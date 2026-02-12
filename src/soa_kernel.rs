@@ -397,23 +397,24 @@ impl SoAKernel {
         
         // Check bounds
         if idx >= self.next_set.len() {
-            // Resize if needed
             self.next_set.resize(idx + 1, false);
         }
         
-        if self.next_set[idx] {
-            return; // Already set, don't overwrite
-        }
+        // Check if next is already set
+        let already_set = self.next_set[idx];
         
-        if let Some(he) = self.halfedge_mut(heh) {
-            he.next_halfedge_handle = Some(next_heh);
-        }
+        // Always set prev for the next halfedge (needed for vertex traversal)
         if let Some(he) = self.halfedge_mut(next_heh) {
             he.prev_halfedge_handle = Some(heh);
         }
         
-        // Mark as set
-        self.next_set[idx] = true;
+        // Only set next if not already set
+        if !already_set {
+            if let Some(he) = self.halfedge_mut(heh) {
+                he.next_halfedge_handle = Some(next_heh);
+            }
+            self.next_set[idx] = true;
+        }
     }
 
     /// Get the previous halfedge in the cycle

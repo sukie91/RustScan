@@ -115,15 +115,14 @@ impl<'a> Iterator for VertexHalfedgeIter<'a> {
 
         let heh = self.current_heh;
         
-        // Get the next outgoing halfedge:
-        // 1. current_heh goes from vertex to neighbor1
-        // 2. opposite goes from neighbor1 to vertex
-        // 3. next around the face goes from neighbor1 to neighbor2
-        // 4. opposite goes from neighbor2 to vertex - THIS is the next outgoing!
+        // Correct vertex-ring traversal:
+        // 1. current_heh goes from vertex to neighbor1 (outgoing)
+        // 2. opposite goes from neighbor1 to vertex (incoming)
+        // 3. prev goes counter-clockwise around the OTHER face to another incoming
+        // 4. The prev is already outgoing from vertex! No need for opposite.
         
-        let opp = self.mesh.opposite_halfedge_handle(self.current_heh);
-        let next_in_face = self.mesh.next_halfedge_handle(opp);
-        let next_outgoing = self.mesh.opposite_halfedge_handle(next_in_face);
+        let incoming = self.mesh.opposite_halfedge_handle(self.current_heh);
+        let next_outgoing = self.mesh.prev_halfedge_handle(incoming);
         
         // Check if we've completed a full cycle
         if next_outgoing == self.start_heh {
@@ -439,26 +438,20 @@ mod tests {
         let mesh = generate_tetrahedron();
         let v0 = VertexHandle::from_usize(0);
 
-        // Get outgoing halfedges manually by checking all halfedges
-        let mut expected_count: usize = 0;
-        for i in 0..mesh.n_halfedges() {
-            let heh = HalfedgeHandle::new(i as u32);
-            if mesh.from_vertex_handle(heh) == v0 {
-                expected_count += 1;
-            }
-        }
-        eprintln!("Expected outgoing halfedges count: {}", expected_count);
-
         // Get via circulator
         let halfedges: Vec<_> = match mesh.vertex_halfedges(v0) {
             Some(c) => c.collect(),
             None => panic!("No iterator for vertex 0"),
         };
-        eprintln!("Circulator returned {} halfedges: {:?}", halfedges.len(), halfedges);
 
-        // Check count matches
-        assert_eq!(halfedges.len(), expected_count, 
-            "Expected {} halfedges, got {}: {:?}", expected_count, halfedges.len(), halfedges);
+        // Tetrahedron: each vertex has 3 outgoing halfedges
+        assert_eq!(halfedges.len(), 3, "Expected 3 halfedges, got {:?}", halfedges);
+
+        // All returned halfedges should be outgoing from v0
+        for heh in &halfedges {
+            assert_eq!(mesh.from_vertex_handle(*heh), v0,
+                "Halfedge {:?} should be outgoing from vertex {:?}", heh, v0);
+        }
     }
 
     #[test]
