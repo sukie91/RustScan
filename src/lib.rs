@@ -26,6 +26,7 @@ pub use test_data::*;
 pub use geometry::*;
 pub use io::*;
 pub use status::{StatusFlags, StatusSet};
+pub use circulators::*;
 pub use glam::Vec3;
 
 // Core modules only
@@ -39,3 +40,4 @@ mod test_data;
 mod geometry;
 mod io;
 mod status;
+mod circulators;

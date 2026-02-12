@@ -13,6 +13,7 @@
 use crate::handles::{VertexHandle, HalfedgeHandle, EdgeHandle, FaceHandle};
 use crate::items::{Halfedge, Edge, Face};
 use glam::Vec3;
+use std::collections::HashMap;
 
 /// SoA Kernel - SIMD-friendly mesh storage
 #[derive(Debug, Clone)]
@@ -29,6 +30,12 @@ pub struct SoAKernel {
     halfedges: Vec<Halfedge>,
     edges: Vec<Edge>,
     faces: Vec<Face>,
+    
+    // Edge lookup: (min_v, max_v) -> HalfedgeHandle (the one pointing from min to max)
+    edge_map: HashMap<(u32, u32), HalfedgeHandle>,
+    
+    // Track which halfedges have had next set
+    next_set: Vec<bool>,
 }
 
 impl SoAKernel {
@@ -43,6 +50,8 @@ impl SoAKernel {
             halfedges: Vec::new(),
             edges: Vec::new(),
             faces: Vec::new(),
+            edge_map: HashMap::new(),
+            next_set: Vec::new(),
         }
     }
 
@@ -56,6 +65,8 @@ impl SoAKernel {
         self.halfedges.clear();
         self.edges.clear();
         self.faces.clear();
+        self.edge_map.clear();
+        self.next_set.clear();
     }
 
     // --- Vertex operations ---
@@ -188,6 +199,25 @@ impl SoAKernel {
     /// Add a new edge and return the handle to the first halfedge
     #[inline]
     pub fn add_edge(&mut self, start_vh: VertexHandle, end_vh: VertexHandle) -> HalfedgeHandle {
+        let (v0, v1) = if start_vh.idx() < end_vh.idx() {
+            (start_vh.idx(), end_vh.idx())
+        } else {
+            (end_vh.idx(), start_vh.idx())
+        };
+        
+        // Check if edge already exists
+        if let Some(&existing_heh) = self.edge_map.get(&(v0, v1)) {
+            // Return the halfedge pointing to end_vh
+            let to_v = self.halfedge(existing_heh).map(|he| he.vertex_handle.idx());
+            if to_v == Some(end_vh.idx()) {
+                return existing_heh;
+            } else {
+                // Return opposite halfedge (safe because every halfedge has an opposite)
+                return self.opposite_halfedge_handle(existing_heh).unwrap_or(existing_heh);
+            }
+        }
+        
+        // Create new edge
         let edge_idx = self.edges.len() as u32;
         let he0_idx = self.halfedges.len() as u32;
         let he1_idx = he0_idx + 1;
@@ -217,8 +247,19 @@ impl SoAKernel {
 
         self.halfedges.push(he0);
         self.halfedges.push(he1);
+        self.next_set.push(false);
+        self.next_set.push(false);
+        
+        // Store edge in map for O(1) lookup
+        self.edge_map.insert((v0, v1), he0_handle);
 
         he0_handle
+    }
+
+    /// Check if edge already exists
+    #[inline]
+    pub fn edge_exists(&self, v0: u32, v1: u32) -> bool {
+        self.edge_map.contains_key(&(v0.min(v1), v0.max(v1)))
     }
 
     /// Get edge count
@@ -295,6 +336,15 @@ impl SoAKernel {
             .unwrap_or(VertexHandle::invalid())
     }
 
+    /// Get the from-vertex of a halfedge (via opposite halfedge)
+    #[inline]
+    pub fn from_vertex_handle(&self, heh: HalfedgeHandle) -> VertexHandle {
+        self.opposite_halfedge_handle(heh)
+            .and_then(|opp| self.halfedge(opp))
+            .map(|he| he.vertex_handle)
+            .unwrap_or(VertexHandle::invalid())
+    }
+
     /// Get the opposite halfedge
     #[inline]
     pub fn opposite_halfedge_handle(&self, heh: HalfedgeHandle) -> Option<HalfedgeHandle> {
@@ -343,12 +393,27 @@ impl SoAKernel {
     /// Set the next halfedge in the cycle
     #[inline]
     pub fn set_next_halfedge_handle(&mut self, heh: HalfedgeHandle, next_heh: HalfedgeHandle) {
+        let idx = heh.idx_usize();
+        
+        // Check bounds
+        if idx >= self.next_set.len() {
+            // Resize if needed
+            self.next_set.resize(idx + 1, false);
+        }
+        
+        if self.next_set[idx] {
+            return; // Already set, don't overwrite
+        }
+        
         if let Some(he) = self.halfedge_mut(heh) {
             he.next_halfedge_handle = Some(next_heh);
         }
         if let Some(he) = self.halfedge_mut(next_heh) {
             he.prev_halfedge_handle = Some(heh);
         }
+        
+        // Mark as set
+        self.next_set[idx] = true;
     }
 
     /// Get the previous halfedge in the cycle
@@ -366,9 +431,11 @@ impl SoAKernel {
     /// Set vertex halfedge handle
     #[inline]
     pub fn set_halfedge_handle(&mut self, vh: VertexHandle, heh: HalfedgeHandle) {
-        if vh.idx_usize() < self.halfedge_handles.len() {
-            self.halfedge_handles[vh.idx_usize()] = Some(heh);
+        let idx = vh.idx_usize();
+        if idx >= self.halfedge_handles.len() {
+            self.halfedge_handles.resize(idx + 1, None);
         }
+        self.halfedge_handles[idx] = Some(heh);
     }
 }
 

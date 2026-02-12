@@ -419,24 +419,43 @@ impl PolyMeshSoA {
 
         let n = vertices.len();
         let mut halfedges: Vec<HalfedgeHandle> = Vec::with_capacity(n);
-
+        
+        // First: create all edges and track them
         for i in 0..n {
             let start = vertices[i];
             let end = vertices[(i + 1) % n];
+            
+            // Create the halfedge from end to start
             let he = self.add_edge(end, start);
             halfedges.push(he);
         }
 
+        // Second: set next pointers for ALL halfedges in this face
+        // Each halfedge points to the next one in the face cycle
         for i in 0..n {
             let curr = halfedges[i];
-            let next = halfedges[(i + 1) % n];
-            self.kernel.set_next_halfedge_handle(curr, next);
+            let next_in_face = halfedges[(i + 1) % n];
+            self.kernel.set_next_halfedge_handle(curr, next_in_face);
         }
 
         let fh = self.kernel.add_face(Some(halfedges[0]));
 
+        // Set face handle for all halfedges
+        for &he in &halfedges {
+            self.kernel.set_face_handle(he, fh);
+        }
+
+        // Set vertex halfedge handles
+        // halfedges[i] is the halfedge from vertices[(i+1)%n] to vertices[i]
+        // So for vertex v = vertices[i], the incoming halfedge is halfedges[i]
+        // We need to find an OUTGOING halfedge (from this vertex)
+        // Look at opposite halfedges to find outgoing ones
         for (i, &vh) in vertices.iter().enumerate() {
-            self.kernel.set_halfedge_handle(vh, halfedges[i]);
+            let incoming_heh = halfedges[i];
+            // Get the opposite halfedge which points FROM this vertex
+            if let Some(opp_heh) = self.kernel.opposite_halfedge_handle(incoming_heh) {
+                self.kernel.set_halfedge_handle(vh, opp_heh);
+            }
         }
 
         Some(fh)
@@ -504,6 +523,36 @@ impl PolyMeshSoA {
     #[inline]
     pub fn to_vertex_handle(&self, heh: HalfedgeHandle) -> VertexHandle {
         self.kernel.to_vertex_handle(heh)
+    }
+
+    /// Get the from-vertex of a halfedge
+    #[inline]
+    pub fn from_vertex_handle(&self, heh: HalfedgeHandle) -> VertexHandle {
+        self.kernel.from_vertex_handle(heh)
+    }
+
+    /// Get the opposite halfedge (across the edge)
+    #[inline]
+    pub fn opposite_halfedge_handle(&self, heh: HalfedgeHandle) -> HalfedgeHandle {
+        self.kernel.opposite_halfedge_handle(heh).unwrap_or(heh)
+    }
+
+    /// Get the next halfedge in the cycle
+    #[inline]
+    pub fn next_halfedge_handle(&self, heh: HalfedgeHandle) -> HalfedgeHandle {
+        self.kernel.next_halfedge_handle(heh).unwrap_or(heh)
+    }
+
+    /// Get the previous halfedge in the cycle
+    #[inline]
+    pub fn prev_halfedge_handle(&self, heh: HalfedgeHandle) -> HalfedgeHandle {
+        self.kernel.prev_halfedge_handle(heh).unwrap_or(heh)
+    }
+
+    /// Get the halfedge handle associated with a face
+    #[inline]
+    pub fn face_halfedge_handle(&self, fh: FaceHandle) -> Option<HalfedgeHandle> {
+        self.kernel.face_halfedge_handle(fh)
     }
 
     // --- SIMD-optimized operations ---
