@@ -2,14 +2,14 @@
 //!
 //! Generates test meshes for benchmarking and validation.
 
-use crate::FastMesh;
+use crate::RustMesh;
 use crate::handles::VertexHandle;
 use crate::io::{read_mesh, write_mesh};
 use std::path::Path;
 
 /// Generate a simple cube
-pub fn generate_cube() -> FastMesh {
-    let mut mesh = FastMesh::new();
+pub fn generate_cube() -> RustMesh {
+    let mut mesh = RustMesh::new();
 
     // 8 vertices of a unit cube centered at origin
     let v = [
@@ -35,8 +35,8 @@ pub fn generate_cube() -> FastMesh {
 }
 
 /// Generate a tetrahedron
-pub fn generate_tetrahedron() -> FastMesh {
-    let mut mesh = FastMesh::new();
+pub fn generate_tetrahedron() -> RustMesh {
+    let mut mesh = RustMesh::new();
 
     let a = mesh.add_vertex(glam::vec3( 1.0,  1.0,  1.0));
     let b = mesh.add_vertex(glam::vec3(-1.0, -1.0,  1.0));
@@ -52,8 +52,8 @@ pub fn generate_tetrahedron() -> FastMesh {
 }
 
 /// Generate a pyramid (square base)
-pub fn generate_pyramid() -> FastMesh {
-    let mut mesh = FastMesh::new();
+pub fn generate_pyramid() -> RustMesh {
+    let mut mesh = RustMesh::new();
 
     let base0 = mesh.add_vertex(glam::vec3(-1.0, -1.0,  0.0));
     let base1 = mesh.add_vertex(glam::vec3( 1.0, -1.0,  0.0));
@@ -74,8 +74,8 @@ pub fn generate_pyramid() -> FastMesh {
 }
 
 /// Generate an icosahedron (20-sided polyhedron)
-pub fn generate_icosahedron() -> FastMesh {
-    let mut mesh = FastMesh::new();
+pub fn generate_icosahedron() -> RustMesh {
+    let mut mesh = RustMesh::new();
 
     let t = (1.0 + 5.0_f32.sqrt()) / 2.0;
 
@@ -110,7 +110,7 @@ pub fn generate_icosahedron() -> FastMesh {
 }
 
 /// Generate a subdivided icosphere (by subdividing icosahedron)
-pub fn generate_icosphere(subdivisions: u32) -> FastMesh {
+pub fn generate_icosphere(subdivisions: u32) -> RustMesh {
     let mut mesh = generate_icosahedron();
 
     for _ in 0..subdivisions {
@@ -122,8 +122,8 @@ pub fn generate_icosphere(subdivisions: u32) -> FastMesh {
 }
 
 /// Generate a grid mesh
-pub fn generate_grid(rows: usize, cols: usize) -> FastMesh {
-    let mut mesh = FastMesh::new();
+pub fn generate_grid(rows: usize, cols: usize) -> RustMesh {
+    let mut mesh = RustMesh::new();
 
     // Create vertices
     let mut vertices: Vec<Vec<VertexHandle>> = Vec::new();
@@ -153,8 +153,8 @@ pub fn generate_grid(rows: usize, cols: usize) -> FastMesh {
 }
 
 /// Generate a sphere using latitude/longitude subdivision
-pub fn generate_sphere(radius: f32, segments: usize, rings: usize) -> FastMesh {
-    let mut mesh = FastMesh::new();
+pub fn generate_sphere(radius: f32, segments: usize, rings: usize) -> RustMesh {
+    let mut mesh = RustMesh::new();
 
     let mut vertices: Vec<Vec<VertexHandle>> = Vec::new();
 
@@ -196,8 +196,8 @@ pub fn generate_sphere(radius: f32, segments: usize, rings: usize) -> FastMesh {
 }
 
 /// Generate a torus
-pub fn generate_torus(major_radius: f32, minor_radius: f32, major_segments: usize, minor_segments: usize) -> FastMesh {
-    let mut mesh = FastMesh::new();
+pub fn generate_torus(major_radius: f32, minor_radius: f32, major_segments: usize, minor_segments: usize) -> RustMesh {
+    let mut mesh = RustMesh::new();
 
     let mut vertices: Vec<Vec<VertexHandle>> = Vec::new();
 
@@ -236,9 +236,9 @@ pub fn generate_torus(major_radius: f32, minor_radius: f32, major_segments: usiz
 }
 
 /// Generate a complex mesh with random perturbations (for smoothing tests)
-pub fn generate_noisy_sphere(radius: f32, noise: f32, segments: usize, rings: usize) -> FastMesh {
+pub fn generate_noisy_sphere(radius: f32, noise: f32, segments: usize, rings: usize) -> RustMesh {
     use rand::Rng;
-    let mut mesh = FastMesh::new();
+    let mut mesh = RustMesh::new();
     let mut rng = rand::thread_rng();
 
     let mut vertices: Vec<Vec<VertexHandle>> = Vec::new();
@@ -282,12 +282,12 @@ pub fn generate_noisy_sphere(radius: f32, noise: f32, segments: usize, rings: us
 }
 
 /// Save generated mesh to file
-pub fn save_mesh<P: AsRef<Path>>(mesh: &FastMesh, path: P) -> crate::io::IoResult<()> {
+pub fn save_mesh<P: AsRef<Path>>(mesh: &RustMesh, path: P) -> crate::io::IoResult<()> {
     crate::io::write_mesh(mesh, path)
 }
 
 /// Load generated mesh from file
-pub fn load_mesh<P: AsRef<Path>>(path: P) -> crate::io::IoResult<FastMesh> {
+pub fn load_mesh<P: AsRef<Path>>(path: P) -> crate::io::IoResult<RustMesh> {
     crate::io::read_mesh(path)
 }
 

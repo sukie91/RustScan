@@ -102,34 +102,33 @@ pub struct VertexHalfedgeIter<'a> {
     mesh: &'a PolyMeshSoA,
     start_heh: HalfedgeHandle,
     current_heh: HalfedgeHandle,
-    done: bool,
+    first: bool,
 }
 
 impl<'a> Iterator for VertexHalfedgeIter<'a> {
     type Item = HalfedgeHandle;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.done {
+        if !self.first && self.current_heh == self.start_heh {
             return None;
         }
-
+        
         let heh = self.current_heh;
         
-        // Correct vertex-ring traversal:
-        // 1. current_heh goes from vertex to neighbor1 (outgoing)
-        // 2. opposite goes from neighbor1 to vertex (incoming)
-        // 3. prev goes counter-clockwise around the OTHER face to another incoming
-        // 4. The prev is already outgoing from vertex! No need for opposite.
-        
+        // Get the opposite halfedge (incoming to our vertex)
         let incoming = self.mesh.opposite_halfedge_handle(self.current_heh);
-        let next_outgoing = self.mesh.prev_halfedge_handle(incoming);
         
-        // Check if we've completed a full cycle
-        if next_outgoing == self.start_heh {
-            self.done = true;
-        } else {
-            self.current_heh = next_outgoing;
+        // Get previous halfedge in the face cycle (going counter-clockwise)
+        let prev_incoming = self.mesh.prev_halfedge_handle(incoming);
+        
+        // The previous of incoming is another outgoing halfedge from our vertex
+        // But we need to check if prev_incoming is valid and different
+        if prev_incoming == incoming || !prev_incoming.is_valid() {
+            return None;
         }
+        
+        self.first = false;
+        self.current_heh = prev_incoming;
 
         Some(heh)
     }
@@ -142,7 +141,7 @@ impl<'a> PolyMeshSoA {
             mesh: self,
             start_heh,
             current_heh: start_heh,
-            done: false,
+            first: true,
         })
     }
 }

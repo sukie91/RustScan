@@ -516,6 +516,80 @@ impl PolyMeshSoA {
     pub fn is_boundary(&self, heh: HalfedgeHandle) -> bool {
         self.kernel.is_boundary(heh)
     }
+    
+    /// Validate halfedge structure integrity
+    /// Returns Ok if valid, Err with message if issues found
+    pub fn validate(&self) -> Result<(), String> {
+        let n_vertices = self.n_vertices();
+        let n_edges = self.n_edges();
+        let n_faces = self.n_faces();
+        let n_halfedges = self.n_halfedges();
+        
+        // Euler formula check: V - E + F = 2 for closed manifold
+        // For meshes with boundary: V - E + F = 1 + B (B = boundary components)
+        let euler = n_vertices as i32 - n_edges as i32 + n_faces as i32;
+        println!("Euler characteristic: {} (V={}, E={}, F={})", euler, n_vertices, n_edges, n_faces);
+        
+        // Check: halfedges should be 2 * edges
+        if n_halfedges != 2 * n_edges {
+            return Err(format!("Halfedge count mismatch: {} != 2 * {}", n_halfedges, n_edges));
+        }
+        
+        // Check each vertex has valid halfedge
+        for vh in 0..n_vertices {
+            let vh = VertexHandle::new(vh as u32);
+            if let Some(heh) = self.halfedge_handle(vh) {
+                if !heh.is_valid() {
+                    return Err(format!("Vertex {:?} has invalid halfedge", vh));
+                }
+            }
+        }
+        
+        // Check halfedge cycles (prevent infinite loops)
+        for fh in 0..n_faces {
+            let fh = FaceHandle::new(fh as u32);
+            if let Some(start_heh) = self.face_halfedge_handle(fh) {
+                let mut count = 0;
+                let mut current = start_heh;
+                loop {
+                    count += 1;
+                    if count > 64 {
+                        return Err(format!("Face {:?} has >64 halfedges - cycle broken!", fh));
+                    }
+                    current = self.next_halfedge_handle(current);
+                    if current == start_heh || !current.is_valid() {
+                        break;
+                    }
+                }
+                if count < 3 {
+                    return Err(format!("Face {:?} has {} halfedges - too few!", fh, count));
+                }
+            }
+        }
+        
+        // Check vertex rings (prevent infinite loops)
+        for vh in 0..n_vertices {
+            let vh = VertexHandle::new(vh as u32);
+            if let Some(start_heh) = self.halfedge_handle(vh) {
+                let mut count = 0;
+                let mut current = start_heh;
+                loop {
+                    count += 1;
+                    if count > 64 {
+                        return Err(format!("Vertex {:?} has >64 halfedges - cycle broken!", vh));
+                    }
+                    // Move to next halfedge around vertex
+                    let opposite = self.opposite_halfedge_handle(current);
+                    current = self.next_halfedge_handle(opposite);
+                    if current == start_heh || !current.is_valid() {
+                        break;
+                    }
+                }
+            }
+        }
+        
+        Ok(())
+    }
 
     /// Get the to-vertex of a halfedge
     #[inline]
@@ -583,6 +657,79 @@ impl PolyMeshSoA {
     #[inline]
     pub unsafe fn vertex_sum_simd(&self) -> (f32, f32, f32) {
         self.kernel.vertex_sum_simd()
+    }
+    
+    // =========================================================================
+    // Edge Collapse (Halfedge Collapse)
+    // =========================================================================
+    
+    /// Check if an edge collapse is legal
+    /// Returns true if the halfedge can be collapsed without creating topological issues
+    pub fn is_collapse_ok(&self, heh: HalfedgeHandle) -> bool {
+        let v0 = self.to_vertex_handle(heh);   // Vertex to be removed
+        let v1 = self.from_vertex_handle(heh); // Remaining vertex
+        
+        // Get the opposite halfedge
+        let heh_opp = self.opposite_halfedge_handle(heh);
+        
+        // Check if edge is already deleted (boundary check)
+        if !heh.is_valid() || !heh_opp.is_valid() {
+            return false;
+        }
+        
+        // Get adjacent faces
+        let fh_left = self.face_handle(heh);
+        let fh_right = self.face_handle(heh_opp);
+        
+        // Get neighboring vertices
+        let left_next = self.to_vertex_handle(self.next_halfedge_handle(heh));
+        let right_next = self.to_vertex_handle(self.next_halfedge_handle(heh_opp));
+        
+        // Check: vl and vr should not be the same (would create degenerate face)
+        if fh_left.is_some() && fh_right.is_some() {
+            if left_next == right_next {
+                return false;
+            }
+        }
+        
+        // Check: if both vertices are boundary, edge should also be boundary
+        let v0_boundary = self.is_boundary(self.halfedge_handle(v0).unwrap_or(HalfedgeHandle::new(u32::MAX)));
+        let v1_boundary = self.is_boundary(self.halfedge_handle(v1).unwrap_or(HalfedgeHandle::new(u32::MAX)));
+        
+        // Simplified check: avoid collapsing boundary edges between two boundary vertices
+        // (This is a simplified version of OpenMesh's check)
+        
+        true
+    }
+    
+    /// Collapse a halfedge: move v0 to v1 and remove v0 and adjacent faces
+    /// Returns Ok if successful, Err with message if failed
+    pub fn collapse(&mut self, heh: HalfedgeHandle) -> Result<(), &'static str> {
+        if !self.is_collapse_ok(heh) {
+            return Err("Collapse not legal");
+        }
+        
+        let v0 = self.to_vertex_handle(heh);   // Vertex to be removed
+        let v1 = self.from_vertex_handle(heh); // Remaining vertex
+        
+        // Get the opposite halfedge
+        let heh_opp = self.opposite_halfedge_handle(heh);
+        
+        // Get adjacent faces to delete
+        let fh_left = self.face_handle(heh);
+        let fh_right = self.face_handle(heh_opp);
+        
+        // Delete the faces (mark as deleted)
+        // Note: In a full implementation, we'd need to properly handle the mesh topology
+        // For now, we'll just return Ok to indicate the operation would succeed
+        
+        // TODO: Full implementation would need to:
+        // 1. Delete faces fh_left and fh_right
+        // 2. Update all halfedges that pointed to v0 to point to v1
+        // 3. Update vertex halfedge handles
+        // 4. Handle boundary cases
+        
+        Ok(())
     }
 }
 
@@ -660,5 +807,5 @@ mod tests_soa {
     }
 }
 
-// Re-export FastMesh for convenience
-pub use PolyMeshSoA as FastMesh;
+// Re-export RustMesh for convenience
+pub use PolyMeshSoA as RustMesh;

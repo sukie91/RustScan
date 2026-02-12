@@ -8,7 +8,7 @@ use std::path::Path;
 
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 
-use crate::connectivity::FastMesh;
+use crate::connectivity::RustMesh;
 use crate::handles::{VertexHandle, FaceHandle};
 
 /// Result type for IO operations
@@ -49,7 +49,7 @@ impl From<io::Error> for IoError {
 /// - Second line: vertex_count face_count edge_count
 /// - Then: vertex lines (x y z) or (x y z r g b a)
 /// - Then: face lines (n v1 v2 ... vn) or with colors
-pub fn read_off<P: AsRef<Path>>(path: P) -> IoResult<FastMesh> {
+pub fn read_off<P: AsRef<Path>>(path: P) -> IoResult<RustMesh> {
     let file = File::open(path)?;
     let reader = BufReader::new(file);
     let mut lines = reader.lines();
@@ -76,7 +76,7 @@ pub fn read_off<P: AsRef<Path>>(path: P) -> IoResult<FastMesh> {
 
     let (n_vertices, n_faces, _n_edges) = (counts[0], counts[1], counts.get(2).copied().unwrap_or(0));
 
-    let mut mesh = FastMesh::new();
+    let mut mesh = RustMesh::new();
     let mut vertices: Vec<VertexHandle> = Vec::with_capacity(n_vertices);
 
     // Parse vertices
@@ -147,7 +147,7 @@ pub fn read_off<P: AsRef<Path>>(path: P) -> IoResult<FastMesh> {
 }
 
 /// Write OFF format file
-pub fn write_off<P: AsRef<Path>>(mesh: &FastMesh, path: P) -> IoResult<()> {
+pub fn write_off<P: AsRef<Path>>(mesh: &RustMesh, path: P) -> IoResult<()> {
     let file = OpenOptions::new()
         .write(true)
         .create(true)
@@ -189,12 +189,12 @@ pub fn write_off<P: AsRef<Path>>(mesh: &FastMesh, path: P) -> IoResult<()> {
 /// - f v1 v2 v3 ... (faces, vertices only)
 /// - f v1/vt1 v2/vt2 ... (faces with UVs)
 /// - f v1/vt1/vn1 ... (faces with UVs and normals)
-pub fn read_obj<P: AsRef<Path>>(path: P) -> IoResult<FastMesh> {
+pub fn read_obj<P: AsRef<Path>>(path: P) -> IoResult<RustMesh> {
     let file = File::open(path)?;
     let reader = BufReader::new(file);
     let lines = reader.lines();
 
-    let mut mesh = FastMesh::new();
+    let mut mesh = RustMesh::new();
     let mut vertices: Vec<VertexHandle> = Vec::new();
     let mut texture_coords: Vec<(f32, f32, f32)> = Vec::new();
     let mut normals: Vec<glam::Vec3> = Vec::new();
@@ -290,7 +290,7 @@ pub fn read_obj<P: AsRef<Path>>(path: P) -> IoResult<FastMesh> {
 }
 
 /// Write OBJ format file
-pub fn write_obj<P: AsRef<Path>>(mesh: &FastMesh, path: P) -> IoResult<()> {
+pub fn write_obj<P: AsRef<Path>>(mesh: &RustMesh, path: P) -> IoResult<()> {
     let file = OpenOptions::new()
         .write(true)
         .create(true)
@@ -350,12 +350,12 @@ pub fn detect_format<P: AsRef<Path>>(path: P) -> Option<&'static str> {
 ///   - endloop
 /// - endfacet
 /// - endsolid <name>
-pub fn read_stl<P: AsRef<Path>>(path: P) -> IoResult<FastMesh> {
+pub fn read_stl<P: AsRef<Path>>(path: P) -> IoResult<RustMesh> {
     let file = File::open(path)?;
     let reader = BufReader::new(file);
     let lines = reader.lines();
 
-    let mut mesh = FastMesh::new();
+    let mut mesh = RustMesh::new();
     let mut vertices: Vec<VertexHandle> = Vec::new();
     let mut current_normal: Option<glam::Vec3> = None;
 
@@ -408,7 +408,7 @@ pub fn read_stl<P: AsRef<Path>>(path: P) -> IoResult<FastMesh> {
 }
 
 /// Write STL format file (ASCII)
-pub fn write_stl<P: AsRef<Path>>(mesh: &FastMesh, path: P) -> IoResult<()> {
+pub fn write_stl<P: AsRef<Path>>(mesh: &RustMesh, path: P) -> IoResult<()> {
     let file = OpenOptions::new()
         .write(true)
         .create(true)
@@ -443,9 +443,9 @@ pub fn write_stl<P: AsRef<Path>>(mesh: &FastMesh, path: P) -> IoResult<()> {
 ///   - 2 bytes: attribute (unused, usually 0)
 
 /// Read binary STL format
-pub fn read_stl_binary<P: AsRef<Path>>(path: P) -> IoResult<FastMesh> {
+pub fn read_stl_binary<P: AsRef<Path>>(path: P) -> IoResult<RustMesh> {
     let mut file = File::open(path)?;
-    let mut mesh = FastMesh::new();
+    let mut mesh = RustMesh::new();
 
     // Read and discard header (80 bytes)
     let mut header = [0u8; 80];
@@ -486,7 +486,7 @@ pub fn read_stl_binary<P: AsRef<Path>>(path: P) -> IoResult<FastMesh> {
 }
 
 /// Write binary STL format
-pub fn write_stl_binary<P: AsRef<Path>>(mesh: &FastMesh, path: P) -> IoResult<()> {
+pub fn write_stl_binary<P: AsRef<Path>>(mesh: &RustMesh, path: P) -> IoResult<()> {
     let mut file = OpenOptions::new()
         .write(true)
         .create(true)
@@ -521,7 +521,7 @@ pub fn write_stl_binary<P: AsRef<Path>>(mesh: &FastMesh, path: P) -> IoResult<()
 }
 
 /// Read mesh file (auto-detect format)
-pub fn read_mesh<P: AsRef<Path>>(path: P) -> IoResult<FastMesh> {
+pub fn read_mesh<P: AsRef<Path>>(path: P) -> IoResult<RustMesh> {
     match detect_format(&path) {
         Some("OFF") => read_off(path),
         Some("OBJ") => read_obj(path),
@@ -532,13 +532,213 @@ pub fn read_mesh<P: AsRef<Path>>(path: P) -> IoResult<FastMesh> {
 }
 
 /// Write mesh file (auto-detect format from extension)
-pub fn write_mesh<P: AsRef<Path>>(mesh: &FastMesh, path: P) -> IoResult<()> {
+pub fn write_mesh<P: AsRef<Path>>(mesh: &RustMesh, path: P) -> IoResult<()> {
     match detect_format(&path) {
         Some("OFF") => write_off(mesh, path),
         Some("OBJ") => write_obj(mesh, path),
         Some("STL") => write_stl(mesh, path),
         Some(format) => Err(IoError::Format(format!("Unsupported format for writing: {}", format))),
         None => Err(IoError::Format("Unknown file format".to_string())),
+    }
+}
+
+
+// ============================================================================
+// PLY Format Support
+// ============================================================================
+
+/// Read PLY format file (ASCII)
+pub fn read_ply<P: AsRef<Path>>(path: P) -> IoResult<RustMesh> {
+    let content = std::fs::read_to_string(path)?;
+    parse_ply_ascii(&content)
+}
+
+fn parse_ply_ascii(content: &str) -> IoResult<RustMesh> {
+    let mut lines = content.lines();
+    
+    let first = lines.next()
+        .ok_or(IoError::Parse("Empty file".to_string()))?;
+    if first.trim() != "ply" {
+        return Err(IoError::Parse("Not a PLY file".to_string()));
+    }
+    
+    let mut n_vertices = 0;
+    let mut n_faces = 0;
+    
+    for line in lines.by_ref() {
+        let trimmed = line.trim();
+        if trimmed == "end_header" { break; }
+        if let Some(rest) = trimmed.strip_prefix("element vertex ") {
+            n_vertices = rest.trim().parse()
+                .map_err(|_| IoError::Parse("Invalid vertex count".to_string()))?;
+        }
+        if let Some(rest) = trimmed.strip_prefix("element face ") {
+            n_faces = rest.trim().parse()
+                .map_err(|_| IoError::Parse("Invalid face count".to_string()))?;
+        }
+    }
+    
+    let mut vertices = Vec::with_capacity(n_vertices);
+    for _ in 0..n_vertices {
+        if let Some(line) = lines.next() {
+            let mut iter = line.split_whitespace();
+            let x = iter.next().ok_or(IoError::Parse("Invalid x".to_string()))?
+                .parse().map_err(|_| IoError::Parse("Invalid x".to_string()))?;
+            let y = iter.next().ok_or(IoError::Parse("Invalid y".to_string()))?
+                .parse().map_err(|_| IoError::Parse("Invalid y".to_string()))?;
+            let z = iter.next().ok_or(IoError::Parse("Invalid z".to_string()))?
+                .parse().map_err(|_| IoError::Parse("Invalid z".to_string()))?;
+            vertices.push((x, y, z));
+        }
+    }
+    
+    let mut mesh = RustMesh::new();
+    let vhandles: Vec<VertexHandle> = vertices.iter()
+        .map(|(x, y, z)| mesh.add_vertex(glam::vec3(*x, *y, *z)))
+        .collect();
+    
+    for _ in 0..n_faces {
+        if let Some(line) = lines.next() {
+            let mut iter = line.split_whitespace();
+            let n: usize = iter.next()
+                .ok_or(IoError::Parse("Invalid face".to_string()))?
+                .parse().map_err(|_| IoError::Parse("Invalid face size".to_string()))?;
+            if n >= 3 {
+                let indices: Vec<VertexHandle> = iter
+                    .filter_map(|s| s.parse::<usize>().ok())
+                    .filter_map(|i| vhandles.get(i).copied())
+                    .collect();
+                if indices.len() >= 3 {
+                    mesh.add_face(&indices);
+                }
+            }
+        }
+    }
+    
+    Ok(mesh)
+}
+
+/// Write PLY format file (ASCII)
+pub fn write_ply<P: AsRef<Path>>(mesh: &RustMesh, path: P) -> IoResult<()> {
+    let mut file = File::create(path)?;
+    
+    writeln!(file, "ply")?;
+    writeln!(file, "format ascii 1.0")?;
+    writeln!(file, "element vertex {}", mesh.n_vertices())?;
+    writeln!(file, "property float x")?;
+    writeln!(file, "property float y")?;
+    writeln!(file, "property float z")?;
+    writeln!(file, "element face {}", mesh.n_faces())?;
+    writeln!(file, "property list uchar int vertex_index")?;
+    writeln!(file, "end_header")?;
+    
+    for i in 0..mesh.n_vertices() {
+        let vh = VertexHandle::from_usize(i);
+        if let Some(p) = mesh.point(vh) {
+            writeln!(file, "{} {} {}", p.x, p.y, p.z)?;
+        }
+    }
+    
+    for fh in mesh.faces() {
+        if let Some(verts) = mesh.face_vertices(fh) {
+            let vs: Vec<_> = verts.collect();
+            write!(file, "{} ", vs.len())?;
+            for (i, vh) in vs.iter().enumerate() {
+                if i > 0 { write!(file, " ")?; }
+                write!(file, "{}", vh.idx_usize())?;
+            }
+            writeln!(file)?;
+        }
+    }
+    
+    Ok(())
+}
+
+/// Write PLY format file (Binary Little Endian)
+pub fn write_ply_binary<P: AsRef<Path>>(mesh: &RustMesh, path: P) -> IoResult<()> {
+    let mut file = File::create(path)?;
+    
+    writeln!(file, "ply")?;
+    writeln!(file, "format binary_little_endian 1.0")?;
+    writeln!(file, "element vertex {}", mesh.n_vertices())?;
+    writeln!(file, "property float x")?;
+    writeln!(file, "property float y")?;
+    writeln!(file, "property float z")?;
+    writeln!(file, "element face {}", mesh.n_faces())?;
+    writeln!(file, "property list uchar int vertex_index")?;
+    writeln!(file, "end_header")?;
+    
+    for i in 0..mesh.n_vertices() {
+        let vh = VertexHandle::from_usize(i);
+        if let Some(p) = mesh.point(vh) {
+            file.write_f32::<LittleEndian>(p.x)?;
+            file.write_f32::<LittleEndian>(p.y)?;
+            file.write_f32::<LittleEndian>(p.z)?;
+        }
+    }
+    
+    for fh in mesh.faces() {
+        if let Some(verts) = mesh.face_vertices(fh) {
+            let vs: Vec<_> = verts.collect();
+            file.write_u8(vs.len() as u8)?;
+            for vh in &vs {
+                file.write_i32::<LittleEndian>(vh.idx_usize() as i32)?;
+            }
+        }
+    }
+    
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests_ply {
+    use super::*;
+    use tempfile::NamedTempFile;
+
+    #[test]
+    fn test_read_ply_ascii() {
+        let content = "ply\nformat ascii 1.0\nelement vertex 3\nproperty float x\nproperty float y\nproperty float z\nelement face 1\nproperty list uchar int vertex_index\nend_header\n0 0 0\n1 0 0\n0 1 0\n3 0 1 2\n";
+        let temp = NamedTempFile::new().unwrap();
+        std::fs::write(temp.path(), content).unwrap();
+        let mesh = read_ply(temp.path()).unwrap();
+        assert_eq!(mesh.n_vertices(), 3);
+        assert_eq!(mesh.n_faces(), 1);
+    }
+
+    #[test]
+    fn test_write_ply_ascii() {
+        let mut mesh = RustMesh::new();
+        let v0 = mesh.add_vertex(glam::vec3(0.0, 0.0, 0.0));
+        let v1 = mesh.add_vertex(glam::vec3(1.0, 0.0, 0.0));
+        let v2 = mesh.add_vertex(glam::vec3(0.0, 1.0, 0.0));
+        mesh.add_face(&[v0, v1, v2]);
+        
+        let temp = NamedTempFile::new().unwrap();
+        write_ply(&mesh, temp.path()).unwrap();
+        
+        let content = std::fs::read_to_string(temp.path()).unwrap();
+        assert!(content.contains("ply"));
+        assert!(content.contains("element vertex 3"));
+        
+        let read_mesh = read_ply(temp.path()).unwrap();
+        assert_eq!(read_mesh.n_vertices(), 3);
+        assert_eq!(read_mesh.n_faces(), 1);
+    }
+
+    #[test]
+    fn test_write_ply_binary() {
+        let mut mesh = RustMesh::new();
+        let v0 = mesh.add_vertex(glam::vec3(0.0, 0.0, 0.0));
+        let v1 = mesh.add_vertex(glam::vec3(1.0, 0.0, 0.0));
+        let v2 = mesh.add_vertex(glam::vec3(0.0, 1.0, 0.0));
+        mesh.add_face(&[v0, v1, v2]);
+        
+        let temp = NamedTempFile::new().unwrap();
+        write_ply_binary(&mesh, temp.path()).unwrap();
+        
+        // Verify file exists and has content
+        let metadata = std::fs::metadata(temp.path()).unwrap();
+        assert!(metadata.len() > 0, "Binary PLY file should not be empty");
     }
 }
 
@@ -642,7 +842,7 @@ endsolid mesh
 
     #[test]
     fn test_write_stl() {
-        let mesh = FastMesh::new();
+        let mesh = RustMesh::new();
         let mut temp_file = NamedTempFile::new().unwrap();
         
         write_stl(&mesh, temp_file.path()).unwrap();
@@ -654,7 +854,7 @@ endsolid mesh
 
     #[test]
     fn test_stl_binary_read_write() {
-        let mut mesh = FastMesh::new();
+        let mut mesh = RustMesh::new();
         let v0 = mesh.add_vertex(glam::vec3(0.0, 0.0, 0.0));
         let v1 = mesh.add_vertex(glam::vec3(1.0, 0.0, 0.0));
         let v2 = mesh.add_vertex(glam::vec3(0.0, 1.0, 0.0));
@@ -676,7 +876,7 @@ endsolid mesh
     #[test]
     fn test_stl_binary_triangle() {
         // Create a single triangle
-        let mut mesh = FastMesh::new();
+        let mut mesh = RustMesh::new();
         let v0 = mesh.add_vertex(glam::vec3(0.0, 0.0, 0.0));
         let v1 = mesh.add_vertex(glam::vec3(1.0, 0.0, 0.0));
         let v2 = mesh.add_vertex(glam::vec3(0.0, 0.0, 1.0));

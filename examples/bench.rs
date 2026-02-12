@@ -1,5 +1,5 @@
-// FastMesh Performance Benchmark
-use rustmesh::{FastMesh, generate_sphere};
+// RustMesh Performance Benchmark
+use rustmesh::{RustMesh, generate_sphere};
 use std::time::Instant;
 use std::hint::black_box;
 
@@ -33,7 +33,7 @@ fn main() {
     let per_vertex = simd_ns / n_vertices as f64;
     
     println!("=== Results ===");
-    println!("SIMD (FastMesh): {:.3} ns/batch", simd_ns);
+    println!("SIMD (RustMesh): {:.3} ns/batch", simd_ns);
     println!("Per vertex: {:.3} ns", per_vertex);
     println!();
     println!("OpenMesh: 0.27 ns/vertex");

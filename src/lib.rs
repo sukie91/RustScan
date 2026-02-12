@@ -5,9 +5,9 @@
 //! ## Quick Start
 //!
 //! ```rust
-//! use rustmesh::{FastMesh, Vec3};
+//! use rustmesh::{RustMesh, Vec3};
 //!
-//! let mut mesh = FastMesh::new();
+//! let mut mesh = RustMesh::new();
 //! let v0 = mesh.add_vertex(Vec3::new(0.0, 0.0, 0.0));
 //! let v1 = mesh.add_vertex(Vec3::new(1.0, 0.0, 0.0));
 //! let v2 = mesh.add_vertex(Vec3::new(0.0, 1.0, 0.0));
@@ -20,13 +20,17 @@
 pub use handles::{VertexHandle, HalfedgeHandle, EdgeHandle, FaceHandle, BaseHandle};
 pub use items::{Vertex, Halfedge, Edge, Face};
 pub use soa_kernel::SoAKernel;
-pub use connectivity::PolyMeshSoA as FastMesh;
+pub use connectivity::PolyMeshSoA as RustMesh;
 pub use tri_connectivity::TriMesh;
 pub use test_data::*;
 pub use geometry::*;
 pub use io::*;
 pub use status::{StatusFlags, StatusSet};
 pub use circulators::*;
+pub use quadric::QuadricT;
+pub use decimation::{Decimater, decimate_mesh, DecimationConfig, CollapseInfo, ModQuadricT};
+pub use smart_ranges::{SmartMesh, VertexRange, FaceRange};
+pub use smoother::{SmootherConfig, SmoothResult, laplace_smooth, tangential_smooth};
 pub use glam::Vec3;
 
 // Core modules only
@@ -41,3 +45,7 @@ mod geometry;
 mod io;
 mod status;
 mod circulators;
+mod quadric;
+mod decimation;
+mod smart_ranges;
+mod smoother;

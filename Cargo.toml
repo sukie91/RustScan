@@ -48,3 +48,7 @@ opt-level = 0
 name = "bench"
 harness = false
 path = "examples/bench.rs"
+
+[[bench]]
+name = "quadric_bench"
+harness = false
