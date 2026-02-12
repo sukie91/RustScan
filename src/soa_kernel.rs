@@ -438,6 +438,45 @@ impl SoAKernel {
         }
         self.halfedge_handles[idx] = Some(heh);
     }
+    
+    /// Set halfedge's to_vertex (target vertex)
+    #[inline]
+    pub fn set_halfedge_to_vertex(&mut self, heh: HalfedgeHandle, vh: VertexHandle) {
+        let idx = heh.idx_usize();
+        if idx >= self.halfedges.len() {
+            return;
+        }
+        self.halfedges[idx].vertex_handle = vh;
+    }
+    
+    /// Mark a vertex as deleted
+    #[inline]
+    pub fn delete_vertex(&mut self, vh: VertexHandle) {
+        let idx = vh.idx_usize();
+        if idx < self.halfedge_handles.len() {
+            self.halfedge_handles[idx] = None;
+        }
+        // In a full implementation, we'd also mark position as invalid
+    }
+    
+    /// Mark a face as deleted
+    #[inline]
+    pub fn delete_face(&mut self, fh: FaceHandle) {
+        let idx = fh.idx_usize();
+        if idx < self.faces.len() {
+            self.faces[idx].halfedge_handle = None; // Mark as deleted
+        }
+    }
+    
+    /// Mark an edge as deleted
+    #[inline]
+    pub fn delete_edge(&mut self, eh: EdgeHandle) {
+        let idx = eh.idx_usize();
+        if idx < self.edges.len() {
+            // Mark halfedges as invalid
+            self.edges[idx].halfedges = [HalfedgeHandle::new(u32::MAX), HalfedgeHandle::new(u32::MAX)];
+        }
+    }
 }
 
 // ============================================================================

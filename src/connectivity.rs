@@ -719,17 +719,65 @@ impl PolyMeshSoA {
         let fh_left = self.face_handle(heh);
         let fh_right = self.face_handle(heh_opp);
         
-        // Delete the faces (mark as deleted)
-        // Note: In a full implementation, we'd need to properly handle the mesh topology
-        // For now, we'll just return Ok to indicate the operation would succeed
+        // Step 1: Update all halfedges that point to v0 to point to v1 instead
+        // This includes all outgoing halfedges from v0 and all incoming halfedges to v0
+        self.redirect_halfedges(v0, v1)?;
         
-        // TODO: Full implementation would need to:
-        // 1. Delete faces fh_left and fh_right
-        // 2. Update all halfedges that pointed to v0 to point to v1
-        // 3. Update vertex halfedge handles
-        // 4. Handle boundary cases
+        // Step 2: Delete the adjacent faces
+        if let Some(fh) = fh_left {
+            self.delete_face(fh);
+        }
+        if let Some(fh) = fh_right {
+            self.delete_face(fh);
+        }
+        
+        // Step 3: Delete vertex v0
+        self.delete_vertex(v0);
+        
+        // Step 4: Delete the edge (both halfedges)
+        let eh = self.edge_handle(heh);
+        self.delete_edge(eh);
+        
+        // Step 5: Update v1's position to the collapse target position (optional)
+        // For now we keep v1's position
         
         Ok(())
+    }
+    
+    /// Redirect all halfedges that reference from_vertex to reference to_vertex
+    fn redirect_halfedges(&mut self, from_vertex: VertexHandle, to_vertex: VertexHandle) -> Result<(), &'static str> {
+        // Get all halfedges and update those that reference from_vertex
+        let n_halfedges = self.n_halfedges();
+        
+        for heh_idx in 0..n_halfedges {
+            let heh = HalfedgeHandle::new(heh_idx as u32);
+            
+            // Check if this halfedge's to_vertex is from_vertex
+            let to_vh = self.to_vertex_handle(heh);
+            if to_vh == from_vertex {
+                // Update the to_vertex to to_vertex
+                // This requires modifying the halfedge data directly
+                self.kernel.set_halfedge_to_vertex(heh, to_vertex);
+            }
+        }
+        
+        Ok(())
+    }
+    
+    /// Delete a face from the mesh
+    fn delete_face(&mut self, fh: FaceHandle) {
+        // Mark face as deleted (in a full implementation, we'd also handle halfedges)
+        self.kernel.delete_face(fh);
+    }
+    
+    /// Delete a vertex from the mesh
+    fn delete_vertex(&mut self, vh: VertexHandle) {
+        self.kernel.delete_vertex(vh);
+    }
+    
+    /// Delete an edge from the mesh
+    fn delete_edge(&mut self, eh: EdgeHandle) {
+        self.kernel.delete_edge(eh);
     }
 }
 
