@@ -8,6 +8,22 @@
 
 ## 核心模块
 
+### RustSLAM (视觉 SLAM)
+
+**纯 Rust 实现的视觉 SLAM 库**
+
+- 特征提取 (ORB, AKAZE, SuperPoint)
+- 视觉里程计 (VO + PnP)
+- 局部建图 (三角化 + BA)
+- 回环检测 (BoW)
+- 可选的 TSDF 稠密融合
+
+**技术栈**:
+- opencv-rust: 图像处理
+- glam: SIMD 数学库
+- tch-rs: PyTorch 绑定
+- g2o-rs: 图优化
+
 ### RustMesh
 
 **核心网格表示与几何处理算法库**
