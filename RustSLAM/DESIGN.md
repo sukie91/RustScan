@@ -32,63 +32,60 @@
 RustSLAM/
 ├── Cargo.toml
 │
-├── rustslam/                    # 主库
-│   ├── Cargo.toml
-│   └── src/
-│       ├── lib.rs
-│       │
-│       ├── core/                # 核心数据结构
-│       │   ├── mod.rs
-│       │   ├── frame.rs         # 帧
-│       │   ├── keyframe.rs      # 关键帧
-│       │   ├── map_point.rs     # 地图点
-│       │   ├── map.rs           # 地图管理
-│       │   ├── camera.rs        # 相机模型
-│       │   └── pose.rs          # 位姿 (SE3)
-│       │
-│       ├── features/            # 特征提取
-│       │   ├── mod.rs
-│       │   ├── base.rs          # 特征接口
-│       │   ├── orb.rs           # ORB 特征
-│       │   ├── akaze.rs         # AKAZE 特征
-│       │   ├── superpoint.rs    # SuperPoint
-│       │   └── matcher.rs       # 特征匹配
-│       │
-│       ├── tracker/             # 视觉里程计
-│       │   ├── mod.rs
-│       │   ├── vo.rs            # 里程计主逻辑
-│       │   ├── pnp.rs           # PnP 求解
-│       │   ├── motion_model.rs  # 运动模型
-│       │   └── initializer.rs   # 初始化
-│       │
-│       ├── mapping/             # 局部建图
-│       │   ├── mod.rs
-│       │   ├── triangulate.rs   # 三角化
-│       │   ├── keyframe_culling.rs
-│       │   └── local_ba.rs      # 局部 BA
-│       │
-│       ├── optimizer/           # 图优化
-│       │   ├── mod.rs
-│       │   ├── g2o.rs
-│       │   └── bundle_adjustment.rs
-│       │
-│       ├── loop_closing/        # 回环检测
-│       │   ├── mod.rs
-│       │   ├── detector.rs
-│       │   ├── vocabulary.rs    # BoW 词袋
-│       │   ├── database.rs
-│       │   └── geometric_verifier.rs
-│       │
-│       └── io/                 # IO
-│           ├── mod.rs
-│           └── trajectory.rs
+├── src/
+│   ├── lib.rs
+│   │
+│   ├── core/                # 核心数据结构
+│   │   ├── mod.rs
+│   │   ├── frame.rs         # 帧
+│   │   ├── keyframe.rs      # 关键帧
+│   │   ├── map_point.rs     # 地图点
+│   │   ├── map.rs           # 地图管理
+│   │   ├── camera.rs        # 相机模型
+│   │   └── pose.rs          # 位姿 (SE3)
+│   │
+│   ├── features/            # 特征提取
+│   │   ├── mod.rs
+│   │   ├── base.rs          # 特征接口
+│   │   ├── orb.rs           # ORB 特征
+│   │   ├── akaze.rs         # AKAZE 特征
+│   │   ├── superpoint.rs    # SuperPoint
+│   │   └── matcher.rs       # 特征匹配
+│   │
+│   ├── tracker/             # 视觉里程计
+│   │   ├── mod.rs
+│   │   ├── vo.rs            # 里程计主逻辑
+│   │   ├── pnp.rs           # PnP 求解
+│   │   ├── motion_model.rs  # 运动模型
+│   │   └── initializer.rs   # 初始化
+│   │
+│   ├── mapping/             # 局部建图
+│   │   ├── mod.rs
+│   │   ├── triangulate.rs   # 三角化
+│   │   ├── keyframe_culling.rs
+│   │   └── local_ba.rs      # 局部 BA
+│   │
+│   ├── optimizer/           # 图优化
+│   │   ├── mod.rs
+│   │   ├── g2o.rs
+│   │   └── bundle_adjustment.rs
+│   │
+│   ├── loop_closing/        # 回环检测
+│   │   ├── mod.rs
+│   │   ├── detector.rs
+│   │   ├── vocabulary.rs    # BoW 词袋
+│   │   ├── database.rs
+│   │   └── geometric_verifier.rs
+│   │
+│   ├── fusion/             # 稠密融合 (可选)
+│   │   ├── mod.rs
+│   │   └── tsdf.rs
+│   │
+│   └── io/                 # IO
+│       ├── mod.rs
+│       └── trajectory.rs
 │
-├── fusion/                     # 稠密融合 (可选)
-│   ├── Cargo.toml
-│   └── src/
-│       └── tsdf.rs
-│
-└── examples/                   # 示例
+└── examples/               # 示例
     ├── run_vo.rs
     └── run_slam.rs
 ```
@@ -100,26 +97,12 @@ RustSLAM/
 ### 3.1 core (核心数据结构)
 
 ```rust
-// frame.rs
-pub struct Frame {
-    pub id: u64,
-    pub timestamp: f64,
-    pub image: GrayImage,
-    pub depth: Option<DepthImage>,
-    pub features: Vec<Feature>,
-    pub pose: Option<SE3>,
-}
+// pose.rs - 位姿表示
+use glam::{Quat, Vec3, Mat4};
 
-// map.rs
-pub struct Map {
-    pub points: Vec<MapPoint>,
-    pub keyframes: Vec<KeyFrame>,
-}
-
-// pose.rs
 pub struct SE3 {
-    rotation: Quat,      // 旋转 (glam::Quat)
-    translation: Vec3,   // 平移 (glam::Vec3)
+    rotation: Quat,      // 旋转
+    translation: Vec3,   // 平移
 }
 
 impl SE3 {
@@ -128,23 +111,33 @@ impl SE3 {
     pub fn compose(&self, other: &SE3) -> SE3;
     pub fn inverse(&self) -> SE3;
 }
+
+// frame.rs - 帧
+pub struct Frame {
+    pub id: u64,
+    pub timestamp: f64,
+    pub image: GrayImage,
+    pub depth: Option<DepthImage>,
+    pub features: Vec<Feature>,
+    pub pose: Option<SE3>,
+}
 ```
 
 ### 3.2 features (特征提取)
 
 ```rust
-// base.rs
+// base.rs - 特征接口
 pub trait FeatureExtractor {
     fn detect(&mut self, image: &GrayImage) -> Result<(Vec<KeyPoint>, Descriptors)>;
 }
 
 pub trait FeatureMatcher {
-    fn match_features(&self, des1: &Descriptors, des2: &Descriptors) -> Result<Vec<Match.rs
-pub struct OrbExtractor {
-    inner: open>>;
+    fn match_features(&self, des1: &Descriptors, des2: &Descriptors) -> Result<Vec<Match>>;
 }
 
-// orbcv::features::Orb,
+// orb.rs - ORB 特征
+pub struct OrbExtractor {
+    inner: opencv::features::Orb,
 }
 
 impl FeatureExtractor for OrbExtractor {
@@ -152,23 +145,12 @@ impl FeatureExtractor for OrbExtractor {
         // 调用 OpenCV ORB
     }
 }
-
-// superpoint.rs
-pub struct SuperPoint {
-    model: torch::jit::ScriptModule,  // tch-rs
-}
-
-impl FeatureExtractor for SuperPoint {
-    fn detect(&mut self, image: &GrayImage) -> Result<(Vec<KeyPoint>, Descriptors)> {
-        // PyTorch 推理
-    }
-}
 ```
 
 ### 3.3 tracker (视觉里程计)
 
 ```rust
-// vo.rs
+// vo.rs - 里程计主逻辑
 pub struct VisualOdometry {
     extractor: Box<dyn FeatureExtractor>,
     matcher: Box<dyn FeatureMatcher>,
@@ -179,18 +161,9 @@ pub struct VisualOdometry {
 impl VisualOdometry {
     pub fn estimate(&mut self, frame: &mut Frame) -> Result<SE3> {
         // 1. 提取特征
-        let (kps, des) = self.extractor.detect(&frame.image)?;
-        
         // 2. 与上一帧匹配
-        let matches = self.matcher.match_features(&des, &self.prev_des)?;
-        
         // 3. PnP 求解
-        let pose = self.pnp_solver.solve(&matches, &self.prev_points_3d)?;
-        
         // 4. 更新运动模型
-        self.motion_model.update(pose);
-        
-        Ok(pose)
     }
 }
 ```
@@ -198,7 +171,7 @@ impl VisualOdometry {
 ### 3.4 mapping (局部建图)
 
 ```rust
-// triangulate.rs
+// triangulate.rs - 三角化
 pub fn triangulate_points(
     kp1: &KeyPoint, kp2: &KeyPoint,
     pose1: &SE3, pose2: &SE3,
@@ -207,50 +180,29 @@ pub fn triangulate_points(
     // SVD 三角化
 }
 
-// local_ba.rs
+// local_ba.rs - 局部 BA
 pub fn local_bundle_adjustment(
     keyframes: &[KeyFrame],
     points: &[MapPoint],
     optimizer: &mut G2oOptimizer,
 ) {
-    // 1. 添加关键帧顶点
-    // 2. 添加地图点顶点
-    // 3. 添加重投影边
-    // 4. 优化
+    // 添加顶点和边，执行优化
 }
 ```
 
 ### 3.5 loop_closing (回环检测)
 
 ```rust
-// vocabulary.rs
+// vocabulary.rs - BoW 词袋
 pub struct BoWVocabulary {
     words: Vec<BoWWord>,
     levels: u32,
 }
 
-impl BoWVocabulary {
-    pub fn transform(&self, descriptors: &Descriptors) -> BoWVector;
-    pub fn add_word(&mut self, word: &BoWWord, id: u32);
-}
-
-// detector.rs
+// detector.rs - 回环检测器
 pub struct LoopDetector {
     vocabulary: BoWVocabulary,
     database: KeyframeDatabase,
-}
-
-impl LoopDetector {
-    pub fn detect(&self, keyframe: &KeyFrame) -> Option<LoopCandidate> {
-        // 1. 计算 BoW 向量
-        let bow = self.vocabulary.transform(&keyframe.descriptors);
-        
-        // 2. 检索候选
-        let candidates = self.database.query(&bow);
-        
-        // 3. 几何验证
-        self.geometric_verify(keyframe, &candidates)
-    }
 }
 ```
 
@@ -258,7 +210,7 @@ impl LoopDetector {
 
 ## 四、依赖配置
 
-### 4.1 rustslam/Cargo.toml
+### Cargo.toml
 
 ```toml
 [package]
@@ -296,19 +248,6 @@ thiserror = "1.0"
 bindgen = "0.69"
 ```
 
-### 4.2 fusion/Cargo.toml
-
-```toml
-[package]
-name = "rustslam-fusion"
-version = "0.1.0"
-
-[dependencies]
-rustslam = { path = "../rustslam" }
-glam = "0.25"
-rayon = "1.8"
-```
-
 ---
 
 ## 五、路线图 (Roadmap)
@@ -333,7 +272,7 @@ rayon = "1.8"
 | **W5** | 三角化 + 地图点管理 | `mapping/triangulate.rs` |
 | **W6** | 关键帧管理 + 局部 BA | `mapping/local_ba.rs` |
 | **W7** | g2o 集成 + BA 优化 | `optimizer/` |
-| **W8** | 完整 SLAM 流程集成 | `slam.rs` 主逻辑 |
+| **W8** | 完整 SLAM 流程集成 | `lib.rs` 主逻辑 |
 
 **里程碑**: 完整稀疏 SLAM
 
@@ -356,7 +295,7 @@ rayon = "1.8"
 | 周次 | 任务 | 交付物 |
 |------|------|--------|
 | **W12** | SuperPoint 特征 | `features/superpoint.rs` |
-| **W13** | IMU 预积分 | `sensors/imu.rs` |
+| **W13** | IMU 预积分 | `imu.rs` |
 | **W14** | TSDF 稠密融合 | `fusion/tsdf.rs` |
 | **W15** | 性能优化 + 文档 | 稳定版 |
 
