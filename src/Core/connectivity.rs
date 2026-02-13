@@ -296,6 +296,25 @@ pub struct PolyMeshSoA {
     kernel: SoAKernel,
 }
 
+impl Clone for PolyMeshSoA {
+    fn clone(&self) -> Self {
+        Self {
+            kernel: self.kernel.clone(),
+        }
+    }
+}
+
+impl std::fmt::Debug for PolyMeshSoA {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PolyMeshSoA")
+            .field("n_vertices", &self.kernel.n_vertices())
+            .field("n_edges", &self.kernel.n_edges())
+            .field("n_faces", &self.kernel.n_faces())
+            .field("n_halfedges", &self.kernel.n_halfedges())
+            .finish()
+    }
+}
+
 impl PolyMeshSoA {
     /// Create a new empty mesh
     #[inline]
@@ -765,18 +784,18 @@ impl PolyMeshSoA {
     }
     
     /// Delete a face from the mesh
-    fn delete_face(&mut self, fh: FaceHandle) {
+    pub fn delete_face(&mut self, fh: FaceHandle) {
         // Mark face as deleted (in a full implementation, we'd also handle halfedges)
         self.kernel.delete_face(fh);
     }
     
     /// Delete a vertex from the mesh
-    fn delete_vertex(&mut self, vh: VertexHandle) {
+    pub fn delete_vertex(&mut self, vh: VertexHandle) {
         self.kernel.delete_vertex(vh);
     }
     
     /// Delete an edge from the mesh
-    fn delete_edge(&mut self, eh: EdgeHandle) {
+    pub fn delete_edge(&mut self, eh: EdgeHandle) {
         self.kernel.delete_edge(eh);
     }
 }

@@ -3,7 +3,9 @@
 //! This module provides zero-overhead iteration primitives for mesh data.
 //! Designed to match or exceed C++ performance while maintaining safety.
 
+#[cfg(target_arch = "wasm32")]
 use std::arch::wasm32;
+#[cfg(target_arch = "aarch64")]
 use std::arch::aarch64;
 
 /// Vertex with tightly packed layout (no padding)
