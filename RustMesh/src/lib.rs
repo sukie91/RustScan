@@ -22,7 +22,7 @@ pub use attrib_soa_kernel::AttribSoAKernel;
 pub use connectivity::RustMesh;
 pub use test_data::*;
 pub use geometry::*;
-// pub use io::*;  // IO module not yet implemented
+pub use io::*;  // IO module now implemented
 pub use status::{StatusFlags, StatusSet};
 pub use circulators::*;
 pub use quadric::QuadricT;
@@ -64,8 +64,7 @@ mod soa_kernel { pub use crate::core::soa_kernel::*; }
 mod attrib_soa_kernel { pub use crate::core::attrib_soa_kernel::*; }
 mod connectivity { pub use crate::core::connectivity::*; }
 mod geometry { pub use crate::core::geometry::*; }
-#[allow(unused_imports)]
-mod io { pub use crate::core::io::*; }
+pub mod io { pub use crate::core::io::*; }
 
 // Utils modules (对应 OpenMesh/Core/Utils)
 pub mod utils {

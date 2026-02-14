@@ -775,6 +775,148 @@ impl RustMesh {
     pub fn set_e_color(&mut self, eh: EdgeHandle, c: glam::Vec4) {
         self.kernel.set_edge_color(eh, c);
     }
+
+    // =========================================================================
+    // IO helper methods (index-based access for export)
+    // =========================================================================
+
+    /// Get vertex position by index (for IO operations)
+    pub fn point_by_index(&self, idx: usize) -> Option<glam::Vec3> {
+        self.kernel.point(idx)
+    }
+
+    /// Get vertex normal by index (for IO operations)
+    pub fn vertex_normal_by_index(&self, idx: usize) -> Option<glam::Vec3> {
+        if idx < self.n_vertices() {
+            self.kernel.vertex_normal(VertexHandle::from_usize(idx))
+        } else {
+            None
+        }
+    }
+
+    /// Get vertex color by index (for IO operations)
+    pub fn vertex_color_by_index(&self, idx: usize) -> Option<glam::Vec4> {
+        if idx < self.n_vertices() {
+            self.kernel.vertex_color(VertexHandle::from_usize(idx))
+        } else {
+            None
+        }
+    }
+
+    /// Get vertex texcoord by index (for IO operations)
+    pub fn vertex_texcoord_by_index(&self, idx: usize) -> Option<glam::Vec2> {
+        if idx < self.n_vertices() {
+            self.kernel.vertex_texcoord(VertexHandle::from_usize(idx))
+        } else {
+            None
+        }
+    }
+
+    /// Set vertex normal by index (for IO operations)
+    pub fn set_vertex_normal_by_index(&mut self, idx: usize, normal: glam::Vec3) {
+        if idx < self.n_vertices() {
+            self.kernel.set_vertex_normal(VertexHandle::from_usize(idx), normal);
+        }
+    }
+
+    /// Set vertex color by index (for IO operations)
+    pub fn set_vertex_color_by_index(&mut self, idx: usize, color: glam::Vec4) {
+        if idx < self.n_vertices() {
+            self.kernel.set_vertex_color(VertexHandle::from_usize(idx), color);
+        }
+    }
+
+    /// Set vertex texcoord by index (for IO operations)
+    pub fn set_vertex_texcoord_by_index(&mut self, idx: usize, texcoord: glam::Vec2) {
+        if idx < self.n_vertices() {
+            self.kernel.set_vertex_texcoord(VertexHandle::from_usize(idx), texcoord);
+        }
+    }
+
+    /// Get all vertices of a face (for IO operations - returns Vec)
+    pub fn face_vertices_vec(&self, fh: FaceHandle) -> Vec<VertexHandle> {
+        let mut vertices = Vec::new();
+
+        // Get the first halfedge of the face
+        if let Some(first_heh) = self.kernel.face_halfedge_handle(fh) {
+            let mut current_heh = first_heh;
+
+            loop {
+                // Get the target vertex of this halfedge
+                let to_vh = self.kernel.to_vertex_handle(current_heh);
+                vertices.push(to_vh);
+
+                // Move to next halfedge
+                if let Some(next_heh) = self.kernel.next_halfedge_handle(current_heh) {
+                    current_heh = next_heh;
+                    if current_heh == first_heh {
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+        }
+
+        vertices
+    }
+
+    // =========================================================================
+    // Conversion from RustSLAM mesh
+    // =========================================================================
+
+    /// Create RustMesh from simple triangle mesh (e.g., from RustSLAM marching cubes)
+    ///
+    /// Accepts:
+    /// - vertices: list of positions
+    /// - triangles: list of (v0, v1, v2) index triplets
+    /// - normals: optional per-vertex normals
+    /// - colors: optional per-vertex colors (RGB as [f32; 3])
+    pub fn from_triangle_mesh(
+        vertices: &[glam::Vec3],
+        triangles: &[[usize; 3]],
+        normals: Option<&[glam::Vec3]>,
+        colors: Option<&[[f32; 3]]>,
+    ) -> Self {
+        let mut mesh = RustMesh::new();
+
+        // Add vertices
+        for pos in vertices {
+            mesh.add_vertex(*pos);
+        }
+
+        // Add normals if provided
+        if let Some(norms) = normals {
+            mesh.request_vertex_normals();
+            for (i, normal) in norms.iter().enumerate() {
+                if i < mesh.n_vertices() {
+                    mesh.set_vertex_normal_by_index(i, *normal);
+                }
+            }
+        }
+
+        // Add colors if provided
+        if let Some(cols) = colors {
+            mesh.request_vertex_colors();
+            for (i, color) in cols.iter().enumerate() {
+                if i < mesh.n_vertices() {
+                    // Convert RGB to RGBA (add alpha = 1.0)
+                    let rgba = glam::Vec4::new(color[0], color[1], color[2], 1.0);
+                    mesh.set_vertex_color_by_index(i, rgba);
+                }
+            }
+        }
+
+        // Add faces
+        for tri in triangles {
+            let v0 = VertexHandle::from_usize(tri[0]);
+            let v1 = VertexHandle::from_usize(tri[1]);
+            let v2 = VertexHandle::from_usize(tri[2]);
+            mesh.add_face(&[v0, v1, v2]);
+        }
+
+        mesh
+    }
 }
 
 #[cfg(test)]
