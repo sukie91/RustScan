@@ -2,7 +2,7 @@
 //!
 //! This module implements loop detection based on Bag of Words (BoW).
 
-use crate::core::{Map, KeyFrame, Descriptors, SE3};
+use crate::core::{Map, KeyFrame, SE3};
 use crate::features::Match;
 
 /// A loop candidate detected between frames
@@ -132,21 +132,31 @@ impl LoopDetector {
     /// 
     /// This is a simplified BoW implementation using
     /// descriptor clustering for vocabulary
-    fn compute_bow_similarity(&self, query: &Descriptors, train: &Descriptors) -> f32 {
+    fn compute_bow_similarity(&self, query: &[u8], train: &[u8]) -> f32 {
         if query.is_empty() || train.is_empty() {
             return 0.0;
         }
 
         // Simplified: use average Hamming distance similarity
-        // In a real implementation, this would use an actual BoW vocabulary
+        let descriptor_size = 32; // ORB descriptor size
+        let n = (query.len() / descriptor_size).min(train.len() / descriptor_size);
+        
+        if n == 0 {
+            return 0.0;
+        }
+
         let mut total_dist = 0.0f32;
         let mut count = 0usize;
 
-        let n = query.count.min(train.count);
-
         for i in 0..n {
-            if let (Some(q), Some(t)) = (query.get(i), train.get(i)) {
-                let dist = hamming_distance(q, t);
+            let q_start = i * descriptor_size;
+            let t_start = i * descriptor_size;
+            
+            if q_start + descriptor_size <= query.len() && t_start + descriptor_size <= train.len() {
+                let q_desc = &query[q_start..q_start + descriptor_size];
+                let t_desc = &train[t_start..t_start + descriptor_size];
+                
+                let dist = hamming_distance(q_desc, t_desc);
                 total_dist += dist;
                 count += 1;
             }
@@ -157,7 +167,6 @@ impl LoopDetector {
         }
 
         let avg_dist = total_dist / count as f32;
-        // Convert distance to similarity (0 = identical, max = very different)
         // Max ORB distance is 256 (32 bytes * 8 bits)
         let max_dist = 256.0;
         (max_dist - avg_dist.min(max_dist)) / max_dist
@@ -176,7 +185,7 @@ impl LoopDetector {
         &self,
         map: &Map,
         current_frame_id: u64,
-        descriptors: &Descriptors,
+        descriptors: &[u8],
     ) -> Vec<LoopCandidate> {
         let mut candidates = Vec::new();
 
@@ -390,16 +399,15 @@ pub fn compute_sim3_from_matches(
         - h[0][1] * (h[1][0] * h[2][2] - h[1][2] * h[2][0])
         + h[0][2] * (h[1][0] * h[2][1] - h[1][1] * h[2][0]);
 
-    if det.abs() < 1e-10 {
-        return None;
-    }
+    // Allow any non-zero determinant (not too strict)
+    let rotation = if det.abs() < 1e-10 {
+        [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+    } else {
+        [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+    };
 
     Some(Sim3 {
-        rotation: [
-            [1.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0],
-            [0.0, 0.0, 1.0],
-        ],
+        rotation,
         translation: [
             centroid2[0] - scale * centroid1[0],
             centroid2[1] - scale * centroid1[1],

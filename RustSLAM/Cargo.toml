@@ -38,6 +38,11 @@ image = { version = "0.25", optional = true }
 # KD-Tree for KNN matching
 kiddo = "5.2.1"
 
+# Linear algebra (required for apex-solver)
+nalgebra = "0.33"
+candle-core = "0.9.2"
+candle-metal = { version = "0.27.1", features = ["mps"] }
+
 [features]
 default = []
 opencv = ["dep:opencv"]
