@@ -1,6 +1,6 @@
 # RustScan 项目路线图
 
-> 最后更新: 2026-02-14
+> 最后更新: 2026-02-14 (完成 3DGS → Mesh 抽取)
 
 ## 项目概述
 
@@ -42,7 +42,7 @@ Pipeline: 相机输入 → RustSLAM → 3DGS 融合 → 网格抽取 → RustMes
 
 ### 2.1 RustSLAM (视觉 SLAM + 3DGS)
 
-**进度: ~80%** ✅ 核心完备
+**进度: ~85%** ✅ 核心完备 + Mesh 抽取
 
 | 功能 | 状态 | 说明 |
 |------|------|------|
@@ -67,6 +67,10 @@ Pipeline: 相机输入 → RustSLAM → 3DGS 融合 → 网格抽取 → RustMes
 | 可微渲染 | ✅ | Candle + Metal |
 | 训练管道 | ✅ | Trainer + Adam |
 | SLAM 集成 | ✅ | Sparse + Dense |
+| **Mesh 抽取** |
+| TSDF Volume | ✅ | 纯 Rust 实现 |
+| Marching Cubes | ✅ | 256 案例查找表 |
+| Mesh Extractor | ✅ | 后处理 (聚类过滤) |
 | **待完成** |
 | IMU 集成 | ⏳ | - |
 | 多地图 SLAM | ⏳ | - |
@@ -219,7 +223,7 @@ Pipeline: 相机输入 → RustSLAM → 3DGS 融合 → 网格抽取 → RustMes
 
 | 模块 | 源文件 | 测试 |
 |------|--------|------|
-| RustSLAM | 45 | 77 |
+| RustSLAM | 48 | 77 |
 | RustMesh | ~45 | - |
 
 ---
@@ -227,7 +231,7 @@ Pipeline: 相机输入 → RustSLAM → 3DGS 融合 → 网格抽取 → RustMes
 ## 七、任务看板
 
 ### P0 (阻塞流水线)
-- [ ] **3DGS → Mesh 抽取** - 关键连通功能
+- [x] **3DGS → Mesh 抽取** - 已完成 (纯 Rust 实现)
 - [ ] 属性系统集成 - 完善 OM 格式
 
 ### P1 (重要)

@@ -2,7 +2,7 @@
 //!
 //! This module provides dense reconstruction capabilities using 3D Gaussian Splatting.
 //! Based on "3D Gaussian Splatting for Real-Time Radiance Field Rendering" (Kerbl et al. SIGGRAPH 2023)
-//! 
+//!
 //! Architecture:
 //! - gaussian.rs: Core 3D Gaussian data structures
 //! - renderer.rs: Basic forward rendering
@@ -11,11 +11,14 @@
 //! - autodiff.rs: TRUE automatic differentiation with backward propagation
 //! - tiled_renderer.rs: Complete tiled rasterization
 //! - slam_integrator.rs: Sparse-Dense SLAM integration
-//! - training_pipeline.rs: Complete training pipeline (NEW!)
+//! - training_pipeline.rs: Complete training pipeline
 //! - tracker.rs: Gaussian-based tracking
 //! - mapper.rs: Incremental Gaussian mapping
 //! - trainer.rs: Basic training pipeline
 //! - complete_trainer.rs: Complete trainer
+//! - tsdf_volume.rs: TSDF volume for mesh extraction
+//! - marching_cubes.rs: Marching cubes algorithm
+//! - mesh_extractor.rs: High-level mesh extraction API
 
 pub mod gaussian;
 pub mod renderer;
@@ -29,6 +32,9 @@ pub mod tracker;
 pub mod mapper;
 pub mod trainer;
 pub mod complete_trainer;
+pub mod tsdf_volume;
+pub mod marching_cubes;
+pub mod mesh_extractor;
 
 pub use gaussian::{Gaussian3D, GaussianMap, GaussianCamera, GaussianState};
 pub use renderer::{GaussianRenderer, RenderOutput};
@@ -46,3 +52,6 @@ pub use tracker::{GaussianTracker, TrackingResult};
 pub use mapper::{GaussianMapper, MapperConfig, MapperUpdateResult};
 pub use trainer::{Trainer, TrainConfig, TrainState};
 pub use complete_trainer::{CompleteTrainer, LrScheduler, TrainingResult as CompleteTrainingResult};
+pub use tsdf_volume::{TsdfVolume, TsdfConfig, Voxel};
+pub use marching_cubes::{Mesh, MeshVertex, MeshTriangle, MarchingCubes};
+pub use mesh_extractor::{MeshExtractor, MeshExtractionConfig};
