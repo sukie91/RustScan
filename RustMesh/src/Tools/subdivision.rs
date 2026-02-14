@@ -21,7 +21,7 @@
 //! - Kobbelt, L. (2000). "Sqrt(3)-Subdivision". SIGGRAPH 2000.
 
 use crate::handles::{VertexHandle, HalfedgeHandle, FaceHandle};
-use crate::connectivity::PolyMeshSoA;
+use crate::connectivity::RustMesh;
 use std::collections::HashMap;
 
 /// Error types for subdivision operations
@@ -98,7 +98,7 @@ impl std::fmt::Display for SubdivisionStats {
 }
 
 /// Check if the mesh is triangular (all faces have 3 vertices)
-fn is_triangular(mesh: &PolyMeshSoA) -> bool {
+fn is_triangular(mesh: &RustMesh) -> bool {
     for fh in mesh.faces() {
         if let Some(start_heh) = mesh.face_halfedge_handle(fh) {
             let mut count = 0;
@@ -119,7 +119,7 @@ fn is_triangular(mesh: &PolyMeshSoA) -> bool {
 }
 
 /// Get all halfedges of a face
-fn get_face_halfedges(mesh: &PolyMeshSoA, fh: FaceHandle) -> Vec<HalfedgeHandle> {
+fn get_face_halfedges(mesh: &RustMesh, fh: FaceHandle) -> Vec<HalfedgeHandle> {
     let mut halfedges = Vec::with_capacity(3);
     if let Some(start_heh) = mesh.face_halfedge_handle(fh) {
         let mut current = start_heh;
@@ -135,7 +135,7 @@ fn get_face_halfedges(mesh: &PolyMeshSoA, fh: FaceHandle) -> Vec<HalfedgeHandle>
 }
 
 /// Get the vertices of a face
-fn get_face_vertices(mesh: &PolyMeshSoA, fh: FaceHandle) -> Vec<VertexHandle> {
+fn get_face_vertices(mesh: &RustMesh, fh: FaceHandle) -> Vec<VertexHandle> {
     let mut vertices = Vec::with_capacity(3);
     if let Some(start_heh) = mesh.face_halfedge_handle(fh) {
         let mut current = start_heh;
@@ -152,7 +152,7 @@ fn get_face_vertices(mesh: &PolyMeshSoA, fh: FaceHandle) -> Vec<VertexHandle> {
 
 /// Get all edges of the mesh
 #[allow(dead_code)]
-fn get_all_edges(mesh: &PolyMeshSoA) -> Vec<(VertexHandle, VertexHandle)> {
+fn get_all_edges(mesh: &RustMesh) -> Vec<(VertexHandle, VertexHandle)> {
     let mut edges = Vec::with_capacity(mesh.n_edges());
     let n_halfedges = mesh.n_halfedges();
     
@@ -168,7 +168,7 @@ fn get_all_edges(mesh: &PolyMeshSoA) -> Vec<(VertexHandle, VertexHandle)> {
 }
 
 /// Check if a vertex is on the boundary
-fn is_boundary_vertex(mesh: &PolyMeshSoA, vh: VertexHandle) -> bool {
+fn is_boundary_vertex(mesh: &RustMesh, vh: VertexHandle) -> bool {
     if let Some(heh) = mesh.halfedge_handle(vh) {
         let mut current = heh;
         loop {
@@ -186,7 +186,7 @@ fn is_boundary_vertex(mesh: &PolyMeshSoA, vh: VertexHandle) -> bool {
 }
 
 /// Get all 1-ring neighbors of a vertex
-fn get_vertex_neighbors(mesh: &PolyMeshSoA, vh: VertexHandle) -> Vec<VertexHandle> {
+fn get_vertex_neighbors(mesh: &RustMesh, vh: VertexHandle) -> Vec<VertexHandle> {
     let mut neighbors = Vec::new();
     
     if let Some(heh) = mesh.halfedge_handle(vh) {
@@ -209,7 +209,7 @@ fn get_vertex_neighbors(mesh: &PolyMeshSoA, vh: VertexHandle) -> Vec<VertexHandl
 
 /// Get the valence (number of neighbors) of a vertex
 #[allow(dead_code)]
-fn get_vertex_valence(mesh: &PolyMeshSoA, vh: VertexHandle) -> usize {
+fn get_vertex_valence(mesh: &RustMesh, vh: VertexHandle) -> usize {
     get_vertex_neighbors(mesh, vh).len()
 }
 
@@ -227,7 +227,7 @@ fn get_vertex_valence(mesh: &PolyMeshSoA, vh: VertexHandle) -> usize {
 /// # Returns
 /// * `Ok(VertexHandle)` - The handle to the new vertex
 /// * `Err(SubdivisionError)` - If the operation fails
-pub fn split_edge(mesh: &mut PolyMeshSoA, v0: VertexHandle, v1: VertexHandle) -> SubdivisionResult<VertexHandle> {
+pub fn split_edge(mesh: &mut RustMesh, v0: VertexHandle, v1: VertexHandle) -> SubdivisionResult<VertexHandle> {
     // Validate vertices
     if !v0.is_valid() || !v1.is_valid() {
         return Err(SubdivisionError::InvalidHandle("Invalid vertex handle".to_string()));
@@ -353,7 +353,7 @@ pub fn split_edge(mesh: &mut PolyMeshSoA, v0: VertexHandle, v1: VertexHandle) ->
 /// # Returns
 /// * `Ok(glam::Vec3)` - The new position
 /// * `Err(SubdivisionError)` - If the vertex is invalid
-fn calculate_loop_new_position(mesh: &PolyMeshSoA, vh: VertexHandle) -> SubdivisionResult<glam::Vec3> {
+fn calculate_loop_new_position(mesh: &RustMesh, vh: VertexHandle) -> SubdivisionResult<glam::Vec3> {
     let old_pos = mesh.point(vh).ok_or(SubdivisionError::VertexNotFound)?;
     let neighbors = get_vertex_neighbors(mesh, vh);
     let n = neighbors.len();
@@ -447,7 +447,7 @@ fn calculate_loop_new_position(mesh: &PolyMeshSoA, vh: VertexHandle) -> Subdivis
 /// # Returns
 /// * `Ok(SubdivisionStats)` - Statistics about the subdivision
 /// * `Err(SubdivisionError)` - If the mesh cannot be subdivided
-pub fn loop_subdivide(mesh: &mut PolyMeshSoA) -> SubdivisionResult<SubdivisionStats> {
+pub fn loop_subdivide(mesh: &mut RustMesh) -> SubdivisionResult<SubdivisionStats> {
     // Validate mesh
     if mesh.n_vertices() == 0 {
         return Err(SubdivisionError::EmptyMesh);
@@ -593,7 +593,7 @@ pub fn loop_subdivide(mesh: &mut PolyMeshSoA) -> SubdivisionResult<SubdivisionSt
 /// # Returns
 /// * `Ok(Vec<SubdivisionStats>)` - Statistics for each iteration
 /// * `Err(SubdivisionError)` - If any subdivision fails
-pub fn loop_subdivide_iterations(mesh: &mut PolyMeshSoA, iterations: usize) -> SubdivisionResult<Vec<SubdivisionStats>> {
+pub fn loop_subdivide_iterations(mesh: &mut RustMesh, iterations: usize) -> SubdivisionResult<Vec<SubdivisionStats>> {
     let mut all_stats = Vec::with_capacity(iterations);
     
     for _ in 0..iterations {
@@ -612,7 +612,7 @@ pub fn loop_subdivide_iterations(mesh: &mut PolyMeshSoA, iterations: usize) -> S
 /// # Returns
 /// * `Ok(())` - If mesh is valid
 /// * `Err(SubdivisionError)` - If mesh has issues
-pub fn validate_for_subdivision(mesh: &PolyMeshSoA) -> SubdivisionResult<()> {
+pub fn validate_for_subdivision(mesh: &RustMesh) -> SubdivisionResult<()> {
     if mesh.n_vertices() == 0 {
         return Err(SubdivisionError::EmptyMesh);
     }
@@ -644,7 +644,7 @@ pub fn validate_for_subdivision(mesh: &PolyMeshSoA) -> SubdivisionResult<()> {
 }
 
 /// Check if the mesh is triangular (public version for external use)
-pub fn is_mesh_triangular(mesh: &PolyMeshSoA) -> bool {
+pub fn is_mesh_triangular(mesh: &RustMesh) -> bool {
     is_triangular(mesh)
 }
 
@@ -665,7 +665,7 @@ pub fn is_mesh_triangular(mesh: &PolyMeshSoA) -> bool {
 
 /// * `Ok(glam::Vec3)` - The new position
 /// * `Err(SubdivisionError)` - If the vertex is invalid
-fn calculate_sqrt3_new_position(mesh: &PolyMeshSoA, vh: VertexHandle) -> SubdivisionResult<glam::Vec3> {
+fn calculate_sqrt3_new_position(mesh: &RustMesh, vh: VertexHandle) -> SubdivisionResult<glam::Vec3> {
     let old_pos = mesh.point(vh).ok_or(SubdivisionError::VertexNotFound)?;
     let neighbors = get_vertex_neighbors(mesh, vh);
     
@@ -711,7 +711,7 @@ fn calculate_sqrt3_new_position(mesh: &PolyMeshSoA, vh: VertexHandle) -> Subdivi
 /// # Returns
 /// * `Ok(SubdivisionStats)` - Statistics about the subdivision
 /// * `Err(SubdivisionError)` - If the mesh cannot be subdivided
-pub fn sqrt3_subdivide(mesh: &mut PolyMeshSoA) -> SubdivisionResult<SubdivisionStats> {
+pub fn sqrt3_subdivide(mesh: &mut RustMesh) -> SubdivisionResult<SubdivisionStats> {
     // Validate mesh
     if mesh.n_vertices() == 0 {
         return Err(SubdivisionError::EmptyMesh);
@@ -861,7 +861,7 @@ pub fn sqrt3_subdivide(mesh: &mut PolyMeshSoA) -> SubdivisionResult<SubdivisionS
 /// # Returns
 /// * `Ok(Vec<SubdivisionStats>)` - Statistics for each iteration
 /// * `Err(SubdivisionError)` - If any subdivision fails
-pub fn sqrt3_subdivide_iterations(mesh: &mut PolyMeshSoA, iterations: usize) -> SubdivisionResult<Vec<SubdivisionStats>> {
+pub fn sqrt3_subdivide_iterations(mesh: &mut RustMesh, iterations: usize) -> SubdivisionResult<Vec<SubdivisionStats>> {
     let mut all_stats = Vec::with_capacity(iterations);
     
     for _ in 0..iterations {
@@ -878,7 +878,7 @@ pub fn sqrt3_subdivide_iterations(mesh: &mut PolyMeshSoA, iterations: usize) -> 
 
 /// Compute the face point (centroid) of a face
 /// Face point = average of all vertices of the face
-fn compute_face_point(mesh: &PolyMeshSoA, fh: FaceHandle) -> glam::Vec3 {
+fn compute_face_point(mesh: &RustMesh, fh: FaceHandle) -> glam::Vec3 {
     let vertices = get_face_vertices_polygonal(mesh, fh);
     if vertices.is_empty() {
         return glam::Vec3::ZERO;
@@ -892,7 +892,7 @@ fn compute_face_point(mesh: &PolyMeshSoA, fh: FaceHandle) -> glam::Vec3 {
 }
 
 /// Get all vertices of a face (works for n-gons)
-fn get_face_vertices_polygonal(mesh: &PolyMeshSoA, fh: FaceHandle) -> Vec<VertexHandle> {
+fn get_face_vertices_polygonal(mesh: &RustMesh, fh: FaceHandle) -> Vec<VertexHandle> {
     let mut vertices = Vec::new();
     if let Some(start_heh) = mesh.face_halfedge_handle(fh) {
         let mut current = start_heh;
@@ -910,7 +910,7 @@ fn get_face_vertices_polygonal(mesh: &PolyMeshSoA, fh: FaceHandle) -> Vec<Vertex
 
 /// Get all halfedges of a face (works for n-gons)
 #[allow(dead_code)]
-fn get_face_halfedges_polygonal(mesh: &PolyMeshSoA, fh: FaceHandle) -> Vec<HalfedgeHandle> {
+fn get_face_halfedges_polygonal(mesh: &RustMesh, fh: FaceHandle) -> Vec<HalfedgeHandle> {
     let mut halfedges = Vec::new();
     if let Some(start_heh) = mesh.face_halfedge_handle(fh) {
         let mut current = start_heh;
@@ -928,13 +928,13 @@ fn get_face_halfedges_polygonal(mesh: &PolyMeshSoA, fh: FaceHandle) -> Vec<Halfe
 
 /// Get the number of vertices in a face
 #[allow(dead_code)]
-fn get_face_valence(mesh: &PolyMeshSoA, fh: FaceHandle) -> usize {
+fn get_face_valence(mesh: &RustMesh, fh: FaceHandle) -> usize {
     get_face_vertices_polygonal(mesh, fh).len()
 }
 
 /// Get all edges incident to a vertex (as pairs of vertex handles)
 #[allow(dead_code)]
-fn get_incident_edges(mesh: &PolyMeshSoA, vh: VertexHandle) -> Vec<(VertexHandle, VertexHandle)> {
+fn get_incident_edges(mesh: &RustMesh, vh: VertexHandle) -> Vec<(VertexHandle, VertexHandle)> {
     let mut edges = Vec::new();
     
     if let Some(heh) = mesh.halfedge_handle(vh) {
@@ -955,7 +955,7 @@ fn get_incident_edges(mesh: &PolyMeshSoA, vh: VertexHandle) -> Vec<(VertexHandle
 }
 
 /// Get all faces incident to a vertex
-fn get_incident_faces(mesh: &PolyMeshSoA, vh: VertexHandle) -> Vec<FaceHandle> {
+fn get_incident_faces(mesh: &RustMesh, vh: VertexHandle) -> Vec<FaceHandle> {
     let mut faces = Vec::new();
     
     if let Some(heh) = mesh.halfedge_handle(vh) {
@@ -978,7 +978,7 @@ fn get_incident_faces(mesh: &PolyMeshSoA, vh: VertexHandle) -> Vec<FaceHandle> {
 
 /// Check if an edge is on the boundary
 #[allow(dead_code)]
-fn is_boundary_edge(mesh: &PolyMeshSoA, v0: VertexHandle, v1: VertexHandle) -> bool {
+fn is_boundary_edge(mesh: &RustMesh, v0: VertexHandle, v1: VertexHandle) -> bool {
     if let Some(heh) = mesh.halfedge_handle(v0) {
         let mut current = heh;
         loop {
@@ -1000,7 +1000,7 @@ fn is_boundary_edge(mesh: &PolyMeshSoA, v0: VertexHandle, v1: VertexHandle) -> b
 /// Edge point = average of:
 /// - Midpoint of edge endpoints
 /// - Face points of adjacent faces (if interior) or just endpoints (if boundary)
-fn compute_edge_point(mesh: &PolyMeshSoA, v0: VertexHandle, v1: VertexHandle) -> glam::Vec3 {
+fn compute_edge_point(mesh: &RustMesh, v0: VertexHandle, v1: VertexHandle) -> glam::Vec3 {
     let p0 = mesh.point(v0).unwrap_or(glam::Vec3::ZERO);
     let p1 = mesh.point(v1).unwrap_or(glam::Vec3::ZERO);
     
@@ -1054,7 +1054,7 @@ fn compute_edge_point(mesh: &PolyMeshSoA, v0: VertexHandle, v1: VertexHandle) ->
 /// - R = average of edge midpoints (or edge points) around the vertex
 /// - P = original vertex position
 /// - n = vertex valence (number of incident edges)
-fn calculate_catmull_clark_new_position(mesh: &PolyMeshSoA, vh: VertexHandle) -> SubdivisionResult<glam::Vec3> {
+fn calculate_catmull_clark_new_position(mesh: &RustMesh, vh: VertexHandle) -> SubdivisionResult<glam::Vec3> {
     let p = mesh.point(vh).ok_or(SubdivisionError::VertexNotFound)?;
     
     // Get all incident faces
@@ -1115,7 +1115,7 @@ fn calculate_catmull_clark_new_position(mesh: &PolyMeshSoA, vh: VertexHandle) ->
 /// # Returns
 /// * `Ok(SubdivisionStats)` - Statistics about the subdivision
 /// * `Err(SubdivisionError)` - If the mesh cannot be subdivided
-pub fn catmull_clark_subdivide(mesh: &mut PolyMeshSoA) -> SubdivisionResult<SubdivisionStats> {
+pub fn catmull_clark_subdivide(mesh: &mut RustMesh) -> SubdivisionResult<SubdivisionStats> {
     // Validate mesh
     if mesh.n_vertices() == 0 {
         return Err(SubdivisionError::EmptyMesh);
@@ -1267,7 +1267,7 @@ pub fn catmull_clark_subdivide(mesh: &mut PolyMeshSoA) -> SubdivisionResult<Subd
 /// # Returns
 /// * `Ok(Vec<SubdivisionStats>)` - Statistics for each iteration
 /// * `Err(SubdivisionError)` - If any subdivision fails
-pub fn catmull_clark_subdivide_iterations(mesh: &mut PolyMeshSoA, iterations: usize) -> SubdivisionResult<Vec<SubdivisionStats>> {
+pub fn catmull_clark_subdivide_iterations(mesh: &mut RustMesh, iterations: usize) -> SubdivisionResult<Vec<SubdivisionStats>> {
     let mut all_stats = Vec::with_capacity(iterations);
     
     for _ in 0..iterations {
@@ -1286,7 +1286,7 @@ pub fn catmull_clark_subdivide_iterations(mesh: &mut PolyMeshSoA, iterations: us
 /// # Returns
 /// * `Ok(())` - If mesh is valid
 /// * `Err(SubdivisionError)` - If mesh has issues
-pub fn validate_for_catmull_clark(mesh: &PolyMeshSoA) -> SubdivisionResult<()> {
+pub fn validate_for_catmull_clark(mesh: &RustMesh) -> SubdivisionResult<()> {
     if mesh.n_vertices() == 0 {
         return Err(SubdivisionError::EmptyMesh);
     }
@@ -1320,10 +1320,10 @@ pub fn validate_for_catmull_clark(mesh: &PolyMeshSoA) -> SubdivisionResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::connectivity::PolyMeshSoA;
+    use crate::connectivity::RustMesh;
 
-    fn create_simple_triangle() -> PolyMeshSoA {
-        let mut mesh = PolyMeshSoA::new();
+    fn create_simple_triangle() -> RustMesh {
+        let mut mesh = RustMesh::new();
         
         // Create a simple triangle
         let v0 = mesh.add_vertex(glam::vec3(0.0, 0.0, 0.0));
@@ -1335,8 +1335,8 @@ mod tests {
         mesh
     }
 
-    fn create_triangle_mesh_with_boundary() -> PolyMeshSoA {
-        let mut mesh = PolyMeshSoA::new();
+    fn create_triangle_mesh_with_boundary() -> RustMesh {
+        let mut mesh = RustMesh::new();
         
         // Create a quad as two triangles (boundary mesh)
         let v0 = mesh.add_vertex(glam::vec3(0.0, 0.0, 0.0));
@@ -1350,8 +1350,8 @@ mod tests {
         mesh
     }
 
-    fn create_tetrahedron() -> PolyMeshSoA {
-        let mut mesh = PolyMeshSoA::new();
+    fn create_tetrahedron() -> RustMesh {
+        let mut mesh = RustMesh::new();
         
         // Tetrahedron (closed mesh)
         let v0 = mesh.add_vertex(glam::vec3(0.0, 0.0, 0.0));
@@ -1417,7 +1417,7 @@ mod tests {
 
     #[test]
     fn test_validate_empty_mesh() {
-        let mesh = PolyMeshSoA::new();
+        let mesh = RustMesh::new();
         assert!(matches!(
             validate_for_subdivision(&mesh),
             Err(SubdivisionError::EmptyMesh)
@@ -1598,7 +1598,7 @@ mod tests {
     // Integration test with more complex mesh
     #[test]
     fn test_subdivision_icosphere_like() {
-        let mut mesh = PolyMeshSoA::new();
+        let mut mesh = RustMesh::new();
         
         // Create a simple triangulated sphere approximation (icosahedron-like)
         // Using 20 triangles - a simple subdivision test
@@ -1658,8 +1658,8 @@ mod tests {
     // Catmull-Clark Subdivision Tests
     // ========================================================================
 
-    fn create_simple_quad() -> PolyMeshSoA {
-        let mut mesh = PolyMeshSoA::new();
+    fn create_simple_quad() -> RustMesh {
+        let mut mesh = RustMesh::new();
         
         // Create a simple quad (4 vertices, 1 face)
         // Quad in XY plane:
@@ -1676,8 +1676,8 @@ mod tests {
         mesh
     }
 
-    fn create_cube() -> PolyMeshSoA {
-        let mut mesh = PolyMeshSoA::new();
+    fn create_cube() -> RustMesh {
+        let mut mesh = RustMesh::new();
         
         // Create a cube (8 vertices, 6 quad faces)
         // Front face
@@ -1831,7 +1831,7 @@ mod tests {
 
     #[test]
     fn test_catmull_clark_mixed_face_mesh() {
-        let mut mesh = PolyMeshSoA::new();
+        let mut mesh = RustMesh::new();
         
         // Create a mesh with mixed face types: triangle + quad
         //  v2
@@ -2077,7 +2077,7 @@ mod tests {
 
     #[test]
     fn test_sqrt3_on_larger_mesh() {
-        let mut mesh = PolyMeshSoA::new();
+        let mut mesh = RustMesh::new();
         
         // Create an icosahedron-like mesh (20 triangles)
         // Center top
@@ -2138,7 +2138,7 @@ mod tests {
     #[test]
     fn test_sqrt3_not_triangular_error() {
         // Test that Sqrt3 fails on non-triangular mesh
-        let mut mesh = PolyMeshSoA::new();
+        let mut mesh = RustMesh::new();
         
         // Create a quad (not triangular)
         let v0 = mesh.add_vertex(glam::vec3(0.0, 0.0, 0.0));
@@ -2155,7 +2155,7 @@ mod tests {
 
     #[test]
     fn test_sqrt3_empty_mesh_error() {
-        let mut mesh = PolyMeshSoA::new();
+        let mut mesh = RustMesh::new();
         
         let result = sqrt3_subdivide(&mut mesh);
         

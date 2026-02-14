@@ -3,7 +3,7 @@
 //! Implements mesh dualization (face ↔ vertex duality).
 //! In the dual mesh, faces become vertices and vertices become faces.
 
-use crate::connectivity::PolyMeshSoA;
+use crate::connectivity::RustMesh;
 use crate::handles::{VertexHandle, FaceHandle, HalfedgeHandle, EdgeHandle};
 use glam::Vec3;
 use std::collections::HashMap;
@@ -46,7 +46,7 @@ impl std::error::Error for DualError {}
 /// - No boundary edges (all halfedges have a face)
 /// - Each vertex is incident to exactly two faces (manifold)
 /// - Mesh has at least one face
-pub fn is_dualizable(mesh: &PolyMeshSoA) -> bool {
+pub fn is_dualizable(mesh: &RustMesh) -> bool {
     // Check for empty mesh
     if mesh.n_faces() == 0 || mesh.n_vertices() == 0 {
         return false;
@@ -106,7 +106,7 @@ pub fn is_dualizable(mesh: &PolyMeshSoA) -> bool {
 }
 
 /// Compute the centroid of a face
-fn face_centroid(mesh: &PolyMeshSoA, fh: FaceHandle) -> Vec3 {
+fn face_centroid(mesh: &RustMesh, fh: FaceHandle) -> Vec3 {
     let mut centroid = Vec3::ZERO;
     let mut count = 0;
 
@@ -135,7 +135,7 @@ fn face_centroid(mesh: &PolyMeshSoA, fh: FaceHandle) -> Vec3 {
 
 /// Get all vertices of a face
 #[allow(dead_code)]
-fn get_face_vertices(mesh: &PolyMeshSoA, fh: FaceHandle) -> Vec<VertexHandle> {
+fn get_face_vertices(mesh: &RustMesh, fh: FaceHandle) -> Vec<VertexHandle> {
     let mut vertices = Vec::new();
     
     if let Some(start_heh) = mesh.face_halfedge_handle(fh) {
@@ -155,7 +155,7 @@ fn get_face_vertices(mesh: &PolyMeshSoA, fh: FaceHandle) -> Vec<VertexHandle> {
 }
 
 /// Get all faces adjacent to a vertex
-fn get_vertex_faces(mesh: &PolyMeshSoA, vh: VertexHandle) -> Vec<FaceHandle> {
+fn get_vertex_faces(mesh: &RustMesh, vh: VertexHandle) -> Vec<FaceHandle> {
     let mut faces = Vec::new();
     
     if let Some(start_heh) = mesh.halfedge_handle(vh) {
@@ -188,7 +188,7 @@ fn get_vertex_faces(mesh: &PolyMeshSoA, vh: VertexHandle) -> Vec<FaceHandle> {
 /// - Two dual vertices are connected if the corresponding original faces share an edge
 /// 
 /// The result is written back to the input mesh (replacing its contents).
-pub fn dualize(mesh: &mut PolyMeshSoA) -> DualResult<()> {
+pub fn dualize(mesh: &mut RustMesh) -> DualResult<()> {
     // Validate mesh
     if mesh.n_faces() == 0 || mesh.n_vertices() == 0 {
         return Err(DualError::EmptyMesh);
@@ -214,7 +214,7 @@ pub fn dualize(mesh: &mut PolyMeshSoA) -> DualResult<()> {
 
     // Step 2: For each original vertex, collect adjacent face centroids to form dual faces
     // Build the dual mesh
-    let mut dual_mesh = PolyMeshSoA::new();
+    let mut dual_mesh = RustMesh::new();
     
     // Add dual vertices (at face centroids)
     for centroid in &face_centroids {
@@ -314,7 +314,7 @@ pub fn dualize(mesh: &mut PolyMeshSoA) -> DualResult<()> {
     // - Dual faces = for each original vertex, connect the centroids of all incident faces
     
     // Let's rebuild more carefully
-    let mut dual_mesh_new = PolyMeshSoA::new();
+    let mut dual_mesh_new = RustMesh::new();
     
     // Add dual vertices (at face centroids)
     let mut dual_vertex_handles: Vec<VertexHandle> = Vec::with_capacity(n_faces);
@@ -403,9 +403,9 @@ pub fn dualize(mesh: &mut PolyMeshSoA) -> DualResult<()> {
 /// Create a dual mesh and return it (without modifying original)
 /// 
 /// This creates a new mesh with the dual topology.
-pub fn dual_mesh(mesh: &PolyMeshSoA) -> DualResult<PolyMeshSoA> {
-    // We need to rebuild the mesh data manually since PolyMeshSoA doesn't implement Clone
-    let mut dual = PolyMeshSoA::new();
+pub fn dual_mesh(mesh: &RustMesh) -> DualResult<RustMesh> {
+    // We need to rebuild the mesh data manually since RustMesh doesn't implement Clone
+    let mut dual = RustMesh::new();
     
     // Compute face centroids
     let n_faces = mesh.n_faces();
@@ -562,7 +562,7 @@ mod tests {
 
     #[test]
     fn test_empty_mesh_not_dualizable() {
-        let mesh = PolyMeshSoA::new();
+        let mesh = RustMesh::new();
         assert!(!is_dualizable(&mesh));
     }
 }

@@ -2,12 +2,12 @@
 //!
 //! Circulators provide iterator-based traversal of adjacent mesh elements.
 
-use crate::connectivity::PolyMeshSoA;
+use crate::connectivity::RustMesh;
 use crate::handles::{VertexHandle, HalfedgeHandle, EdgeHandle, FaceHandle};
 
 /// Vertex-Vertex Circulator: Visit all unique vertices adjacent to a vertex
 pub struct VertexVertexCirculator<'a> {
-    mesh: &'a PolyMeshSoA,
+    mesh: &'a RustMesh,
     start_vh: VertexHandle,
     current_heh: HalfedgeHandle,
 }
@@ -41,7 +41,7 @@ impl<'a> Iterator for VertexVertexCirculator<'a> {
     }
 }
 
-impl<'a> PolyMeshSoA {
+impl<'a> RustMesh {
     pub fn vertex_vertices(&'a self, vh: VertexHandle) -> Option<VertexVertexCirculator<'a>> {
         let start_heh = self.halfedge_handle(vh)?;
         Some(VertexVertexCirculator {
@@ -54,7 +54,7 @@ impl<'a> PolyMeshSoA {
 
 /// Vertex-Face Circulator: Visit all faces adjacent to a vertex
 pub struct VertexFaceCirculator<'a> {
-    mesh: &'a PolyMeshSoA,
+    mesh: &'a RustMesh,
     start_vh: VertexHandle,
     current_heh: HalfedgeHandle,
 }
@@ -86,7 +86,7 @@ impl<'a> Iterator for VertexFaceCirculator<'a> {
     }
 }
 
-impl<'a> PolyMeshSoA {
+impl<'a> RustMesh {
     pub fn vertex_faces(&'a self, vh: VertexHandle) -> Option<VertexFaceCirculator<'a>> {
         let start_heh = self.halfedge_handle(vh)?;
         Some(VertexFaceCirculator {
@@ -99,7 +99,7 @@ impl<'a> PolyMeshSoA {
 
 /// Vertex-Halfedge Iterator: Visit all outgoing halfedges around a vertex
 pub struct VertexHalfedgeIter<'a> {
-    mesh: &'a PolyMeshSoA,
+    mesh: &'a RustMesh,
     start_heh: HalfedgeHandle,
     current_heh: HalfedgeHandle,
     first: bool,
@@ -134,7 +134,7 @@ impl<'a> Iterator for VertexHalfedgeIter<'a> {
     }
 }
 
-impl<'a> PolyMeshSoA {
+impl<'a> RustMesh {
     pub fn vertex_halfedges(&'a self, vh: VertexHandle) -> Option<VertexHalfedgeIter<'a>> {
         let start_heh = self.halfedge_handle(vh)?;
         Some(VertexHalfedgeIter {
@@ -148,7 +148,7 @@ impl<'a> PolyMeshSoA {
 
 /// Vertex-Edge Iterator: Visit all edges adjacent to a vertex
 pub struct VertexEdgeIter<'a> {
-    mesh: &'a PolyMeshSoA,
+    mesh: &'a RustMesh,
     halfedges: VertexHalfedgeIter<'a>,
 }
 
@@ -160,7 +160,7 @@ impl<'a> Iterator for VertexEdgeIter<'a> {
     }
 }
 
-impl<'a> PolyMeshSoA {
+impl<'a> RustMesh {
     pub fn vertex_edges(&'a self, vh: VertexHandle) -> Option<VertexEdgeIter<'a>> {
         let halfedges = self.vertex_halfedges(vh)?;
         Some(VertexEdgeIter {
@@ -172,7 +172,7 @@ impl<'a> PolyMeshSoA {
 
 /// Face-Vertex Circulator: Visit all vertices of a face
 pub struct FaceVertexCirculator<'a> {
-    mesh: &'a PolyMeshSoA,
+    mesh: &'a RustMesh,
     start_heh: HalfedgeHandle,
     current_heh: HalfedgeHandle,
     done: bool,
@@ -198,7 +198,7 @@ impl<'a> Iterator for FaceVertexCirculator<'a> {
     }
 }
 
-impl<'a> PolyMeshSoA {
+impl<'a> RustMesh {
     pub fn face_vertices(&'a self, fh: FaceHandle) -> Option<FaceVertexCirculator<'a>> {
         let start_heh = self.face_halfedge_handle(fh)?;
         Some(FaceVertexCirculator {
@@ -212,7 +212,7 @@ impl<'a> PolyMeshSoA {
 
 /// Face-Halfedge Iterator: Visit all halfedges in a face cycle
 pub struct FaceHalfedgeIter<'a> {
-    mesh: &'a PolyMeshSoA,
+    mesh: &'a RustMesh,
     start_heh: HalfedgeHandle,
     current_heh: HalfedgeHandle,
     done: bool,
@@ -238,7 +238,7 @@ impl<'a> Iterator for FaceHalfedgeIter<'a> {
     }
 }
 
-impl<'a> PolyMeshSoA {
+impl<'a> RustMesh {
     pub fn face_halfedges(&'a self, fh: FaceHandle) -> Option<FaceHalfedgeIter<'a>> {
         let start_heh = self.face_halfedge_handle(fh)?;
         Some(FaceHalfedgeIter {
@@ -252,7 +252,7 @@ impl<'a> PolyMeshSoA {
 
 /// Face-Edge Iterator: Visit all edges of a face
 pub struct FaceEdgeIter<'a> {
-    mesh: &'a PolyMeshSoA,
+    mesh: &'a RustMesh,
     halfedges: FaceHalfedgeIter<'a>,
 }
 
@@ -264,7 +264,7 @@ impl<'a> Iterator for FaceEdgeIter<'a> {
     }
 }
 
-impl<'a> PolyMeshSoA {
+impl<'a> RustMesh {
     pub fn face_edges(&'a self, fh: FaceHandle) -> Option<FaceEdgeIter<'a>> {
         let halfedges = self.face_halfedges(fh)?;
         Some(FaceEdgeIter {
@@ -276,7 +276,7 @@ impl<'a> PolyMeshSoA {
 
 /// Face-Face Circulator: Visit all adjacent faces
 pub struct FaceFaceCirculator<'a> {
-    mesh: &'a PolyMeshSoA,
+    mesh: &'a RustMesh,
     start_heh: HalfedgeHandle,
     current_heh: HalfedgeHandle,
     done: bool,
@@ -303,7 +303,7 @@ impl<'a> Iterator for FaceFaceCirculator<'a> {
     }
 }
 
-impl<'a> PolyMeshSoA {
+impl<'a> RustMesh {
     pub fn face_faces(&'a self, fh: FaceHandle) -> Option<FaceFaceCirculator<'a>> {
         let start_heh = self.face_halfedge_handle(fh)?;
         Some(FaceFaceCirculator {

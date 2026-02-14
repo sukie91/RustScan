@@ -69,11 +69,11 @@ impl Iterator for FaceIndexIter {
     }
 }
 
-pub struct PolyMeshSoA {
+pub struct RustMesh {
     kernel: SoAKernel,
 }
 
-impl Clone for PolyMeshSoA {
+impl Clone for RustMesh {
     fn clone(&self) -> Self {
         Self {
             kernel: self.kernel.clone(),
@@ -81,9 +81,9 @@ impl Clone for PolyMeshSoA {
     }
 }
 
-impl std::fmt::Debug for PolyMeshSoA {
+impl std::fmt::Debug for RustMesh {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PolyMeshSoA")
+        f.debug_struct("RustMesh")
             .field("n_vertices", &self.kernel.n_vertices())
             .field("n_edges", &self.kernel.n_edges())
             .field("n_faces", &self.kernel.n_faces())
@@ -92,7 +92,7 @@ impl std::fmt::Debug for PolyMeshSoA {
     }
 }
 
-impl PolyMeshSoA {
+impl RustMesh {
     /// Create a new empty mesh
     #[inline]
     pub fn new() -> Self {
@@ -783,7 +783,7 @@ mod tests_soa {
 
     #[test]
     fn test_soa_mesh() {
-        let mut mesh = PolyMeshSoA::new();
+        let mut mesh = RustMesh::new();
 
         // Add vertices
         let v0 = mesh.add_vertex(glam::vec3(0.0, 0.0, 0.0));
@@ -811,7 +811,7 @@ mod tests_soa {
 
     #[test]
     fn test_soa_bounding_box() {
-        let mut mesh = PolyMeshSoA::new();
+        let mut mesh = RustMesh::new();
 
         // Add vertices of a cube
         mesh.add_vertex(glam::vec3(0.0, 0.0, 0.0));
@@ -835,7 +835,7 @@ mod tests_soa {
 
     #[test]
     fn test_soa_centroid() {
-        let mut mesh = PolyMeshSoA::new();
+        let mut mesh = RustMesh::new();
 
         // Add vertices
         mesh.add_vertex(glam::vec3(0.0, 0.0, 0.0));
@@ -852,7 +852,7 @@ mod tests_soa {
 
     #[test]
     fn test_vertex_attributes() {
-        let mut mesh = PolyMeshSoA::new();
+        let mut mesh = RustMesh::new();
 
         // Add vertices
         let v0 = mesh.add_vertex(glam::vec3(0.0, 0.0, 0.0));
@@ -889,7 +889,7 @@ mod tests_soa {
 
     #[test]
     fn test_face_attributes() {
-        let mut mesh = PolyMeshSoA::new();
+        let mut mesh = RustMesh::new();
 
         // Add vertices and face
         let v0 = mesh.add_vertex(glam::vec3(0.0, 0.0, 0.0));
@@ -913,5 +913,4 @@ mod tests_soa {
     }
 }
 
-// Re-export RustMesh for convenience
-pub use PolyMeshSoA as RustMesh;
+// RustMesh is now the primary mesh type (previously PolyMeshSoA)

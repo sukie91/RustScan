@@ -106,7 +106,7 @@ impl<'a> ModQuadricT<'a> {
         }
     }
 
-    /// Get vertices of a face (PolyMeshSoA compatible)
+    /// Get vertices of a face (RustMesh compatible)
     fn get_face_vertices(&self, fh: FaceHandle) -> Option<Vec<VertexHandle>> {
         let heh = self.mesh.face_halfedge_handle(fh)?;
         let mut vertices = Vec::new();

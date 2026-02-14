@@ -19,7 +19,7 @@ pub use handles::{VertexHandle, HalfedgeHandle, EdgeHandle, FaceHandle, BaseHand
 pub use items::{Vertex, Halfedge, Edge, Face};
 pub use soa_kernel::SoAKernel;
 pub use attrib_soa_kernel::AttribSoAKernel;
-pub use connectivity::PolyMeshSoA as RustMesh;
+pub use connectivity::RustMesh;
 pub use test_data::*;
 pub use geometry::*;
 // pub use io::*;  // IO module not yet implemented

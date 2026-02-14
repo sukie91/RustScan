@@ -153,6 +153,6 @@ impl AttribSoAKernel {
 2. 实现 add_property/get_property/set_property
 
 ### Phase 3: 集成和测试
-1. 更新 PolyMeshSoA 使用新 kernel
+1. 更新 RustMesh 使用新 kernel
 2. 运行测试确保兼容性
 3. 添加 OM 格式支持

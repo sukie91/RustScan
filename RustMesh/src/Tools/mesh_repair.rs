@@ -8,7 +8,7 @@
 //! - Merge close vertices
 
 use std::collections::HashMap;
-use crate::connectivity::PolyMeshSoA;
+use crate::connectivity::RustMesh;
 use crate::handles::{VertexHandle, FaceHandle, HalfedgeHandle};
 use crate::geometry::{triangle_area, triangle_normal};
 
@@ -44,7 +44,7 @@ impl From<&str> for MeshRepairError {
 /// Uses a hash map to find vertices at the same position and merges them.
 ///
 /// Returns the number of vertices that were merged (removed).
-pub fn remove_duplicates(mesh: &mut PolyMeshSoA) -> Result<usize, MeshRepairError> {
+pub fn remove_duplicates(mesh: &mut RustMesh) -> Result<usize, MeshRepairError> {
     if mesh.n_vertices() == 0 {
         return Ok(0);
     }
@@ -101,7 +101,7 @@ pub fn remove_duplicates(mesh: &mut PolyMeshSoA) -> Result<usize, MeshRepairErro
 }
 
 /// Remap all faces using old_vh to use new_vh instead
-fn remap_vertex_in_faces(mesh: &mut PolyMeshSoA, old_vh: VertexHandle, new_vh: VertexHandle) {
+fn remap_vertex_in_faces(mesh: &mut RustMesh, old_vh: VertexHandle, new_vh: VertexHandle) {
     // Avoid using vertex_faces circulator here because broken connectivity can
     // cause extremely long iterations. Scan all faces by index instead.
     let face_handles: Vec<_> = mesh.faces().collect();
@@ -127,7 +127,7 @@ fn remap_vertex_in_faces(mesh: &mut PolyMeshSoA, old_vh: VertexHandle, new_vh: V
 }
 
 /// Compact vertices, removing those marked as false
-fn compact_vertices(mesh: &mut PolyMeshSoA, keep_vertex: &[bool]) -> Result<(), MeshRepairError> {
+fn compact_vertices(mesh: &mut RustMesh, keep_vertex: &[bool]) -> Result<(), MeshRepairError> {
     // Build remapping: old index -> new index
     let mut remap: Vec<Option<usize>> = vec![None; keep_vertex.len()];
     let mut new_count = 0;
@@ -204,7 +204,7 @@ fn compact_vertices(mesh: &mut PolyMeshSoA, keep_vertex: &[bool]) -> Result<(), 
 /// For polygonal faces, checks if the face has area close to zero.
 ///
 /// Returns the number of degenerate faces removed.
-pub fn remove_degenerate_faces(mesh: &mut PolyMeshSoA) -> Result<usize, MeshRepairError> {
+pub fn remove_degenerate_faces(mesh: &mut RustMesh) -> Result<usize, MeshRepairError> {
     if mesh.n_faces() == 0 {
         return Ok(0);
     }
@@ -231,7 +231,7 @@ pub fn remove_degenerate_faces(mesh: &mut PolyMeshSoA) -> Result<usize, MeshRepa
 }
 
 /// Check if a face is degenerate (zero area)
-fn is_face_degenerate(mesh: &PolyMeshSoA, verts: &[VertexHandle]) -> bool {
+fn is_face_degenerate(mesh: &RustMesh, verts: &[VertexHandle]) -> bool {
     if verts.len() < 3 {
         return true;
     }
@@ -282,7 +282,7 @@ fn is_face_degenerate(mesh: &PolyMeshSoA, verts: &[VertexHandle]) -> bool {
 }
 
 /// Compute centroid of a polygon
-fn compute_polygon_centroid(mesh: &PolyMeshSoA, verts: &[VertexHandle]) -> glam::Vec3 {
+fn compute_polygon_centroid(mesh: &RustMesh, verts: &[VertexHandle]) -> glam::Vec3 {
     if verts.is_empty() {
         return glam::Vec3::ZERO;
     }
@@ -305,7 +305,7 @@ fn compute_polygon_centroid(mesh: &PolyMeshSoA, verts: &[VertexHandle]) -> glam:
 }
 
 /// Delete a face from the mesh
-fn delete_face(mesh: &mut PolyMeshSoA, fh: FaceHandle) {
+fn delete_face(mesh: &mut RustMesh, fh: FaceHandle) {
     // Get the halfedges of this face
     if let Some(start_heh) = mesh.face_halfedge_handle(fh) {
         let mut halfedges: Vec<HalfedgeHandle> = Vec::new();
@@ -339,7 +339,7 @@ fn delete_face(mesh: &mut PolyMeshSoA, fh: FaceHandle) {
 /// Uses the first face's normal as reference and flips faces that don't match.
 ///
 /// Returns the number of faces that were flipped.
-pub fn fix_winding_order(mesh: &mut PolyMeshSoA) -> Result<usize, MeshRepairError> {
+pub fn fix_winding_order(mesh: &mut RustMesh) -> Result<usize, MeshRepairError> {
     if mesh.n_faces() == 0 {
         return Ok(0);
     }
@@ -371,7 +371,7 @@ pub fn fix_winding_order(mesh: &mut PolyMeshSoA) -> Result<usize, MeshRepairErro
 }
 
 /// Compute the normal of a face
-fn compute_face_normal(mesh: &PolyMeshSoA, fh: FaceHandle) -> Option<glam::Vec3> {
+fn compute_face_normal(mesh: &RustMesh, fh: FaceHandle) -> Option<glam::Vec3> {
     let verts = mesh.face_vertices(fh)?;
     let verts: Vec<_> = verts.collect();
     
@@ -387,7 +387,7 @@ fn compute_face_normal(mesh: &PolyMeshSoA, fh: FaceHandle) -> Option<glam::Vec3>
 }
 
 /// Flip the winding order of a face (reverse vertex order)
-fn flip_face_winding(mesh: &mut PolyMeshSoA, fh: FaceHandle) -> Result<(), MeshRepairError> {
+fn flip_face_winding(mesh: &mut RustMesh, fh: FaceHandle) -> Result<(), MeshRepairError> {
     let verts = mesh.face_vertices(fh)
         .ok_or("Cannot get face vertices")?;
     let mut face_verts: Vec<_> = verts.collect();
@@ -421,7 +421,7 @@ fn flip_face_winding(mesh: &mut PolyMeshSoA, fh: FaceHandle) -> Result<(), MeshR
 /// * `threshold` - Maximum distance between vertices to merge (default: 1e-5)
 ///
 /// Returns the number of vertex pairs merged.
-pub fn merge_close_vertices(mesh: &mut PolyMeshSoA, threshold: f32) -> Result<usize, MeshRepairError> {
+pub fn merge_close_vertices(mesh: &mut RustMesh, threshold: f32) -> Result<usize, MeshRepairError> {
     if mesh.n_vertices() < 2 {
         return Ok(0);
     }
@@ -489,7 +489,7 @@ pub fn merge_close_vertices(mesh: &mut PolyMeshSoA, threshold: f32) -> Result<us
 /// # Arguments
 /// * `mesh` - The mesh to repair
 /// * `merge_threshold` - Distance threshold for merging vertices
-pub fn repair_mesh(mesh: &mut PolyMeshSoA, merge_threshold: f32) -> Result<RepairStats, MeshRepairError> {
+pub fn repair_mesh(mesh: &mut RustMesh, merge_threshold: f32) -> Result<RepairStats, MeshRepairError> {
     let mut stats = RepairStats::default();
     
     // Step 1: Merge close vertices
@@ -542,8 +542,8 @@ mod tests {
     use super::*;
     use crate::Vec3;
 
-    fn create_test_mesh() -> PolyMeshSoA {
-        let mut mesh = PolyMeshSoA::new();
+    fn create_test_mesh() -> RustMesh {
+        let mut mesh = RustMesh::new();
         
         // Create a simple quad
         let v0 = mesh.add_vertex(Vec3::new(0.0, 0.0, 0.0));
@@ -639,7 +639,7 @@ mod tests {
 
     #[test]
     fn test_empty_mesh() {
-        let mut mesh = PolyMeshSoA::new();
+        let mut mesh = RustMesh::new();
         
         assert_eq!(remove_duplicates(&mut mesh).unwrap(), 0);
         assert_eq!(remove_degenerate_faces(&mut mesh).unwrap(), 0);
