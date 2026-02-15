@@ -221,25 +221,42 @@ pub fn split_edge(mesh: &mut RustMesh, v0: VertexHandle, v1: VertexHandle) -> Su
     if !v0.is_valid() || !v1.is_valid() {
         return Err(SubdivisionError::InvalidHandle("Invalid vertex handle".to_string()));
     }
-    
+
     // Get positions
     let p0 = mesh.point(v0).ok_or(SubdivisionError::VertexNotFound)?;
     let p1 = mesh.point(v1).ok_or(SubdivisionError::VertexNotFound)?;
-    
-    // Check if edge is on boundary
-    let is_boundary = {
-        // Find a halfedge for this edge
-        let mut found = false;
-        let mut boundary = false;
-        
-        // Search for the halfedge from v0 to v1
-        if let Some(heh) = mesh.halfedge_handle(v0) {
+
+    // Find the halfedge from v0 to v1
+    let mut h01_opt = None;
+    let mut is_boundary = false;
+
+    if let Some(heh) = mesh.halfedge_handle(v0) {
+        let mut current = heh;
+        loop {
+            let to = mesh.to_vertex_handle(current);
+            if to == v1 {
+                h01_opt = Some(current);
+                is_boundary = mesh.is_boundary(current);
+                break;
+            }
+            let opp = mesh.opposite_halfedge_handle(current);
+            current = mesh.next_halfedge_handle(opp);
+            if current == heh || !current.is_valid() {
+                break;
+            }
+        }
+    }
+
+    // Try opposite direction if not found
+    if h01_opt.is_none() {
+        if let Some(heh) = mesh.halfedge_handle(v1) {
             let mut current = heh;
             loop {
                 let to = mesh.to_vertex_handle(current);
-                if to == v1 {
-                    found = true;
-                    boundary = mesh.is_boundary(current);
+                if to == v0 {
+                    // Found v1 -> v0, use its opposite for v0 -> v1
+                    h01_opt = Some(mesh.opposite_halfedge_handle(current));
+                    is_boundary = mesh.is_boundary(current);
                     break;
                 }
                 let opp = mesh.opposite_halfedge_handle(current);
@@ -249,30 +266,8 @@ pub fn split_edge(mesh: &mut RustMesh, v0: VertexHandle, v1: VertexHandle) -> Su
                 }
             }
         }
-        
-        if !found {
-            // Try opposite direction
-            if let Some(heh) = mesh.halfedge_handle(v1) {
-                let mut current = heh;
-                loop {
-                    let to = mesh.to_vertex_handle(current);
-                    if to == v0 {
-                        found = true;
-                        boundary = mesh.is_boundary(current);
-                        break;
-                    }
-                    let opp = mesh.opposite_halfedge_handle(current);
-                    current = mesh.next_halfedge_handle(opp);
-                    if current == heh || !current.is_valid() {
-                        break;
-                    }
-                }
-            }
-        }
-        
-        boundary
-    };
-    
+    }
+
     // Calculate new vertex position
     let new_pos = if is_boundary {
         // For boundary edges: midpoint
@@ -280,59 +275,67 @@ pub fn split_edge(mesh: &mut RustMesh, v0: VertexHandle, v1: VertexHandle) -> Su
     } else {
         // For interior edges: weighted average (Loop scheme for edge points)
         // New edge point = 3/8 * (p0 + p1) + 1/8 * (p_opposite0 + p_opposite1)
-        // Where p_opposite0/1 are the vertices opposite to the edge in the two adjacent faces
-        
+
         let mut sum = p0 + p1;
         let mut count = 0;
-        
+
         // Find the two faces adjacent to this edge
-        if let Some(heh) = mesh.halfedge_handle(v0) {
-            let mut current = heh;
-            loop {
-                let to = mesh.to_vertex_handle(current);
-                if to == v1 {
-                    // Found the halfedge, get the opposite vertex in the face
-                    if let Some(fh) = mesh.face_handle(current) {
-                        let face_verts = get_face_vertices(mesh, fh);
-                        for &fv in &face_verts {
-                            if fv != v0 && fv != v1 {
-                                if let Some(p) = mesh.point(fv) {
-                                    sum = sum + p;
-                                    count += 1;
-                                }
-                            }
+        if let Some(h01) = h01_opt {
+            // Get opposite vertex from face of h01
+            if let Some(fh) = mesh.face_handle(h01) {
+                let face_verts = get_face_vertices(mesh, fh);
+                for &fv in &face_verts {
+                    if fv != v0 && fv != v1 {
+                        if let Some(p) = mesh.point(fv) {
+                            sum = sum + p;
+                            count += 1;
                         }
                     }
                 }
-                let opp = mesh.opposite_halfedge_handle(current);
-                current = mesh.next_halfedge_handle(opp);
-                if current == heh || !current.is_valid() {
-                    break;
+            }
+
+            // Get opposite vertex from face of opposite halfedge
+            let h10 = mesh.opposite_halfedge_handle(h01);
+            if let Some(fh) = mesh.face_handle(h10) {
+                let face_verts = get_face_vertices(mesh, fh);
+                for &fv in &face_verts {
+                    if fv != v0 && fv != v1 {
+                        if let Some(p) = mesh.point(fv) {
+                            sum = sum + p;
+                            count += 1;
+                        }
+                    }
                 }
             }
         }
-        
+
         if count > 0 {
             sum / (count as f32 + 2.0) // (p0 + p1 + sum_of_opposites) / (2 + count)
         } else {
             (p0 + p1) * 0.5
         }
     };
-    
+
     // Add the new vertex
     let new_vh = mesh.add_vertex(new_pos);
-    
-    // P0-6 fix: Split the edge topology by adding a new halfedge
-    // This connects new_vh to v1, creating a proper edge split
-    
-    // Add a new edge connecting new_vh to v1
-    // This ensures the topology is connected
-    let _new_heh = mesh.add_edge(new_vh, v1);
-    // Note: full implementation would need to:
-    // 1. Update original halfedge's to_vertex to new_vh
-    // 2. Properly reconnect the halfedge ring
-    // 3. Handle face halfedge pointers
-    
+
+    // P0-6 fix: Only create the vertex, don't modify topology
+    // The subdivision algorithms (Loop, Catmull-Clark, Sqrt3) rebuild the
+    // topology by creating new faces that use the new vertices and then
+    // deleting the original faces. This approach avoids the need for
+    // low-level halfedge manipulation.
+    //
+    // A full edge split implementation would need to:
+    // 1. Find halfedge h01 from v0 to v1
+    // 2. Modify h01's to_vertex to new_vh (requires kernel access)
+    // 3. Create new halfedge from new_vh to v1
+    // 4. Update next/prev pointers in the halfedge ring
+    // 5. Update face halfedge pointers
+    // 6. Handle the opposite halfedge similarly
+    //
+    // This requires exposing set_halfedge_to_vertex and other low-level
+    // methods in the public API, which is not currently done.
+
     Ok(new_vh)
 }
 
