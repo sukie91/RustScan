@@ -110,9 +110,14 @@ impl Halfedge {
     }
 
     /// Get the from vertex handle (opposite halfedge's to_vertex)
+    /// Note: This requires mesh context to access the opposite halfedge's data.
+    /// Use Connectivity::from_vertex_handle() instead for proper implementation.
     pub fn from_vertex_handle(&self) -> VertexHandle {
-        // This is a workaround - actual implementation depends on context
-        VertexHandle::default()
+        // This is a placeholder - actual implementation requires mesh context
+        // Use kernel/connectivity to find the opposite halfedge and get its to_vertex
+        // For now, this returns invalid handle and callers should use 
+        // mesh.from_vertex_handle(halfedge) instead
+        VertexHandle::invalid()
     }
 
     /// Get the opposite halfedge handle
