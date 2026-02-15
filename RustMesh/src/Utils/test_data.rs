@@ -22,13 +22,13 @@ pub fn generate_cube() -> RustMesh {
         mesh.add_vertex(glam::vec3(-1.0,  1.0,  1.0)),
     ];
 
-    // 6 faces (CCW winding)
-    mesh.add_face(&[v[0], v[1], v[2], v[3]]); // back
-    mesh.add_face(&[v[4], v[5], v[6], v[7]]); // front
-    mesh.add_face(&[v[0], v[1], v[5], v[4]]); // bottom
-    mesh.add_face(&[v[2], v[3], v[7], v[6]]); // top
-    mesh.add_face(&[v[0], v[3], v[7], v[4]]); // left
-    mesh.add_face(&[v[1], v[2], v[6], v[5]]); // right
+    // 6 faces - consistent orientation so adjacent faces share edges in opposite directions
+    mesh.add_face(&[v[0], v[1], v[2], v[3]]); // back  (v0→v1→v2→v3)
+    mesh.add_face(&[v[7], v[6], v[5], v[4]]); // front (reversed)
+    mesh.add_face(&[v[4], v[5], v[1], v[0]]); // bottom (reversed)
+    mesh.add_face(&[v[3], v[2], v[6], v[7]]); // top
+    mesh.add_face(&[v[4], v[0], v[3], v[7]]); // left  (reversed)
+    mesh.add_face(&[v[1], v[5], v[6], v[2]]); // right (reversed)
 
     mesh
 }
@@ -302,10 +302,8 @@ mod tests {
     fn test_cube() {
         let mesh = generate_cube();
         assert_eq!(mesh.n_vertices(), 8);
-        // Note: Due to half-edge mesh constraints where edges can only belong to one face,
-        // only 2 of the 6 quad faces can be successfully added (back and front faces).
-        // The remaining 4 faces share edges with these faces and fail to add.
-        assert_eq!(mesh.n_faces(), 2);
+        // All 6 faces should be created with consistent orientation
+        assert_eq!(mesh.n_faces(), 6);
     }
 
     #[test]

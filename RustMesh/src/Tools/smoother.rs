@@ -137,7 +137,13 @@ pub fn laplace_smooth(mesh: &mut RustMesh, config: SmootherConfig) -> SmoothResu
 /// to preserve volume better.
 pub fn tangential_smooth(mesh: &mut RustMesh, config: SmootherConfig) -> SmoothResult {
     let n_vertices = mesh.n_vertices();
-    
+    if n_vertices == 0 {
+        return SmoothResult {
+            iterations: 0,
+            max_displacement: 0.0,
+        };
+    }
+
     // First compute average position (centroid)
     let mut sum = Vec3::ZERO;
     for vh in mesh.vertices() {

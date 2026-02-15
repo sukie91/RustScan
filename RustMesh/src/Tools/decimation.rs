@@ -264,23 +264,23 @@ impl<'a> Decimater<'a> {
     }
 
     pub fn collapse_info(&mut self, heh: HalfedgeHandle) -> Option<CollapseInfo> {
-        let to_vh = self.mesh.to_vertex_handle(heh);
-        let from_vh = self.mesh.from_vertex_handle(heh);
-        
+        let to_vh = self.mesh.to_vertex_handle(heh);     // v_removed
+        let from_vh = self.mesh.from_vertex_handle(heh);  // v_kept
+
         // Create a temporary quadric module for this query
         let mut qm = ModQuadricT::new(&*self.mesh);
         qm.set_max_err(self.config.max_err);
         qm.initialize();
-        
+
         let (error, is_legal) = qm.collapse_priority(from_vh, to_vh);
         if !is_legal {
             return None;
         }
-        
+
         let optimal_pos = qm.optimal_position(from_vh, to_vh);
-        
+
         let mut faces_removed = Vec::new();
-        
+
         if let Some(fh_left) = self.mesh.face_handle(heh) {
             faces_removed.push(fh_left);
         }
@@ -288,20 +288,16 @@ impl<'a> Decimater<'a> {
         if let Some(fh_right) = self.mesh.face_handle(heh_opp) {
             faces_removed.push(fh_right);
         }
-        
+
         let mut info = CollapseInfo::new();
         info.halfedge = heh;
-        info.v_removed = from_vh;
-        info.v_kept = to_vh;
+        info.v_removed = to_vh;   // to_vertex is removed in collapse()
+        info.v_kept = from_vh;    // from_vertex is kept
         info.faces_removed = faces_removed;
         info.new_position = optimal_pos;
         info.error = error;
-        
-        Some(info)
-    }
 
-    fn is_collapse_legal(&self, _v0: VertexHandle, _v1: VertexHandle) -> bool {
-        true
+        Some(info)
     }
 
     pub fn collapse(&mut self, heh: HalfedgeHandle) -> Result<(), &'static str> {
@@ -396,28 +392,41 @@ impl<'a> Decimater<'a> {
         
         let mut collapses = 0;
         let mut retries = 0;
-        let max_retries = 1000;
-        
-        // Decimation loop with BinaryHeap (P0-13 fix)
+        let max_retries = heap.len().max(1000);
+
+        // Decimation loop with BinaryHeap (lazy deletion)
         while collapses < target && retries < max_retries {
             // Pop the best candidate from heap (O(log n))
             match heap.pop() {
                 Some(candidate) => {
                     let heh = candidate.halfedge;
-                    
+
                     // Check if collapse is still valid
                     if !self.mesh.is_collapse_ok(heh) {
                         retries += 1;
                         continue;
                     }
-                    
+
+                    let v_removed = candidate.v_removed;
+                    let v_kept = candidate.v_kept;
+
                     // Try to perform the collapse
-                    if let Err(e) = self.mesh.collapse(heh) {
-                        eprintln!("Collapse failed: {}", e);
+                    if let Err(_) = self.mesh.collapse(heh) {
                         retries += 1;
                         continue;
                     }
-                    
+
+                    // Update quadrics: combine removed vertex's quadric into kept vertex
+                    let idx_removed = v_removed.idx_usize();
+                    let idx_kept = v_kept.idx_usize();
+                    if idx_removed < vertex_quadrics.len() && idx_kept < vertex_quadrics.len() {
+                        if let Some(qr) = vertex_quadrics[idx_removed] {
+                            if let Some(ref mut qk) = vertex_quadrics[idx_kept] {
+                                qk.add_assign_values(qr);
+                            }
+                        }
+                    }
+
                     collapses += 1;
                     retries = 0;  // Reset retries on success
                 }

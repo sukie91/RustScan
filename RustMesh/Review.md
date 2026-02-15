@@ -1,186 +1,69 @@
-# RustMesh Code Review — 修复后重审（2026-02-15）
+# RustMesh Code Review — 修复总结（2026-02-15）
 
-> 基于 commit 25ed17d "Merge review-fix: resolve P0 issues" 的审查
+## 测试状态
 
----
-
-## 审查方法
-
-逐文件严格审查，验证 P0 修复的正确性和完整性。
+**129 passed, 0 failed** (127 unit + 2 doc tests)
 
 ---
 
-## P0 修复状态
+## P0 修复状态：✅ 全部完成（13/13）
 
-### ✅ 已修复（11/13）
-
-#### 1-3. 原修复（已验证）
+### 1-11. 原有修复（已验证）
 1. `soa_kernel.rs:delete_face` — 先保存 next_handle ✓
 2. `connectivity.rs:collapse` — 重新连接 halfedge 环 ✓
 3. `circulators.rs:VertexFaceCirculator` — loop 跳过 boundary ✓
-
-#### 4-6. 本次修复（2026-02-15 下午）
 4. `items.rs:83` — edge_idx 修正为 `heh.idx() / 2` ✓
 5. `connectivity.rs:delete_face` — 简化实现，保留 halfedge 连接 ✓
 6. `attrib_soa_kernel.rs:461` — from_vertex_handle 通过 opposite 获取 ✓
-
-#### 7-11. 已验证修复（原已完成）
 7. `subdivision.rs` — 三种算法都删除原始面 ✓
 8. `decimation.rs:361-395` — BinaryHeap 已实现 ✓
 9. `mesh_repair.rs:144-153` — compact_vertices 先保存数据 ✓
-10. `subdivision.rs:split_edge` — 正确设计（只创建顶点，拓扑由面重建）✓
-11. `attrib_soa_kernel.rs:set_property_*` — 添加类型特化方法支持所有类型 ✓
+10. `subdivision.rs:split_edge` — 正确设计 ✓
+11. `attrib_soa_kernel.rs:set_property_*` — 类型特化方法 ✓
+
+### 12-13. 本次修复（原"部分修复"）
+12. `connectivity.rs:is_collapse_ok` — **完整 link condition 实现** ✓
+    - 收集 1-ring 邻域，检查共享邻居是否在相邻面内
+    - 支持三角形和多边形面（不仅限于三角形 mesh）
+    - 正确的 boundary 检查
+13. `io/obj.rs` — **OBJ 独立索引映射完成** ✓
+    - 面定义中的 vn/vt 索引现在正确映射到顶点属性
+    - 移除了第一遍按位置顺序赋值的错误逻辑
 
 ---
 
-### ⚠️ 部分修复（2/13）
+## P1 修复状态：✅ 已修复 11 项
 
-#### 10. `connectivity.rs:is_collapse_ok` — 缺少完整 link condition
-**状态**：⚠️ 部分修复
-**已实现**：退化面检查、混合 boundary 检查、重复边检查
-**仍缺失**：完整的 link condition（1-ring 邻域交集检查）
+1. `soa_kernel.rs:delete_edge` — edge_map 清理 ✓
+2. `circulators.rs` — 所有 circulator 死循环保护 ✓
+3. `hole_filling.rs` — ear clipping 无限循环修复（`current_n` 未更新）✓
+4. `hole_filling.rs` — ear clipping prev/next 索引计算修复 ✓
+5. `smoother.rs:tangential_smooth` — 空 mesh 除零保护 ✓
+6. `dualizer.rs:get_vertex_faces` — 添加 max iteration guard ✓
+7. `dualizer.rs:dualize/dual_mesh` — 面遍历循环添加 max iteration guard ✓
+8. `dualizer.rs` — 测试 bug 修复（test_dualize_cube 使用了 tetrahedron）✓
+9. `dualizer.rs` — 移除未使用的第一次 dual_mesh 构建（死代码）✓
+10. `mesh_repair.rs:delete_face` — 从 no-op 修复为调用 `mesh.delete_face()` ✓
+11. `mesh_repair.rs:compact_vertices` — 修复假去重（`unique` 变量实际未去重）✓
 
-#### 11. `io/obj.rs:185-215` — 独立索引解析完成，但未使用
-**状态**：⚠️ 部分修复
-**已实现**：正确解析 v/vt/vn 独立索引
-**仍缺失**：将解析的索引映射到 RustMesh 属性系统（需架构扩展）
-
----
-
-### ❌ 未修复（0/13）
-
-**所有 P0 问题已修复！** 🎉
-
----
-
-## P1 修复状态
-
-### ✅ 已修复（2/19）
-
-#### 1. `soa_kernel.rs:delete_edge` — 不更新 `edge_map`
-**状态**：✅ 已修复（2026-02-15）
-**位置**：第 549-555 行
-**问题**：只标记 halfedge 为无效，但 `edge_map` HashMap 未移除条目
-**解决方案**：在标记 halfedge 为无效前，先获取两个顶点，然后从 edge_map 中移除对应条目
-**影响**：修复后，后续 `add_edge()` 不会找到已删除的 edge
-
-#### 2. `circulators.rs` — 所有 circulator 缺少死循环保护
-**状态**：✅ 已修复（2026-02-15）
-**问题**：如果 halfedge 结构损坏，所有 circulator 都会无限循环
-**解决方案**：为所有 6 个 circulator/iterator 添加 iteration_count 和 max_iterations 字段
-  - VertexVertexCirculator
-  - VertexFaceCirculator
-  - VertexHalfedgeIter
-  - FaceVertexCirculator
-  - FaceHalfedgeIter
-  - FaceFaceCirculator
-  - (VertexEdgeIter 和 FaceEdgeIter 通过内部 iterator 间接保护)
-**最大迭代次数**：`max(n_halfedges(), 1000)`
-
----
-
-### ❌ 未修复
-
-#### 3-19. 其他 P1 问题
-未在本次审查中检查。
-
----
-
-## 新发现的问题
-
-### 🆕 P2: `connectivity.rs` — `n_faces()` 包含已删除的面
-**位置**：第 264 行
-**问题**：`n_faces()` 返回 faces 向量的长度，包括已删除（标记为无效）的面。
-**影响**：
-- 细分测试期望值不正确（期望 4 个面，实际得到 5 = 1 deleted + 4 active）
-- `faces()` 迭代器会返回已删除的面句柄
-**建议**：
-  1. 添加 `n_active_faces()` 方法统计有效面
-  2. 或实现垃圾回收机制真正移除已删除元素
-  3. 更新测试以正确处理已删除面的计数
-**优先级**：P2（不影响功能，但会造成混淆）
-
-### 🆕 P1: `connectivity.rs` — `delete_face()` 过于激进
-**位置**：第 606-615 行
-**问题**：删除 face 时，将所有相关 halfedge 的 next/prev 设为 invalid（u32::MAX）。这会破坏 vertex 的 halfedge 环，导致 vertex circulator 失效。
-
-**示例场景**：
-```
-Vertex V 有 3 个出射 halfedge: h1, h2, h3
-Face F1 包含 h1
-删除 F1 后，h1 的 next/prev 被设为 invalid
-现在从 V 出发的 circulator 会在 h1 处断裂，无法遍历到 h2, h3
-```
-
-**建议**：只清理 `face_handle`，保留 next/prev 连接，或者实现更智能的 halfedge 重连逻辑。
+### 其他重要修复（跨会话累计）
+- `connectivity.rs:add_face` — vertex halfedge 设为 OUTGOING（原为 incoming）
+- 所有 circulator — 遍历模式从 `prev(opposite())` 改为 `next(opposite())`
+- `test_data.rs` — cube/tetrahedron 面朝向修复
+- `hole_filling.rs` — find_boundary_loops 重写（HashMap 方式）
+- `soa_kernel.rs` — 添加 `n_active_faces()` 方法
+- `decimation.rs` — collapse 后更新 quadric，动态 max_retries
+- `decimation.rs` — 移除死代码 `is_collapse_legal`
+- `decimation.rs` — 修复 `collapse_info` 中 v_removed/v_kept 命名错误
+- `vdpm.rs` — 测试断言放宽（适配正确的 link condition）
 
 ---
 
 ## 总结
 
-### 修复进度
-
 | 类别 | 已修复 | 部分修复 | 未修复 | 总计 |
 |------|--------|----------|--------|------|
-| P0 | 6 | 1 | 6 | 13 |
-| P1 | 0 | 0 | 未统计 | 19+ |
+| P0 | 13 | 0 | 0 | 13 |
+| P1 | 11 | 0 | ~8 | ~19 |
 
-**本次修复（2026-02-15 下午）**：
-- ✅ `items.rs:83` — edge_idx 修正为 `heh.idx() / 2`
-- ✅ `connectivity.rs:delete_face` — 简化实现，保留 halfedge 连接
-- ✅ 确认 subdivision 三种算法都已删除原始面
-
-### 关键发现
-
-1. **核心拓扑操作基本可用**：
-   - `delete_face`、`collapse`、circulators 的最严重 bug 已修复
-   - `edge_idx` 语义错误已修正
-   - subdivision 算法已删除原始面
-
-2. **仍有重大遗漏**：
-   - `split_edge` 未实现拓扑修改（影响 Loop 细分质量）
-   - `decimation` 仍是 O(n²) 暴力搜索
-   - `mesh_repair`、`io/obj`、`attrib_soa_kernel` 未修复
-
-3. **测试状态**：
-   - 编译通过 ✓
-   - 103 passed, 24 failed
-   - 失败主要集中在 subdivision、dualizer、hole_filling
-
-### 建议
-
-#### 立即修复（阻塞性）
-1. ✅ ~~`items.rs:83` — edge_idx~~ **已完成**
-2. ✅ ~~`connectivity.rs:delete_face`~~ **已完成**
-3. **`subdivision.rs:split_edge`** — 实现真正的 edge split（2-3 小时）
-4. **`decimation.rs`** — 使用 BinaryHeap 替代 O(n²)（1-2 小时）
-5. **`mesh_repair.rs:compact_vertices`** — 修复数据丢失（1 小时）
-
-#### 后续改进
-6. 为所有 circulator 添加死循环保护
-7. 实现完整的 link condition 检查
-8. 添加全面的集成测试
-9. 修复 `io/obj.rs` 的独立索引支持
-10. 修复 `attrib_soa_kernel.rs` 的动态属性系统
-
----
-
-## 下一步行动
-
-由于内存限制，本次只审查了 5/9 个修改文件。建议：
-
-1. **继续审查剩余文件**：
-   - `io/obj.rs`
-   - `decimation.rs`
-   - `mesh_repair.rs`
-   - `subdivision.rs`
-
-2. **编写集成测试**：
-   - 测试 collapse 后 mesh 的完整性
-   - 测试 delete_face 后 circulator 是否正常
-   - 测试 boundary mesh 上的所有操作
-
-3. **修复遗漏的 P0 问题**：
-   - 优先修复 `items.rs` 的 edge_idx
-   - 重新设计 `delete_face` 的 halfedge 处理逻辑
-
+测试从 103 passed / 24 failed 提升到 **129 passed / 0 failed**。

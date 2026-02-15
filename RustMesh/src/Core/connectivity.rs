@@ -468,64 +468,116 @@ impl RustMesh {
     // =========================================================================
     
     /// Check if an edge collapse is legal
-    /// Returns true if the halfedge can be collapsed without creating topological issues
+    /// Returns true if the halfedge can be collapsed without creating topological issues.
+    ///
+    /// Checks:
+    /// 1. For triangle faces: link condition (1-ring intersection)
+    /// 2. For polygon faces: no duplicate edges after collapse
+    /// 3. Boundary consistency
     pub fn is_collapse_ok(&self, heh: HalfedgeHandle) -> bool {
-        let v0 = self.to_vertex_handle(heh);   // Vertex to be removed
-        let v1 = self.from_vertex_handle(heh); // Remaining vertex
-        
-        // Get the opposite halfedge
-        let heh_opp = self.opposite_halfedge_handle(heh);
-        
-        // Check if edge is already deleted (boundary check)
-        if !heh.is_valid() || !heh_opp.is_valid() {
+        if !heh.is_valid() {
             return false;
         }
-        
+
+        let v0 = self.to_vertex_handle(heh);   // Vertex to be removed
+        let v1 = self.from_vertex_handle(heh);  // Remaining vertex
+
+        // Both vertices must have valid halfedges
+        if self.halfedge_handle(v0).is_none() || self.halfedge_handle(v1).is_none() {
+            return false;
+        }
+
+        let heh_opp = self.opposite_halfedge_handle(heh);
+
         // Get adjacent faces
         let fh_left = self.face_handle(heh);
         let fh_right = self.face_handle(heh_opp);
-        
-        // Get neighboring vertices
-        let left_next = self.to_vertex_handle(self.next_halfedge_handle(heh));
-        let right_next = self.to_vertex_handle(self.next_halfedge_handle(heh_opp));
-        
-        // Check: vl and vr should not be the same (would create degenerate face)
-        if fh_left.is_some() && fh_right.is_some() {
-            if left_next == right_next {
+
+        // At least one face must exist
+        if fh_left.is_none() && fh_right.is_none() {
+            return false;
+        }
+
+        // Collect neighbors of v0 (excluding v1)
+        let neighbors_v0: Vec<VertexHandle> = self.vertex_vertices(v0)
+            .map(|c| c.filter(|&v| v != v1).collect())
+            .unwrap_or_default();
+
+        // Collect neighbors of v1 (excluding v0)
+        let neighbors_v1: Vec<VertexHandle> = self.vertex_vertices(v1)
+            .map(|c| c.filter(|&v| v != v0).collect())
+            .unwrap_or_default();
+
+        // Check for duplicate edges: after collapse, v0's neighbors become v1's neighbors.
+        // If any neighbor of v0 is already a neighbor of v1 (and not in an adjacent face),
+        // collapsing would create a duplicate edge.
+        //
+        // Vertices that are allowed to be shared are those in the faces adjacent to the edge.
+        let mut allowed_shared: Vec<VertexHandle> = Vec::new();
+        if let Some(fh) = fh_left {
+            for vh in self.face_vertices_vec(fh) {
+                if vh != v0 && vh != v1 && !allowed_shared.contains(&vh) {
+                    allowed_shared.push(vh);
+                }
+            }
+        }
+        if let Some(fh) = fh_right {
+            for vh in self.face_vertices_vec(fh) {
+                if vh != v0 && vh != v1 && !allowed_shared.contains(&vh) {
+                    allowed_shared.push(vh);
+                }
+            }
+        }
+
+        // Any shared neighbor NOT in the adjacent faces would create a duplicate edge
+        for &nv in &neighbors_v0 {
+            if neighbors_v1.contains(&nv) && !allowed_shared.contains(&nv) {
                 return false;
             }
         }
-        
-        // Check: if both vertices are boundary, edge should also be boundary
-        // Get boundary status for v0 and v1
-        let v0_has_he = self.halfedge_handle(v0);
-        let v1_has_he = self.halfedge_handle(v1);
-        
-        let v0_boundary = v0_has_he.map(|he| self.is_boundary(he)).unwrap_or(true);
-        let v1_boundary = v1_has_he.map(|he| self.is_boundary(he)).unwrap_or(true);
-        
-        // Link condition check: don't collapse if it would create non-manifold topology
-        // If one vertex is interior and the other is boundary, check link conditions
-        if v0_boundary != v1_boundary {
-            // Mixed boundary - need to check if collapse would create issues
-            // For safety, disallow this case
+
+        // For triangle faces: check that the opposite vertices are distinct
+        if fh_left.is_some() && fh_right.is_some() {
+            let vl = self.to_vertex_handle(self.next_halfedge_handle(heh));
+            let vr = self.to_vertex_handle(self.next_halfedge_handle(heh_opp));
+            if vl == vr {
+                return false;
+            }
+        }
+
+        // Boundary check: both boundary vertices can only collapse along a boundary edge
+        let v0_boundary = self.is_boundary_vertex(v0);
+        let v1_boundary = self.is_boundary_vertex(v1);
+        let edge_boundary = fh_left.is_none() || fh_right.is_none();
+
+        if v0_boundary && v1_boundary && !edge_boundary {
             return false;
         }
-        
-        // Check: don't collapse if v0 and v1 are already connected by an edge
-        // (would create duplicate edge after collapse)
-        // This requires checking all edges from v1
-        
-        // Check: don't collapse if left_next == v1 or right_next == v0
-        // (would create degenerate face)
-        if left_next == v1 || right_next == v0 {
-            return false;
-        }
-        
-        // Additional check: ensure collapse won't create holes in the mesh
-        // by verifying the remaining vertices can still form valid faces
-        
+
         true
+    }
+
+    /// Check if a vertex is on the boundary (has at least one boundary halfedge)
+    fn is_boundary_vertex(&self, vh: VertexHandle) -> bool {
+        if let Some(start_heh) = self.halfedge_handle(vh) {
+            let mut current = start_heh;
+            let max_iter = self.n_halfedges().max(64);
+            for _ in 0..max_iter {
+                if self.is_boundary(current) {
+                    return true;
+                }
+                let opp = self.opposite_halfedge_handle(current);
+                if self.is_boundary(opp) {
+                    return true;
+                }
+                let next = self.next_halfedge_handle(opp);
+                if next == start_heh || !next.is_valid() {
+                    break;
+                }
+                current = next;
+            }
+        }
+        false
     }
     
     /// Collapse a halfedge: move v0 to v1 and remove v0 and adjacent faces

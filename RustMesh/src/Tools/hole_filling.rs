@@ -6,17 +6,17 @@
 //! ## Usage
 //!
 //! ```rust
-//! use rustmesh::{RustMesh, hole_filling};
+//! use rustmesh::{RustMesh, find_boundary_loops, fill_all_holes};
 //!
 //! let mut mesh = RustMesh::new();
 //! // ... create mesh with holes ...
 //!
 //! // Find all boundary loops
-//! let loops = hole_filling::find_boundary_loops(&mesh);
+//! let loops = find_boundary_loops(&mesh);
 //!
 //! // Fill all holes
-//! let filled = hole_filling::fill_all_holes(&mut mesh);
-//! println!("Filled {} holes", filled);
+//! let result = fill_all_holes(&mut mesh);
+//! println!("Filled {} holes", result.holes_filled);
 //! ```
 
 use crate::handles::{VertexHandle, HalfedgeHandle};
@@ -84,69 +84,59 @@ pub fn find_boundary_loops(mesh: &RustMesh) -> Vec<BoundaryLoop> {
     let mut visited = vec![false; n_halfedges];
     let mut loops = Vec::new();
 
-    // Iterate through all halfedges to find boundary loops
+    // Build a map: from_vertex -> boundary halfedge
+    // This allows us to follow boundary loops without relying on next pointers
+    let mut boundary_from: std::collections::HashMap<u32, HalfedgeHandle> = std::collections::HashMap::new();
     for heh_idx in 0..n_halfedges {
         let heh = HalfedgeHandle::new(heh_idx as u32);
-        
-        // Skip if already visited or not a boundary halfedge
+        if mesh.is_boundary(heh) {
+            let from_v = mesh.from_vertex_handle(heh);
+            boundary_from.insert(from_v.idx(), heh);
+        }
+    }
+
+    // Follow boundary loops using the from_vertex map
+    for heh_idx in 0..n_halfedges {
+        let heh = HalfedgeHandle::new(heh_idx as u32);
+
         if visited[heh_idx] || !mesh.is_boundary(heh) {
             continue;
         }
 
-        // Start a new boundary loop
         let mut loop_heh = Vec::new();
         let mut loop_vertices = Vec::new();
         let mut loop_points = Vec::new();
 
-        // Follow the boundary cycle
         let mut current = heh;
+        let max_iter = n_halfedges + 1;
         let mut count = 0;
-        let max_iter = n_halfedges + 1; // Safety limit
 
         loop {
-            if count > max_iter {
-                break;
-            }
+            if count > max_iter { break; }
             count += 1;
 
-            let heh_idx = current.idx_usize();
-            
-            // Check if we've visited this halfedge (loop complete)
-            if visited[heh_idx] {
-                break;
-            }
+            let idx = current.idx_usize();
+            if visited[idx] { break; }
 
-            // Mark as visited
-            visited[heh_idx] = true;
+            visited[idx] = true;
             loop_heh.push(current);
 
-            // Get the from-vertex of this halfedge
             let vh = mesh.from_vertex_handle(current);
             loop_vertices.push(vh);
-
-            // Get vertex position
             if let Some(p) = mesh.point(vh) {
                 loop_points.push(p);
             }
 
-            // Move to the next halfedge in the boundary cycle
-            // A boundary halfedge's next is found by:
-            // 1. Get the opposite halfedge
-            // 2. Get the next halfedge around the face (which doesn't exist for boundary)
-            // 3. So we use: opposite -> next -> opposite
-            current = mesh.opposite_halfedge_handle(current);
-            current = mesh.next_halfedge_handle(current);
-            current = mesh.opposite_halfedge_handle(current);
-
-            // Check if we've returned to the start
-            if current == heh {
-                break;
+            // Follow to the next boundary halfedge via to_vertex
+            let to_v = mesh.to_vertex_handle(current);
+            match boundary_from.get(&to_v.idx()) {
+                Some(&next_he) if next_he != current => {
+                    current = next_he;
+                }
+                _ => break,
             }
 
-            // Check for invalid handle
-            if !current.is_valid() {
-                break;
-            }
+            if current == heh { break; }
         }
 
         // Only add non-empty loops with at least 3 vertices
@@ -183,20 +173,14 @@ fn is_valid_ear(
     _mesh: &RustMesh,
     vertices: &[VertexHandle],
     points: &[Vec3],
-    i: usize,
-    valid_indices: &std::collections::HashSet<usize>,
+    prev_idx: usize,
+    curr_idx: usize,
+    next_idx: usize,
+    active: &[usize],
 ) -> bool {
-    let n = vertices.len();
-    if n < 3 {
-        return false;
-    }
-
-    let prev = (i + n - 1) % n;
-    let next = (i + 1) % n;
-
-    let p_prev = points[prev];
-    let p_curr = points[i];
-    let p_next = points[next];
+    let p_prev = points[prev_idx];
+    let p_curr = points[curr_idx];
+    let p_next = points[next_idx];
 
     // Check 1: Non-zero area (not degenerate)
     let area = triangle_area(p_prev, p_curr, p_next);
@@ -204,46 +188,22 @@ fn is_valid_ear(
         return false;
     }
 
-    // Check 2: Local convexity (interior angle < 180 degrees)
-    // Compute the signed angle using cross product
-    let v1 = p_curr - p_prev;
-    let v2 = p_next - p_curr;
-    let _cross = v1.cross(v2);
-    
-    // For boundary loops, we assume counter-clockwise ordering
-    // The cross product should have positive z-component in the local plane
-    // Skip detailed orientation check for simplicity - the ear validity check
-    // will handle non-convex cases via the point-in-triangle test
-
-    // Check 3: No other valid vertices inside the ear
-    // This is the most expensive check - we test each vertex
-    for j in 0..n {
-        // Skip the three vertices of the ear
-        if j == prev || j == i || j == next {
-            continue;
-        }
-
-        // Only check vertices that are still in the polygon
-        if !valid_indices.contains(&j) {
+    // Check 2: No other active vertices inside the ear
+    for &j in active {
+        if j == prev_idx || j == curr_idx || j == next_idx {
             continue;
         }
 
         let p_test = points[j];
-
-        // Use barycentric coordinates to check if point is inside triangle
         if point_in_triangle(p_test, p_prev, p_curr, p_next) {
-            return false; // Vertex inside - not a valid ear
+            return false;
         }
     }
 
-    // Additional check: ensure the ear doesn't intersect existing mesh geometry
-    // (simplified - just check that the ear triangle is not too skinny)
-    let edge1 = (p_curr - p_prev).length();
-    let edge2 = (p_next - p_curr).length();
-    let edge3 = (p_next - p_prev).length();
-
-    // Minimum edge length check to avoid very thin triangles
-    let min_edge = edge1.min(edge2).min(edge3);
+    // Check 3: Minimum edge length to avoid degenerate triangles
+    let min_edge = (p_curr - p_prev).length()
+        .min((p_next - p_curr).length())
+        .min((p_next - p_prev).length());
     if min_edge < 1e-6 {
         return false;
     }
@@ -335,76 +295,52 @@ fn fill_boundary_loop(mesh: &mut RustMesh, loop_info: BoundaryLoop) -> Result<us
     let points = loop_info.points.clone();
     let mut faces_created = 0;
 
-    // Track which indices are still valid (in the current polygon)
-    let mut valid_indices: std::collections::HashSet<usize> = (0..n).collect();
+    // Active indices in circular order (Vec for O(1) prev/next access)
+    let mut active: Vec<usize> = (0..n).collect();
 
     // Ear clipping loop
-    let current_n = n;
-    let mut i = 0;
-
-    while current_n > 3 && valid_indices.len() > 3 {
-        // Find a valid ear
+    while active.len() > 3 {
         let mut ear_found = false;
-        let mut attempts = 0;
-        let max_attempts = current_n;
+        let active_len = active.len();
 
-        while attempts < max_attempts {
-            // Get the actual index in the current polygon
-            let idx = valid_indices.iter().nth(i % valid_indices.len()).unwrap_or(&0);
-            let idx = *idx;
+        for pos in 0..active_len {
+            let prev_idx = active[(pos + active_len - 1) % active_len];
+            let curr_idx = active[pos];
+            let next_idx = active[(pos + 1) % active_len];
 
-            // Check if this vertex forms a valid ear
-            if is_valid_ear(mesh, &vertices, &points, idx, &valid_indices) {
-                // Found an ear! Clip it
-                let prev = (idx + current_n - 1) % current_n;
-                let next = (idx + 1) % current_n;
-
-                // Get current vertex positions
-                let _p_prev = points[prev];
-                let _p_curr = points[idx];
-                let _p_next = points[next];
-
+            if is_valid_ear(mesh, &vertices, &points, prev_idx, curr_idx, next_idx, &active) {
                 // Create the ear face
-                let face_vertices = [vertices[prev], vertices[idx], vertices[next]];
-                
+                let face_vertices = [vertices[prev_idx], vertices[curr_idx], vertices[next_idx]];
+
                 if mesh.add_face(&face_vertices).is_some() {
                     faces_created += 1;
                 } else {
                     return Err("Failed to add ear face");
                 }
 
-                // Remove the ear vertex from the polygon
-                valid_indices.remove(&idx);
-
-                // Mark as found and break
+                // Remove the ear vertex from the active list
+                active.remove(pos);
                 ear_found = true;
                 break;
             }
-
-            i += 1;
-            attempts += 1;
         }
 
         if !ear_found {
-            // No valid ear found - this can happen with non-simple polygons
-            // Try a simpler approach: just create a fan from the first vertex
+            // No valid ear found - break to avoid infinite loop
             break;
         }
 
-        // Safety check to prevent infinite loops
+        // Safety check
         if faces_created > n - 2 {
             break;
         }
     }
 
     // If we have exactly 3 vertices left, add the final face
-    if valid_indices.len() == 3 {
-        let indices: Vec<usize> = valid_indices.iter().cloned().collect();
-        if indices.len() == 3 {
-            let face_vertices = [vertices[indices[0]], vertices[indices[1]], vertices[indices[2]]];
-            if mesh.add_face(&face_vertices).is_some() {
-                faces_created += 1;
-            }
+    if active.len() == 3 {
+        let face_vertices = [vertices[active[0]], vertices[active[1]], vertices[active[2]]];
+        if mesh.add_face(&face_vertices).is_some() {
+            faces_created += 1;
         }
     }
 
@@ -511,27 +447,27 @@ mod tests {
     fn create_mesh_with_triangular_hole() -> RustMesh {
         let mut mesh = RustMesh::new();
 
-        // Create a quad with a triangular hole in the center
+        // Create a mesh surrounding a triangular hole
         // Outer square
         let v0 = mesh.add_vertex(Vec3::new(0.0, 0.0, 0.0));
         let v1 = mesh.add_vertex(Vec3::new(2.0, 0.0, 0.0));
         let v2 = mesh.add_vertex(Vec3::new(2.0, 2.0, 0.0));
         let v3 = mesh.add_vertex(Vec3::new(0.0, 2.0, 0.0));
 
-        // Inner triangle (hole) - reversed order for proper orientation
+        // Inner triangle vertices (hole boundary)
         let h0 = mesh.add_vertex(Vec3::new(0.5, 0.5, 0.0));
         let h1 = mesh.add_vertex(Vec3::new(1.5, 0.5, 0.0));
         let h2 = mesh.add_vertex(Vec3::new(1.0, 1.5, 0.0));
 
-        // Add outer faces (two triangles forming a quad)
+        // Faces with consistent CCW orientation (viewed from +Z)
+        // The inner triangle [h0, h1, h2] is left as a hole
         mesh.add_face(&[v0, v1, h1]);
-        mesh.add_face(&[v1, h2, h1]);
+        mesh.add_face(&[v0, h1, h0]);  // fixed: was [v0, h0, h1]
         mesh.add_face(&[v1, v2, h2]);
+        mesh.add_face(&[v1, h2, h1]);
         mesh.add_face(&[v2, v3, h2]);
-        mesh.add_face(&[v3, v0, h0]);
         mesh.add_face(&[v3, h0, h2]);
-        mesh.add_face(&[v0, h0, h1]);
-        mesh.add_face(&[h0, h2, h1]);
+        mesh.add_face(&[v3, v0, h0]);
 
         mesh
     }

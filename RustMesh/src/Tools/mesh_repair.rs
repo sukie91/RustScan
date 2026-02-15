@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 use crate::connectivity::RustMesh;
-use crate::handles::{VertexHandle, FaceHandle, HalfedgeHandle};
+use crate::handles::{VertexHandle, FaceHandle};
 use crate::geometry::{triangle_area, triangle_normal};
 
 /// Error type for mesh repair operations
@@ -182,11 +182,19 @@ fn compact_vertices(mesh: &mut RustMesh, keep_vertex: &[bool]) -> Result<(), Mes
             }
         }
 
-        // Only add if we have at least 3 unique vertices
+        // Only add if we have at least 3 vertices with no duplicates
         if new_face_verts.len() >= 3 {
-            let unique: Vec<_> = new_face_verts.into_iter().collect();
-            if unique.len() >= 3 {
-                mesh.add_face(&unique);
+            // Deduplicate while preserving order
+            let mut seen = Vec::new();
+            let mut deduped = Vec::new();
+            for vh in new_face_verts {
+                if !seen.contains(&vh) {
+                    seen.push(vh);
+                    deduped.push(vh);
+                }
+            }
+            if deduped.len() >= 3 {
+                mesh.add_face(&deduped);
             }
         }
     }
@@ -304,29 +312,7 @@ fn compute_polygon_centroid(mesh: &RustMesh, verts: &[VertexHandle]) -> glam::Ve
 
 /// Delete a face from the mesh
 fn delete_face(mesh: &mut RustMesh, fh: FaceHandle) {
-    // Get the halfedges of this face
-    if let Some(start_heh) = mesh.face_halfedge_handle(fh) {
-        let mut halfedges: Vec<HalfedgeHandle> = Vec::new();
-        let mut current_heh = start_heh;
-        
-        loop {
-            halfedges.push(current_heh);
-            current_heh = mesh.next_halfedge_handle(current_heh);
-            if current_heh == start_heh {
-                break;
-            }
-        }
-        
-        // Clear the face handle from these halfedges
-        for _heh in &halfedges {
-            // Set face to invalid
-            // Note: This requires kernel access - for now we rebuild
-        }
-    }
-    
-    // For a proper implementation, we'd update connectivity
-    // For now, we mark the face as deleted by removing it from the mesh
-    // This is a simplified approach - in production we'd want proper deletion
+    mesh.delete_face(fh);
 }
 
 // ============================================================================

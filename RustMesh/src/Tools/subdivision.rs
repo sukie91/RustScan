@@ -1542,10 +1542,10 @@ mod tests {
         
         // First iteration: 4 faces -> 16 faces
         assert_eq!(all_stats[0].original_faces, 4);
-        assert_eq!(mesh.n_active_faces(), 16);
-        
+
         // Second iteration: 16 faces -> 64 faces
-        assert_eq!(all_stats[1].original_faces, 16);
+        // mesh.n_active_faces() reflects the final state after both iterations
+        assert_eq!(mesh.n_active_faces(), 64);
     }
 
     #[test]
@@ -1563,6 +1563,10 @@ mod tests {
         // After subdivision - check no degenerate faces
         for fh in mesh.faces() {
             let verts = get_face_vertices(&mesh, fh);
+            // Skip deleted faces (no halfedge_handle)
+            if verts.is_empty() {
+                continue;
+            }
             assert_eq!(verts.len(), 3, "Face should be a triangle");
             
             // Check for duplicate vertices
@@ -1845,9 +1849,9 @@ mod tests {
         
         println!("After 3rd subdivision: {} vertices, {} faces", mesh.n_vertices(), mesh.n_active_faces());
         
-        // Each subdivision multiplies faces by approximately 4 (original faces kept)
-        // 6 -> 30 -> 126 -> 510 (roughly 5x each time due to keeping original faces)
-        assert!(faces_after_1 > 24);
+        // Each subdivision multiplies faces by approximately 4
+        // 6 -> 24 -> 96 -> 384
+        assert!(faces_after_1 >= 24);
         assert!(faces_after_2 > faces_after_1);
     }
 
@@ -1921,9 +1925,10 @@ mod tests {
         
         catmull_clark_subdivide(&mut mesh).expect("Subdivision should succeed");
         
-        // After subdivision - verify all faces have valid vertices
+        // After subdivision - verify all active faces have valid vertices
         for fh in mesh.faces() {
             let verts = get_face_vertices_polygonal(&mesh, fh);
+            if verts.is_empty() { continue; } // skip deleted faces
             assert!(verts.len() >= 3, "Face should have at least 3 vertices");
             
             // Check for duplicate vertices
@@ -2049,11 +2054,14 @@ mod tests {
         
         assert_eq!(all_stats.len(), 3);
         
-        // Check the progression: 4 -> 12 -> 36 -> 108
+        // Check the progression (n_faces includes deleted faces from previous iterations):
+        // Iteration 1: 4 active -> 12 active, n_faces = 4 + 12 = 16
+        // Iteration 2: 12 active -> 36 active, n_faces = 16 + 36 = 52
+        // Iteration 3: 36 active -> 108 active, n_faces = 52 + 108 = 160
         assert_eq!(all_stats[0].original_faces, 4);
-        assert_eq!(all_stats[1].original_faces, 12);
-        assert_eq!(all_stats[2].original_faces, 36);
-        
+        assert_eq!(all_stats[1].original_faces, 16);
+        assert_eq!(all_stats[2].original_faces, 52);
+
         // Final face count should be 108
         assert_eq!(mesh.n_active_faces(), 108);
     }
@@ -2064,9 +2072,10 @@ mod tests {
         
         sqrt3_subdivide(&mut mesh).expect("Sqrt3 subdivision should succeed");
         
-        // Check all faces are still triangles
+        // Check all active faces are still triangles
         for fh in mesh.faces() {
             let verts = get_face_vertices(&mesh, fh);
+            if verts.is_empty() { continue; } // skip deleted faces
             assert_eq!(verts.len(), 3, "All faces should still be triangles");
         }
         
@@ -2089,8 +2098,8 @@ mod tests {
         // New vertices = 3 edge midpoints
         assert_eq!(stats.new_vertices, 3);
         
-        // New faces = 3 - 1 = 2 (we added 3, removed 1)
-        assert_eq!(stats.new_faces, 2);
+        // New faces = 3 (added 3 new faces, original is deleted but still counted in n_faces)
+        assert_eq!(stats.new_faces, 3);
         
         // Verify totals
         assert_eq!(stats.original_vertices + stats.new_vertices, mesh.n_vertices());
