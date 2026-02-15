@@ -5,6 +5,7 @@
 
 use crate::{RustMesh, VertexHandle, HalfedgeHandle, FaceHandle, QuadricT, Vec3};
 use std::cmp::Ordering;
+use std::collections::BinaryHeap;
 
 /// Decimation configuration
 #[derive(Debug, Clone)]
@@ -64,6 +65,7 @@ impl CollapseInfo {
 #[derive(Debug, Clone)]
 struct CollapseCandidate {
     priority: f32,
+    halfedge: HalfedgeHandle,
     v_removed: VertexHandle,
     v_kept: VertexHandle,
 }
@@ -356,54 +358,68 @@ impl<'a> Decimater<'a> {
             }
         }
         
-        let mut collapses = 0;
+        // P0-13 fix: Use BinaryHeap for O(log n) collapse selection
+        let mut heap: BinaryHeap<CollapseCandidate> = BinaryHeap::new();
         
-        // Decimation loop
-        while collapses < target {
-            let mut best_heh: Option<HalfedgeHandle> = None;
-            let mut best_error = f32::MAX;
+        // Initialize heap with all valid collapse candidates
+        for heh_idx in 0..self.mesh.n_halfedges() {
+            let heh = HalfedgeHandle::new(heh_idx as u32);
+            let to_vh = self.mesh.to_vertex_handle(heh);
+            let from_vh = self.mesh.from_vertex_handle(heh);
             
-            // Find best collapse using precomputed quadrics
-            for heh_idx in 0..self.mesh.n_halfedges() {
-                let heh = HalfedgeHandle::new(heh_idx as u32);
-                let to_vh = self.mesh.to_vertex_handle(heh);
-                let from_vh = self.mesh.from_vertex_handle(heh);
-                
-                let idx0 = from_vh.idx_usize();
-                let idx1 = to_vh.idx_usize();
-                
-                let q0 = match vertex_quadrics.get(idx0) {
-                    Some(Some(q)) => q,
-                    _ => continue,
-                };
-                let q1 = match vertex_quadrics.get(idx1) {
-                    Some(Some(q)) => q,
-                    _ => continue,
-                };
-                
-                let combined = q0.add_values(*q1);
-                let (_opt, error) = combined.optimize();
-                
-                if self.config.max_err > 0.0 && error > self.config.max_err {
-                    continue;
-                }
-                
-                if error < best_error {
-                    best_error = error;
-                    best_heh = Some(heh);
-                }
+            let idx0 = from_vh.idx_usize();
+            let idx1 = to_vh.idx_usize();
+            
+            let q0 = match vertex_quadrics.get(idx0) {
+                Some(Some(q)) => q,
+                _ => continue,
+            };
+            let q1 = match vertex_quadrics.get(idx1) {
+                Some(Some(q)) => q,
+                _ => continue,
+            };
+            
+            let combined = q0.add_values(*q1);
+            let (_opt, error) = combined.optimize();
+            
+            if self.config.max_err > 0.0 && error > self.config.max_err {
+                continue;
             }
             
-            match best_heh {
-                Some(heh) => {
+            heap.push(CollapseCandidate {
+                priority: error,
+                halfedge: heh,
+                v_removed: to_vh,
+                v_kept: from_vh,
+            });
+        }
+        
+        let mut collapses = 0;
+        let mut retries = 0;
+        let max_retries = 1000;
+        
+        // Decimation loop with BinaryHeap (P0-13 fix)
+        while collapses < target && retries < max_retries {
+            // Pop the best candidate from heap (O(log n))
+            match heap.pop() {
+                Some(candidate) => {
+                    let heh = candidate.halfedge;
+                    
+                    // Check if collapse is still valid
                     if !self.mesh.is_collapse_ok(heh) {
-                        break;
+                        retries += 1;
+                        continue;
                     }
+                    
+                    // Try to perform the collapse
                     if let Err(e) = self.mesh.collapse(heh) {
                         eprintln!("Collapse failed: {}", e);
-                        break;
+                        retries += 1;
+                        continue;
                     }
+                    
                     collapses += 1;
+                    retries = 0;  // Reset retries on success
                 }
                 None => break,
             }

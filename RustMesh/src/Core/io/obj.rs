@@ -182,18 +182,42 @@ pub fn read_obj(path: impl AsRef<Path>) -> io::Result<RustMesh> {
             continue;
         }
 
-        // Parse face indices
+        // Parse face indices - P0-10 fix: properly parse v/vt/vn indices
         let mut face_verts = Vec::new();
+        
+        // Collect all normal/texcoord indices for this face (for future use)
+        let mut face_normals: Vec<usize> = Vec::new();
+        let mut face_texcoords: Vec<usize> = Vec::new();
 
         for i in 1..parts.len() {
             let indices: Vec<&str> = parts[i].split('/').collect();
+            
+            // Parse vertex index (required)
             if let Ok(v_idx) = indices[0].parse::<usize>() {
                 if v_idx > 0 && v_idx <= mesh.n_vertices() {
                     face_verts.push(crate::VertexHandle::new((v_idx - 1) as u32));
                 }
             }
+            
+            // Parse texture coordinate index (optional, after first /)
+            if indices.len() > 1 && !indices[1].is_empty() {
+                if let Ok(vt_idx) = indices[1].parse::<usize>() {
+                    face_texcoords.push(vt_idx - 1); // Convert to 0-indexed
+                }
+            }
+            
+            // Parse normal index (optional, after second /)
+            if indices.len() > 2 {
+                if let Ok(vn_idx) = indices[2].parse::<usize>() {
+                    face_normals.push(vn_idx - 1); // Convert to 0-indexed
+                }
+            }
         }
 
+        // TODO: P0-10 - Assign normals and texcoords to vertices if available
+        // This requires extending RustMesh to support per-vertex normals/texcoords
+        // For now, we at least parse all indices correctly
+        
         if face_verts.len() >= 3 {
             mesh.add_face(&face_verts);
         }
