@@ -80,7 +80,7 @@ impl Halfedge {
             next_halfedge_handle: None,
             prev_halfedge_handle: None,
             opposite_halfedge_handle: None,
-            edge_idx: heh.idx(),
+            edge_idx: heh.idx() / 2,  // Each edge has 2 halfedges: (2n, 2n+1)
         }
     }
 

@@ -595,24 +595,11 @@ impl RustMesh {
     
     /// Delete a face from the mesh
     pub fn delete_face(&mut self, fh: FaceHandle) {
-        // Get the halfedges of this face before deleting
-        let halfedges = self.get_face_halfedges(fh);
-        
-        // Delete the face in the kernel (clears face_handle references)
+        // Delete the face in the kernel
+        // This clears the face_handle references in all halfedges of this face
+        // but preserves the halfedge connectivity (next/prev pointers)
+        // so that vertex circulators can still traverse around vertices
         self.kernel.delete_face(fh);
-        
-        // Disconnect the halfedges from each other
-        // This prevents traversing deleted faces
-        for heh in &halfedges {
-            let he_next = self.next_halfedge_handle(*heh);
-            if he_next.is_valid() {
-                self.kernel.set_next_halfedge_handle(*heh, HalfedgeHandle::new(u32::MAX));
-            }
-            let he_prev = self.prev_halfedge_handle(*heh);
-            if he_prev.is_valid() {
-                self.kernel.set_next_halfedge_handle(he_prev, HalfedgeHandle::new(u32::MAX));
-            }
-        }
     }
     
     /// Get all halfedges of a face
