@@ -247,22 +247,26 @@ impl RustMesh {
             self.kernel.set_face_handle(he, fh);
         }
 
-        // Set vertex halfedge handles - use any outgoing halfedge
+        // Set vertex halfedge handles - use outgoing halfedge from each vertex
         for (i, &vh) in vertices.iter().enumerate() {
-            let incoming_heh = halfedges[i];
-            // Get the opposite halfedge which points FROM this vertex
-            if let Some(opp_heh) = self.kernel.opposite_halfedge_handle(incoming_heh) {
-                self.kernel.set_halfedge_handle(vh, opp_heh);
-            }
+            // halfedges[i] goes FROM vertices[i] TO vertices[(i+1)%n]
+            // This is the outgoing halfedge from vh, which is what circulators expect
+            self.kernel.set_halfedge_handle(vh, halfedges[i]);
         }
 
         Some(fh)
     }
 
-    /// Get the number of faces
+    /// Get the number of faces (includes deleted faces)
     #[inline]
     pub fn n_faces(&self) -> usize {
         self.kernel.n_faces()
+    }
+
+    /// Get the number of active (non-deleted) faces
+    #[inline]
+    pub fn n_active_faces(&self) -> usize {
+        self.kernel.n_active_faces()
     }
 
     /// Get the number of halfedges

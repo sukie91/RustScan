@@ -34,9 +34,9 @@ impl<'a> Iterator for VertexVertexCirculator<'a> {
         let next_target = self.mesh.to_vertex_handle(self.current_heh);
 
         // Move to next outgoing halfedge around the vertex:
-        // Use the same pattern as VertexHalfedgeIter
-        let incoming = self.mesh.opposite_halfedge_handle(self.current_heh);
-        let next_heh = self.mesh.prev_halfedge_handle(incoming);
+        // opposite() gives the incoming twin, next() gives the next outgoing from same vertex
+        let opp = self.mesh.opposite_halfedge_handle(self.current_heh);
+        let next_heh = self.mesh.next_halfedge_handle(opp);
 
         self.first = false;
         self.current_heh = next_heh;
@@ -93,16 +93,10 @@ impl<'a> Iterator for VertexFaceCirculator<'a> {
             // Get the face from current halfedge
             let fh = self.mesh.face_handle(self.current_heh);
 
-            // Move to next outgoing halfedge around the vertex
-            let incoming = self.mesh.opposite_halfedge_handle(self.current_heh);
-
-            // Check if incoming is valid before proceeding
-            if !incoming.is_valid() {
-                self.first = false;
-                return None;
-            }
-
-            let next_heh = self.mesh.prev_halfedge_handle(incoming);
+            // Move to next outgoing halfedge around the vertex:
+            // opposite() gives the incoming twin, next() gives the next outgoing
+            let opp = self.mesh.opposite_halfedge_handle(self.current_heh);
+            let next_heh = self.mesh.next_halfedge_handle(opp);
 
             self.first = false;
             self.current_heh = next_heh;
@@ -157,20 +151,18 @@ impl<'a> Iterator for VertexHalfedgeIter<'a> {
 
         let heh = self.current_heh;
 
-        // Get the opposite halfedge (incoming to our vertex)
-        let incoming = self.mesh.opposite_halfedge_handle(self.current_heh);
+        // Move to next outgoing halfedge around the vertex:
+        // opposite() gives the incoming twin, next() gives the next outgoing
+        let opp = self.mesh.opposite_halfedge_handle(self.current_heh);
+        let next_outgoing = self.mesh.next_halfedge_handle(opp);
 
-        // Get previous halfedge in the face cycle (going counter-clockwise)
-        let prev_incoming = self.mesh.prev_halfedge_handle(incoming);
-
-        // The previous of incoming is another outgoing halfedge from our vertex
-        // But we need to check if prev_incoming is valid and different
-        if prev_incoming == incoming || !prev_incoming.is_valid() {
+        // Check if next_outgoing is valid and different from opp
+        if next_outgoing == opp || !next_outgoing.is_valid() {
             return None;
         }
 
         self.first = false;
-        self.current_heh = prev_incoming;
+        self.current_heh = next_outgoing;
 
         Some(heh)
     }

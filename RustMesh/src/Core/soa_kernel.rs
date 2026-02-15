@@ -355,10 +355,16 @@ impl SoAKernel {
         FaceHandle::new(idx)
     }
 
-    /// Get face count
+    /// Get face count (includes deleted faces)
     #[inline]
     pub fn n_faces(&self) -> usize {
         self.faces.len()
+    }
+
+    /// Get active (non-deleted) face count
+    #[inline]
+    pub fn n_active_faces(&self) -> usize {
+        self.faces.iter().filter(|f| f.halfedge_handle.is_some()).count()
     }
 
     /// Get face by handle

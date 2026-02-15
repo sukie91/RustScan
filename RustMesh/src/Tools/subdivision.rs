@@ -161,10 +161,14 @@ fn is_boundary_vertex(mesh: &RustMesh, vh: VertexHandle) -> bool {
     if let Some(heh) = mesh.halfedge_handle(vh) {
         let mut current = heh;
         loop {
+            // Check both the outgoing halfedge and its opposite
             if mesh.is_boundary(current) {
                 return true;
             }
             let opp = mesh.opposite_halfedge_handle(current);
+            if mesh.is_boundary(opp) {
+                return true;
+            }
             current = mesh.next_halfedge_handle(opp);
             if current == heh || !current.is_valid() {
                 break;
@@ -176,23 +180,21 @@ fn is_boundary_vertex(mesh: &RustMesh, vh: VertexHandle) -> bool {
 
 /// Get all 1-ring neighbors of a vertex
 fn get_vertex_neighbors(mesh: &RustMesh, vh: VertexHandle) -> Vec<VertexHandle> {
+    let mut seen = std::collections::HashSet::new();
     let mut neighbors = Vec::new();
-    
-    if let Some(heh) = mesh.halfedge_handle(vh) {
-        let mut current = heh;
-        loop {
-            let neighbor = mesh.to_vertex_handle(current);
-            if neighbor != vh {
-                neighbors.push(neighbor);
-            }
-            let opp = mesh.opposite_halfedge_handle(current);
-            current = mesh.next_halfedge_handle(opp);
-            if current == heh || !current.is_valid() {
-                break;
+
+    // Collect neighbors from all adjacent faces
+    if let Some(face_iter) = mesh.vertex_faces(vh) {
+        for fh in face_iter {
+            let face_verts = get_face_vertices(mesh, fh);
+            for &fv in &face_verts {
+                if fv != vh && seen.insert(fv) {
+                    neighbors.push(fv);
+                }
             }
         }
     }
-    
+
     neighbors
 }
 
@@ -236,7 +238,9 @@ pub fn split_edge(mesh: &mut RustMesh, v0: VertexHandle, v1: VertexHandle) -> Su
             let to = mesh.to_vertex_handle(current);
             if to == v1 {
                 h01_opt = Some(current);
-                is_boundary = mesh.is_boundary(current);
+                // Edge is boundary if either halfedge has no face
+                let opp_he = mesh.opposite_halfedge_handle(current);
+                is_boundary = mesh.is_boundary(current) || mesh.is_boundary(opp_he);
                 break;
             }
             let opp = mesh.opposite_halfedge_handle(current);
@@ -255,8 +259,10 @@ pub fn split_edge(mesh: &mut RustMesh, v0: VertexHandle, v1: VertexHandle) -> Su
                 let to = mesh.to_vertex_handle(current);
                 if to == v0 {
                     // Found v1 -> v0, use its opposite for v0 -> v1
-                    h01_opt = Some(mesh.opposite_halfedge_handle(current));
-                    is_boundary = mesh.is_boundary(current);
+                    let opp_he = mesh.opposite_halfedge_handle(current);
+                    h01_opt = Some(opp_he);
+                    // Edge is boundary if either halfedge has no face
+                    is_boundary = mesh.is_boundary(current) || mesh.is_boundary(opp_he);
                     break;
                 }
                 let opp = mesh.opposite_halfedge_handle(current);
@@ -1367,18 +1373,19 @@ mod tests {
 
     fn create_tetrahedron() -> RustMesh {
         let mut mesh = RustMesh::new();
-        
-        // Tetrahedron (closed mesh)
+
+        // Tetrahedron (closed mesh) - faces must have consistent orientation
+        // so adjacent faces share edges in opposite directions
         let v0 = mesh.add_vertex(glam::vec3(0.0, 0.0, 0.0));
         let v1 = mesh.add_vertex(glam::vec3(1.0, 0.0, 0.0));
         let v2 = mesh.add_vertex(glam::vec3(0.5, 1.0, 0.0));
         let v3 = mesh.add_vertex(glam::vec3(0.5, 0.5, 1.0));
-        
+
         mesh.add_face(&[v0, v1, v2]); // Base
-        mesh.add_face(&[v0, v1, v3]);
-        mesh.add_face(&[v1, v2, v3]);
-        mesh.add_face(&[v2, v0, v3]);
-        
+        mesh.add_face(&[v0, v2, v3]);
+        mesh.add_face(&[v0, v3, v1]);
+        mesh.add_face(&[v1, v3, v2]);
+
         mesh
     }
 
@@ -1482,7 +1489,7 @@ mod tests {
         
         assert_eq!(stats.original_vertices, 3);
         assert_eq!(stats.original_faces, 1);
-        assert_eq!(mesh.n_faces(), 4);
+        assert_eq!(mesh.n_active_faces(), 4);
         
         // Should have 6 vertices (3 original + 3 new edge points)
         // Note: actual count may vary depending on implementation
@@ -1502,7 +1509,7 @@ mod tests {
         // Original: 4 faces
         // After: 4 * 4 = 16 faces
         assert_eq!(stats.original_faces, 4);
-        assert_eq!(mesh.n_faces(), 16);
+        assert_eq!(mesh.n_active_faces(), 16);
     }
 
     #[test]
@@ -1518,7 +1525,7 @@ mod tests {
         // Original: 2 triangles
         // After: 2 * 4 = 8 triangles
         assert_eq!(stats.original_faces, 2);
-        assert_eq!(mesh.n_faces(), 8);
+        assert_eq!(mesh.n_active_faces(), 8);
     }
 
     #[test]
@@ -1535,7 +1542,7 @@ mod tests {
         
         // First iteration: 4 faces -> 16 faces
         assert_eq!(all_stats[0].original_faces, 4);
-        assert_eq!(mesh.n_faces(), 16);
+        assert_eq!(mesh.n_active_faces(), 16);
         
         // Second iteration: 16 faces -> 64 faces
         assert_eq!(all_stats[1].original_faces, 16);
@@ -1577,7 +1584,7 @@ mod tests {
         assert!(stats.original_vertices > 0);
         assert!(stats.original_faces > 0);
         assert!(stats.new_faces > 0);
-        assert!(mesh.n_faces() > stats.original_faces);
+        assert!(mesh.n_active_faces() > stats.original_faces);
     }
 
     #[test]
@@ -1665,7 +1672,7 @@ mod tests {
         let _stats = stats.unwrap();
         
         // Count should have increased
-        assert!(mesh.n_faces() > 20);
+        assert!(mesh.n_active_faces() > 20);
         assert!(mesh.n_vertices() > 11);
     }
 
@@ -1733,7 +1740,7 @@ mod tests {
         
         // Check structure
         assert_eq!(mesh.n_vertices(), 4);
-        assert_eq!(mesh.n_faces(), 1);
+        assert_eq!(mesh.n_active_faces(), 1);
     }
 
     #[test]
@@ -1746,7 +1753,7 @@ mod tests {
         
         // Check structure
         assert_eq!(mesh.n_vertices(), 8);
-        assert_eq!(mesh.n_faces(), 6);
+        assert_eq!(mesh.n_active_faces(), 6);
     }
 
     #[test]
@@ -1754,7 +1761,7 @@ mod tests {
         let mut mesh = create_simple_quad();
         
         let original_vertices = mesh.n_vertices();
-        let original_faces = mesh.n_faces();
+        let original_faces = mesh.n_active_faces();
         
         println!("Before subdivision: {} vertices, {} faces", original_vertices, original_faces);
         
@@ -1764,7 +1771,7 @@ mod tests {
         
         let stats = stats.unwrap();
         
-        println!("After subdivision: {} vertices, {} faces", mesh.n_vertices(), mesh.n_faces());
+        println!("After subdivision: {} vertices, {} faces", mesh.n_vertices(), mesh.n_active_faces());
         println!("Stats: {}", stats);
         
         // A quad should subdivide into 4 quads
@@ -1774,7 +1781,7 @@ mod tests {
         // - Total vertices: 9
         // Note: Original face is kept + 4 new faces = 5 total faces
         assert_eq!(original_faces, 1);
-        assert!(mesh.n_faces() >= 4, "Should have at least 4 faces");
+        assert!(mesh.n_active_faces() >= 4, "Should have at least 4 faces");
         
         // Check we have the expected vertices
         assert_eq!(mesh.n_vertices(), 9, "Should have 9 vertices (4 original + 4 edge + 1 face)");
@@ -1789,7 +1796,7 @@ mod tests {
         let mut mesh = create_cube();
         
         let original_vertices = mesh.n_vertices();
-        let original_faces = mesh.n_faces();
+        let original_faces = mesh.n_active_faces();
         
         println!("Before subdivision: {} vertices, {} faces", original_vertices, original_faces);
         
@@ -1799,13 +1806,13 @@ mod tests {
         
         let stats = stats.unwrap();
         
-        println!("After subdivision: {} vertices, {} faces", mesh.n_vertices(), mesh.n_faces());
+        println!("After subdivision: {} vertices, {} faces", mesh.n_vertices(), mesh.n_active_faces());
         println!("Stats: {}", stats);
         
         // A cube has 6 faces, each quad becomes 4 quads
         // Original faces are kept + 6*4 new faces = 30 total faces
         assert_eq!(original_faces, 6);
-        assert!(mesh.n_faces() >= 24, "Cube should have at least 24 quads (6 * 4)");
+        assert!(mesh.n_active_faces() >= 24, "Cube should have at least 24 quads (6 * 4)");
         
         // Check stats make sense
         assert!(stats.new_vertices > 0);
@@ -1820,23 +1827,23 @@ mod tests {
         let stats1 = catmull_clark_subdivide(&mut mesh);
         assert!(stats1.is_ok());
         
-        println!("After 1st subdivision: {} vertices, {} faces", mesh.n_vertices(), mesh.n_faces());
+        println!("After 1st subdivision: {} vertices, {} faces", mesh.n_vertices(), mesh.n_active_faces());
         
-        let faces_after_1 = mesh.n_faces();
+        let faces_after_1 = mesh.n_active_faces();
         
         // Second iteration
         let stats2 = catmull_clark_subdivide(&mut mesh);
         assert!(stats2.is_ok());
         
-        println!("After 2nd subdivision: {} vertices, {} faces", mesh.n_vertices(), mesh.n_faces());
+        println!("After 2nd subdivision: {} vertices, {} faces", mesh.n_vertices(), mesh.n_active_faces());
         
-        let faces_after_2 = mesh.n_faces();
+        let faces_after_2 = mesh.n_active_faces();
         
         // Third iteration
         let stats3 = catmull_clark_subdivide(&mut mesh);
         assert!(stats3.is_ok());
         
-        println!("After 3rd subdivision: {} vertices, {} faces", mesh.n_vertices(), mesh.n_faces());
+        println!("After 3rd subdivision: {} vertices, {} faces", mesh.n_vertices(), mesh.n_active_faces());
         
         // Each subdivision multiplies faces by approximately 4 (original faces kept)
         // 6 -> 30 -> 126 -> 510 (roughly 5x each time due to keeping original faces)
@@ -1868,18 +1875,18 @@ mod tests {
         // Quad face
         mesh.add_face(&[v0, v3, v4, v1]);
         
-        assert_eq!(mesh.n_faces(), 2);
+        assert_eq!(mesh.n_active_faces(), 2);
         
         // Subdivide
         let stats = catmull_clark_subdivide(&mut mesh);
         
         assert!(stats.is_ok(), "Mixed mesh subdivision should succeed: {:?}", stats);
         
-        println!("Mixed mesh after subdivision: {} vertices, {} faces", mesh.n_vertices(), mesh.n_faces());
+        println!("Mixed mesh after subdivision: {} vertices, {} faces", mesh.n_vertices(), mesh.n_active_faces());
         
         // Triangle becomes 3 quads, quad becomes 4 quads
         // Original faces kept: 2 + 3 + 4 = 9 faces
-        assert!(mesh.n_faces() >= 7);
+        assert!(mesh.n_active_faces() >= 7);
     }
 
     #[test]
@@ -1943,7 +1950,7 @@ mod tests {
         let mut mesh = create_simple_triangle();
         
         // Before: 1 triangle, 3 vertices
-        let original_faces = mesh.n_faces();
+        let original_faces = mesh.n_active_faces();
         assert_eq!(original_faces, 1);
         
         let stats = sqrt3_subdivide(&mut mesh);
@@ -1954,7 +1961,7 @@ mod tests {
         
         // Sqrt3: 1 triangle -> 3 triangles
         assert_eq!(stats.original_faces, 1);
-        assert_eq!(mesh.n_faces(), 3, "One triangle should become 3 triangles");
+        assert_eq!(mesh.n_active_faces(), 3, "One triangle should become 3 triangles");
         
         // Vertices: 3 original + 3 edge midpoints = 6
         assert_eq!(mesh.n_vertices(), 6);
@@ -1967,7 +1974,7 @@ mod tests {
         let mut mesh = create_tetrahedron();
         
         // Before: 4 triangles
-        let original_faces = mesh.n_faces();
+        let original_faces = mesh.n_active_faces();
         assert_eq!(original_faces, 4);
         
         let stats = sqrt3_subdivide(&mut mesh);
@@ -1978,7 +1985,7 @@ mod tests {
         
         // Sqrt3: 4 triangles -> 12 triangles (4 * 3)
         assert_eq!(stats.original_faces, 4);
-        assert_eq!(mesh.n_faces(), 12, "4 triangles should become 12 triangles");
+        assert_eq!(mesh.n_active_faces(), 12, "4 triangles should become 12 triangles");
         
         println!("Sqrt3 tetrahedron stats: {}", stats);
     }
@@ -1988,7 +1995,7 @@ mod tests {
         let mut mesh = create_triangle_mesh_with_boundary();
         
         // Before: 2 triangles (a quad made of 2 triangles)
-        let original_faces = mesh.n_faces();
+        let original_faces = mesh.n_active_faces();
         assert_eq!(original_faces, 2);
         
         let stats = sqrt3_subdivide(&mut mesh);
@@ -1999,7 +2006,7 @@ mod tests {
         
         // Sqrt3: 2 triangles -> 6 triangles
         assert_eq!(stats.original_faces, 2);
-        assert_eq!(mesh.n_faces(), 6, "2 triangles should become 6 triangles");
+        assert_eq!(mesh.n_active_faces(), 6, "2 triangles should become 6 triangles");
         
         println!("Sqrt3 boundary mesh stats: {}", stats);
     }
@@ -2011,23 +2018,23 @@ mod tests {
         // First iteration: 4 -> 12
         let stats1 = sqrt3_subdivide(&mut mesh);
         assert!(stats1.is_ok());
-        assert_eq!(mesh.n_faces(), 12);
+        assert_eq!(mesh.n_active_faces(), 12);
         
-        println!("After 1st Sqrt3: {} faces", mesh.n_faces());
+        println!("After 1st Sqrt3: {} faces", mesh.n_active_faces());
         
         // Second iteration: 12 -> 36
         let stats2 = sqrt3_subdivide(&mut mesh);
         assert!(stats2.is_ok());
-        assert_eq!(mesh.n_faces(), 36);
+        assert_eq!(mesh.n_active_faces(), 36);
         
-        println!("After 2nd Sqrt3: {} faces", mesh.n_faces());
+        println!("After 2nd Sqrt3: {} faces", mesh.n_active_faces());
         
         // Third iteration: 36 -> 108
         let stats3 = sqrt3_subdivide(&mut mesh);
         assert!(stats3.is_ok());
-        assert_eq!(mesh.n_faces(), 108);
+        assert_eq!(mesh.n_active_faces(), 108);
         
-        println!("After 3rd Sqrt3: {} faces", mesh.n_faces());
+        println!("After 3rd Sqrt3: {} faces", mesh.n_active_faces());
     }
 
     #[test]
@@ -2048,7 +2055,7 @@ mod tests {
         assert_eq!(all_stats[2].original_faces, 36);
         
         // Final face count should be 108
-        assert_eq!(mesh.n_faces(), 108);
+        assert_eq!(mesh.n_active_faces(), 108);
     }
 
     #[test]
@@ -2133,7 +2140,7 @@ mod tests {
             mesh.add_face(&[lower[i], lower[next], v11]);
         }
         
-        let original_faces = mesh.n_faces();
+        let original_faces = mesh.n_active_faces();
         println!("Icosahedron-like mesh: {} faces", original_faces);
         
         // Sqrt3 subdivision
@@ -2144,9 +2151,9 @@ mod tests {
         let stats = stats.unwrap();
         
         // Should be 3x faces
-        assert_eq!(mesh.n_faces(), original_faces * 3);
+        assert_eq!(mesh.n_active_faces(), original_faces * 3);
         
-        println!("After Sqrt3: {} faces", mesh.n_faces());
+        println!("After Sqrt3: {} faces", mesh.n_active_faces());
         println!("Stats: {}", stats);
     }
 
