@@ -457,9 +457,12 @@ impl AttribSoAKernel {
     /// Get from vertex handle from halfedge
     #[inline]
     pub fn from_vertex_handle(&self, heh: HalfedgeHandle) -> VertexHandle {
-        self.halfedge(heh)
-            .map(|h| h.from_vertex_handle())
-            .unwrap_or(VertexHandle::new(0))
+        // Get the opposite halfedge and return its to_vertex
+        // This is the correct way to get from_vertex without mesh context
+        self.opposite_halfedge_handle(heh)
+            .and_then(|opp_heh| self.halfedge(opp_heh))
+            .map(|h| h.to_vertex_handle())
+            .unwrap_or(VertexHandle::invalid())
     }
 
     /// Get opposite halfedge handle
