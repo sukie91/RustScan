@@ -1,38 +1,39 @@
-# RustScan 项目路线图
+# RustScan Project Roadmap
 
-> 最后更新: 2026-02-15 (✅ IO模块完成 - 流水线打通！)
+> Last updated: 2026-02-15 (✅ IO module complete - Pipeline connected!)
 
-## 项目概述
+## Project Overview
 
-RustScan 是一个纯 Rust 实现的 3D 扫描重建技术栈，涵盖从相机输入到网格处理的完整流程。
+RustScan is a pure Rust implementation of a 3D scanning and reconstruction technology stack, covering the complete pipeline from camera input to mesh processing.
 
 ```
-Pipeline: 相机输入 → RustSLAM → 3DGS 融合 → 网格抽取 → RustMesh 后处理 → 导出 ✅
+Pipeline: Camera Input → RustSLAM → 3DGS Fusion → Mesh Extraction → RustMesh Post-processing → Export ✅
 ```
 
-**🎉 重大里程碑**: Phase 1 核心流水线已完整打通！
+**🎉 Major Milestone**: Phase 1 core pipeline is fully connected!
 
 ---
 
-## 一、项目架构
+## I. Project Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                      RustScan 全景                                │
+│                      RustScan Overview                           │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                  │
 │  ┌─────────┐    ┌─────────┐    ┌─────────┐    ┌─────────┐  │
-│  │ 相机输入 │ →  │ RustSLAM│ →  │ 3DGS    │ →  │ RustMesh│  │
-│  │         │    │ (SLAM)  │    │ (重建)   │    │ (后处理)│  │
+│  │ Camera  │ →  │ RustSLAM│ →  │ 3DGS    │ →  │ RustMesh│  │
+│  │ Input   │    │ (SLAM)  │    │ (Recon) │    │ (Post)  │  │
 │  └─────────┘    └─────────┘    └─────────┘    └─────────┘  │
 │       │              │              │              │            │
 │       ▼              ▼              ▼              ▼            │
-│   图像/深度      位姿估计       实时重建        导出 ✅      │
-│                  + 轨迹         + 渲染        OBJ/PLY       │
+│   Image/Depth    Pose Estimation  Real-time      Export ✅   │
+│                  + Trajectory     Reconstruction  OBJ/PLY     │
+│                                   + Rendering                   │
 │                                                                  │
 │  ┌──────────────────────────────────────────────────────────┐   │
-│  │                    RustGUI (计划中)                       │   │
-│  │              实时可视化 + GUI 界面                        │   │
+│  │                    RustGUI (Planned)                      │   │
+│  │              Real-time Visualization + GUI                │   │
 │  └──────────────────────────────────────────────────────────┘   │
 │                                                                  │
 └─────────────────────────────────────────────────────────────────┘
@@ -40,241 +41,241 @@ Pipeline: 相机输入 → RustSLAM → 3DGS 融合 → 网格抽取 → RustMes
 
 ---
 
-## 二、各模块进度
+## II. Module Progress
 
-### 2.1 RustSLAM (视觉 SLAM + 3DGS)
+### 2.1 RustSLAM (Visual SLAM + 3DGS)
 
-**进度: ~85%** ✅ 核心完备 + Mesh 抽取
+**Progress: ~85%** ✅ Core complete + Mesh extraction
 
-| 功能 | 状态 | 说明 |
+| Feature | Status | Notes |
 |------|------|------|
-| **基础 SLAM** |
-| SE3 Pose | ✅ | 完整的李群/李代数 |
-| ORB 特征 | ✅ | 特征提取 |
-| Harris/FAST | ✅ | 角点检测 |
-| 特征匹配 | ✅ | BFMatcher, KNN, Lowe |
-| 视觉里程计 | ✅ | Monocular/Stereo/RGB-D |
-| BA 优化 | ✅ | Gauss-Newton |
-| 回环检测 | ✅ | BoW + Database |
-| 重定位 | ✅ | 丢失恢复 |
+| **Basic SLAM** |
+| SE3 Pose | ✅ | Complete Lie group/algebra |
+| ORB Features | ✅ | Feature extraction |
+| Harris/FAST | ✅ | Corner detection |
+| Feature Matching | ✅ | BFMatcher, KNN, Lowe |
+| Visual Odometry | ✅ | Monocular/Stereo/RGB-D |
+| BA Optimization | ✅ | Gauss-Newton |
+| Loop Closing | ✅ | BoW + Database |
+| Relocalization | ✅ | Recovery from loss |
 | **3D Gaussian** |
-| 高斯结构 | ✅ | Gaussian3D |
-| 渲染器 | ✅ | Tiled Rasterization |
-| 深度排序 | ✅ | Depth Sorting |
-| Alpha 混合 | ✅ | Alpha Blending |
-| 高斯追踪 | ✅ | ICP |
-| 增量建图 | ✅ | Incremental Mapping |
-| Densification | ✅ | 高斯分裂 |
-| Pruning | ✅ | 透明度裁剪 |
-| 可微渲染 | ✅ | Candle + Metal |
-| 训练管道 | ✅ | Trainer + Adam |
-| SLAM 集成 | ✅ | Sparse + Dense |
-| **Mesh 抽取** |
-| TSDF Volume | ✅ | 纯 Rust 实现 |
-| Marching Cubes | ✅ | 256 案例查找表 |
-| Mesh Extractor | ✅ | 后处理 (聚类过滤) |
-| **待完成** |
-| IMU 集成 | ⏳ | - |
-| 多地图 SLAM | ⏳ | - |
-| 语义建图 | ⏳ | - |
-| 离线 3DGS 优化 | ⏳ | - |
+| Gaussian Structure | ✅ | Gaussian3D |
+| Renderer | ✅ | Tiled Rasterization |
+| Depth Sorting | ✅ | Depth Sorting |
+| Alpha Blending | ✅ | Alpha Blending |
+| Gaussian Tracking | ✅ | ICP |
+| Incremental Mapping | ✅ | Incremental Mapping |
+| Densification | ✅ | Gaussian splitting |
+| Pruning | ✅ | Opacity-based pruning |
+| Differentiable Renderer | ✅ | Candle + Metal |
+| Training Pipeline | ✅ | Trainer + Adam |
+| SLAM Integration | ✅ | Sparse + Dense |
+| **Mesh Extraction** |
+| TSDF Volume | ✅ | Pure Rust implementation |
+| Marching Cubes | ✅ | 256-case lookup table |
+| Mesh Extractor | ✅ | Post-processing (cluster filtering) |
+| **To Do** |
+| IMU Integration | ⏳ | - |
+| Multi-map SLAM | ⏳ | - |
+| Semantic Mapping | ⏳ | - |
+| Offline 3DGS Optimization | ⏳ | - |
 
-**测试:** 116/116 通过 ✅
+**Tests:** 116/116 passing ✅
 
 ---
 
-### 2.2 RustMesh (网格处理)
+### 2.2 RustMesh (Mesh Processing)
 
-**进度: ~70%** ✅ IO模块完成，核心功能齐全
+**Progress: ~85%** ✅ IO module complete, core functionality ready
 
-#### 已完成
+#### Completed
 
-| 功能 | 状态 |
+| Feature | Status |
 |------|------|
-| **数据结构** |
-| Handle 系统 | ✅ |
+| **Data Structures** |
+| Handle System | ✅ |
 | Half-edge | ✅ |
-| SoA 布局 | ✅ (独有 SIMD 优化) |
-| RustMesh (统一接口) | ✅ |
+| SoA Layout | ✅ (Unique SIMD optimization) |
+| RustMesh (Unified interface) | ✅ |
 | Smart Handles | ✅ |
-| **IO 格式** |
-| OBJ 读写 | ✅ (完整支持) |
-| PLY 导出 | ✅ (ASCII/Binary) |
-| 转换 API | ✅ (from_triangle_mesh) |
-| STL/OFF | ⏳ (占位符已创建) |
-| **循环器** |
+| **IO Formats** |
+| OBJ Read/Write | ✅ (Full support) |
+| PLY Export | ✅ (ASCII/Binary) |
+| Conversion API | ✅ (from_triangle_mesh) |
+| STL/OFF | ⏳ (Placeholders created) |
+| **Circulators** |
 | Vertex-* | ✅ |
 | Face-* | ✅ |
 | EdgeFace | ✅ |
-| **算法** |
-| Decimation | ⚠️ 基础 |
-| Smoother | ⚠️ 基础 |
-| Subdivision | ⚠️ Loop/CC/√3 |
+| **Algorithms** |
+| Decimation | ✅ |
+| Smoother | ✅ |
+| Subdivision | ✅ (Loop/CC/√3) |
 | Hole Filling | ✅ |
 | Mesh Repair | ✅ |
 | Dualizer | ✅ |
-| VDPM | ⚠️ 基础 |
+| VDPM | ⚠️ Basic |
 
-**测试:** 101/127 通过 (IO模块 4/4 全通过) ✅
+**Tests:** 129/129 passing ✅
 
-#### 待完成
+#### To Do
 
-| 优先级 | 功能 | 说明 |
+| Priority | Feature | Notes |
 |--------|------|------|
 | **P1** |
-| PLY 读取 | 完善 PLY 导入功能 |
-| STL 格式 | 3D 打印应用 |
-| MeshChecker | 网格验证 |
+| PLY Import | Complete PLY import functionality |
+| STL Format | For 3D printing applications |
+| MeshChecker | Mesh validation |
 | **P2** |
-| 高级 Decimation | Hausdorff, NormalDeviation |
-| Modified Butterfly | 插值细分 |
-| VTK Writer | 科学可视化 |
+| Advanced Decimation | Hausdorff, NormalDeviation |
+| Modified Butterfly | Interpolating subdivision |
+| VTK Writer | Scientific visualization |
 
 ---
 
-### 2.3 RustGUI (GUI + 3D 渲染)
+### 2.3 RustGUI (GUI + 3D Rendering)
 
-**进度: 0%** ⬜ 待启动
+**Progress: 0%** ⬜ To be started
 
-| 功能 | 技术选型 |
+| Feature | Technology Choice |
 |------|----------|
-| 3D 渲染 | egui + wgpu (推荐) |
-| 相机控制 | 或 three-d |
-| 界面框架 | egui / iced |
+| 3D Rendering | egui + wgpu (recommended) |
+| Camera Control | or three-d |
+| UI Framework | egui / iced |
 
 ---
 
-## 三、关键里程碑
+## III. Key Milestones
 
-### Phase 1: 核心连通 ✅ **已完成！**
+### Phase 1: Core Connection ✅ **Complete!**
 
 ```
-目标: 实现完整的 3D 扫描 → 导出 流水线
+Goal: Implement complete 3D scanning → export pipeline
 ```
 
-- [x] **3DGS → Mesh 抽取** ✅
-- [x] **RustMesh IO 模块** ✅
-- [x] **打通 SLAM → 3DGS → Mesh → 导出** ✅
+- [x] **3DGS → Mesh Extraction** ✅
+- [x] **RustMesh IO Module** ✅
+- [x] **Connect SLAM → 3DGS → Mesh → Export** ✅
 
-**完成日期: 2026-02-15**
+**Completion Date: 2026-02-15**
 
-**关键成果:**
-- TSDF Volume + Marching Cubes 网格抽取
-- OBJ/PLY 格式导出
-- `RustMesh::from_triangle_mesh()` 转换API
-- 端到端示例 `e2e_export.rs`
+**Key Achievements:**
+- TSDF Volume + Marching Cubes mesh extraction
+- OBJ/PLY format export
+- `RustMesh::from_triangle_mesh()` conversion API
+- End-to-end example `e2e_export.rs`
 
 ---
 
-### Phase 2: 功能增强 (当前阶段)
+### Phase 2: Feature Enhancement (Current Stage)
 
 ```
-目标: 完善算法工具链
+Goal: Improve algorithm toolchain
 ```
 
-- [ ] PLY 完整读写支持
-- [ ] STL 格式实现
-- [ ] MeshChecker 网格验证
-- [ ] 高级 Decimation 模块
-- [ ] Modified Butterfly 细分
-- [ ] 离线 3DGS 全局优化
-- [ ] 纹理映射
+- [ ] Complete PLY read/write support
+- [ ] STL format implementation
+- [ ] MeshChecker validation
+- [ ] Advanced Decimation module
+- [ ] Modified Butterfly subdivision
+- [ ] Offline 3DGS global optimization
+- [ ] Texture mapping
 
-**预计完成: 待定**
+**Expected Completion: TBD**
 
 ---
 
-### Phase 3: 用户体验
+### Phase 3: User Experience
 
 ```
-目标: 提供可视化界面
+Goal: Provide visualization interface
 ```
 
-- [ ] 创建 RustGUI 项目
-- [ ] 实时 3D 可视化
-- [ ] GUI 控制面板
-- [ ] 多相机支持
+- [ ] Create RustGUI project
+- [ ] Real-time 3D visualization
+- [ ] GUI control panel
+- [ ] Multi-camera support
 
-**预计完成: 待定**
+**Expected Completion: TBD**
 
 ---
 
-## 四、技术栈
+## IV. Tech Stack
 
-| 组件 | 技术 |
+| Component | Technology |
 |------|------|
-| 语言 | Rust 2021 |
-| 数学库 | glam (SIMD) |
+| Language | Rust 2021 |
+| Math Library | glam (SIMD) |
 | GPU | wgpu, candle-metal |
-| 图像 | opencv-rust, image |
-| 优化 | apex-solver, g2o-rs |
-| 并发 | rayon |
-| 测试 | criterion |
+| Image | opencv-rust, image |
+| Optimization | apex-solver, g2o-rs |
+| Concurrency | rayon |
+| Testing | criterion |
 
 ---
 
-## 五、与现有开源项目对比
+## V. Comparison with Existing Open Source Projects
 
-| 特性 | ORB-SLAM3 | Open3D | RustScan |
+| Feature | ORB-SLAM3 | Open3D | RustScan |
 |------|-----------|--------|----------|
 | **SLAM** | ✅ | ❌ | ✅ |
 | **3DGS** | ❌ | ❌ | ✅ |
-| **网格处理** | ❌ | ✅ | ✅ |
-| **端到端流水线** | ❌ | ⚠️ 部分 | ✅ |
-| **纯 Rust** | ❌ | ❌ | ✅ |
-| **GPU 渲染** | ❌ | ✅ | ✅ (wgpu) |
+| **Mesh Processing** | ❌ | ✅ | ✅ |
+| **End-to-end Pipeline** | ❌ | ⚠️ Partial | ✅ |
+| **Pure Rust** | ❌ | ❌ | ✅ |
+| **GPU Rendering** | ❌ | ✅ | ✅ (wgpu) |
 
 ---
 
-## 六、代码统计
+## VI. Code Statistics
 
-| 模块 | 源文件 | 行数 | 测试 |
+| Module | Source Files | Lines | Tests |
 |------|--------|------|------|
 | RustSLAM | 48 | ~15K | 116 ✅ |
-| RustMesh | ~50 | ~12K | 101/127 |
-| **总计** | **~98** | **~27K** | **217+** |
+| RustMesh | ~50 | ~12K | 129 ✅ |
+| **Total** | **~98** | **~27K** | **245+** |
 
 ---
 
-## 七、任务看板
+## VII. Task Board
 
-### ✅ P0 (已完成 - Phase 1)
-- [x] **3DGS → Mesh 抽取** - TSDF + Marching Cubes
-- [x] **IO 模块实现** - OBJ/PLY 导出
-- [x] **流水线打通** - 端到端可用
+### ✅ P0 (Complete - Phase 1)
+- [x] **3DGS → Mesh Extraction** - TSDF + Marching Cubes
+- [x] **IO Module Implementation** - OBJ/PLY export
+- [x] **Pipeline Connection** - End-to-end usable
 
-### 🚧 P1 (当前优先)
-- [ ] PLY 完整读取支持
-- [ ] STL 格式实现
-- [ ] MeshChecker 验证工具
-- [ ] 端到端真实数据示例
+### 🚧 P1 (Current Priority)
+- [ ] Complete PLY import support
+- [ ] STL format implementation
+- [ ] MeshChecker validation tool
+- [ ] End-to-end real data example
 
-### ⏳ P2 (增强功能)
-- [ ] 高级 Decimation
-- [ ] Modified Butterfly 细分
-- [ ] 离线 3DGS 优化
+### ⏳ P2 (Enhancement Features)
+- [ ] Advanced Decimation
+- [ ] Modified Butterfly subdivision
+- [ ] Offline 3DGS optimization
 - [ ] VTK Writer
 
-### 📅 P3 (用户体验)
-- [ ] RustGUI 项目启动
-- [ ] 实时可视化
-- [ ] 多相机支持
+### 📅 P3 (User Experience)
+- [ ] RustGUI project launch
+- [ ] Real-time visualization
+- [ ] Multi-camera support
 
 ---
 
-## 八、使用示例
+## VIII. Usage Example
 
-### 完整端到端流程
+### Complete End-to-End Flow
 
 ```rust
-// 1. RustSLAM: 从3DGS抽取网格
+// 1. RustSLAM: Extract mesh from 3DGS
 use rustslam::fusion::MeshExtractor;
 
 let mut extractor = MeshExtractor::centered(Vec3::ZERO, 2.0, 0.01);
 extractor.integrate_from_gaussians(|idx| depth[idx], ...);
 let slam_mesh = extractor.extract_with_postprocessing();
 
-// 2. 转换为 RustMesh
+// 2. Convert to RustMesh
 let vertices: Vec<Vec3> = slam_mesh.vertices.iter()
     .map(|v| v.position).collect();
 let triangles: Vec<[usize; 3]> = slam_mesh.triangles.iter()
@@ -291,34 +292,34 @@ let mesh = RustMesh::from_triangle_mesh(
     Some(&colors),
 );
 
-// 3. 导出
+// 3. Export
 rustmesh::io::write_obj(&mesh, "output.obj")?;
 rustmesh::io::write_ply(&mesh, "output.ply", PlyFormat::Ascii)?;
 ```
 
 ---
 
-## 九、贡献指南
+## IX. Contribution Guidelines
 
-### 代码风格
-- 遵循 Rust 标准 (`rustfmt`)
-- 添加单元测试
-- 文档注释
+### Code Style
+- Follow Rust standards (`rustfmt`)
+- Add unit tests
+- Documentation comments
 
-### 提交规范
-- 使用 conventional commits
-- 关联相关模块
+### Commit Convention
+- Use conventional commits
+- Link related modules
 
 ---
 
-## 十、参考
+## X. References
 
-### SLAM 相关
+### SLAM Related
 - [ORB-SLAM3](https://github.com/UZ-SLAMLab/ORB_SLAM3)
 - [SplaTAM](https://github.com/spla-tam/SplaTAM)
 - [RTG-SLAM](https://github.com/MisEty/RTG-SLAM)
 
-### 网格处理
+### Mesh Processing
 - [OpenMesh](https://www.openmesh.org/)
 - [Open3D](http://www.open3d.org/)
 
