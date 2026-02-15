@@ -851,14 +851,14 @@ impl AttribSoAKernel {
     }
 
     /// Get dynamic property value (simplified - only works for f32)
-    pub fn get_property<T: PropValue + Copy>(&self, handle: PropHandle, idx: usize) -> Option<T>
+    pub fn get_property<T: PropValue + Copy + TryFrom<f32>>(&self, handle: PropHandle, idx: usize) -> Option<T>
     where
         T: TryFrom<DynamicProperty> + Default,
     {
         self.dynamic_props.get(&handle.id).and_then(|prop| {
             match prop {
                 DynamicProperty::Float(v) => {
-                    v.get(idx).copied().map(|_| T::default())
+                    v.get(idx).and_then(|&val| T::try_from(val).ok())
                 }
                 _ => None,
             }

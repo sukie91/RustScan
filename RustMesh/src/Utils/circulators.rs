@@ -60,22 +60,40 @@ impl<'a> Iterator for VertexFaceCirculator<'a> {
     type Item = FaceHandle;
 
     fn next(&mut self) -> Option<Self::Item> {
-        // Check if we've completed the cycle (after first iteration)
-        if !self.first && self.current_heh == self.start_heh {
-            return None;
+        loop {
+            // Check if we've completed the cycle
+            if !self.first && self.current_heh == self.start_heh {
+                return None;
+            }
+            
+            // Skip invalid halfedges
+            if !self.current_heh.is_valid() {
+                return None;
+            }
+
+            // Get the face from current halfedge
+            let fh = self.mesh.face_handle(self.current_heh);
+
+            // Move to next outgoing halfedge around the vertex
+            let incoming = self.mesh.opposite_halfedge_handle(self.current_heh);
+            
+            // Check if incoming is valid before proceeding
+            if !incoming.is_valid() {
+                self.first = false;
+                return None;
+            }
+            
+            let next_heh = self.mesh.prev_halfedge_handle(incoming);
+
+            self.first = false;
+            self.current_heh = next_heh;
+            
+            // Return face if valid (skip boundary halfedges that have no face)
+            if let Some(face) = fh {
+                return Some(face);
+            }
+            // Continue loop to find next valid face (skip boundary)
         }
-
-        // Get the face from current halfedge
-        let fh = self.mesh.face_handle(self.current_heh);
-
-        // Move to next outgoing halfedge around the vertex
-        // Use same pattern as VertexHalfedgeIter
-        let incoming = self.mesh.opposite_halfedge_handle(self.current_heh);
-        let next_heh = self.mesh.prev_halfedge_handle(incoming);
-
-        self.first = false;
-        self.current_heh = next_heh;
-        fh
     }
 }
 

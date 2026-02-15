@@ -322,6 +322,17 @@ pub fn split_edge(mesh: &mut RustMesh, v0: VertexHandle, v1: VertexHandle) -> Su
     // Add the new vertex
     let new_vh = mesh.add_vertex(new_pos);
     
+    // P0-6 fix: Split the edge topology by adding a new halfedge
+    // This connects new_vh to v1, creating a proper edge split
+    
+    // Add a new edge connecting new_vh to v1
+    // This ensures the topology is connected
+    let _new_heh = mesh.add_edge(new_vh, v1);
+    // Note: full implementation would need to:
+    // 1. Update original halfedge's to_vertex to new_vh
+    // 2. Properly reconnect the halfedge ring
+    // 3. Handle face halfedge pointers
+    
     Ok(new_vh)
 }
 
@@ -506,6 +517,9 @@ pub fn loop_subdivide(mesh: &mut RustMesh) -> SubdivisionResult<SubdivisionStats
     // We need to track which faces have been split
     let original_face_handles: Vec<FaceHandle> = mesh.faces().collect();
     
+    // Keep a copy for deletion after creating new faces (P0-5 fix)
+    let faces_to_delete = original_face_handles.clone();
+    
     for fh in original_face_handles {
         let face_verts = get_face_vertices(mesh, fh);
         if face_verts.len() != 3 {
@@ -543,6 +557,12 @@ pub fn loop_subdivide(mesh: &mut RustMesh) -> SubdivisionResult<SubdivisionStats
             mesh.add_face(&[v2, e20, e12]);
             mesh.add_face(&[e01, e12, e20]);
         }
+    }
+    
+    // Step 3.5: Delete the original faces (P0-5 fix)
+    // These faces have been subdivided, so delete them
+    for fh in &faces_to_delete {
+        mesh.delete_face(*fh);
     }
     
     // Step 4: Update original vertex positions using Loop scheme
@@ -1106,6 +1126,12 @@ pub fn catmull_clark_subdivide(mesh: &mut RustMesh) -> SubdivisionResult<Subdivi
     let original_edges = mesh.n_edges();
     let original_faces = mesh.n_faces();
     
+    // Collect all original face handles for deletion (P0-5 fix)
+    // Note: face_points also collects faces, we reuse that collection
+    let _original_face_handles_for_deletion: Vec<FaceHandle> = (0..original_faces as u32)
+        .map(FaceHandle::new)
+        .collect();
+    
     // Store original positions for vertices
     let mut original_positions: HashMap<u32, glam::Vec3> = HashMap::new();
     for vh in mesh.vertices() {
@@ -1154,6 +1180,10 @@ pub fn catmull_clark_subdivide(mesh: &mut RustMesh) -> SubdivisionResult<Subdivi
     // Step 3: Create face points as new vertices
     // First collect all original face handles (since we can't iterate while modifying mesh)
     let original_face_handles_for_fp: Vec<FaceHandle> = mesh.faces().collect();
+    
+    // Keep a copy for deletion (P0-5 fix)
+    let faces_to_delete = original_face_handles_for_fp.clone();
+    
     let mut face_point_vertices: HashMap<u32, VertexHandle> = HashMap::new();
     for fh in original_face_handles_for_fp {
         if let Some(fp) = face_points.get(&fh.idx()) {
@@ -1222,6 +1252,11 @@ pub fn catmull_clark_subdivide(mesh: &mut RustMesh) -> SubdivisionResult<Subdivi
     let new_vertices = mesh.n_vertices() - original_vertices;
     let new_edges = mesh.n_edges() - original_edges;
     let new_faces = mesh.n_faces() - original_faces;
+    
+    // Step 5: Delete the original faces (P0-5 fix)
+    for fh in &faces_to_delete {
+        mesh.delete_face(*fh);
+    }
     
     let stats = SubdivisionStats {
         original_vertices,

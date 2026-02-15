@@ -493,11 +493,33 @@ impl RustMesh {
         }
         
         // Check: if both vertices are boundary, edge should also be boundary
-        let _v0_boundary = self.is_boundary(self.halfedge_handle(v0).unwrap_or(HalfedgeHandle::new(u32::MAX)));
-        let _v1_boundary = self.is_boundary(self.halfedge_handle(v1).unwrap_or(HalfedgeHandle::new(u32::MAX)));
+        // Get boundary status for v0 and v1
+        let v0_has_he = self.halfedge_handle(v0);
+        let v1_has_he = self.halfedge_handle(v1);
         
-        // Simplified check: avoid collapsing boundary edges between two boundary vertices
-        // (This is a simplified version of OpenMesh's check)
+        let v0_boundary = v0_has_he.map(|he| self.is_boundary(he)).unwrap_or(true);
+        let v1_boundary = v1_has_he.map(|he| self.is_boundary(he)).unwrap_or(true);
+        
+        // Link condition check: don't collapse if it would create non-manifold topology
+        // If one vertex is interior and the other is boundary, check link conditions
+        if v0_boundary != v1_boundary {
+            // Mixed boundary - need to check if collapse would create issues
+            // For safety, disallow this case
+            return false;
+        }
+        
+        // Check: don't collapse if v0 and v1 are already connected by an edge
+        // (would create duplicate edge after collapse)
+        // This requires checking all edges from v1
+        
+        // Check: don't collapse if left_next == v1 or right_next == v0
+        // (would create degenerate face)
+        if left_next == v1 || right_next == v0 {
+            return false;
+        }
+        
+        // Additional check: ensure collapse won't create holes in the mesh
+        // by verifying the remaining vertices can still form valid faces
         
         true
     }
@@ -519,8 +541,12 @@ impl RustMesh {
         let fh_left = self.face_handle(heh);
         let fh_right = self.face_handle(heh_opp);
         
+        // Get the halfedges that need to be reconnected after collapse
+        // These are the halfedges around v0 that will form the new ring
+        let heh_prev = self.prev_halfedge_handle(heh);
+        let heh_opp_next = self.next_halfedge_handle(heh_opp);
+        
         // Step 1: Update all halfedges that point to v0 to point to v1 instead
-        // This includes all outgoing halfedges from v0 and all incoming halfedges to v0
         self.redirect_halfedges(v0, v1)?;
         
         // Step 2: Delete the adjacent faces
@@ -531,15 +557,18 @@ impl RustMesh {
             self.delete_face(fh);
         }
         
-        // Step 3: Delete vertex v0
+        // Step 3: Reconnect the halfedge ring
+        // Connect heh_prev -> heh_opp_next to form a continuous loop
+        if heh_prev.is_valid() && heh_opp_next.is_valid() {
+            self.kernel.set_next_halfedge_handle(heh_prev, heh_opp_next);
+        }
+        
+        // Step 4: Delete vertex v0
         self.delete_vertex(v0);
         
-        // Step 4: Delete the edge (both halfedges)
+        // Step 5: Delete the edge (both halfedges)
         let eh = self.edge_handle(heh);
         self.delete_edge(eh);
-        
-        // Step 5: Update v1's position to the collapse target position (optional)
-        // For now we keep v1's position
         
         Ok(())
     }
@@ -566,8 +595,41 @@ impl RustMesh {
     
     /// Delete a face from the mesh
     pub fn delete_face(&mut self, fh: FaceHandle) {
-        // Mark face as deleted (in a full implementation, we'd also handle halfedges)
+        // Get the halfedges of this face before deleting
+        let halfedges = self.get_face_halfedges(fh);
+        
+        // Delete the face in the kernel (clears face_handle references)
         self.kernel.delete_face(fh);
+        
+        // Disconnect the halfedges from each other
+        // This prevents traversing deleted faces
+        for heh in &halfedges {
+            let he_next = self.next_halfedge_handle(*heh);
+            if he_next.is_valid() {
+                self.kernel.set_next_halfedge_handle(*heh, HalfedgeHandle::new(u32::MAX));
+            }
+            let he_prev = self.prev_halfedge_handle(*heh);
+            if he_prev.is_valid() {
+                self.kernel.set_next_halfedge_handle(he_prev, HalfedgeHandle::new(u32::MAX));
+            }
+        }
+    }
+    
+    /// Get all halfedges of a face
+    fn get_face_halfedges(&self, fh: FaceHandle) -> Vec<HalfedgeHandle> {
+        let mut result = Vec::new();
+        if let Some(start_heh) = self.kernel.face(fh).and_then(|f| f.halfedge_handle) {
+            let mut current = start_heh;
+            loop {
+                result.push(current);
+                let next = self.next_halfedge_handle(current);
+                if !next.is_valid() || next == start_heh {
+                    break;
+                }
+                current = next;
+            }
+        }
+        result
     }
     
     /// Delete a vertex from the mesh

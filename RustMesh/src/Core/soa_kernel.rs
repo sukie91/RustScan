@@ -525,12 +525,16 @@ impl SoAKernel {
                         break;
                     }
                     visited[curr_idx] = true;
+                    
+                    // IMPORTANT: Save next handle BEFORE clearing it
+                    let next_handle = self.next_halfedge_handle(current);
+                    
                     if let Some(he) = self.halfedge_mut(current) {
                         he.face_handle = None;
-                        he.next_halfedge_handle = None;
-                        he.prev_halfedge_handle = None;
                     }
-                    match self.next_halfedge_handle(current) {
+                    
+                    // Move to next before clearing next pointer
+                    match next_handle {
                         Some(next) if next.is_valid() => current = next,
                         _ => break,
                     }

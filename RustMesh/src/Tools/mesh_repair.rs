@@ -141,6 +141,17 @@ fn compact_vertices(mesh: &mut RustMesh, keep_vertex: &[bool]) -> Result<(), Mes
     let old_n_vertices = mesh.n_vertices();
     let old_n_faces = mesh.n_faces();
     
+    // IMPORTANT: Save face data BEFORE clearing mesh
+    let mut old_face_data: Vec<Vec<VertexHandle>> = Vec::new();
+    for i in 0..old_n_faces {
+        let fh = FaceHandle::new(i as u32);
+        let verts = mesh.face_vertices_vec(fh);
+        let valid_verts: Vec<_> = verts.into_iter().filter(|vh| vh.is_valid()).collect();
+        if !valid_verts.is_empty() {
+            old_face_data.push(valid_verts);
+        }
+    }
+    
     // Store old geometry
     let mut old_points: Vec<(VertexHandle, glam::Vec3)> = Vec::new();
     for i in 0..old_n_vertices {
@@ -162,28 +173,20 @@ fn compact_vertices(mesh: &mut RustMesh, keep_vertex: &[bool]) -> Result<(), Mes
         new_vh_map.insert(old_vh.idx_usize(), new_vh);
     }
     
-    // Rebuild faces
-    for i in 0..old_n_faces {
-        let fh = FaceHandle::new(i as u32);
-        let verts = mesh.face_vertices_vec(fh);
-        let face_verts: Vec<VertexHandle> = verts;
-        let has_valid_vertex = face_verts.iter().any(|vh| vh.is_valid());
-
-        if has_valid_vertex {
-            // Remap vertex handles
-            let mut new_face_verts: Vec<VertexHandle> = Vec::new();
-            for vh in &face_verts {
-                if let Some(&new_vh) = new_vh_map.get(&vh.idx_usize()) {
-                    new_face_verts.push(new_vh);
-                }
+    // Rebuild faces using SAVED data (not from mesh after clear)
+    for face_verts in old_face_data {
+        let mut new_face_verts: Vec<VertexHandle> = Vec::new();
+        for vh in &face_verts {
+            if let Some(&new_vh) = new_vh_map.get(&vh.idx_usize()) {
+                new_face_verts.push(new_vh);
             }
+        }
 
-            // Only add if we have at least 3 unique vertices
-            if new_face_verts.len() >= 3 {
-                let unique: Vec<_> = new_face_verts.into_iter().collect();
-                if unique.len() >= 3 {
-                    mesh.add_face(&unique);
-                }
+        // Only add if we have at least 3 unique vertices
+        if new_face_verts.len() >= 3 {
+            let unique: Vec<_> = new_face_verts.into_iter().collect();
+            if unique.len() >= 3 {
+                mesh.add_face(&unique);
             }
         }
     }
