@@ -956,6 +956,6 @@ mod tests {
         let _prop = kernel.add_property::<f32>("custom_float");
 
         // Dynamic property simplified - just verify it compiles
-        assert!(kernel.is_empty());
+        assert_eq!(kernel.n_vertices(), 1);
     }
 }

@@ -8,34 +8,29 @@ use crate::handles::{VertexHandle, HalfedgeHandle, EdgeHandle, FaceHandle};
 /// Vertex-Vertex Circulator: Visit all unique vertices adjacent to a vertex
 pub struct VertexVertexCirculator<'a> {
     mesh: &'a RustMesh,
-    start_vh: VertexHandle,
+    start_heh: HalfedgeHandle,
     current_heh: HalfedgeHandle,
+    first: bool,
 }
 
 impl<'a> Iterator for VertexVertexCirculator<'a> {
     type Item = VertexHandle;
 
     fn next(&mut self) -> Option<Self::Item> {
+        // Check if we've completed the cycle (after first iteration)
+        if !self.first && self.current_heh == self.start_heh {
+            return None;
+        }
+
         // Get the neighbor from current halfedge (it points to the neighbor)
         let next_target = self.mesh.to_vertex_handle(self.current_heh);
-        
-        // Check if we've come back to start vertex (completed the cycle)
-        if next_target == self.start_vh {
-            return None;
-        }
-        
-        // Move to next halfedge around the vertex:
-        // current_heh points to neighbor N1
-        // We want to find the next neighbor N2
-        // Go to opposite (back to start), then next halfedge in the face
-        let opposite = self.mesh.opposite_halfedge_handle(self.current_heh);
-        let next_heh = self.mesh.next_halfedge_handle(opposite);
-        
-        // Check termination
-        if next_heh == self.current_heh || !next_heh.is_valid() {
-            return None;
-        }
-        
+
+        // Move to next outgoing halfedge around the vertex:
+        // Use the same pattern as VertexHalfedgeIter
+        let incoming = self.mesh.opposite_halfedge_handle(self.current_heh);
+        let next_heh = self.mesh.prev_halfedge_handle(incoming);
+
+        self.first = false;
         self.current_heh = next_heh;
         Some(next_target)
     }
@@ -46,8 +41,9 @@ impl<'a> RustMesh {
         let start_heh = self.halfedge_handle(vh)?;
         Some(VertexVertexCirculator {
             mesh: self,
-            start_vh: vh,
+            start_heh,
             current_heh: start_heh,
+            first: true,
         })
     }
 }
@@ -55,32 +51,29 @@ impl<'a> RustMesh {
 /// Vertex-Face Circulator: Visit all faces adjacent to a vertex
 pub struct VertexFaceCirculator<'a> {
     mesh: &'a RustMesh,
-    start_vh: VertexHandle,
+    start_heh: HalfedgeHandle,
     current_heh: HalfedgeHandle,
+    first: bool,
 }
 
 impl<'a> Iterator for VertexFaceCirculator<'a> {
     type Item = FaceHandle;
 
     fn next(&mut self) -> Option<Self::Item> {
+        // Check if we've completed the cycle (after first iteration)
+        if !self.first && self.current_heh == self.start_heh {
+            return None;
+        }
+
         // Get the face from current halfedge
         let fh = self.mesh.face_handle(self.current_heh);
-        
-        // Check if we've come back to start vertex (completed the cycle)
-        let next_target = self.mesh.to_vertex_handle(self.current_heh);
-        if next_target == self.start_vh {
-            return None;
-        }
-        
-        // Move to next halfedge around the vertex
-        let opposite = self.mesh.opposite_halfedge_handle(self.current_heh);
-        let next_heh = self.mesh.next_halfedge_handle(opposite);
-        
-        // Check termination
-        if next_heh == self.current_heh || !next_heh.is_valid() {
-            return None;
-        }
-        
+
+        // Move to next outgoing halfedge around the vertex
+        // Use same pattern as VertexHalfedgeIter
+        let incoming = self.mesh.opposite_halfedge_handle(self.current_heh);
+        let next_heh = self.mesh.prev_halfedge_handle(incoming);
+
+        self.first = false;
         self.current_heh = next_heh;
         fh
     }
@@ -91,8 +84,9 @@ impl<'a> RustMesh {
         let start_heh = self.halfedge_handle(vh)?;
         Some(VertexFaceCirculator {
             mesh: self,
-            start_vh: vh,
+            start_heh,
             current_heh: start_heh,
+            first: true,
         })
     }
 }
@@ -374,19 +368,22 @@ mod tests {
     fn test_vertex_vertex_circulator() {
         let mesh = generate_tetrahedron();
         let v0 = VertexHandle::from_usize(0);
-        
+
         let neighbors: Vec<_> = match mesh.vertex_vertices(v0) {
             Some(c) => c.collect(),
             None => panic!("No circulator for vertex 0"),
         };
-        
+
+        eprintln!("v0 = {:?}, neighbors = {:?}", v0, neighbors);
+
         // Tetrahedron: each vertex has 3 neighbors
         assert_eq!(neighbors.len(), 3, "Expected 3 neighbors, got {:?}", neighbors);
-        
+
         // Verify neighbors are unique and not self
         let mut unique: Vec<_> = neighbors.iter().filter(|&&vh| vh != v0).collect();
         unique.sort();
         unique.dedup();
+        eprintln!("unique (after filter) = {:?}", unique);
         assert_eq!(unique.len(), 3, "All 3 neighbors should be unique and not self");
     }
 

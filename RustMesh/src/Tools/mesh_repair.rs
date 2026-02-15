@@ -106,10 +106,7 @@ fn remap_vertex_in_faces(mesh: &mut RustMesh, old_vh: VertexHandle, new_vh: Vert
     // cause extremely long iterations. Scan all faces by index instead.
     let face_handles: Vec<_> = mesh.faces().collect();
     for fh in face_handles {
-        let verts = match mesh.face_vertices(fh) {
-            Some(v) => v.collect::<Vec<_>>(),
-            None => continue,
-        };
+        let verts = mesh.face_vertices_vec(fh);
 
         if !verts.iter().any(|&v| v == old_vh) {
             continue;
@@ -168,25 +165,24 @@ fn compact_vertices(mesh: &mut RustMesh, keep_vertex: &[bool]) -> Result<(), Mes
     // Rebuild faces
     for i in 0..old_n_faces {
         let fh = FaceHandle::new(i as u32);
-        if let Some(verts) = mesh.face_vertices(fh) {
-            let face_verts: Vec<VertexHandle> = verts.collect();
-            let has_valid_vertex = face_verts.iter().any(|vh| vh.is_valid());
-            
-            if has_valid_vertex {
-                // Remap vertex handles
-                let mut new_face_verts: Vec<VertexHandle> = Vec::new();
-                for vh in &face_verts {
-                    if let Some(&new_vh) = new_vh_map.get(&vh.idx_usize()) {
-                        new_face_verts.push(new_vh);
-                    }
+        let verts = mesh.face_vertices_vec(fh);
+        let face_verts: Vec<VertexHandle> = verts;
+        let has_valid_vertex = face_verts.iter().any(|vh| vh.is_valid());
+
+        if has_valid_vertex {
+            // Remap vertex handles
+            let mut new_face_verts: Vec<VertexHandle> = Vec::new();
+            for vh in &face_verts {
+                if let Some(&new_vh) = new_vh_map.get(&vh.idx_usize()) {
+                    new_face_verts.push(new_vh);
                 }
-                
-                // Only add if we have at least 3 unique vertices
-                if new_face_verts.len() >= 3 {
-                    let unique: Vec<_> = new_face_verts.into_iter().collect();
-                    if unique.len() >= 3 {
-                        mesh.add_face(&unique);
-                    }
+            }
+
+            // Only add if we have at least 3 unique vertices
+            if new_face_verts.len() >= 3 {
+                let unique: Vec<_> = new_face_verts.into_iter().collect();
+                if unique.len() >= 3 {
+                    mesh.add_face(&unique);
                 }
             }
         }
@@ -213,12 +209,11 @@ pub fn remove_degenerate_faces(mesh: &mut RustMesh) -> Result<usize, MeshRepairE
 
     // Check each face for degeneracy
     for fh in mesh.faces() {
-        if let Some(verts) = mesh.face_vertices(fh) {
-            let face_verts: Vec<_> = verts.collect();
-            
-            if is_face_degenerate(mesh, &face_verts) {
-                faces_to_remove.push(fh);
-            }
+        let verts = mesh.face_vertices_vec(fh);
+        let face_verts: Vec<_> = verts;
+
+        if is_face_degenerate(mesh, &face_verts) {
+            faces_to_remove.push(fh);
         }
     }
 
@@ -372,30 +367,27 @@ pub fn fix_winding_order(mesh: &mut RustMesh) -> Result<usize, MeshRepairError> 
 
 /// Compute the normal of a face
 fn compute_face_normal(mesh: &RustMesh, fh: FaceHandle) -> Option<glam::Vec3> {
-    let verts = mesh.face_vertices(fh)?;
-    let verts: Vec<_> = verts.collect();
-    
+    let verts = mesh.face_vertices_vec(fh);
+
     if verts.len() < 3 {
         return None;
     }
-    
+
     let p0 = mesh.point(verts[0])?;
     let p1 = mesh.point(verts[1])?;
     let p2 = mesh.point(verts[2])?;
-    
+
     Some(triangle_normal(p0, p1, p2))
 }
 
 /// Flip the winding order of a face (reverse vertex order)
 fn flip_face_winding(mesh: &mut RustMesh, fh: FaceHandle) -> Result<(), MeshRepairError> {
-    let verts = mesh.face_vertices(fh)
-        .ok_or("Cannot get face vertices")?;
-    let mut face_verts: Vec<_> = verts.collect();
-    
+    let mut face_verts = mesh.face_vertices_vec(fh);
+
     if face_verts.len() < 3 {
         return Err("Face has fewer than 3 vertices".into());
     }
-    
+
     // Reverse the vertex order (but keep first vertex to maintain manifold)
     face_verts.reverse();
     

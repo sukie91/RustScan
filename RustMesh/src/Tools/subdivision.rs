@@ -136,18 +136,7 @@ fn get_face_halfedges(mesh: &RustMesh, fh: FaceHandle) -> Vec<HalfedgeHandle> {
 
 /// Get the vertices of a face
 fn get_face_vertices(mesh: &RustMesh, fh: FaceHandle) -> Vec<VertexHandle> {
-    let mut vertices = Vec::with_capacity(3);
-    if let Some(start_heh) = mesh.face_halfedge_handle(fh) {
-        let mut current = start_heh;
-        loop {
-            vertices.push(mesh.from_vertex_handle(current));
-            current = mesh.next_halfedge_handle(current);
-            if current == start_heh || !current.is_valid() {
-                break;
-            }
-        }
-    }
-    vertices
+    mesh.face_vertices_vec(fh)
 }
 
 /// Get all edges of the mesh
@@ -893,19 +882,7 @@ fn compute_face_point(mesh: &RustMesh, fh: FaceHandle) -> glam::Vec3 {
 
 /// Get all vertices of a face (works for n-gons)
 fn get_face_vertices_polygonal(mesh: &RustMesh, fh: FaceHandle) -> Vec<VertexHandle> {
-    let mut vertices = Vec::new();
-    if let Some(start_heh) = mesh.face_halfedge_handle(fh) {
-        let mut current = start_heh;
-        loop {
-            vertices.push(mesh.from_vertex_handle(current));
-            current = mesh.next_halfedge_handle(current);
-            if current == start_heh || !current.is_valid() {
-                break;
-            }
-        }
-    }
-
-    vertices
+    mesh.face_vertices_vec(fh)
 }
 
 /// Get all halfedges of a face (works for n-gons)
