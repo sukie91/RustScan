@@ -30,6 +30,10 @@ serde = { version = "1.0", features = ["derive"] }
 serde_yaml = "0.9"
 toml = "0.8"
 
+# CLI & JSON
+clap = { version = "4.5", features = ["derive"] }
+serde_json = "1.0"
+
 # 日志
 log = "0.4"
 env_logger = "0.11"
@@ -47,6 +51,10 @@ kiddo = "5.2.1"
 nalgebra = "0.33"
 candle-core = "0.9.2"
 candle-metal = { version = "0.27.1", features = ["mps"] }
+
+# Video decoding
+ffmpeg-next = "8.0"
+lru = "0.12"
 
 [features]
 default = []

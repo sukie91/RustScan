@@ -4,6 +4,7 @@
 //! and utilities for reading/writing SLAM data.
 
 mod dataset;
+pub mod video_decoder;
 #[cfg(feature = "opencv")]
 mod video_loader;
 

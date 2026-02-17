@@ -25,3 +25,4 @@ pub mod pipeline;
 pub mod depth;
 pub mod config;
 pub mod test_utils;
+pub mod cli;
