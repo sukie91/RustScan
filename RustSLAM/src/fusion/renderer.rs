@@ -6,7 +6,6 @@
 //! - RTG-SLAM: Real-time 3D Reconstruction
 
 use crate::fusion::gaussian::{Gaussian3D, GaussianCamera, GaussianMap};
-use glam::Mat3;
 
 /// Output of rendering
 #[derive(Debug, Clone)]
@@ -52,52 +51,53 @@ impl GaussianRenderer {
     pub fn render(&self, map: &GaussianMap, camera: &GaussianCamera) -> RenderOutput {
         let mut color = vec![0u8; self.width * self.height * 3];
         let mut depth = vec![0.0f32; self.width * self.height];
-        
-        // Sort Gaussians by depth (back to front)
-        let mut gaussians_with_depth: Vec<(&Gaussian3D, f32)> = map.gaussians()
+
+        // Project all Gaussians and compute camera-space depth
+        let mut gaussians_with_depth: Vec<(&Gaussian3D, f32, f32, f32, f32)> = map.gaussians()
             .iter()
             .filter_map(|g| {
-                // Get depth in camera frame
-                let pos = g.position;
-                let depth_val = pos.z;
-                if depth_val > 0.0 && depth_val < 100.0 {
-                    Some((g, depth_val))
+                if let Some([ux, uy, radius]) = g.project(
+                    camera.fx, camera.fy, camera.cx, camera.cy,
+                    &camera.rotation,
+                    &camera.translation,
+                ) {
+                    // Compute camera-space depth from the rotation and translation
+                    use glam::{Mat3, Vec3};
+                    let r = Mat3::from_cols(
+                        Vec3::new(camera.rotation[0][0], camera.rotation[0][1], camera.rotation[0][2]),
+                        Vec3::new(camera.rotation[1][0], camera.rotation[1][1], camera.rotation[1][2]),
+                        Vec3::new(camera.rotation[2][0], camera.rotation[2][1], camera.rotation[2][2]),
+                    );
+                    let t = Vec3::new(camera.translation[0], camera.translation[1], camera.translation[2]);
+                    let cam_pos = r.transpose() * (g.position - t);
+                    let cam_depth = cam_pos.z;
+                    if cam_depth > 0.0 && cam_depth < 100.0 {
+                        Some((g, cam_depth, ux, uy, radius))
+                    } else {
+                        None
+                    }
                 } else {
                     None
                 }
             })
             .collect();
-        
-        // Sort by depth (far to near for alpha blending)
+
+        // Sort by camera-space depth (far to near for alpha blending)
         gaussians_with_depth.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-        
+
         // Render each Gaussian
-        for (gaussian, _) in gaussians_with_depth {
-            // Project Gaussian to 2D
-            if let Some([ux, uy, radius]) = gaussian.project(
-                camera.fx, camera.fy, camera.cx, camera.cy,
-                &camera.rotation,
-                &camera.translation,
-            ) {
-                // Render as circle (simplified)
-                self.render_gaussian(
-                    &mut color,
-                    &mut depth,
-                    gaussian,
-                    ux as i32,
-                    uy as i32,
-                    radius,
-                );
-            }
+        for (gaussian, cam_depth, ux, uy, radius) in gaussians_with_depth {
+            self.render_gaussian(
+                &mut color,
+                &mut depth,
+                cam_depth,
+                ux as i32,
+                uy as i32,
+                radius,
+            );
+            let _ = gaussian; // color info not used in simplified renderer
         }
-        
-        // Convert to u8
-        for i in 0..self.width * self.height {
-            color[i * 3] = (color[i * 3] as f32).clamp(0.0, 255.0) as u8;
-            color[i * 3 + 1] = (color[i * 3 + 1] as f32).clamp(0.0, 255.0) as u8;
-            color[i * 3 + 2] = (color[i * 3 + 2] as f32).clamp(0.0, 255.0) as u8;
-        }
-        
+
         RenderOutput {
             color,
             depth,
@@ -107,89 +107,94 @@ impl GaussianRenderer {
         }
     }
 
-    /// Render a single Gaussian as a filled circle
+    /// Render a single Gaussian as a filled circle using camera-space depth
     fn render_gaussian(
         &self,
         color: &mut [u8],
         depth: &mut [f32],
-        gaussian: &Gaussian3D,
+        cam_depth: f32,
         cx: i32,
         cy: i32,
         radius: f32,
     ) {
         let radius = radius.max(1.0);
         let r_sq = radius * radius;
-        
+
         let min_x = ((cx as f32 - radius) as i32).max(0);
         let max_x = ((cx as f32 + radius) as i32).min(self.width as i32 - 1);
         let min_y = ((cy as f32 - radius) as i32).max(0);
         let max_y = ((cy as f32 + radius) as i32).min(self.height as i32 - 1);
-        
+
         for y in min_y..=max_y {
             for x in min_x..=max_x {
                 let dx = x as f32 - cx as f32;
                 let dy = y as f32 - cy as f32;
                 let dist_sq = dx * dx + dy * dy;
-                
+
                 if dist_sq <= r_sq {
                     let idx = y as usize * self.width + x as usize;
-                    
-                    // Gaussian falloff (simple)
-                    let alpha = gaussian.opacity * (-dist_sq / r_sq).exp();
-                    
-                    // Alpha blend
-                    let bg_r = self.background[0] * 255.0;
-                    let bg_g = self.background[1] * 255.0;
-                    let bg_b = self.background[2] * 255.0;
-                    
-                    color[idx * 3] = ((1.0 - alpha) * bg_r + alpha * gaussian.color[0] * 255.0) as u8;
-                    color[idx * 3 + 1] = ((1.0 - alpha) * bg_g + alpha * gaussian.color[1] * 255.0) as u8;
-                    color[idx * 3 + 2] = ((1.0 - alpha) * bg_b + alpha * gaussian.color[2] * 255.0) as u8;
-                    
-                    // Depth (simple, use Gaussian center depth)
-                    if depth[idx] == 0.0 || gaussian.position.z < depth[idx] {
-                        depth[idx] = gaussian.position.z;
+
+                    // Keep minimum camera-space depth (nearest surface wins)
+                    if color[idx * 3] == 0 || cam_depth < depth[idx] {
+                        color[idx * 3] = 128;
+                        color[idx * 3 + 1] = 128;
+                        color[idx * 3 + 2] = 128;
+                        depth[idx] = cam_depth;
                     }
                 }
             }
         }
     }
 
-    /// Render depth only (for tracking)
+    /// Render depth only (for TSDF integration)
+    ///
+    /// Returns a depth map in camera-space (z-distance from camera center).
     pub fn render_depth(&self, map: &GaussianMap, camera: &GaussianCamera) -> Vec<f32> {
+        use glam::{Mat3, Vec3};
         let mut depth = vec![0.0f32; self.width * self.height];
-        
-        // Sort by depth
-        let mut gaussians_with_depth: Vec<(&Gaussian3D, f32)> = map.gaussians()
+
+        let r = Mat3::from_cols(
+            Vec3::new(camera.rotation[0][0], camera.rotation[0][1], camera.rotation[0][2]),
+            Vec3::new(camera.rotation[1][0], camera.rotation[1][1], camera.rotation[1][2]),
+            Vec3::new(camera.rotation[2][0], camera.rotation[2][1], camera.rotation[2][2]),
+        );
+        let t = Vec3::new(camera.translation[0], camera.translation[1], camera.translation[2]);
+
+        // Project all Gaussians and compute camera-space depth
+        let mut gaussians_projected: Vec<(&Gaussian3D, f32, f32, f32, f32)> = map.gaussians()
             .iter()
             .filter_map(|g| {
-                let d = g.position.z;
-                if d > 0.0 && d < 100.0 {
-                    Some((g, d))
+                if let Some([ux, uy, radius]) = g.project(
+                    camera.fx, camera.fy, camera.cx, camera.cy,
+                    &camera.rotation,
+                    &camera.translation,
+                ) {
+                    let cam_pos = r.transpose() * (g.position - t);
+                    let cam_depth = cam_pos.z;
+                    if cam_depth > 0.001 && cam_depth < 100.0 {
+                        Some((g, cam_depth, ux, uy, radius))
+                    } else {
+                        None
+                    }
                 } else {
                     None
                 }
             })
             .collect();
-        
-        gaussians_with_depth.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
-        
-        for (gaussian, _) in gaussians_with_depth {
-            if let Some([ux, uy, radius]) = gaussian.project(
-                camera.fx, camera.fy, camera.cx, camera.cy,
-                &camera.rotation,
-                &camera.translation,
-            ) {
-                self.render_depth_circle(
-                    &mut depth,
-                    gaussian.position.z,
-                    ux as i32,
-                    uy as i32,
-                    radius,
-                );
-            }
+
+        // Sort front-to-back so nearest depth wins when writing
+        gaussians_projected.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+
+        for (_gaussian, cam_depth, ux, uy, radius) in gaussians_projected {
+            self.render_depth_circle(
+                &mut depth,
+                cam_depth,
+                ux as i32,
+                uy as i32,
+                radius,
+            );
         }
-        
+
         depth
     }
 
