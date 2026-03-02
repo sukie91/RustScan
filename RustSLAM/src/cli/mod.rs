@@ -1143,7 +1143,7 @@ fn run_mesh_stage(
         )
         .with_pose(keyframe.pose.rotation(), keyframe.pose.translation());
 
-        let depth = renderer.render_depth(&gaussian.map, &camera);
+        let (depth, color) = renderer.render_depth_and_color(&gaussian.map, &camera);
         let mat = keyframe.pose.to_matrix();
         let flat = [
             mat[0][0], mat[0][1], mat[0][2], mat[0][3],
@@ -1155,6 +1155,7 @@ fn run_mesh_stage(
 
         extractor.integrate_from_gaussians(
             |i| depth[i],
+            Some(&color),
             width,
             height,
             [

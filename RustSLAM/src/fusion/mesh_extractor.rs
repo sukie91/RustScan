@@ -150,6 +150,7 @@ impl MeshExtractor {
     pub fn integrate_from_gaussians<F>(
         &mut self,
         render_depth_fn: F,
+        color: Option<&[[u8; 3]]>,
         width: usize,
         height: usize,
         intrinsics: [f32; 4],
@@ -158,9 +159,13 @@ impl MeshExtractor {
         F: Fn(usize) -> f32,
     {
         let start = Instant::now();
+        let color_fn: Option<Box<dyn Fn(usize) -> Option<[u8; 3]>>> = color.map(|c| {
+            let c = c.to_vec();
+            Box::new(move |i: usize| c.get(i).copied()) as Box<dyn Fn(usize) -> Option<[u8; 3]>>
+        });
         self.volume.integrate_from_gaussians(
             render_depth_fn,
-            None,
+            color_fn.as_ref().map(|f| f.as_ref() as &dyn Fn(usize) -> Option<[u8; 3]>),
             width,
             height,
             intrinsics,
