@@ -19,10 +19,12 @@ pub mod mapping;
 pub mod optimizer;
 pub mod loop_closing;
 pub mod fusion;
+#[cfg(feature = "slam-pipeline")]
 pub mod io;
 pub mod viewer;
 pub mod pipeline;
 pub mod depth;
 pub mod config;
 pub mod test_utils;
+#[cfg(feature = "slam-pipeline")]
 pub mod cli;

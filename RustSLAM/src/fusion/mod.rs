@@ -22,51 +22,46 @@
 //! - mesh_extractor.rs: High-level mesh extraction API
 
 pub mod gaussian;
-pub mod gaussian_init;
 pub mod scene_io;
-pub mod training_checkpoint;
 pub mod renderer;
-pub mod diff_renderer;
-pub mod diff_splat;
 pub mod analytical_backward;
-pub mod autodiff;
 pub mod tiled_renderer;
 pub mod slam_integrator;
 pub mod training_pipeline;
 pub mod tracker;
 pub mod mapper;
-pub mod trainer;
-pub mod complete_trainer;
 pub mod tsdf_volume;
 pub mod marching_cubes;
 pub mod mesh_extractor;
 pub mod mesh_io;
 pub mod mesh_metadata;
+
+#[cfg(feature = "gpu")]
+pub mod gaussian_init;
+#[cfg(feature = "gpu")]
+pub mod training_checkpoint;
+#[cfg(feature = "gpu")]
+pub mod diff_renderer;
+#[cfg(feature = "gpu")]
+pub mod diff_splat;
+#[cfg(feature = "gpu")]
+pub mod autodiff;
+#[cfg(feature = "gpu")]
+pub mod complete_trainer;
+#[cfg(feature = "gpu")]
+pub mod trainer;
+#[cfg(feature = "gpu")]
 pub mod gpu_trainer;
+#[cfg(feature = "gpu")]
+pub mod autodiff_trainer;
 
 pub use gaussian::{Gaussian3D, GaussianMap, GaussianCamera, GaussianState};
-pub use gaussian_init::{
-    GaussianInitConfig,
-    initialize_gaussians_from_map,
-    initialize_trainable_gaussians_from_map,
-};
 pub use scene_io::{SceneMetadata, SceneIoError, save_scene_ply, load_scene_ply};
-pub use training_checkpoint::{
-    TrainingCheckpoint,
-    TrainingCheckpointConfig,
-    TrainingCheckpointManager,
-    TrainingCheckpointError,
-    checkpoint_path as training_checkpoint_path,
-    load_latest_checkpoint as load_latest_training_checkpoint,
-};
 pub use renderer::{GaussianRenderer, RenderOutput};
-pub use diff_renderer::{DiffGaussianRenderer, GaussianTensors, CameraTensors, RenderLoss};
-pub use diff_splat::{TrainableGaussians, DiffSplatRenderer, DiffCamera, DiffRenderOutput, DiffLoss};
 pub use analytical_backward::{
     GaussianRenderRecord, ForwardIntermediate, AnalyticalGradients,
     backward as analytical_backward_pass,
 };
-pub use autodiff::{VarGaussian, VarCamera, VarRenderer, VarOutput, TrueAutodiffTrainer};
 pub use tiled_renderer::{Gaussian, ProjectedGaussian, TiledRenderer, RenderBuffer, densify, prune};
 pub use slam_integrator::{SparseDenseSlam, SlamIntegrator, SlamConfig, KeyFrame, SlamOutput};
 pub use training_pipeline::{
@@ -76,8 +71,6 @@ pub use training_pipeline::{
 };
 pub use tracker::{GaussianTracker, TrackingResult};
 pub use mapper::{GaussianMapper, MapperConfig, MapperUpdateResult};
-pub use trainer::{Trainer, TrainConfig, TrainState};
-pub use complete_trainer::{CompleteTrainer, LrScheduler, TrainingResult as CompleteTrainingResult};
 pub use tsdf_volume::{TsdfVolume, TsdfConfig, Voxel};
 pub use marching_cubes::{Mesh, MeshVertex, MeshTriangle, MarchingCubes};
 pub use mesh_extractor::{MeshExtractor, MeshExtractionConfig};
@@ -91,4 +84,31 @@ pub use mesh_metadata::{
     save_mesh_metadata,
     export_mesh_metadata,
 };
+
+#[cfg(feature = "gpu")]
+pub use gaussian_init::{
+    GaussianInitConfig,
+    initialize_gaussians_from_map,
+    initialize_trainable_gaussians_from_map,
+};
+#[cfg(feature = "gpu")]
+pub use training_checkpoint::{
+    TrainingCheckpoint,
+    TrainingCheckpointConfig,
+    TrainingCheckpointManager,
+    TrainingCheckpointError,
+    checkpoint_path as training_checkpoint_path,
+    load_latest_checkpoint as load_latest_training_checkpoint,
+};
+#[cfg(feature = "gpu")]
+pub use diff_renderer::{DiffGaussianRenderer, GaussianTensors, CameraTensors, RenderLoss};
+#[cfg(feature = "gpu")]
+pub use diff_splat::{TrainableGaussians, DiffSplatRenderer, DiffCamera, DiffRenderOutput, DiffLoss};
+#[cfg(feature = "gpu")]
+pub use autodiff::{VarGaussian, VarCamera, VarRenderer, VarOutput, TrueAutodiffTrainer};
+#[cfg(feature = "gpu")]
+pub use complete_trainer::{CompleteTrainer, LrScheduler, TrainingResult as CompleteTrainingResult};
+#[cfg(feature = "gpu")]
+pub use trainer::{Trainer, TrainConfig, TrainState};
+#[cfg(feature = "gpu")]
 pub use gpu_trainer::{GpuTrainer, GpuTrainerConfig, GpuGaussianBuffer, SyncData, GpuAdamState, GpuTrainerBuilder};
