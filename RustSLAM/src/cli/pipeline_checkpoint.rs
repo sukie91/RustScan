@@ -53,6 +53,15 @@ pub struct SlamCheckpoint {
     pub camera: CameraCheckpoint,
     pub frame_count: usize,
     pub keyframes: Vec<KeyframeCheckpoint>,
+    #[serde(default)]
+    pub map_points: Vec<MapPointCheckpoint>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MapPointCheckpoint {
+    pub position: [f32; 3],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<[f32; 3]>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

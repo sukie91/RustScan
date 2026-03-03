@@ -29,6 +29,7 @@ use glam::{Mat4, Vec3};
 use pipeline_checkpoint::{
     CameraCheckpoint,
     KeyframeCheckpoint,
+    MapPointCheckpoint,
     PipelineCheckpoint,
     PipelineCheckpointError,
     PoseCheckpoint,
@@ -671,7 +672,23 @@ fn run_pipeline(config: &ResolvedConfig) -> Result<PipelineReport, CliError> {
     };
     let camera_count = slam.keyframes.len();
     let gaussian = run_gaussian_stage(slam, config)?;
+
+    // Write Gaussian positions into the SLAM checkpoint as map_points so that
+    // RustViewer can display them without a separate scene.ply load.
     checkpoint_state = update_stage_completion(&config.output, checkpoint_state, StageMarker::Gaussian)
+        .map_err(|err| CliError::Pipeline(format!("Checkpoint save: {err}")))?;
+    if let Some(slam_ck) = checkpoint_state.slam.as_mut() {
+        slam_ck.map_points = gaussian
+            .map
+            .gaussians()
+            .iter()
+            .map(|g| MapPointCheckpoint {
+                position: [g.position.x, g.position.y, g.position.z],
+                color: Some(g.color),
+            })
+            .collect();
+    }
+    save_pipeline_checkpoint(&config.output, &checkpoint_state)
         .map_err(|err| CliError::Pipeline(format!("Checkpoint save: {err}")))?;
     let mesh = run_mesh_stage(gaussian, &config.output, config.mesh_voxel_size)?;
     let _ = update_stage_completion(&config.output, checkpoint_state, StageMarker::Mesh)
@@ -801,6 +818,7 @@ fn save_slam_checkpoint(
         },
         frame_count: slam.frame_count,
         keyframes,
+        map_points: Vec::new(),
     });
 
     save_pipeline_checkpoint(output_dir, &checkpoint)?;
