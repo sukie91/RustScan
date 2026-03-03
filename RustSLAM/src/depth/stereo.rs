@@ -266,9 +266,9 @@ impl StereoMatcher {
     fn aggregate_direction_simple(
         &self,
         cost_volume: &[i32],
-        width: usize,
-        height: usize,
-        num_disp: usize,
+        _width: usize,
+        _height: usize,
+        _num_disp: usize,
     ) -> Vec<i32> {
         // Simplified aggregation - just copy the cost volume
         // Full SGM aggregation would be more expensive

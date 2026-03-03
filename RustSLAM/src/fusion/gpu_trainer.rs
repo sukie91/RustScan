@@ -231,7 +231,7 @@ impl GpuAdamState {
     }
 
     /// Resize state when Gaussians are added/removed
-    pub fn resize(&mut self, new_n: usize) -> candle_core::Result<()> {
+    pub fn resize(&mut self, _new_n: usize) -> candle_core::Result<()> {
         // Simplified: just recreate
         Ok(())
     }
@@ -308,8 +308,8 @@ impl GpuTrainer {
     /// Render Gaussians from camera view (simplified)
     fn render_gaussians(
         &self,
-        camera_pos: &[f32],
-        camera_rot: &[f32],
+        _camera_pos: &[f32],
+        _camera_rot: &[f32],
     ) -> candle_core::Result<Tensor> {
         // Simplified: just return dummy render
         // Full implementation would use tiled rasterization
@@ -320,8 +320,8 @@ impl GpuTrainer {
     /// Compute loss (L1 + SSIM) on GPU
     fn compute_loss(
         &self,
-        rendered: Tensor,
-        target: &[f32],
+        _rendered: Tensor,
+        _target: &[f32],
     ) -> candle_core::Result<f32> {
         // Simplified loss computation
         // Full implementation would compute L1 + SSIM on GPU
@@ -329,7 +329,7 @@ impl GpuTrainer {
     }
 
     /// Adam optimization step on GPU
-    fn adam_step(&mut self, grads: &Tensor) -> candle_core::Result<()> {
+    fn adam_step(&mut self, _grads: &Tensor) -> candle_core::Result<()> {
         // Simplified Adam step
         // Full implementation would update all parameters on GPU
         Ok(())

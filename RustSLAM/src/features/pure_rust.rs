@@ -439,7 +439,7 @@ impl FeatureExtractor for HarrisExtractor {
             return Ok(Vec::new());
         }
 
-        let mut keypoints: Vec<BaseKeyPoint> = self
+        let keypoints: Vec<BaseKeyPoint> = self
             .detector
             .detect(&gray, width, height)
             .into_iter()
@@ -512,7 +512,7 @@ impl FeatureExtractor for FastExtractor {
             return Ok(Vec::new());
         }
 
-        let mut keypoints: Vec<BaseKeyPoint> = self
+        let keypoints: Vec<BaseKeyPoint> = self
             .detector
             .detect(&gray, width, height)
             .into_iter()

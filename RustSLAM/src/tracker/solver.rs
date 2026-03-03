@@ -927,7 +927,7 @@ impl Sim3Solver {
 
     /// Compute scale between two point sets
     fn compute_scale(&self, pts1: &[[f32; 3]], c1: [f32; 3], pts2: &[[f32; 3]], c2: [f32; 3]) -> f32 {
-        let n = pts1.len() as f32;
+        let _n = pts1.len() as f32;
         
         let mut d1_sq = 0.0f32;
         let mut d2_sq = 0.0f32;

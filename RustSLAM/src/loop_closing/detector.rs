@@ -2,8 +2,7 @@
 //!
 //! This module implements loop detection based on Bag of Words (BoW).
 
-use crate::core::{Map, KeyFrame, SE3};
-use crate::features::Match;
+use crate::core::{Map, SE3};
 use crate::features::base::ORB_DESCRIPTOR_SIZE;
 use nalgebra::{Matrix3, Vector3};
 use std::collections::HashMap;

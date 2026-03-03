@@ -21,20 +21,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if !cfg!(feature = "image") {
         eprintln!("This example requires the `image` feature to load dataset images.");
-        eprintln!("Please run with: cargo run --example e2e_slam_to_mesh --features image,opencv");
-        return Ok(());
-    }
-    if !cfg!(feature = "opencv") {
-        eprintln!("This example requires the `opencv` feature for ORB feature extraction.");
-        eprintln!("Please run with: cargo run --example e2e_slam_to_mesh --features image,opencv");
+        eprintln!("Please run with: cargo run --example e2e_slam_to_mesh --features image");
         return Ok(());
     }
 
+    // Note: This example uses pure Rust feature extraction (Harris/FAST)
+    // OpenCV is optional but not required
+
     // Configuration
-    let dataset_path = PathBuf::from("data/rgbd_dataset_freiburg1_xyz");
-    let output_dir = PathBuf::from("output");
-    let max_frames = 100;  // Process at most 100 frames for demo
-    let keyframe_interval = 5;  // Add keyframe every 5 frames
+    let dataset_path = PathBuf::from("../test_data/tum/rgbd_dataset_freiburg1_xyz");
+    let output_dir = PathBuf::from("../test_output_tum");
+    let max_frames = 50;  // Process at most 50 frames for demo
+    let keyframe_interval = 3;  // Add keyframe every 3 frames
 
     // Create output directory
     fs::create_dir_all(&output_dir)?;

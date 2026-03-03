@@ -5,7 +5,7 @@
 //! - Geometric verification with RANSAC + PnP
 //! - SIMD acceleration for descriptor distance
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::cmp::Ordering;
 
 /// Inverted index for efficient BoW-based frame retrieval
@@ -165,7 +165,7 @@ impl GeometricVerifier {
     /// Random sample indices
     fn random_sample(&self, len: usize, count: usize) -> Vec<usize> {
         use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
+        use std::hash::Hasher;
 
         let mut selected = Vec::new();
         let mut hasher = DefaultHasher::new();
@@ -188,7 +188,7 @@ impl GeometricVerifier {
     /// Solve PnP for selected points (simplified)
     fn solve_pnp_selected(
         &self,
-        matches: &[([f32; 2], [f32; 2], [f32; 3])],
+        _matches: &[([f32; 2], [f32; 2], [f32; 3])],
         indices: &[usize],
     ) -> Option<([[f32; 3]; 3], [f32; 3])> {
         if indices.len() < 6 {

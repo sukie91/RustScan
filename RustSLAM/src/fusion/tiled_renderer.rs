@@ -9,8 +9,6 @@
 //! 3. Depth sorting
 //! 4. Alpha blending
 
-use candle_core::{Tensor, Device, DType, Var};
-use std::collections::VecDeque;
 
 /// A single Gaussian with all parameters
 #[derive(Debug, Clone)]
@@ -109,8 +107,8 @@ impl TiledRenderer {
         gaussians: &[Gaussian],
         fx: f32,
         fy: f32,
-        cx: f32,
-        cy: f32,
+        _cx: f32,
+        _cy: f32,
         rotation: &[[f32; 3]; 3],
         translation: &[f32; 3],
     ) -> Vec<ProjectedGaussian> {
@@ -208,7 +206,7 @@ impl TiledRenderer {
         translation: &[f32; 3],
     ) -> RenderBuffer {
         // Project to 2D
-        let mut projected = self.project_gaussians(gaussians, fx, fy, cx, cy, rotation, translation);
+        let projected = self.project_gaussians(gaussians, fx, fy, cx, cy, rotation, translation);
         
         // Initialize output buffers
         let mut color_buf = vec![0.0f32; self.width * self.height * 3];
@@ -334,7 +332,7 @@ impl RenderBuffer {
 
 /// Densification - add new Gaussians
 pub fn densify(gaussians: &mut Vec<Gaussian>, grads: &[f32], threshold: f32) {
-    let n = gaussians.len();
+    let _n = gaussians.len();
     let mut new_gaussians = Vec::new();
     
     for (i, g) in gaussians.iter().enumerate() {

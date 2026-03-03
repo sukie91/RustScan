@@ -8,7 +8,7 @@
 //! - PGSR (Planar-based Gaussian Splatting Reconstruction)
 
 use std::collections::HashMap;
-use glam::{Vec3, Mat3, Mat4};
+use glam::{Vec3, Mat4};
 
 /// A 3D voxel cell in the TSDF volume
 #[derive(Debug, Clone)]
@@ -298,6 +298,16 @@ impl TsdfVolume {
     /// Get number of active voxels
     pub fn num_voxels(&self) -> usize {
         self.voxels.len()
+    }
+
+    /// Iterate over all active voxels (sparse iteration)
+    pub fn voxels_iter(&self) -> impl Iterator<Item = ((i32, i32, i32), &Voxel)> {
+        self.voxels.iter().map(|(k, v)| (*k, v))
+    }
+
+    /// Get active voxel positions (for sparse marching cubes)
+    pub fn active_voxel_positions(&self) -> Vec<(i32, i32, i32)> {
+        self.voxels.keys().copied().collect()
     }
 
     /// Clear the volume

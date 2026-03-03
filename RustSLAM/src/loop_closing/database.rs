@@ -85,7 +85,7 @@ impl KeyFrameDatabase {
     /// Vector of (keyframe_id, shared_word_count) sorted by count
     pub fn get_candidates(&self, word_ids: &[u32], min_shared_words: usize) -> Vec<(u64, usize)> {
         let inverted = self.inverted_index.read().unwrap();
-        let entries = self.entries.read().unwrap();
+        let _entries = self.entries.read().unwrap();
 
         // Count shared words for each keyframe
         let mut shared_counts: HashMap<u64, usize> = HashMap::new();
@@ -142,7 +142,7 @@ impl KeyFrameDatabase {
         let entries = self.entries.read().unwrap();
         let mut results = Vec::new();
 
-        for (kf_id, shared_count) in candidates {
+        for (kf_id, _shared_count) in candidates {
             // Skip current keyframe and immediate neighbors
             if kf_id == current_id {
                 continue;

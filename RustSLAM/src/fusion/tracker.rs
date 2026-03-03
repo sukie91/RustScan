@@ -6,7 +6,7 @@
 use crate::fusion::gaussian::{GaussianMap, GaussianCamera};
 use crate::fusion::renderer::GaussianRenderer;
 use crate::core::SE3;
-use glam::{Mat3, Vec3};
+use glam::Vec3;
 
 /// Tracking result
 #[derive(Debug, Clone)]

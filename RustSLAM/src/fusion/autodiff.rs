@@ -4,7 +4,6 @@
 //! The key is using Var for gradient tracking and calling backward() on the loss.
 
 use candle_core::{Tensor, Device, DType, Var};
-use std::sync::Arc;
 
 /// Trainable Gaussian parameters with TRUE gradient tracking
 /// 
@@ -206,7 +205,7 @@ impl VarRenderer {
         let _v = y.broadcast_mul(&fy_t)?.broadcast_div(&z_safe)?.broadcast_add(&cy_t)?;
 
         // Scale by depth
-        let scale_x = scale.narrow(1, 0, 1)?.squeeze(1)?.broadcast_div(&z)?;
+        let _scale_x = scale.narrow(1, 0, 1)?.squeeze(1)?.broadcast_div(&z)?;
         let _scale_y = scale.narrow(1, 1, 1)?.squeeze(1)?.broadcast_div(&z)?;
 
         // Weights

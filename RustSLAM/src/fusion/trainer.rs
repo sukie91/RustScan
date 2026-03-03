@@ -6,9 +6,8 @@
 //! - Adaptive opacity pruning
 //! - Training loop with checkpointing
 
-use candle_core::{Tensor, Device, DType, Var};
-use std::sync::Arc;
-use crate::fusion::diff_splat::{TrainableGaussians, DiffSplatRenderer, DiffCamera, DiffRenderOutput, DiffLoss};
+use candle_core::{Tensor, Device, Var};
+use crate::fusion::diff_splat::{TrainableGaussians, DiffSplatRenderer, DiffCamera};
 
 /// Training configuration
 #[derive(Debug, Clone)]

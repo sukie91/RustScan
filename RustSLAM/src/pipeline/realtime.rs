@@ -264,14 +264,14 @@ impl Drop for RealtimePipeline {
 
 /// Tracking thread main function
 fn tracking_thread_main<D: Dataset>(
-    mut dataset: D,
+    dataset: D,
     track_tx: Sender<TrackingMessage>,
     stop_flag: Arc<AtomicBool>,
     resume_frame: Option<usize>,
 ) {
     let camera = dataset.camera();
     let mut vo = crate::tracker::VisualOdometry::new(camera);
-    let mut skip_until = resume_frame.unwrap_or(0);
+    let skip_until = resume_frame.unwrap_or(0);
 
     for frame_result in dataset.frames() {
         if stop_flag.load(Ordering::Relaxed) {

@@ -3,7 +3,7 @@
 //! This module implements a visual vocabulary for efficient loop detection.
 //! Based on ORB-SLAM3's BoW approach.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
@@ -203,7 +203,7 @@ impl Vocabulary {
         let mut num_images = 0u32;
         let mut num_words = 0usize;
         let mut words = Vec::new();
-        let mut nodes = HashMap::new();
+        let nodes = HashMap::new();
 
         for line in reader.lines() {
             let line = line?;

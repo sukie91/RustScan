@@ -3,8 +3,7 @@
 //! This module provides GPU-accelerated differentiable rendering
 //! for 3D Gaussian Splatting using Candle with Metal MPS backend.
 
-use candle_core::{Tensor, Device, DType, Shape};
-use std::sync::Arc;
+use candle_core::{Tensor, Device};
 
 use crate::fusion::tiled_renderer::{Gaussian, RenderBuffer, TiledRenderer};
 

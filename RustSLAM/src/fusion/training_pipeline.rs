@@ -8,7 +8,6 @@
 //! - SSIM loss
 //! - Progressive training
 
-use candle_core::{Tensor, Device, DType, Var};
 use std::path::{Path, PathBuf};
 use crate::fusion::scene_io::{save_scene_ply, SceneIoError, SceneMetadata};
 use crate::fusion::tiled_renderer::{Gaussian, TiledRenderer, RenderBuffer};
@@ -287,7 +286,7 @@ pub fn compute_ssim_loss(
     let c1 = 0.01_f32.powi(2);
     let c2 = 0.03_f32.powi(2);
     
-    let mut ssim_total = 0.0f32;
+    let _ssim_total = 0.0f32;
     
     // Compute means
     let mut mu_pred = 0.0f32;

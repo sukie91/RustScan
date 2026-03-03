@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, RwLock};
 use glam::Vec3;
 
-use crate::core::{Camera, Frame, FrameFeatures, KeyFrame, Map, MapPoint, SE3};
+use crate::core::{Camera, KeyFrame, Map, MapPoint, SE3};
 use crate::optimizer::ba::{BundleAdjuster, BACamera, BALandmark, BAObservation};
 
 /// Configuration for Local Mapping
@@ -291,7 +291,7 @@ impl LocalMapping {
             
             // Find corresponding feature in kf2 (simplified - in real system use matching)
             // For now, create a simple triangulated point based on position
-            let kp2_opt = features2.keypoints.get(i);
+            let _kp2_opt = features2.keypoints.get(i);
             
             // Calculate simple triangulation
             // This is a simplified version - real implementation would use DLT
@@ -362,7 +362,7 @@ impl LocalMapping {
         if let Some(ref shared) = self.map {
             let map = shared.read().unwrap();
             for &kf_id in &local_kfs {
-                if let Some(kf) = map.get_keyframe(kf_id) {
+                if let Some(_kf) = map.get_keyframe(kf_id) {
                     // Get camera intrinsics (use default if not available)
                     let (fx, fy, cx, cy) = if let Some(ref cam) = self.camera {
                         (cam.focal.x as f64, cam.focal.y as f64, cam.principal.x as f64, cam.principal.y as f64)
@@ -428,7 +428,7 @@ impl LocalMapping {
         let result = adjuster.optimize(self.config.local_ba_iterations);
         
         match result {
-            Ok((cameras, landmarks)) => {
+            Ok((_cameras, landmarks)) => {
                 // Update map points with optimized positions
                 if let Some(ref shared) = self.map {
                     let mut map = shared.write().unwrap();
@@ -554,6 +554,7 @@ impl Default for LocalMapping {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::{Frame, FrameFeatures};
 
     #[test]
     fn test_config_default() {

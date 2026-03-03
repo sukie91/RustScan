@@ -497,7 +497,7 @@ impl MapViewer {
             
             // Write simple PPM format (easier to debug without dependencies)
             // PPM format: P6 width height maxval\n followed by RGB data
-            let mut header = format!("P6\n{} {}\n255\n", self.width, self.height);
+            let header = format!("P6\n{} {}\n255\n", self.width, self.height);
             file.write_all(header.as_bytes()).map_err(|e| e.to_string())?;
             
             // Convert RGBA to RGB for PPM

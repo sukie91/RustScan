@@ -7,9 +7,8 @@
 //! - Classify Gaussians as Stable/Unstable
 //! - Only optimize unstable Gaussians
 
-use crate::fusion::gaussian::{Gaussian3D, GaussianMap, GaussianState};
+use crate::fusion::gaussian::{Gaussian3D, GaussianMap};
 use crate::fusion::renderer::GaussianRenderer;
-use std::collections::HashSet;
 
 /// Configuration for Gaussian mapping
 #[derive(Debug, Clone)]
@@ -112,7 +111,7 @@ impl GaussianMapper {
         self.frame_count += 1;
         
         let mut added = 0;
-        let mut pruned = 0;
+        let pruned = 0;
         
         // 1. Always add Gaussians for first few frames, then periodically
         if self.frame_count <= 5 || self.frame_count % self.config.densify_interval == 0 {
@@ -210,8 +209,8 @@ impl GaussianMapper {
     fn classify_gaussians(
         &self,
         depth: &[f32],
-        width: usize,
-        height: usize,
+        _width: usize,
+        _height: usize,
         fx: f32,
         fy: f32,
         cx: f32,
@@ -226,8 +225,8 @@ impl GaussianMapper {
         let rendered_depth = self.renderer.render_depth(&self.map, &camera);
         
         // Compare rendered vs observed depth
-        let mut unstable_ids: Vec<usize> = Vec::new();
-        let mut stable_count = 0;
+        let _unstable_ids: Vec<usize> = Vec::new();
+        let stable_count = 0;
         
         for i in 0..rendered_depth.len() {
             let rend_d = rendered_depth[i];

@@ -6,7 +6,6 @@
 use std::path::{Path, PathBuf};
 use std::fs::File;
 use std::io::{self, BufRead, BufReader};
-use std::collections::HashMap;
 
 use glam::{Vec3, Quat};
 use serde::{Deserialize, Serialize};
@@ -341,13 +340,13 @@ impl TumRgbdDataset {
         // Parse association files
         let color_entries = parse_association_file(&rgb_file)?
             .into_iter()
-            .map(|(ts, fname)| (ts, root.join("rgb").join(fname)))
+            .map(|(ts, fname)| (ts, root.join(fname)))
             .collect::<Vec<_>>();
 
         let depth_entries = if depth_file.exists() && config.load_depth {
             parse_association_file(&depth_file)?
                 .into_iter()
-                .map(|(ts, fname)| (ts, root.join("depth").join(fname)))
+                .map(|(ts, fname)| (ts, root.join(fname)))
                 .collect::<Vec<_>>()
         } else {
             Vec::new()

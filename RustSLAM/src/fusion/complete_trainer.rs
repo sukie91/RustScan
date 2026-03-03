@@ -270,10 +270,10 @@ impl CompleteTrainer {
         target_color: &[f32],
         target_depth: &[f32],
         n: usize,
-        pos_data: &[f32],
-        scale_data: &[f32],
-        op_data: &[f32],
-        color_data: &[f32],
+        _pos_data: &[f32],
+        _scale_data: &[f32],
+        _op_data: &[f32],
+        _color_data: &[f32],
     ) -> candle_core::Result<(f32, Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>)> {
         // Forward pass with intermediates
         let (output, intermediate) = self.renderer.render_with_intermediates(gaussians, camera)?;
