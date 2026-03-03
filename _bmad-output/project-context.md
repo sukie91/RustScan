@@ -1,10 +1,10 @@
 ---
 project_name: 'RustScan'
 user_name: ' 飞哥'
-date: '2026-02-16'
-sections_completed: ['technology_stack', 'language_rules', 'architecture_rules', 'testing_rules', 'code_quality_rules', 'workflow_rules', 'critical_rules']
+date: '2026-03-01'
+sections_completed: ['technology_stack', 'language_rules', 'architecture_rules', 'cli_config_rules', 'video_io_rules', 'mesh_extraction_rules', 'testing_rules', 'code_quality_rules', 'workflow_rules', 'critical_rules']
 status: 'complete'
-rule_count: 85
+rule_count: 98
 optimized_for_llm: true
 ---
 
@@ -45,6 +45,16 @@ _This file contains critical rules and patterns that AI agents must follow when 
 
 **Build Tools:**
 - bindgen 0.69 (C/C++ bindings)
+
+**Video I/O:**
+- ffmpeg-next 8.0 (video decoding with VideoToolbox HW accel)
+- lru 0.12 (frame cache)
+- sysinfo 0.30 (system info)
+
+**CLI:**
+- clap 4.5 (derive macros for CLI args)
+- serde_json 1.0 (JSON output)
+- toml 0.8 (config file parsing)
 
 ## Critical Implementation Rules
 
@@ -133,6 +143,84 @@ _This file contains critical rules and patterns that AI agents must follow when 
 - Parameterize poses as SE3 (not Euler angles)
 - Use robust kernels (Huber) for outlier rejection
 - Fix first pose to avoid gauge freedom
+
+### CLI & Configuration Rules
+
+**CLI Implementation (clap):**
+- Use `#[derive(Parser)]` for CLI argument structs
+- Provide `#[command(name, version, about)]` metadata
+- Use `#[arg(long, value_name = "FILE")]` for named arguments
+- Implement `ValueEnum` for enum arguments (OutputFormat, LogLevel)
+- Always provide `Default` implementations for config structs
+
+**Configuration File Handling:**
+- Use TOML format for configuration files (`rustscan.toml`)
+- Implement `serde::Deserialize` with `#[serde(default, deny_unknown_fields)]`
+- CLI arguments MUST override config file settings
+- Provide validation methods that return `ValidationErrors` (Vec<String>)
+
+**Parameter Validation Pattern:**
+```rust
+impl TrackerParams {
+    pub fn validate(&self) -> ValidationErrors {
+        let mut errs = Vec::new();
+        if self.max_features == 0 {
+            errs.push("tracker.max_features must be > 0".into());
+        }
+        // ... more validations
+        errs
+    }
+}
+```
+
+**Error Types for CLI:**
+- Use `thiserror` for custom error types
+- Provide `ExitCode` returns (0=success, 1=user error, 2=system error)
+- Include recovery suggestions in error messages
+
+### Video I/O Rules
+
+**Video Decoder Configuration:**
+- Default LRU cache capacity: 100 frames
+- Prefer hardware acceleration (`prefer_hardware: true`)
+- Support formats: MP4, MOV, HEVC (H.264/H.265)
+- Hardware decoder: `h264_videotoolbox`, `hevc_videotoolbox` (macOS)
+
+**Frame Cache Behavior:**
+- Forward seeking: O(1) from cache or sequential decode
+- Backward seeking: O(n) - requires full decoder reset (no keyframe seeking)
+- Use `Arc<Vec<u8>>` for frame data to avoid copies
+- Frame cache capacity configurable via `--video-cache-capacity`
+
+**Error Handling for Video:**
+- Define `VideoError` enum with `thiserror`
+- Validate file existence, format, codec before decoding
+- Provide clear error messages for unsupported formats
+- Hardware fallback: Log when HW accel fails and SW decoder used
+
+### Mesh Extraction Rules
+
+**TSDF Volume Fusion:**
+- Voxel size controls mesh resolution (default: 0.01m = 1cm)
+- Truncation distance: typically 3-5x voxel size
+- Division guards required: use `.max(1e-8)` for division operations
+- Integrate depth frames from Gaussian rendering
+
+**Marching Cubes:**
+- Full 256-case lookup table implemented
+- Color interpolation from TSDF volume
+- Output: vertices with positions and colors, triangle indices
+
+**Mesh Post-Processing:**
+- Cluster filtering: Remove isolated triangles (floaters)
+- Normal smoothing: Improve mesh appearance
+- Export formats: OBJ (1-based indexing), PLY (0-based indexing)
+
+**Mesh Metadata (JSON):**
+- Bounding box (min, max)
+- Vertex/face counts
+- Processing timings
+- TSDF configuration
 
 ### Testing Rules
 
@@ -283,6 +371,14 @@ _This file contains critical rules and patterns that AI agents must follow when 
 - Reason: Libraries should let callers decide how to handle errors
 - Only panic for truly unrecoverable programmer errors
 
+❌ **NEVER use Euclidean distance for binary descriptor matching**
+- Reason: Binary descriptors (BRIEF, ORB) require Hamming distance
+- Use `HammingMatcher` for binary descriptors, `KnnMatcher` for float descriptors
+
+❌ **NEVER forget division guards in TSDF operations**
+- Reason: Division by near-zero causes NaN propagation
+- Always use `.max(1e-8)` or similar guards
+
 **Edge Cases to Handle:**
 
 ⚠️ **Empty meshes and degenerate cases:**
@@ -367,4 +463,4 @@ _This file contains critical rules and patterns that AI agents must follow when 
 - Default: Codex CLI
 - Fallback: Claude Code
 
-Last Updated: 2026-02-16
+Last Updated: 2026-03-01

@@ -1,77 +1,84 @@
 # RustScan Documentation Index
 
-Welcome to the RustScan documentation. This index provides a comprehensive guide to all available documentation for the RustScan project.
+**Version:** 0.1.0 | **Updated:** 2026-03-01 | **Status:** Active Development
+
+---
+
+## Quick Navigation
+
+| For New Users | For Contributors | For Researchers |
+|---------------|------------------|-----------------|
+| [Project Overview](project-overview.md) | [Development Guide](DEVELOPMENT.md) | [Architecture](ARCHITECTURE.md) |
+| [Getting Started](#getting-started) | [API Reference](API.md) | [RustSLAM Design](RustSLAM-DESIGN.md) |
+
+---
 
 ## Project Overview
 
-RustScan is a pure Rust implementation of 3D scanning algorithms, comprising two main libraries:
+RustScan is a **pure Rust implementation of 3D scanning algorithms** for generating 3D meshes from video input.
 
-- **RustMesh**: A mesh processing library (Rust port of OpenMesh)
-- **RustSLAM**: A Visual SLAM library with 3D Gaussian Splatting support
+### Key Components
 
-**Version**: 0.1.0
-**Language**: Rust (Edition 2021)
-**License**: MIT
+| Library | Description | Status |
+|---------|-------------|--------|
+| [**RustMesh**](RustMesh-README.md) | SIMD-accelerated mesh processing (OpenMesh port) | ~60% complete |
+| [**RustSLAM**](RustSLAM-README.md) | Visual SLAM with 3D Gaussian Splatting | ~85% complete |
 
-## Quick Start
+### Pipeline Overview
 
-- [README](README.md) - Project overview and quick start guide
-- [DEVELOPMENT](DEVELOPMENT.md) - Development setup and workflow
-- [CLAUDE](CLAUDE.md) - Claude Code integration guide
+```
+iPhone Video (MP4/MOV/HEVC)
+    ↓ Hardware Decoding (VideoToolbox)
+Frame Extraction
+    ↓ Feature Extraction (ORB/Harris/FAST)
+Visual Odometry
+    ↓ Bundle Adjustment
+Sparse Map + Camera Poses
+    ↓ 3D Gaussian Splatting Training
+Dense 3DGS Scene
+    ↓ TSDF Volume + Marching Cubes
+Mesh Export (OBJ/PLY + JSON Metadata)
+```
 
-## Core Documentation
+---
 
-### Architecture & Design
+## Documentation Structure
 
-- [ARCHITECTURE](ARCHITECTURE.md) - System architecture and component overview
-- [RustSLAM Design](RustSLAM-DESIGN.md) - Detailed RustSLAM design document
+### Core Documentation
 
-### API Reference
+| Document | Description |
+|----------|-------------|
+| [Project Overview](project-overview.md) | Project summary, statistics, technology stack |
+| [Source Tree Analysis](source-tree-analysis.md) | Complete source code structure and organization |
+| [Architecture](ARCHITECTURE.md) | System architecture and component overview |
+| [API Reference](API.md) | Complete API documentation for both libraries |
+| [Development Guide](DEVELOPMENT.md) | Building, testing, and contributing |
 
-- [API Reference](API.md) - Complete API documentation for both libraries
-  - RustMesh API
-  - RustSLAM API
-  - Common patterns and examples
+### Component Documentation
 
-### Development
+| Document | Description |
+|----------|-------------|
+| [RustMesh README](RustMesh-README.md) | RustMesh-specific documentation |
+| [RustSLAM README](RustSLAM-README.md) | RustSLAM-specific documentation |
+| [RustSLAM Design](RustSLAM-DESIGN.md) | Detailed design decisions |
+| [RustSLAM ToDo](RustSLAM-ToDo.md) | Development roadmap |
 
-- [Development Guide](DEVELOPMENT.md) - Building, testing, and contributing
-  - Prerequisites and installation
-  - Build instructions
-  - Testing strategies
-  - Running examples
-  - Debugging and profiling
-  - Code style guidelines
+### Project Planning
 
-## Component Documentation
+| Document | Description |
+|----------|-------------|
+| [ROADMAP](../ROADMAP.md) | Project roadmap and future plans |
+| [CLAUDE](../CLAUDE.md) | Claude Code integration guide |
 
-### RustMesh
-
-- [RustMesh README](RustMesh-README.md) - RustMesh-specific documentation
-- **Key Features**:
-  - Half-edge data structure with SoA layout
-  - Mesh I/O (OFF, OBJ, PLY, STL)
-  - Decimation, subdivision, smoothing
-  - Hole filling and mesh repair
-
-### RustSLAM
-
-- [RustSLAM README](RustSLAM-README.md) - RustSLAM-specific documentation
-- [RustSLAM Design](RustSLAM-DESIGN.md) - Architecture and design decisions
-- [RustSLAM ToDo](RustSLAM-ToDo.md) - Development roadmap and tasks
-- **Key Features**:
-  - Visual Odometry (VO)
-  - Bundle Adjustment (BA)
-  - Loop Closing
-  - 3D Gaussian Splatting
-  - Mesh extraction (TSDF + Marching Cubes)
-
-## Project Planning
-
-- [ROADMAP](ROADMAP.md) - Project roadmap and future plans
-- [RustSLAM ToDo](RustSLAM-ToDo.md) - Detailed task list and progress tracking
+---
 
 ## Getting Started
+
+### Prerequisites
+
+- **Rust**: Edition 2021 (install via [rustup](https://rustup.rs/))
+- **Platform**: macOS (Apple Silicon recommended)
+- **FFmpeg**: For video decoding
 
 ### Installation
 
@@ -87,208 +94,141 @@ cd RustMesh && cargo build --release
 cd ../RustSLAM && cargo build --release
 ```
 
-### Running Examples
+### Quick Test
 
 ```bash
-# RustMesh examples
-cd RustMesh
-cargo run --example smart_handles_demo
+# Run RustSLAM tests (287 tests)
+cd RustSLAM && cargo test --lib
 
-# RustSLAM examples
-cd RustSLAM
-cargo run --release --example run_vo
+# Run CLI
+cargo run --release -- --input video.mp4 --output ./results
+
+# Run example
+cargo run --release --example e2e_slam_to_mesh
 ```
 
-### Running Tests
+### Usage Examples
 
-```bash
-# Test RustMesh
-cd RustMesh && cargo test
+```rust
+// RustMesh: Create and manipulate meshes
+use rustmesh::{RustMesh, Vec3};
 
-# Test RustSLAM
-cd RustSLAM && cargo test
+let mut mesh = RustMesh::new();
+let v0 = mesh.add_vertex(Vec3::new(0.0, 0.0, 0.0));
+let v1 = mesh.add_vertex(Vec3::new(1.0, 0.0, 0.0));
+let v2 = mesh.add_vertex(Vec3::new(0.0, 1.0, 0.0));
+mesh.add_face(&[v0, v1, v2]);
+
+// RustSLAM: Use SE3 poses
+use rustslam::{SE3, VisualOdometry};
+let pose = SE3::identity();
 ```
 
-## Documentation by Topic
-
-### For New Users
-
-1. Start with [README](README.md) for project overview
-2. Read [ARCHITECTURE](ARCHITECTURE.md) to understand the system design
-3. Follow [DEVELOPMENT](DEVELOPMENT.md) to set up your environment
-4. Explore [API Reference](API.md) for code examples
-
-### For Contributors
-
-1. Read [DEVELOPMENT](DEVELOPMENT.md) for workflow and guidelines
-2. Check [ROADMAP](ROADMAP.md) for planned features
-3. Review [RustSLAM ToDo](RustSLAM-ToDo.md) for specific tasks
-4. Follow code style guidelines in [DEVELOPMENT](DEVELOPMENT.md)
-
-### For Researchers
-
-1. Read [ARCHITECTURE](ARCHITECTURE.md) for system overview
-2. Study [RustSLAM Design](RustSLAM-DESIGN.md) for algorithm details
-3. Review [API Reference](API.md) for implementation details
-4. Check [ROADMAP](ROADMAP.md) for research directions
-
-## Key Concepts
-
-### RustMesh Concepts
-
-- **Half-Edge Data Structure**: Efficient mesh representation
-- **SoA Layout**: Structure of Arrays for cache efficiency
-- **Smart Handles**: Type-safe mesh element references
-- **Circulators**: Efficient mesh traversal
-
-### RustSLAM Concepts
-
-- **Visual Odometry**: Camera pose estimation from images
-- **Bundle Adjustment**: Global optimization of poses and 3D points
-- **Loop Closing**: Detecting and correcting drift
-- **3D Gaussian Splatting**: Dense 3D reconstruction
-- **TSDF Fusion**: Volumetric integration
-- **Marching Cubes**: Mesh extraction from volumes
+---
 
 ## Technology Stack
 
 ### Core Dependencies
 
-- **glam**: SIMD-accelerated math library
-- **nalgebra**: Linear algebra
-- **rayon**: Data parallelism
-- **serde**: Serialization
+| Category | Library | Purpose |
+|----------|---------|---------|
+| Math | `glam` | SIMD-accelerated 3D math |
+| GPU | `candle-metal` | Apple Metal acceleration |
+| Video | `ffmpeg-next` | Hardware video decoding |
+| Parallelism | `rayon` | Data parallelism |
+| CLI | `clap` | Command-line interface |
+| BA | `apex-solver` | Bundle adjustment |
 
-### RustMesh Dependencies
+### Build System
 
-- **criterion**: Benchmarking
-- **byteorder**: Binary I/O
+- **Build Tool**: Cargo
+- **Test Framework**: `cargo test`
+- **Benchmark**: Criterion
+- **Profile**: Release with LTO, opt-level 3
 
-### RustSLAM Dependencies
+---
 
-- **apex-solver**: Bundle adjustment
-- **candle-core/candle-metal**: GPU acceleration
-- **kiddo**: KD-Tree for KNN matching
-- **opencv** (optional): Image processing
-- **tch** (optional): Deep learning
+## Project Statistics
 
-## Build Profiles
+| Metric | Value |
+|--------|-------|
+| Total Rust Files | 187 |
+| Total Lines of Code | ~27,000 |
+| Examples | 32 |
+| Tests | 287+ (all passing) |
+| Documentation Files | 12 |
 
-### Release (Optimized)
+---
 
-```bash
-cargo build --release
-```
+## Key Concepts
 
-- LTO enabled
-- Single codegen unit
-- Maximum optimization (opt-level 3)
-- Stripped symbols
+### RustMesh Concepts
 
-### Development (Fast Compilation)
+- **Half-Edge Data Structure**: Efficient mesh representation with O(1) adjacency queries
+- **SoA Layout**: Structure of Arrays for SIMD cache efficiency
+- **Smart Handles**: Type-safe mesh element references
+- **Circulators**: Efficient mesh traversal patterns
 
-```bash
-cargo build
-```
+### RustSLAM Concepts
 
-- Basic optimization (opt-level 1)
-- Minimal debug info
+- **SE(3) Pose**: Special Euclidean group for 3D transformations
+- **Visual Odometry**: Camera motion estimation from image sequences
+- **Bundle Adjustment**: Joint optimization of poses and 3D points
+- **3D Gaussian Splatting**: Differentiable rendering for dense reconstruction
+- **TSDF Fusion**: Truncated Signed Distance Field for volumetric integration
+- **Marching Cubes**: Iso-surface extraction from volumetric data
 
-## Testing
+---
 
-### Unit Tests
+## Documentation by Role
 
-```bash
-cargo test --lib
-```
+### For New Users
 
-### Integration Tests
+1. Read [Project Overview](project-overview.md) for project summary
+2. Follow [Getting Started](#getting-started) to build the project
+3. Explore [API Reference](API.md) for code examples
+4. Check [Architecture](ARCHITECTURE.md) for system design
 
-```bash
-cargo test --example test_name
-```
+### For Contributors
 
-### Benchmarks
+1. Read [Development Guide](DEVELOPMENT.md) for workflow and guidelines
+2. Check [ROADMAP](../ROADMAP.md) for planned features
+3. Review [RustSLAM ToDo](RustSLAM-ToDo.md) for specific tasks
+4. Follow code style guidelines in [DEVELOPMENT.md](DEVELOPMENT.md)
 
-```bash
-cd RustMesh
-cargo bench
-```
+### For Researchers
 
-## Project Structure
+1. Read [Architecture](ARCHITECTURE.md) for system overview
+2. Study [RustSLAM Design](RustSLAM-DESIGN.md) for algorithm details
+3. Review [API Reference](API.md) for implementation details
+4. Check [ROADMAP](../ROADMAP.md) for research directions
 
-```
-RustScan/
-├── RustMesh/              # Mesh processing library
-│   ├── src/
-│   │   ├── Core/          # Core data structures
-│   │   ├── Tools/         # Mesh algorithms
-│   │   └── Utils/         # Utilities
-│   ├── examples/          # Example programs (27)
-│   └── benches/           # Benchmarks
-├── RustSLAM/              # Visual SLAM library
-│   ├── src/
-│   │   ├── core/          # Core data structures
-│   │   ├── features/      # Feature extraction
-│   │   ├── tracker/       # Visual Odometry
-│   │   ├── optimizer/     # Bundle Adjustment
-│   │   ├── loop_closing/  # Loop detection
-│   │   ├── fusion/        # 3D Gaussian Splatting
-│   │   ├── mapping/       # Mapping
-│   │   ├── pipeline/      # SLAM pipeline
-│   │   └── io/            # I/O utilities
-│   └── examples/          # Example programs (5)
-├── docs/                  # Documentation
-├── test_data/             # Test datasets
-└── README.md              # Project overview
-```
-
-## Statistics
-
-- **Total Source Files**: 90 Rust files
-  - RustMesh: 25 files
-  - RustSLAM: 65 files
-- **Examples**: 32 total
-  - RustMesh: 27 examples
-  - RustSLAM: 5 examples
-- **Test Coverage**: Comprehensive unit and integration tests
-- **Documentation**: 8 markdown files
-
-## Recent Updates
-
-- ✅ Complete 3DGS → Mesh extraction pipeline (TSDF + Marching Cubes)
-- ✅ Comprehensive test coverage for P0 modules
-- ✅ GPU acceleration via Apple Metal
-- ✅ Real-time SLAM pipeline
-- ✅ Loop closing and relocalization
-
-## Future Directions
-
-- ⏳ IMU integration
-- ⏳ Multi-map SLAM
-- ⏳ Enhanced RustMesh-RustSLAM integration
-- ⏳ Additional mesh processing algorithms
-
-## Support & Contributing
-
-- **Issues**: Report bugs and request features via GitHub Issues
-- **Contributing**: See [DEVELOPMENT](DEVELOPMENT.md) for contribution guidelines
-- **Code Style**: Follow Rust standard style (enforced by `cargo fmt`)
-- **Testing**: All contributions must include tests
+---
 
 ## External Resources
 
 - [Rust Book](https://doc.rust-lang.org/book/)
 - [OpenMesh Documentation](https://www.graphics.rwth-aachen.de/software/openmesh/)
 - [ORB-SLAM Paper](https://arxiv.org/abs/1502.00956)
-- [3D Gaussian Splatting Paper](https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/)
-
-## License
-
-MIT License - See LICENSE file for details
+- [3D Gaussian Splatting](https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/)
 
 ---
 
-**Last Updated**: 2026-02-16
-**Documentation Version**: 1.0
-**Project Status**: Active Development (~85% complete)
+## Support
+
+- **Issues**: Report bugs via GitHub Issues
+- **Contributing**: See [Development Guide](DEVELOPMENT.md)
+- **Code Style**: Rust standard style (enforced by `cargo fmt`)
+- **Testing**: All contributions must include tests
+
+---
+
+## License
+
+MIT License - See LICENSE file for details.
+
+---
+
+**Last Updated:** 2026-03-01
+**Documentation Version:** 2.0
+**Project Status:** Active Development

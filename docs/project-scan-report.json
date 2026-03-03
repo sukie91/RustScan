@@ -1,16 +1,16 @@
 {
   "scan_metadata": {
-    "scan_type": "initial_scan",
-    "scan_level": "quick",
-    "scan_date": "2026-02-16",
-    "workflow_version": "1.0",
+    "scan_type": "full_rescan",
+    "scan_level": "exhaustive",
+    "scan_date": "2026-03-01",
+    "workflow_version": "1.2.0",
     "status": "completed",
     "current_step": 12,
     "completed_steps": [
       "1. Detect Project Structure",
       "2. Discover Existing Documentation",
       "3. Analyze Technology Stack",
-      "4. Conditional Analysis (library type - no additional scans needed)",
+      "4. Conditional Analysis (library + CLI)",
       "5. Generate Source Tree Analysis",
       "6. Extract Development/Operational Info",
       "7. Detect Multi-Part Integration",
@@ -21,11 +21,10 @@
       "12. Finalize"
     ],
     "generated_documents": [
-      "docs/ARCHITECTURE.md",
-      "docs/DEVELOPMENT.md",
-      "docs/API.md",
-      "docs/index.md",
-      "docs/project-scan-report.json"
+      "docs/project-scan-report.json",
+      "docs/project-overview.md",
+      "docs/source-tree-analysis.md",
+      "docs/index.md"
     ]
   },
   "project_identification": {
@@ -34,105 +33,104 @@
     "primary_language": "Rust",
     "edition": "2021",
     "is_monorepo": true,
+    "total_source_files": 187,
+    "total_lines_of_code": 897539,
     "sub_projects": [
       {
         "name": "RustMesh",
-        "description": "Rust port of OpenMesh - A versatile geometric data structure",
+        "description": "SIMD-accelerated mesh processing library (Rust port of OpenMesh)",
         "version": "0.1.0",
         "source_files": 25,
-        "examples": 27
+        "examples": 27,
+        "features": ["Half-edge data structure", "SoA memory layout", "Mesh I/O (OFF/OBJ/PLY/STL)", "Decimation", "Subdivision", "Hole filling", "Mesh repair"]
       },
       {
         "name": "RustSLAM",
-        "description": "A pure Rust Visual SLAM library",
+        "description": "Visual SLAM library with 3D Gaussian Splatting support",
         "version": "0.1.0",
-        "source_files": 65,
-        "examples": 5
+        "source_files": 83,
+        "examples": 5,
+        "features": ["Visual Odometry", "Bundle Adjustment", "Loop Closing", "3DGS Training", "Mesh Extraction", "CLI Pipeline"]
       }
     ]
-  },
-  "directory_structure": {
-    "root_directories": [
-      "RustMesh/",
-      "RustSLAM/",
-      "docs/",
-      "test_data/",
-      "_bmad/",
-      "_bmad-output/"
-    ],
-    "rustmesh_structure": {
-      "src": ["Core/", "Tools/", "Utils/"],
-      "examples": true,
-      "benches": true,
-      "target": true
-    },
-    "rustslam_structure": {
-      "src": [
-        "core/",
-        "features/",
-        "tracker/",
-        "optimizer/",
-        "loop_closing/",
-        "fusion/",
-        "mapping/",
-        "pipeline/",
-        "depth/",
-        "config/",
-        "io/",
-        "viewer/"
-      ],
-      "examples": true,
-      "target": true
-    }
-  },
-  "existing_documentation": {
-    "root_level": [
-      "README.md",
-      "ROADMAP.md",
-      "CLAUDE.md"
-    ],
-    "docs_directory": [
-      "README.md",
-      "ROADMAP.md",
-      "CLAUDE.md",
-      "RustMesh-README.md",
-      "RustSLAM-README.md",
-      "RustSLAM-DESIGN.md",
-      "RustSLAM-ToDo.md"
-    ],
-    "sub_project_docs": [
-      "RustMesh/README.md",
-      "RustSLAM/README.md",
-      "RustSLAM/DESIGN.md",
-      "RustSLAM/ToDo.md"
-    ],
-    "has_index": false
   },
   "technology_stack": {
     "primary_language": "Rust",
     "edition": "2021",
-    "rustmesh_dependencies": {
-      "math_geometry": ["glam", "nalgebra"],
-      "serialization": ["serde", "serde_json"],
-      "io": ["byteorder"],
-      "utilities": ["itertools", "rand"],
-      "benchmarking": ["criterion"]
-    },
-    "rustslam_dependencies": {
-      "math_geometry": ["glam", "nalgebra"],
-      "computer_vision": ["opencv (optional)"],
-      "optimization": ["apex-solver"],
-      "deep_learning": ["tch (optional)"],
-      "gpu_acceleration": ["candle-core", "candle-metal"],
-      "parallelism": ["rayon", "crossbeam-channel"],
-      "serialization": ["serde", "serde_yaml", "toml"],
-      "logging": ["log", "env_logger"],
-      "error_handling": ["thiserror"],
-      "image_processing": ["image (optional)"],
-      "data_structures": ["kiddo"]
-    },
     "build_system": "Cargo",
     "test_framework": "cargo test",
-    "benchmark_framework": "criterion"
+    "benchmark_framework": "criterion",
+    "rustmesh_dependencies": {
+      "math_geometry": ["glam 0.25", "nalgebra 0.33"],
+      "serialization": ["serde 1.0", "serde_json 1.0"],
+      "io": ["byteorder 1"],
+      "utilities": ["itertools 0.13", "rand 0.8"],
+      "benchmarking": ["criterion 0.5"]
+    },
+    "rustslam_dependencies": {
+      "math_geometry": ["glam 0.25", "nalgebra 0.33"],
+      "computer_vision": ["opencv 0.98 (optional)"],
+      "optimization": ["apex-solver 1.0"],
+      "deep_learning": ["tch 0.5 (optional)"],
+      "gpu_acceleration": ["candle-core 0.9.2", "candle-metal 0.27.1"],
+      "parallelism": ["rayon 1.8", "crossbeam-channel 0.5"],
+      "serialization": ["serde 1.0", "serde_yaml 0.9", "toml 0.8"],
+      "cli": ["clap 4.5"],
+      "logging": ["log 0.4", "env_logger 0.11"],
+      "error_handling": ["thiserror 1.0"],
+      "video": ["ffmpeg-next 8.0", "lru 0.12"],
+      "data_structures": ["kiddo 5.2.1"]
+    }
+  },
+  "directory_structure": {
+    "root_directories": ["RustMesh/", "RustSLAM/", "docs/", "test_data/", "_bmad/", "_bmad-output/", "Mirror/"],
+    "rustmesh_modules": {
+      "Core": ["handles.rs", "items.rs", "soa_kernel.rs", "attrib_soa_kernel.rs", "connectivity.rs", "geometry.rs", "io/"],
+      "Tools": ["decimation.rs", "subdivision.rs", "smoother.rs", "hole_filling.rs", "mesh_repair.rs", "dualizer.rs", "vdpm.rs"],
+      "Utils": ["status.rs", "circulators.rs", "quadric.rs", "smart_ranges.rs", "test_data.rs", "performance.rs"]
+    },
+    "rustslam_modules": {
+      "core": ["pose.rs", "frame.rs", "keyframe.rs", "map_point.rs", "map.rs", "camera.rs", "keyframe_selector.rs"],
+      "features": ["base.rs", "orb.rs", "pure_rust.rs", "knn_matcher.rs", "hamming_matcher.rs", "utils.rs"],
+      "tracker": ["vo.rs", "solver.rs"],
+      "optimizer": ["ba.rs"],
+      "loop_closing": ["vocabulary.rs", "detector.rs", "database.rs", "relocalization.rs", "optimized_detector.rs", "closing.rs"],
+      "fusion": ["gaussian.rs", "gaussian_init.rs", "renderer.rs", "diff_renderer.rs", "diff_splat.rs", "analytical_backward.rs", "tiled_renderer.rs", "training_pipeline.rs", "complete_trainer.rs", "slam_integrator.rs", "tsdf_volume.rs", "marching_cubes.rs", "mesh_extractor.rs", "mesh_io.rs", "mesh_metadata.rs", "gpu_trainer.rs"],
+      "cli": ["mod.rs", "pipeline_checkpoint.rs", "integration_tests.rs"],
+      "config": ["config.rs", "params.rs"],
+      "io": ["video_decoder.rs", "video_loader.rs", "dataset.rs"],
+      "pipeline": ["checkpoint.rs", "realtime.rs"],
+      "mapping": ["local_mapping.rs"],
+      "depth": ["fusion.rs", "stereo.rs"],
+      "viewer": ["mod.rs"]
+    }
+  },
+  "test_status": {
+    "rustslam_tests": "287 passed; 0 failed",
+    "rustmesh_tests": "Passing (benchmark suite available)"
+  },
+  "api_surface": {
+    "rustmesh_exports": [
+      "RustMesh", "VertexHandle", "HalfedgeHandle", "EdgeHandle", "FaceHandle",
+      "Decimater", "decimate_mesh", "DecimationConfig",
+      "loop_subdivide", "catmull_clark_subdivide", "split_edge",
+      "laplace_smooth", "tangential_smooth",
+      "load_obj", "load_ply", "load_off", "load_stl",
+      "save_obj", "save_ply", "save_off", "save_stl"
+    ],
+    "rustslam_exports": [
+      "SE3", "Frame", "FrameFeatures", "KeyFrame", "MapPoint", "Map", "Camera",
+      "FeatureExtractor", "FeatureMatcher", "KeyPoint", "Descriptors", "Match",
+      "OrbExtractor", "KnnMatcher", "HammingMatcher", "DistanceMetric",
+      "VisualOdometry", "VOState", "VOResult",
+      "BundleAdjuster", "BACamera", "BALandmark", "BAObservation",
+      "LoopDetector", "LoopClosing", "Relocalizer",
+      "Gaussian3D", "GaussianMap", "MeshExtractor", "MeshExtractionConfig",
+      "TsdfVolume", "MarchingCubes"
+    ]
+  },
+  "existing_documentation": {
+    "root_level": ["README.md", "ROADMAP.md", "CLAUDE.md"],
+    "docs_directory": ["API.md", "ARCHITECTURE.md", "DEVELOPMENT.md", "index.md", "RustMesh-README.md", "RustSLAM-README.md", "RustSLAM-DESIGN.md", "RustSLAM-ToDo.md"]
   }
 }

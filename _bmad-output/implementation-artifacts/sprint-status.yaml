@@ -123,12 +123,10 @@ development_status:
   epic-6-retrospective: optional
 
   # ============================================================
-  # Epic 7: Cross-Cutting Infrastructure Fixes — PARTIALLY COMPLETE
-  # 7-1: Partial (AtomicU64 for IDs only, no full thread safety)
-  # 7-2: Done (camera.rs has from_config())
-  # 7-3: Done (config.rs has validate())
+  # Epic 7: Cross-Cutting Infrastructure Fixes — DONE
+  # All 3 stories complete: Map thread safety, camera intrinsics unified, config validation
   # ============================================================
-  epic-7: in-progress
+  epic-7: done
   7-1-add-thread-safety-to-map-struct: done
   7-2-unify-camera-intrinsics-from-configuration: done
   7-3-add-configuration-parameter-validation: done
