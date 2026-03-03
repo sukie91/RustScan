@@ -29,9 +29,10 @@ pub fn load_obj(path: &Path) -> Result<(Vec<MeshGpuVertex>, Vec<u32>), LoadError
         let mut parts = line.split_whitespace();
         match parts.next() {
             Some("v") => {
-                let vals: Vec<f32> = parts
-                    .map(|s| s.parse::<f32>().unwrap_or(0.0))
+                let vals: Result<Vec<f32>, _> = parts
+                    .map(|s| s.parse::<f32>())
                     .collect();
+                let vals = vals.map_err(|_| LoadError::ObjParse(format!("bad vertex line: {line}")))?;
                 if vals.len() >= 3 {
                     positions.push([vals[0], vals[1], vals[2]]);
                     let r = vals.get(3).copied().unwrap_or(0.5);
@@ -41,9 +42,10 @@ pub fn load_obj(path: &Path) -> Result<(Vec<MeshGpuVertex>, Vec<u32>), LoadError
                 }
             }
             Some("vn") => {
-                let vals: Vec<f32> = parts
-                    .map(|s| s.parse::<f32>().unwrap_or(0.0))
+                let vals: Result<Vec<f32>, _> = parts
+                    .map(|s| s.parse::<f32>())
                     .collect();
+                let vals = vals.map_err(|_| LoadError::ObjParse(format!("bad normal line: {line}")))?;
                 if vals.len() >= 3 {
                     normals.push([vals[0], vals[1], vals[2]]);
                 }

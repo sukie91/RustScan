@@ -40,6 +40,12 @@ pub fn expand_points_to_quads(
         let ndcy = clip.y / clip.w;
         let ndcz = clip.z / clip.w;
 
+        // Skip points outside the view frustum (NDC [-1,1] on all axes).
+        // This avoids submitting degenerate quads for clipped geometry.
+        if ndcz < -1.0 || ndcz > 1.0 || ndcx < -2.0 || ndcx > 2.0 || ndcy < -2.0 || ndcy > 2.0 {
+            continue;
+        }
+
         // Four corners of the point quad in NDC
         let corners: [[f32; 3]; 4] = [
             [ndcx - ndc_w, ndcy - ndc_h, ndcz],

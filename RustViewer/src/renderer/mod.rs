@@ -52,7 +52,7 @@ impl SceneRenderer {
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
-                    min_binding_size: wgpu::BufferSize::new(64),
+                    min_binding_size: wgpu::BufferSize::new(256),
                 },
                 count: None,
             }],
@@ -60,7 +60,10 @@ impl SceneRenderer {
 
         let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("uniform_buf"),
-            size: 64,
+            // 256 bytes: satisfies min_uniform_buffer_offset_alignment on all backends.
+            // The view_proj matrix (64 bytes) is written at offset 0; the remaining padding
+            // is never read by the shader.
+            size: 256,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -165,17 +168,22 @@ impl SceneRenderer {
             let traj_color = [0.2f32, 0.6, 1.0];
             let mut line_verts: Vec<PointVertex> = Vec::new();
             for i in 0..scene.trajectory.len() - 1 {
-                for &pos in &[scene.trajectory[i], scene.trajectory[i + 1]] {
+                // Project both endpoints; skip the segment if either is behind the camera.
+                let mut ndc_pair = [[0.0f32; 3]; 2];
+                let mut valid = true;
+                for (j, &pos) in [scene.trajectory[i], scene.trajectory[i + 1]].iter().enumerate() {
                     let p = glam::Vec4::new(pos[0], pos[1], pos[2], 1.0);
                     let clip = vp * p;
-                    if clip.w > 0.0 {
+                    if clip.w <= 0.0 {
+                        valid = false;
+                        break;
+                    }
+                    ndc_pair[j] = [clip.x / clip.w, clip.y / clip.w, clip.z / clip.w];
+                }
+                if valid {
+                    for ndc in &ndc_pair {
                         line_verts.push(PointVertex {
-                            position: [clip.x / clip.w, clip.y / clip.w, clip.z / clip.w],
-                            color: traj_color,
-                        });
-                    } else {
-                        line_verts.push(PointVertex {
-                            position: [0.0; 3],
+                            position: *ndc,
                             color: traj_color,
                         });
                     }
@@ -266,6 +274,8 @@ pub struct ViewerCallback {
     pub scene: std::sync::Arc<std::sync::Mutex<Scene>>,
     pub camera: ArcballCamera,
     pub viewport_size: [f32; 2],
+    /// Surface format read from eframe at startup — used for lazy pipeline init.
+    pub surface_format: wgpu::TextureFormat,
 }
 
 impl egui_wgpu::CallbackTrait for ViewerCallback {
@@ -277,13 +287,10 @@ impl egui_wgpu::CallbackTrait for ViewerCallback {
         _encoder: &mut wgpu::CommandEncoder,
         resources: &mut egui_wgpu::CallbackResources,
     ) -> Vec<wgpu::CommandBuffer> {
-        // Lazy-init the renderer on first frame.
-        // eframe on macOS Metal uses Bgra8Unorm (not sRGB). This is the correct default for Metal.
-        // If the pipeline format mismatches the surface, wgpu will panic at draw time, which would
-        // surface this assumption quickly. A future improvement would use wgpu surface query.
+        // Lazy-init the renderer on first frame using the actual surface format
+        // supplied by eframe (read from wgpu RenderState at app startup).
         if resources.get::<SceneRenderer>().is_none() {
-            let surface_format = wgpu::TextureFormat::Bgra8Unorm;
-            let renderer = SceneRenderer::new(device, queue, surface_format);
+            let renderer = SceneRenderer::new(device, queue, self.surface_format);
             resources.insert(renderer);
         }
 

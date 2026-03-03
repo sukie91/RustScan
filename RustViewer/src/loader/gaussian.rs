@@ -8,7 +8,7 @@ use crate::renderer::scene::{GaussianPoint, Scene};
 /// Load a 3DGS scene.ply and add Gaussians to the scene.
 pub fn load_gaussians(path: &Path, scene: &mut Scene) -> Result<(), LoadError> {
     let (gaussians, _meta) = rustslam::fusion::load_scene_ply(path)
-        .map_err(|e| LoadError::Io(std::io::Error::other(e.to_string())))?;
+        .map_err(|e| LoadError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
 
     for g in &gaussians {
         let color = [
