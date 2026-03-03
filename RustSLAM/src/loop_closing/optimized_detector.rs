@@ -289,8 +289,7 @@ impl DescriptorDistance {
             .sum()
     }
 
-    /// SIMD-accelerated Hamming distance (using glam for SIMD)
-    #[cfg(feature = "glam")]
+    /// Hamming distance with 16-byte chunk unrolling.
     fn hamming_simd(&self, a: &[u8], b: &[u8]) -> u32 {
         // Process 16 bytes at a time using SIMD
         let mut distance = 0u32;
@@ -335,10 +334,6 @@ impl DescriptorDistance {
         distance
     }
 
-    #[cfg(not(feature = "glam"))]
-    fn hamming_simd(&self, a: &[u8], b: &[u8]) -> u32 {
-        self.hamming_scalar(a, b)
-    }
 
     /// Compute distances between query and train descriptors
     pub fn compute_distances(&self, query: &[u8], train: &[&[u8]]) -> Vec<u32> {
