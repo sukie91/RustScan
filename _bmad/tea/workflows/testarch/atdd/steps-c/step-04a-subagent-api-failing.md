@@ -1,15 +1,15 @@
 ---
-name: 'step-04a-subprocess-api-failing'
-description: 'Subprocess: Generate FAILING API tests (TDD red phase)'
-subprocess: true
+name: 'step-04a-subagent-api-failing'
+description: 'Subagent: Generate FAILING API tests (TDD red phase)'
+subagent: true
 outputFile: '/tmp/tea-atdd-api-tests-{{timestamp}}.json'
 ---
 
-# Subprocess 4A: Generate Failing API Tests (TDD Red Phase)
+# Subagent 4A: Generate Failing API Tests (TDD Red Phase)
 
-## SUBPROCESS CONTEXT
+## SUBAGENT CONTEXT
 
-This is an **isolated subprocess** running in parallel with E2E failing test generation.
+This is an **isolated subagent** running in parallel with E2E failing test generation.
 
 **What you have from parent workflow:**
 
@@ -24,18 +24,18 @@ This is an **isolated subprocess** running in parallel with E2E failing test gen
 
 ## MANDATORY EXECUTION RULES
 
-- 📖 Read this entire subprocess file before acting
+- 📖 Read this entire subagent file before acting
 - ✅ Generate FAILING API tests ONLY
 - ✅ Tests MUST fail when run (feature not implemented yet)
 - ✅ Output structured JSON to temp file
 - ✅ Follow knowledge fragment patterns
-- ❌ Do NOT generate E2E tests (that's subprocess 4B)
+- ❌ Do NOT generate E2E tests (that's subagent 4B)
 - ❌ Do NOT generate passing tests (this is TDD red phase)
 - ❌ Do NOT run tests (that's step 5)
 
 ---
 
-## SUBPROCESS TASK
+## SUBAGENT TASK
 
 ### 1. Identify API Endpoints from Acceptance Criteria
 
@@ -139,7 +139,7 @@ Write JSON to temp file: `/tmp/tea-atdd-api-tests-{{timestamp}}.json`
 ```json
 {
   "success": true,
-  "subprocess": "atdd-api-tests",
+  "subagent": "atdd-api-tests",
   "tests": [
     {
       "file": "tests/api/user-registration.spec.ts",
@@ -172,7 +172,7 @@ Write JSON to temp file: `/tmp/tea-atdd-api-tests-{{timestamp}}.json`
 ```json
 {
   "success": false,
-  "subprocess": "atdd-api-tests",
+  "subagent": "atdd-api-tests",
   "error": "Error message describing what went wrong",
   "partial_output": {
     /* any tests generated before error */
@@ -184,19 +184,19 @@ Write JSON to temp file: `/tmp/tea-atdd-api-tests-{{timestamp}}.json`
 
 ## EXIT CONDITION
 
-Subprocess completes when:
+Subagent completes when:
 
 - ✅ All API endpoints from acceptance criteria have test files
 - ✅ All tests use `test.skip()` (documented failing tests)
 - ✅ All tests assert EXPECTED behavior (not placeholder assertions)
 - ✅ JSON output written to temp file
-- ✅ Fixture needs tracked
+- ✅ Fixture needs to be tracked
 
-**Subprocess terminates here.** Parent workflow will read output and proceed to aggregation.
+**Subagent terminates here.** Parent workflow will read output and proceed to aggregation.
 
 ---
 
-## 🚨 SUBPROCESS SUCCESS METRICS
+## 🚨 SUBAGENT SUCCESS METRICS
 
 ### ✅ SUCCESS:
 

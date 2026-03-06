@@ -1,15 +1,15 @@
 ---
-name: 'step-03b-subprocess-isolation'
-description: 'Subprocess: Check test isolation (no shared state/dependencies)'
-subprocess: true
+name: 'step-03b-subagent-isolation'
+description: 'Subagent: Check test isolation (no shared state/dependencies)'
+subagent: true
 outputFile: '/tmp/tea-test-review-isolation-{{timestamp}}.json'
 ---
 
-# Subprocess 3B: Isolation Quality Check
+# Subagent 3B: Isolation Quality Check
 
-## SUBPROCESS CONTEXT
+## SUBAGENT CONTEXT
 
-This is an **isolated subprocess** running in parallel with other quality dimension checks.
+This is an **isolated subagent** running in parallel with other quality dimension checks.
 
 **Your task:** Analyze test files for ISOLATION violations only.
 
@@ -24,7 +24,7 @@ This is an **isolated subprocess** running in parallel with other quality dimens
 
 ---
 
-## SUBPROCESS TASK
+## SUBAGENT TASK
 
 ### 1. Identify Isolation Violations
 
@@ -102,17 +102,17 @@ const score = Math.max(0, 100 - totalPenalty);
 
 ## EXIT CONDITION
 
-Subprocess completes when:
+Subagent completes when:
 
 - ✅ All test files analyzed for isolation violations
 - ✅ Score calculated
 - ✅ JSON output written to temp file
 
-**Subprocess terminates here.**
+**Subagent terminates here.**
 
 ---
 
-## 🚨 SUBPROCESS SUCCESS METRICS
+## 🚨 SUBAGENT SUCCESS METRICS
 
 ### ✅ SUCCESS:
 

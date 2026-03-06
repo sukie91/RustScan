@@ -1,15 +1,15 @@
 ---
-name: 'step-03b-subprocess-e2e'
-description: 'Subprocess: Generate E2E tests only'
-subprocess: true
+name: 'step-03b-subagent-e2e'
+description: 'Subagent: Generate E2E tests only'
+subagent: true
 outputFile: '/tmp/tea-automate-e2e-tests-{{timestamp}}.json'
 ---
 
-# Subprocess 3B: Generate E2E Tests
+# Subagent 3B: Generate E2E Tests
 
-## SUBPROCESS CONTEXT
+## SUBAGENT CONTEXT
 
-This is an **isolated subprocess** running in parallel with API test generation.
+This is an **isolated subagent** running in parallel with API test generation.
 
 **What you have from parent workflow:**
 
@@ -24,17 +24,17 @@ This is an **isolated subprocess** running in parallel with API test generation.
 
 ## MANDATORY EXECUTION RULES
 
-- 📖 Read this entire subprocess file before acting
+- 📖 Read this entire subagent file before acting
 - ✅ Generate E2E tests ONLY
 - ✅ Output structured JSON to temp file
 - ✅ Follow knowledge fragment patterns
-- ❌ Do NOT generate API tests (that's subprocess 3A)
+- ❌ Do NOT generate API tests (that's subagent 3A)
 - ❌ Do NOT run tests (that's step 4)
 - ❌ Do NOT generate fixtures yet (that's step 3C aggregation)
 
 ---
 
-## SUBPROCESS TASK
+## SUBAGENT TASK
 
 ### 1. Identify User Journeys
 
@@ -134,7 +134,7 @@ Write JSON to temp file: `/tmp/tea-automate-e2e-tests-{{timestamp}}.json`
 ```json
 {
   "success": true,
-  "subprocess": "e2e-tests",
+  "subagent": "e2e-tests",
   "tests": [
     {
       "file": "tests/e2e/authentication.spec.ts",
@@ -171,7 +171,7 @@ Write JSON to temp file: `/tmp/tea-automate-e2e-tests-{{timestamp}}.json`
 ```json
 {
   "success": false,
-  "subprocess": "e2e-tests",
+  "subagent": "e2e-tests",
   "error": "Error message describing what went wrong",
   "partial_output": {
     /* any tests generated before error */
@@ -183,18 +183,18 @@ Write JSON to temp file: `/tmp/tea-automate-e2e-tests-{{timestamp}}.json`
 
 ## EXIT CONDITION
 
-Subprocess completes when:
+Subagent completes when:
 
 - ✅ All user journeys have E2E test files generated
 - ✅ All tests follow knowledge fragment patterns
 - ✅ JSON output written to temp file
 - ✅ Fixture needs tracked
 
-**Subprocess terminates here.** Parent workflow will read output and proceed to aggregation.
+**Subagent terminates here.** Parent workflow will read output and proceed to aggregation.
 
 ---
 
-## 🚨 SUBPROCESS SUCCESS METRICS
+## 🚨 SUBAGENT SUCCESS METRICS
 
 ### ✅ SUCCESS:
 
@@ -209,5 +209,5 @@ Subprocess completes when:
 - Generated tests other than E2E tests
 - Did not follow knowledge fragment patterns
 - Invalid or missing JSON output
-- Ran tests (not subprocess responsibility)
+- Ran tests (not subagent responsibility)
 - Used brittle selectors (CSS classes, XPath)

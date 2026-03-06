@@ -1,15 +1,15 @@
 ---
-name: 'step-03e-subprocess-performance'
-description: 'Subprocess: Check test performance (speed, efficiency, parallelization)'
-subprocess: true
+name: 'step-03e-subagent-performance'
+description: 'Subagent: Check test performance (speed, efficiency, parallelization)'
+subagent: true
 outputFile: '/tmp/tea-test-review-performance-{{timestamp}}.json'
 ---
 
-# Subprocess 3E: Performance Quality Check
+# Subagent 3E: Performance Quality Check
 
-## SUBPROCESS CONTEXT
+## SUBAGENT CONTEXT
 
-This is an **isolated subprocess** running in parallel with other quality dimension checks.
+This is an **isolated subagent** running in parallel with other quality dimension checks.
 
 **Your task:** Analyze test files for PERFORMANCE violations only.
 
@@ -23,7 +23,7 @@ This is an **isolated subprocess** running in parallel with other quality dimens
 
 ---
 
-## SUBPROCESS TASK
+## SUBAGENT TASK
 
 ### 1. Identify Performance Violations
 
@@ -112,6 +112,6 @@ const score = Math.max(0, 100 - totalPenalty);
 
 ## EXIT CONDITION
 
-Subprocess completes when JSON output written to temp file.
+Subagent completes when JSON output written to temp file.
 
-**Subprocess terminates here.**
+**Subagent terminates here.**

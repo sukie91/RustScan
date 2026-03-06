@@ -1,21 +1,21 @@
 ---
-name: 'step-04c-subprocess-reliability'
-description: 'Subprocess: Reliability NFR assessment'
-subprocess: true
+name: 'step-04c-subagent-reliability'
+description: 'Subagent: Reliability NFR assessment'
+subagent: true
 outputFile: '/tmp/tea-nfr-reliability-{{timestamp}}.json'
 ---
 
-# Subprocess 4C: Reliability NFR Assessment
+# Subagent 4C: Reliability NFR Assessment
 
-## SUBPROCESS CONTEXT
+## SUBAGENT CONTEXT
 
-This is an **isolated subprocess** running in parallel with other NFR domain assessments.
+This is an **isolated subagent** running in parallel with other NFR domain assessments.
 
 **Your task:** Assess RELIABILITY NFR domain only.
 
 ---
 
-## SUBPROCESS TASK
+## SUBAGENT TASK
 
 ### 1. Reliability Assessment Categories
 
@@ -82,4 +82,4 @@ This is an **isolated subprocess** running in parallel with other NFR domain ass
 
 ## EXIT CONDITION
 
-Subprocess completes when JSON output written to temp file.
+Subagent completes when JSON output written to temp file.

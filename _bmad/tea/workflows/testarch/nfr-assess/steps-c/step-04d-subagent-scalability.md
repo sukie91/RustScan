@@ -1,21 +1,21 @@
 ---
-name: 'step-04d-subprocess-scalability'
-description: 'Subprocess: Scalability NFR assessment'
-subprocess: true
+name: 'step-04d-subagent-scalability'
+description: 'Subagent: Scalability NFR assessment'
+subagent: true
 outputFile: '/tmp/tea-nfr-scalability-{{timestamp}}.json'
 ---
 
-# Subprocess 4D: Scalability NFR Assessment
+# Subagent 4D: Scalability NFR Assessment
 
-## SUBPROCESS CONTEXT
+## SUBAGENT CONTEXT
 
-This is an **isolated subprocess** running in parallel with other NFR domain assessments.
+This is an **isolated subagent** running in parallel with other NFR domain assessments.
 
 **Your task:** Assess SCALABILITY NFR domain only.
 
 ---
 
-## SUBPROCESS TASK
+## SUBAGENT TASK
 
 ### 1. Scalability Assessment Categories
 
@@ -85,4 +85,4 @@ This is an **isolated subprocess** running in parallel with other NFR domain ass
 
 ## EXIT CONDITION
 
-Subprocess completes when JSON output written to temp file.
+Subagent completes when JSON output written to temp file.

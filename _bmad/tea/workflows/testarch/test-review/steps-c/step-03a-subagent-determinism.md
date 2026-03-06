@@ -1,15 +1,15 @@
 ---
-name: 'step-03a-subprocess-determinism'
-description: 'Subprocess: Check test determinism (no random/time dependencies)'
-subprocess: true
+name: 'step-03a-subagent-determinism'
+description: 'Subagent: Check test determinism (no random/time dependencies)'
+subagent: true
 outputFile: '/tmp/tea-test-review-determinism-{{timestamp}}.json'
 ---
 
-# Subprocess 3A: Determinism Quality Check
+# Subagent 3A: Determinism Quality Check
 
-## SUBPROCESS CONTEXT
+## SUBAGENT CONTEXT
 
-This is an **isolated subprocess** running in parallel with other quality dimension checks.
+This is an **isolated subagent** running in parallel with other quality dimension checks.
 
 **What you have from parent workflow:**
 
@@ -23,16 +23,16 @@ This is an **isolated subprocess** running in parallel with other quality dimens
 
 ## MANDATORY EXECUTION RULES
 
-- 📖 Read this entire subprocess file before acting
+- 📖 Read this entire subagent file before acting
 - ✅ Check DETERMINISM only (not other quality dimensions)
 - ✅ Output structured JSON to temp file
-- ❌ Do NOT check isolation, maintainability, coverage, or performance (other subprocesses)
+- ❌ Do NOT check isolation, maintainability, coverage, or performance (other subagents)
 - ❌ Do NOT modify test files (read-only analysis)
 - ❌ Do NOT run tests (just analyze code)
 
 ---
 
-## SUBPROCESS TASK
+## SUBAGENT TASK
 
 ### 1. Identify Determinism Violations
 
@@ -185,7 +185,7 @@ Write JSON to temp file: `/tmp/tea-test-review-determinism-{{timestamp}}.json`
 
 ## EXIT CONDITION
 
-Subprocess completes when:
+Subagent completes when:
 
 - ✅ All test files analyzed for determinism violations
 - ✅ Score calculated (0-100)
@@ -193,11 +193,11 @@ Subprocess completes when:
 - ✅ Recommendations generated
 - ✅ JSON output written to temp file
 
-**Subprocess terminates here.** Parent workflow will read output and aggregate with other quality dimensions.
+**Subagent terminates here.** Parent workflow will read output and aggregate with other quality dimensions.
 
 ---
 
-## 🚨 SUBPROCESS SUCCESS METRICS
+## 🚨 SUBAGENT SUCCESS METRICS
 
 ### ✅ SUCCESS:
 

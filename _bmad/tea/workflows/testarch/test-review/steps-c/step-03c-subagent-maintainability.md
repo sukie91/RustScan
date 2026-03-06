@@ -1,15 +1,15 @@
 ---
-name: 'step-03c-subprocess-maintainability'
-description: 'Subprocess: Check test maintainability (readability, structure, DRY)'
-subprocess: true
+name: 'step-03c-subagent-maintainability'
+description: 'Subagent: Check test maintainability (readability, structure, DRY)'
+subagent: true
 outputFile: '/tmp/tea-test-review-maintainability-{{timestamp}}.json'
 ---
 
-# Subprocess 3C: Maintainability Quality Check
+# Subagent 3C: Maintainability Quality Check
 
-## SUBPROCESS CONTEXT
+## SUBAGENT CONTEXT
 
-This is an **isolated subprocess** running in parallel with other quality dimension checks.
+This is an **isolated subagent** running in parallel with other quality dimension checks.
 
 **Your task:** Analyze test files for MAINTAINABILITY violations only.
 
@@ -23,7 +23,7 @@ This is an **isolated subprocess** running in parallel with other quality dimens
 
 ---
 
-## SUBPROCESS TASK
+## SUBAGENT TASK
 
 ### 1. Identify Maintainability Violations
 
@@ -97,6 +97,6 @@ const score = Math.max(0, 100 - totalPenalty);
 
 ## EXIT CONDITION
 
-Subprocess completes when JSON output written to temp file.
+Subagent completes when JSON output written to temp file.
 
-**Subprocess terminates here.**
+**Subagent terminates here.**

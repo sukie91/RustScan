@@ -1,21 +1,21 @@
 ---
-name: 'step-04b-subprocess-performance'
-description: 'Subprocess: Performance NFR assessment'
-subprocess: true
+name: 'step-04b-subagent-performance'
+description: 'Subagent: Performance NFR assessment'
+subagent: true
 outputFile: '/tmp/tea-nfr-performance-{{timestamp}}.json'
 ---
 
-# Subprocess 4B: Performance NFR Assessment
+# Subagent 4B: Performance NFR Assessment
 
-## SUBPROCESS CONTEXT
+## SUBAGENT CONTEXT
 
-This is an **isolated subprocess** running in parallel with other NFR domain assessments.
+This is an **isolated subagent** running in parallel with other NFR domain assessments.
 
 **Your task:** Assess PERFORMANCE NFR domain only.
 
 ---
 
-## SUBPROCESS TASK
+## SUBAGENT TASK
 
 ### 1. Performance Assessment Categories
 
@@ -81,4 +81,4 @@ This is an **isolated subprocess** running in parallel with other NFR domain ass
 
 ## EXIT CONDITION
 
-Subprocess completes when JSON output written to temp file.
+Subagent completes when JSON output written to temp file.

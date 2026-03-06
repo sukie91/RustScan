@@ -1,4 +1,4 @@
-# generated: 2026-02-23
+# generated: 2026-03-06
 # project: RustScan
 # project_key: NOKEY
 # tracking_system: file-system
@@ -40,7 +40,7 @@
 # - No story files exist in implementation-artifacts; status derived from epics.md + code review
 # - Epic 3 and Epic 4 marked in-progress due to quality issues found in code review
 
-generated: 2026-02-23
+generated: 2026-03-06
 project: RustScan
 project_key: NOKEY
 tracking_system: file-system
@@ -131,3 +131,27 @@ development_status:
   7-2-unify-camera-intrinsics-from-configuration: done
   7-3-add-configuration-parameter-validation: done
   epic-7-retrospective: optional
+
+  # ============================================================
+  # Epic 8: RustViewer 3D可视化GUI — IN PROGRESS
+  # Interactive 3D visualization GUI for SLAM results
+  # ============================================================
+  epic-8: in-progress
+  8-1-create-workspace-cargo-toml: done
+  8-2-add-viewer-types-feature-to-rustslam: done
+  8-3-add-cfg-gates-for-heavy-dependencies: backlog
+  8-4-create-rustviewer-crate-structure: backlog
+  8-5-create-main-and-app-skeleton: backlog
+  8-6-define-scene-data-model: backlog
+  8-7-implement-checkpoint-loader: backlog
+  8-8-implement-gaussian-ply-loader: backlog
+  8-9-implement-mesh-obj-ply-loader: backlog
+  8-10-implement-arcball-camera: backlog
+  8-11-implement-gpu-buffer-and-shaders: backlog
+  8-12-implement-scene-renderer-egui-integration: backlog
+  8-13-implement-control-panel: backlog
+  8-14-implement-empty-state-ui: backlog
+  8-15-implement-mouse-input-camera-control: backlog
+  8-16-write-data-loading-unit-tests: backlog
+  8-17-write-camera-matrix-unit-tests: backlog
+  epic-8-retrospective: optional

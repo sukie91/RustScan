@@ -1,15 +1,15 @@
 ---
-name: 'step-04a-subprocess-security'
-description: 'Subprocess: Security NFR assessment'
-subprocess: true
+name: 'step-04a-subagent-security'
+description: 'Subagent: Security NFR assessment'
+subagent: true
 outputFile: '/tmp/tea-nfr-security-{{timestamp}}.json'
 ---
 
-# Subprocess 4A: Security NFR Assessment
+# Subagent 4A: Security NFR Assessment
 
-## SUBPROCESS CONTEXT
+## SUBAGENT CONTEXT
 
-This is an **isolated subprocess** running in parallel with other NFR domain assessments.
+This is an **isolated subagent** running in parallel with other NFR domain assessments.
 
 **Your task:** Assess SECURITY NFR domain only.
 
@@ -23,7 +23,7 @@ This is an **isolated subprocess** running in parallel with other NFR domain ass
 
 ---
 
-## SUBPROCESS TASK
+## SUBAGENT TASK
 
 ### 1. Security Assessment Categories
 
@@ -133,6 +133,6 @@ For each category, determine status:
 
 ## EXIT CONDITION
 
-Subprocess completes when JSON output written to temp file.
+Subagent completes when JSON output written to temp file.
 
-**Subprocess terminates here.**
+**Subagent terminates here.**

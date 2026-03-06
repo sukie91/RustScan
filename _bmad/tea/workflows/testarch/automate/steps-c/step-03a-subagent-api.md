@@ -1,40 +1,42 @@
 ---
-name: 'step-03a-subprocess-api'
-description: 'Subprocess: Generate API tests only'
-subprocess: true
+name: 'step-03a-subagent-api'
+description: 'Subagent: Generate API tests only'
+subagent: true
 outputFile: '/tmp/tea-automate-api-tests-{{timestamp}}.json'
 ---
 
-# Subprocess 3A: Generate API Tests
+# Subagent 3A: Generate API Tests
 
-## SUBPROCESS CONTEXT
+## SUBAGENT CONTEXT
 
-This is an **isolated subprocess** running in parallel with E2E test generation.
+This is an **isolated subagent** running in parallel with E2E test generation.
 
 **What you have from parent workflow:**
 
 - Target features/components identified in Step 2
 - Knowledge fragments loaded: api-request, data-factories, api-testing-patterns
-- Config: test framework, Playwright Utils enabled/disabled
+- Config: test framework, Playwright Utils enabled/disabled, Pact.js Utils enabled/disabled, Pact MCP mode
 - Coverage plan: which API endpoints need testing
 
 **Your task:** Generate API tests ONLY (not E2E, not fixtures, not other test types).
+
+**If `use_pactjs_utils` is enabled:** Also generate consumer contract tests and provider verification tests alongside API tests. Use the loaded pactjs-utils fragments (`pactjs-utils-overview`, `pactjs-utils-consumer-helpers`, `pactjs-utils-provider-verifier`, `pactjs-utils-request-filter`) for patterns. If `pact_mcp` is `"mcp"`, use SmartBear MCP tools (Fetch Provider States, Generate Pact Tests) to inform test generation.
 
 ---
 
 ## MANDATORY EXECUTION RULES
 
-- 📖 Read this entire subprocess file before acting
+- 📖 Read this entire subagent file before acting
 - ✅ Generate API tests ONLY
 - ✅ Output structured JSON to temp file
 - ✅ Follow knowledge fragment patterns
-- ❌ Do NOT generate E2E tests (that's subprocess 3B)
+- ❌ Do NOT generate E2E tests (that's subagent 3B)
 - ❌ Do NOT run tests (that's step 4)
 - ❌ Do NOT generate fixtures yet (that's step 3C aggregation)
 
 ---
 
-## SUBPROCESS TASK
+## SUBAGENT TASK
 
 ### 1. Identify API Endpoints
 
@@ -88,6 +90,14 @@ test.describe('[Feature] API Tests', () => {
 - ✅ Use proper TypeScript types
 - ✅ Deterministic assertions (no timing dependencies)
 
+**If Pact.js Utils enabled (from `subagentContext.config.use_pactjs_utils`):**
+
+- ✅ Generate consumer contract tests in `pact/http/consumer/` using `createProviderState({ name, params })` pattern
+- ✅ Generate provider verification tests in `pact/http/provider/` using `buildVerifierOptions({ provider, port, includeMainAndDeployed, stateHandlers })` pattern
+- ✅ Generate request filter helpers in `pact/http/helpers/` using `createRequestFilter({ tokenGenerator: () => string })`
+- ✅ Generate shared state constants in `pact/http/helpers/states.ts`
+- ✅ If async/message patterns detected, generate message consumer tests in `pact/message/` using `buildMessageVerifierOptions`
+
 ### 3. Track Fixture Needs
 
 Identify fixtures needed for API tests:
@@ -107,7 +117,7 @@ Write JSON to temp file: `/tmp/tea-automate-api-tests-{{timestamp}}.json`
 ```json
 {
   "success": true,
-  "subprocess": "api-tests",
+  "subagent": "api-tests",
   "tests": [
     {
       "file": "tests/api/auth.spec.ts",
@@ -144,7 +154,7 @@ Write JSON to temp file: `/tmp/tea-automate-api-tests-{{timestamp}}.json`
 ```json
 {
   "success": false,
-  "subprocess": "api-tests",
+  "subagent": "api-tests",
   "error": "Error message describing what went wrong",
   "partial_output": {
     /* any tests generated before error */
@@ -156,18 +166,18 @@ Write JSON to temp file: `/tmp/tea-automate-api-tests-{{timestamp}}.json`
 
 ## EXIT CONDITION
 
-Subprocess completes when:
+Subagent completes when:
 
 - ✅ All API endpoints have test files generated
 - ✅ All tests follow knowledge fragment patterns
 - ✅ JSON output written to temp file
 - ✅ Fixture needs tracked
 
-**Subprocess terminates here.** Parent workflow will read output and proceed to aggregation.
+**Subagent terminates here.** Parent workflow will read output and proceed to aggregation.
 
 ---
 
-## 🚨 SUBPROCESS SUCCESS METRICS
+## 🚨 SUBAGENT SUCCESS METRICS
 
 ### ✅ SUCCESS:
 
@@ -180,4 +190,4 @@ Subprocess completes when:
 - Generated tests other than API tests
 - Did not follow knowledge fragment patterns
 - Invalid or missing JSON output
-- Ran tests (not subprocess responsibility)
+- Ran tests (not subagent responsibility)
