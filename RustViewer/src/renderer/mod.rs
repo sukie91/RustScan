@@ -8,7 +8,7 @@ use eframe::egui_wgpu;
 use eframe::wgpu;
 
 use camera::ArcballCamera;
-use pipelines::{PointVertex, create_line_pipeline, create_mesh_pipeline, create_point_pipeline, expand_points_to_quads};
+use pipelines::{PointVertex, create_line_pipeline, create_mesh_pipeline, create_point_pipeline, create_wireframe_pipeline, expand_points_to_quads};
 use scene::{Scene, MeshGpuVertex};
 
 /// Holds all GPU resources needed to render a scene.
@@ -16,6 +16,7 @@ pub struct SceneRenderer {
     point_pipeline: wgpu::RenderPipeline,
     line_pipeline: wgpu::RenderPipeline,
     mesh_pipeline: wgpu::RenderPipeline,
+    wireframe_pipeline: wgpu::RenderPipeline,
     uniform_buf: wgpu::Buffer,
     uniform_bg: wgpu::BindGroup,
     // Vertex/index buffers updated each frame
@@ -30,6 +31,8 @@ pub struct SceneRenderer {
     mesh_vbuf: Option<wgpu::Buffer>,
     mesh_ibuf: Option<wgpu::Buffer>,
     mesh_index_count: u32,
+    wireframe_ibuf: Option<wgpu::Buffer>,
+    wireframe_index_count: u32,
     // Cached layer flags (set during prepare, used in paint)
     layer_trajectory: bool,
     layer_map_points: bool,
@@ -80,11 +83,13 @@ impl SceneRenderer {
         let point_pipeline = create_point_pipeline(device, surface_format);
         let line_pipeline = create_line_pipeline(device, surface_format);
         let mesh_pipeline = create_mesh_pipeline(device, surface_format, &uniform_bgl);
+        let wireframe_pipeline = create_wireframe_pipeline(device, surface_format, &uniform_bgl);
 
         Self {
             point_pipeline,
             line_pipeline,
             mesh_pipeline,
+            wireframe_pipeline,
             uniform_buf,
             uniform_bg,
             point_vbuf: None,
@@ -98,6 +103,8 @@ impl SceneRenderer {
             mesh_vbuf: None,
             mesh_ibuf: None,
             mesh_index_count: 0,
+            wireframe_ibuf: None,
+            wireframe_index_count: 0,
             layer_trajectory: true,
             layer_map_points: true,
             layer_gaussians: true,
@@ -198,6 +205,7 @@ impl SceneRenderer {
         // Mesh (uses uniform buffer for world-space transform)
         if (scene.layers.mesh_solid || scene.layers.mesh_wireframe) && !scene.mesh_vertices.is_empty() {
             self.mesh_index_count = scene.mesh_indices.len() as u32;
+            self.wireframe_index_count = scene.mesh_edge_indices.len() as u32;
             self.mesh_vbuf = Some(create_vertex_buffer(
                 device,
                 bytemuck::cast_slice::<MeshGpuVertex, u8>(&scene.mesh_vertices),
@@ -206,8 +214,13 @@ impl SceneRenderer {
                 device,
                 bytemuck::cast_slice(&scene.mesh_indices),
             ));
+            self.wireframe_ibuf = Some(create_index_buffer(
+                device,
+                bytemuck::cast_slice(&scene.mesh_edge_indices),
+            ));
         } else {
             self.mesh_index_count = 0;
+            self.wireframe_index_count = 0;
         }
     }
 
@@ -223,6 +236,20 @@ impl SceneRenderer {
             {
                 if count > 0 {
                     rpass.set_pipeline(&self.mesh_pipeline);
+                    rpass.set_bind_group(0, &self.uniform_bg, &[]);
+                    rpass.set_vertex_buffer(0, vbuf.slice(..));
+                    rpass.set_index_buffer(ibuf.slice(..), wgpu::IndexFormat::Uint32);
+                    rpass.draw_indexed(0..count, 0, 0..1);
+                }
+            }
+        }
+
+        if self.layer_mesh_wireframe {
+            if let (Some(vbuf), Some(ibuf), count) =
+                (&self.mesh_vbuf, &self.wireframe_ibuf, self.wireframe_index_count)
+            {
+                if count > 0 {
+                    rpass.set_pipeline(&self.wireframe_pipeline);
                     rpass.set_bind_group(0, &self.uniform_bg, &[]);
                     rpass.set_vertex_buffer(0, vbuf.slice(..));
                     rpass.set_index_buffer(ibuf.slice(..), wgpu::IndexFormat::Uint32);

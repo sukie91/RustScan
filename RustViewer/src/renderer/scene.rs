@@ -18,8 +18,8 @@ impl Default for LayerVisibility {
             trajectory: true,
             map_points: true,
             gaussians: true,
-            mesh_wireframe: true,
-            mesh_solid: false,
+            mesh_wireframe: false,
+            mesh_solid: true,
         }
     }
 }
@@ -103,6 +103,8 @@ pub struct Scene {
     pub mesh_vertices: Vec<MeshGpuVertex>,
     /// Mesh triangle indices.
     pub mesh_indices: Vec<u32>,
+    /// Mesh edge indices for wireframe rendering.
+    pub mesh_edge_indices: Vec<u32>,
     /// Layer visibility flags.
     pub layers: LayerVisibility,
     /// Axis-aligned bounding box of the full scene.

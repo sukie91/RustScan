@@ -2,6 +2,7 @@
 //!
 //! Parses the exact formats produced by RustSLAM's mesh_io module.
 
+use std::collections::HashSet;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
@@ -9,7 +10,8 @@ use crate::loader::checkpoint::LoadError;
 use crate::renderer::scene::{MeshGpuVertex, Scene};
 
 /// Load an OBJ mesh (RustSLAM format: `v x y z r g b`, `vn nx ny nz`, `f A//A B//B C//C`).
-pub fn load_obj(path: &Path) -> Result<(Vec<MeshGpuVertex>, Vec<u32>), LoadError> {
+/// Returns (vertices, triangle_indices, edge_indices).
+pub fn load_obj(path: &Path) -> Result<(Vec<MeshGpuVertex>, Vec<u32>, Vec<u32>), LoadError> {
     let file = std::fs::File::open(path)?;
     let reader = BufReader::new(file);
 
@@ -35,9 +37,10 @@ pub fn load_obj(path: &Path) -> Result<(Vec<MeshGpuVertex>, Vec<u32>), LoadError
                 let vals = vals.map_err(|_| LoadError::ObjParse(format!("bad vertex line: {line}")))?;
                 if vals.len() >= 3 {
                     positions.push([vals[0], vals[1], vals[2]]);
-                    let r = vals.get(3).copied().unwrap_or(0.5);
-                    let g = vals.get(4).copied().unwrap_or(0.5);
-                    let b = vals.get(5).copied().unwrap_or(0.5);
+                    // Support both with and without color
+                    let r = vals.get(3).copied().unwrap_or(0.7); // Default gray
+                    let g = vals.get(4).copied().unwrap_or(0.7);
+                    let b = vals.get(5).copied().unwrap_or(0.7);
                     colors.push([r, g, b]);
                 }
             }
@@ -51,23 +54,49 @@ pub fn load_obj(path: &Path) -> Result<(Vec<MeshGpuVertex>, Vec<u32>), LoadError
                 }
             }
             Some("f") => {
-                // Format: A//A B//B C//C (1-based)
+                // Support multiple formats:
+                // - A//A B//B C//C (RustSLAM format: vertex//normal)
+                // - A/B/C D/E/F G/H/I (standard format: vertex/texture/normal)
+                // - A B C (simple format: vertex only)
                 let corners: Vec<&str> = parts.collect();
                 if corners.len() >= 3 {
                     let mut vidx = [0usize; 3];
                     let mut nidx = [0usize; 3];
                     for (i, corner) in corners[..3].iter().enumerate() {
-                        let mut split = corner.split("//");
-                        let v = split
-                            .next()
-                            .and_then(|s| s.parse::<usize>().ok())
-                            .ok_or_else(|| LoadError::ObjParse(format!("bad face vertex: {corner}")))?;
-                        let n = split
-                            .next()
-                            .and_then(|s| s.parse::<usize>().ok())
-                            .unwrap_or(1);
-                        vidx[i] = v.saturating_sub(1);
-                        nidx[i] = n.saturating_sub(1);
+                        if corner.contains("//") {
+                            // Format: v//vn
+                            let mut split = corner.split("//");
+                            let v = split
+                                .next()
+                                .and_then(|s| s.parse::<usize>().ok())
+                                .ok_or_else(|| LoadError::ObjParse(format!("bad face vertex: {corner}")))?;
+                            let n = split
+                                .next()
+                                .and_then(|s| s.parse::<usize>().ok())
+                                .unwrap_or(1);
+                            vidx[i] = v.saturating_sub(1);
+                            nidx[i] = n.saturating_sub(1);
+                        } else if corner.contains('/') {
+                            // Format: v/vt/vn or v/vt
+                            let parts_vec: Vec<&str> = corner.split('/').collect();
+                            let v = parts_vec
+                                .get(0)
+                                .and_then(|s| s.parse::<usize>().ok())
+                                .ok_or_else(|| LoadError::ObjParse(format!("bad face vertex: {corner}")))?;
+                            let n = parts_vec
+                                .get(2)
+                                .and_then(|s| s.parse::<usize>().ok())
+                                .unwrap_or(1);
+                            vidx[i] = v.saturating_sub(1);
+                            nidx[i] = n.saturating_sub(1);
+                        } else {
+                            // Format: v (vertex only)
+                            let v = corner
+                                .parse::<usize>()
+                                .map_err(|_| LoadError::ObjParse(format!("bad face vertex: {corner}")))?;
+                            vidx[i] = v.saturating_sub(1);
+                            nidx[i] = 0; // Use first normal or default
+                        }
                     }
                     faces.push(vidx);
                     face_normals.push(nidx);
@@ -78,30 +107,90 @@ pub fn load_obj(path: &Path) -> Result<(Vec<MeshGpuVertex>, Vec<u32>), LoadError
     }
 
     // Build flat vertex + index buffers (one MeshGpuVertex per face corner)
+    // Also track which original vertex each expanded vertex came from
     let mut vertices: Vec<MeshGpuVertex> = Vec::with_capacity(faces.len() * 3);
     let mut indices: Vec<u32> = Vec::with_capacity(faces.len() * 3);
+    let mut expanded_to_orig: Vec<usize> = Vec::with_capacity(faces.len() * 3);
 
-    for (face, fnorm) in faces.iter().zip(face_normals.iter()) {
+    for face in faces.iter() {
+        // Get the three vertex positions
+        let p0 = *positions.get(face[0]).unwrap_or(&[0.0; 3]);
+        let p1 = *positions.get(face[1]).unwrap_or(&[0.0; 3]);
+        let p2 = *positions.get(face[2]).unwrap_or(&[0.0; 3]);
+
+        // Compute face normal from vertex positions using cross product
+        // This ensures the normal is consistent with the vertex winding order
+        let edge1 = [p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]];
+        let edge2 = [p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2]];
+
+        // Cross product: edge1 × edge2
+        let mut computed_normal = [
+            edge1[1] * edge2[2] - edge1[2] * edge2[1],
+            edge1[2] * edge2[0] - edge1[0] * edge2[2],
+            edge1[0] * edge2[1] - edge1[1] * edge2[0],
+        ];
+
+        // Normalize the computed normal
+        let length = (computed_normal[0] * computed_normal[0]
+                    + computed_normal[1] * computed_normal[1]
+                    + computed_normal[2] * computed_normal[2]).sqrt();
+        if length > 1e-6 {
+            computed_normal[0] /= length;
+            computed_normal[1] /= length;
+            computed_normal[2] /= length;
+        } else {
+            computed_normal = [0.0, 1.0, 0.0]; // Default up vector
+        }
+
+        // Use the computed normal for all three vertices of this face
         for i in 0..3 {
             let vi = face[i];
-            let ni = fnorm[i];
             let pos = *positions.get(vi).unwrap_or(&[0.0; 3]);
-            let col = *colors.get(vi).unwrap_or(&[0.5; 3]);
-            let nrm = *normals.get(ni).unwrap_or(&[0.0, 1.0, 0.0]);
+            let col = *colors.get(vi).unwrap_or(&[0.7; 3]);
             indices.push(vertices.len() as u32);
             vertices.push(MeshGpuVertex {
                 position: pos,
-                normal: nrm,
+                normal: computed_normal, // Use computed normal instead of file normal
                 color: col,
             });
+            expanded_to_orig.push(vi);
         }
     }
 
-    Ok((vertices, indices))
+    // Extract unique edges based on original vertex indices
+    let mut edge_set: HashSet<(usize, usize)> = HashSet::new();
+    for face in faces.iter() {
+        let i0 = face[0];
+        let i1 = face[1];
+        let i2 = face[2];
+        edge_set.insert((i0.min(i1), i0.max(i1)));
+        edge_set.insert((i1.min(i2), i1.max(i2)));
+        edge_set.insert((i2.min(i0), i2.max(i0)));
+    }
+
+    // Build a map from original vertex index to one expanded vertex index
+    let mut orig_to_expanded: std::collections::HashMap<usize, u32> = std::collections::HashMap::new();
+    for (expanded_idx, &orig_idx) in expanded_to_orig.iter().enumerate() {
+        orig_to_expanded.entry(orig_idx).or_insert(expanded_idx as u32);
+    }
+
+    // Convert unique edges to expanded vertex indices
+    let edge_indices: Vec<u32> = edge_set
+        .into_iter()
+        .filter_map(|(a, b)| {
+            let va = orig_to_expanded.get(&a)?;
+            let vb = orig_to_expanded.get(&b)?;
+            Some([*va, *vb])
+        })
+        .flatten()
+        .collect();
+
+    Ok((vertices, indices, edge_indices))
 }
 
 /// Load an ASCII PLY mesh (RustSLAM format).
-pub fn load_ply(path: &Path) -> Result<(Vec<MeshGpuVertex>, Vec<u32>), LoadError> {
+/// Returns (vertices, triangle_indices, edge_indices).
+pub fn load_ply(path: &Path) -> Result<(Vec<MeshGpuVertex>, Vec<u32>, Vec<u32>), LoadError> {
     let file = std::fs::File::open(path)?;
     let reader = BufReader::new(file);
     let mut lines = reader.lines();
@@ -158,6 +247,7 @@ pub fn load_ply(path: &Path) -> Result<(Vec<MeshGpuVertex>, Vec<u32>), LoadError
 
     // Read faces: 3 i j k
     let mut indices: Vec<u32> = Vec::with_capacity(face_count * 3);
+    let mut edge_set: HashSet<(u32, u32)> = HashSet::new();
     for _ in 0..face_count {
         let line = lines
             .next()
@@ -171,9 +261,22 @@ pub fn load_ply(path: &Path) -> Result<(Vec<MeshGpuVertex>, Vec<u32>), LoadError
             return Err(LoadError::PlyParse(format!("face line too short: {}", line)));
         }
         indices.extend_from_slice(&vals[..3]);
+
+        // Extract edges for wireframe
+        let i0 = vals[0];
+        let i1 = vals[1];
+        let i2 = vals[2];
+        edge_set.insert((i0.min(i1), i0.max(i1)));
+        edge_set.insert((i1.min(i2), i1.max(i2)));
+        edge_set.insert((i2.min(i0), i2.max(i0)));
     }
 
-    Ok((vertices, indices))
+    let edge_indices: Vec<u32> = edge_set
+        .into_iter()
+        .flat_map(|(a, b)| [a, b])
+        .collect();
+
+    Ok((vertices, indices, edge_indices))
 }
 
 /// Load a mesh file (OBJ or PLY) and merge into the scene.
@@ -184,7 +287,7 @@ pub fn load_mesh(path: &Path, scene: &mut Scene) -> Result<(), LoadError> {
         .unwrap_or("")
         .to_lowercase();
 
-    let (verts, idxs) = match ext.as_str() {
+    let (verts, idxs, edge_idxs) = match ext.as_str() {
         "obj" => load_obj(path)?,
         "ply" => load_ply(path)?,
         other => {
@@ -199,6 +302,7 @@ pub fn load_mesh(path: &Path, scene: &mut Scene) -> Result<(), LoadError> {
     }
     scene.mesh_vertices = verts;
     scene.mesh_indices = idxs;
+    scene.mesh_edge_indices = edge_idxs;
 
     Ok(())
 }
@@ -223,9 +327,10 @@ mod tests {
         tmpfile.write_all(obj.as_bytes()).unwrap();
         let path = tmpfile.path().to_path_buf();
 
-        let (verts, idxs) = load_obj(&path).unwrap();
+        let (verts, idxs, edge_idxs) = load_obj(&path).unwrap();
         assert_eq!(verts.len(), 3, "should have 3 vertices");
         assert_eq!(idxs, vec![0, 1, 2], "indices should be 0,1,2");
+        assert_eq!(edge_idxs.len(), 6, "should have 3 edges (6 indices)"); // 3 edges = 6 indices
         let c = verts[0].color;
         assert!((c[0] - 0.8).abs() < 1e-3, "red component mismatch: {}", c[0]);
     }
@@ -257,9 +362,10 @@ mod tests {
         tmpfile.write_all(ply.as_bytes()).unwrap();
         let path = tmpfile.path().to_path_buf();
 
-        let (verts, idxs) = load_ply(&path).unwrap();
+        let (verts, idxs, edge_idxs) = load_ply(&path).unwrap();
         assert_eq!(verts.len(), 3);
         assert_eq!(idxs, vec![0, 1, 2]);
+        assert_eq!(edge_idxs.len(), 6, "should have 3 edges (6 indices)");
         let c = verts[0].color;
         assert!((c[0] - 204.0 / 255.0).abs() < 1e-3, "red: {}", c[0]);
         assert!((c[1] - 51.0 / 255.0).abs() < 1e-3, "green: {}", c[1]);
