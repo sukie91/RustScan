@@ -109,6 +109,412 @@ RustScan 目前只有 CLI 输出和静态图片导出（`viewer/mod.rs` 生成 P
 
 7. **空状态 UX**：初始界面居中显示「📂 打开 SLAM 结果目录」按钮（rfd::FileDialog），无数据时不显示黑色空视口。图层面板有颜色图例：蓝=地图点、金=相机轨迹、橙=Gaussian、灰=Mesh。
 
+## Apple Design System
+
+### Design Philosophy
+
+RustViewer 遵循 Apple Human Interface Guidelines，追求简洁、优雅、直观的用户体验。设计目标：
+
+- **Clarity（清晰）**：内容优先，界面元素不喧宾夺主
+- **Deference（尊重）**：UI 让位于内容，使用微妙的视觉效果引导用户
+- **Depth（深度）**：通过层次、阴影、透明度营造空间感
+
+### Color System
+
+采用 macOS 原生语义色彩系统，支持浅色/深色模式自动切换：
+
+**主色调（Primary Colors）**
+```rust
+// 使用 egui 的系统色适配
+let system_blue = egui::Color32::from_rgb(0, 122, 255);      // macOS Accent Blue
+let system_gray = egui::Color32::from_rgb(142, 142, 147);    // Secondary Label
+```
+
+**背景层次（Background Hierarchy）**
+- **Window Background**（窗口背景）：`egui::Color32::from_rgb(246, 246, 246)` (Light) / `egui::Color32::from_rgb(30, 30, 30)` (Dark)
+- **Panel Background**（面板背景）：`egui::Color32::from_rgba_premultiplied(255, 255, 255, 230)` (Light, 90% opacity) / `egui::Color32::from_rgba_premultiplied(40, 40, 40, 230)` (Dark)
+- **Card Background**（卡片背景）：`egui::Color32::WHITE` (Light) / `egui::Color32::from_rgb(50, 50, 50)` (Dark)
+
+**语义色（Semantic Colors）**
+- **Success**（成功）：`egui::Color32::from_rgb(52, 199, 89)` — 绿色，用于加载成功提示
+- **Warning**（警告）：`egui::Color32::from_rgb(255, 149, 0)` — 橙色，用于性能警告
+- **Error**（错误）：`egui::Color32::from_rgb(255, 59, 48)` — 红色，用于加载失败
+- **Info**（信息）：`egui::Color32::from_rgb(0, 122, 255)` — 蓝色，用于提示信息
+
+**3D 场景色（Scene Colors）**
+- **Camera Trajectory**（相机轨迹）：`[0.0, 0.478, 1.0]` — SF Blue (#007AFF)
+- **Map Points**（地图点）：渐变色，从 `[0.204, 0.780, 0.349]` (SF Green) 到 `[1.0, 0.584, 0.0]` (SF Orange)，按深度映射
+- **Gaussians**（高斯点云）：`[1.0, 0.584, 0.0]` (SF Orange) 或保持原始颜色
+- **Mesh Wireframe**（网格线框）：`[0.557, 0.557, 0.576]` (System Gray)
+- **Mesh Solid**（实体网格）：使用顶点色 + Lambert 光照，环境光 `[0.95, 0.95, 0.95]`
+
+### Typography
+
+**字体家族（Font Family）**
+- **Primary Font**：SF Pro Text（macOS 系统字体）
+  - egui 默认字体已接近 SF Pro，无需额外配置
+  - 中文回退：PingFang SC（苹方）
+
+**字体大小（Font Sizes）**
+```rust
+// 在 egui 中通过 TextStyle 配置
+let mut style = (*ctx.style()).clone();
+style.text_styles = [
+    (egui::TextStyle::Heading, egui::FontId::new(20.0, egui::FontFamily::Proportional)),  // 标题
+    (egui::TextStyle::Body, egui::FontId::new(13.0, egui::FontFamily::Proportional)),     // 正文
+    (egui::TextStyle::Button, egui::FontId::new(13.0, egui::FontFamily::Proportional)),   // 按钮
+    (egui::TextStyle::Small, egui::FontId::new(11.0, egui::FontFamily::Proportional)),    // 小字
+    (egui::TextStyle::Monospace, egui::FontId::new(12.0, egui::FontFamily::Monospace)),   // 等宽
+].into();
+ctx.set_style(style);
+```
+
+**字重（Font Weights）**
+- **Regular (400)**：正文、标签
+- **Medium (500)**：按钮、强调文本
+- **Semibold (600)**：标题、section header
+
+### Spacing & Layout
+
+遵循 8pt 网格系统（egui 默认使用 4pt，需调整为 8pt 倍数）：
+
+**间距常量（Spacing Constants）**
+```rust
+const SPACING_XXS: f32 = 4.0;   // 极小间距（分隔线）
+const SPACING_XS: f32 = 8.0;    // 小间距（图标与文字）
+const SPACING_SM: f32 = 12.0;   // 中小间距（列表项内部）
+const SPACING_MD: f32 = 16.0;   // 标准间距（section 之间）
+const SPACING_LG: f32 = 24.0;   // 大间距（panel padding）
+const SPACING_XL: f32 = 32.0;   // 超大间距（空状态）
+```
+
+**布局规则（Layout Rules）**
+- **Side Panel Width**：280pt（固定宽度，macOS 标准侧边栏）
+- **Panel Padding**：`egui::Vec2::new(24.0, 20.0)` — 左右 24pt，上下 20pt
+- **Section Spacing**：16pt between sections
+- **List Item Height**：32pt（单行）/ 44pt（带副标题）
+- **Button Height**：28pt（小按钮）/ 32pt（标准按钮）
+
+### Visual Effects
+
+**圆角（Corner Radius）**
+```rust
+// 在 egui Visuals 中配置
+visuals.widgets.noninteractive.rounding = egui::Rounding::same(8.0);  // 面板、卡片
+visuals.widgets.inactive.rounding = egui::Rounding::same(6.0);        // 按钮、输入框
+visuals.widgets.hovered.rounding = egui::Rounding::same(6.0);
+visuals.widgets.active.rounding = egui::Rounding::same(6.0);
+```
+
+**阴影（Shadows）**
+- **Panel Shadow**：`offset: (0, 2), blur: 8, color: rgba(0,0,0,0.1)` — 轻微悬浮感
+- **Button Shadow**（hover）：`offset: (0, 1), blur: 4, color: rgba(0,0,0,0.08)` — 微妙提升
+- **Card Shadow**：`offset: (0, 4), blur: 12, color: rgba(0,0,0,0.12)` — 明显层次
+
+egui 实现：
+```rust
+// egui 0.31 支持通过 Frame 添加阴影
+egui::Frame::none()
+    .fill(egui::Color32::WHITE)
+    .rounding(8.0)
+    .shadow(egui::epaint::Shadow {
+        offset: egui::Vec2::new(0.0, 2.0),
+        blur: 8.0,
+        spread: 0.0,
+        color: egui::Color32::from_black_alpha(25),
+    })
+    .show(ui, |ui| { /* content */ });
+```
+
+**透明度（Opacity）**
+- **Panel Backdrop**：90% opacity（毛玻璃效果的基础）
+- **Disabled State**：50% opacity
+- **Secondary Text**：70% opacity
+- **Divider Line**：20% opacity
+
+**模糊效果（Blur）**
+- egui 不原生支持背景模糊（backdrop-filter），但可通过半透明背景 + 微妙阴影模拟毛玻璃质感
+- 3D 视口背景使用渐变：从 `rgb(250, 250, 250)` (top) 到 `rgb(240, 240, 245)` (bottom)
+
+### Interaction Design
+
+**按钮状态（Button States）**
+```rust
+// 自定义按钮样式
+fn apple_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
+    let button = egui::Button::new(text)
+        .fill(egui::Color32::from_rgb(0, 122, 255))  // System Blue
+        .rounding(6.0)
+        .min_size(egui::Vec2::new(80.0, 32.0));
+
+    let response = ui.add(button);
+
+    // Hover 效果：颜色加深 10%
+    if response.hovered() {
+        // 通过 Painter 绘制 hover overlay
+    }
+
+    response
+}
+```
+
+**状态反馈（State Feedback）**
+- **Hover**：背景色加深 5-10%，添加微妙阴影，光标变为 pointer
+- **Active**（按下）：背景色加深 15%，阴影消失，轻微缩放 0.98x
+- **Focus**：2pt 蓝色描边（`stroke: (2.0, system_blue)`）
+- **Disabled**：50% opacity，光标变为 not-allowed
+
+**动画（Animations）**
+- **Transition Duration**：150ms（快速响应）/ 250ms（状态切换）
+- **Easing**：ease-out（Apple 标准缓动）
+- egui 实现：通过 `ctx.animate_value_with_time()` 实现平滑过渡
+
+```rust
+// 示例：按钮 hover 动画
+let hover_anim = ctx.animate_bool_with_time(
+    egui::Id::new("button_hover"),
+    response.hovered(),
+    0.15  // 150ms
+);
+let bg_color = egui::Color32::from_rgb(
+    (0.0 + hover_anim * 10.0) as u8,
+    (122.0 - hover_anim * 10.0) as u8,
+    255
+);
+```
+
+### Component Specifications
+
+**1. Side Panel（侧边栏）**
+- Width: 280pt
+- Background: Panel Background (90% opacity)
+- Padding: 24pt (left/right), 20pt (top/bottom)
+- Shadow: (0, 2, 8, rgba(0,0,0,0.1))
+- Sections 之间用 1pt 分隔线（20% opacity gray）
+
+**2. File Picker Button（文件选择按钮）**
+- Style: Secondary Button
+- Height: 32pt
+- Icon: SF Symbols 风格（使用 Unicode 或自定义图标）
+- Text: 13pt SF Pro Text Medium
+- Rounding: 6pt
+- Hover: 背景色 `rgba(0, 122, 255, 0.1)`
+
+**3. Layer Toggle（图层开关）**
+- Style: Checkbox + Color Badge
+- Height: 28pt
+- Badge: 12×12pt 圆形色块，左侧 margin 8pt
+- Label: 13pt SF Pro Text Regular
+- Spacing: 8pt between badge and label
+
+**4. Scene Stats Card（场景统计卡片）**
+- Background: Card Background
+- Rounding: 8pt
+- Padding: 12pt
+- Shadow: (0, 1, 4, rgba(0,0,0,0.08))
+- Text: 11pt SF Pro Text Regular (label), 15pt SF Pro Text Semibold (value)
+
+**5. Empty State（空状态）**
+- Icon: 64×64pt, gray (50% opacity)
+- Title: 20pt SF Pro Text Semibold
+- Description: 13pt SF Pro Text Regular, gray (70% opacity)
+- Button: Primary Button, 120pt width
+- Vertical spacing: Icon → 16pt → Title → 8pt → Description → 24pt → Button
+
+**6. 3D Viewport（3D 视口）**
+- Background: Gradient (top: #FAFAFA, bottom: #F0F0F5)
+- Grid: 1pt lines, 10% opacity, 1m spacing
+- Axis Indicator: 右下角，80×80pt，X=红 Y=绿 Z=蓝
+
+**7. Error Toast（错误提示）**
+- Position: Top-center, 16pt from top
+- Background: Error color (95% opacity)
+- Text: White, 13pt SF Pro Text Medium
+- Rounding: 8pt
+- Padding: 12pt (horizontal), 10pt (vertical)
+- Shadow: (0, 4, 12, rgba(0,0,0,0.2))
+- Auto-dismiss: 4 seconds
+
+### Implementation in egui
+
+**全局样式配置（Global Style Setup）**
+
+在 `ViewerApp::new()` 中配置：
+
+```rust
+pub fn configure_apple_style(ctx: &egui::Context) {
+    let mut style = (*ctx.style()).clone();
+
+    // 字体大小
+    style.text_styles = [
+        (egui::TextStyle::Heading, egui::FontId::new(20.0, egui::FontFamily::Proportional)),
+        (egui::TextStyle::Body, egui::FontId::new(13.0, egui::FontFamily::Proportional)),
+        (egui::TextStyle::Button, egui::FontId::new(13.0, egui::FontFamily::Proportional)),
+        (egui::TextStyle::Small, egui::FontId::new(11.0, egui::FontFamily::Proportional)),
+    ].into();
+
+    // 间距（8pt 网格）
+    style.spacing.item_spacing = egui::Vec2::new(8.0, 8.0);
+    style.spacing.button_padding = egui::Vec2::new(12.0, 6.0);
+    style.spacing.indent = 16.0;
+
+    // 视觉效果
+    let mut visuals = egui::Visuals::light();  // 或 dark()
+
+    // 圆角
+    visuals.widgets.noninteractive.rounding = egui::Rounding::same(8.0);
+    visuals.widgets.inactive.rounding = egui::Rounding::same(6.0);
+    visuals.widgets.hovered.rounding = egui::Rounding::same(6.0);
+    visuals.widgets.active.rounding = egui::Rounding::same(6.0);
+
+    // 颜色
+    visuals.widgets.inactive.weak_bg_fill = egui::Color32::from_rgb(0, 122, 255);  // 按钮背景
+    visuals.widgets.hovered.weak_bg_fill = egui::Color32::from_rgb(0, 110, 230);   // hover
+    visuals.widgets.active.weak_bg_fill = egui::Color32::from_rgb(0, 100, 210);    // active
+
+    // 窗口背景
+    visuals.window_fill = egui::Color32::from_rgb(246, 246, 246);
+    visuals.panel_fill = egui::Color32::from_rgba_premultiplied(255, 255, 255, 230);
+
+    // 阴影
+    visuals.window_shadow = egui::epaint::Shadow {
+        offset: egui::Vec2::new(0.0, 2.0),
+        blur: 8.0,
+        spread: 0.0,
+        color: egui::Color32::from_black_alpha(25),
+    };
+
+    style.visuals = visuals;
+    ctx.set_style(style);
+}
+```
+
+**自定义组件库（Custom Widget Library）**
+
+创建 `RustViewer/src/ui/apple_widgets.rs`：
+
+```rust
+pub mod apple_widgets {
+    use egui::{Color32, Response, Ui, Vec2, Widget};
+
+    /// Apple 风格主按钮
+    pub struct ApplePrimaryButton {
+        text: String,
+        min_size: Vec2,
+    }
+
+    impl ApplePrimaryButton {
+        pub fn new(text: impl Into<String>) -> Self {
+            Self {
+                text: text.into(),
+                min_size: Vec2::new(80.0, 32.0),
+            }
+        }
+    }
+
+    impl Widget for ApplePrimaryButton {
+        fn ui(self, ui: &mut Ui) -> Response {
+            let button = egui::Button::new(self.text)
+                .fill(Color32::from_rgb(0, 122, 255))
+                .rounding(6.0)
+                .min_size(self.min_size);
+            ui.add(button)
+        }
+    }
+
+    /// 图层开关（带色块）
+    pub fn layer_toggle(
+        ui: &mut Ui,
+        label: &str,
+        color: Color32,
+        checked: &mut bool,
+    ) -> Response {
+        ui.horizontal(|ui| {
+            // 色块
+            let (rect, _) = ui.allocate_exact_size(
+                Vec2::new(12.0, 12.0),
+                egui::Sense::hover(),
+            );
+            ui.painter().circle_filled(rect.center(), 6.0, color);
+
+            ui.add_space(8.0);
+
+            // Checkbox
+            ui.checkbox(checked, label)
+        })
+        .inner
+    }
+
+    /// 统计卡片
+    pub fn stat_card(ui: &mut Ui, label: &str, value: &str) {
+        egui::Frame::none()
+            .fill(Color32::WHITE)
+            .rounding(8.0)
+            .inner_margin(12.0)
+            .shadow(egui::epaint::Shadow {
+                offset: Vec2::new(0.0, 1.0),
+                blur: 4.0,
+                spread: 0.0,
+                color: Color32::from_black_alpha(20),
+            })
+            .show(ui, |ui| {
+                ui.vertical(|ui| {
+                    ui.label(
+                        egui::RichText::new(label)
+                            .size(11.0)
+                            .color(Color32::from_rgb(142, 142, 147))
+                    );
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new(value)
+                            .size(15.0)
+                            .strong()
+                    );
+                });
+            });
+    }
+}
+```
+
+### Dark Mode Support
+
+自动跟随系统主题（egui 0.31 支持）：
+
+```rust
+// 在 main.rs 中配置
+let native_options = eframe::NativeOptions {
+    viewport: egui::ViewportBuilder::default()
+        .with_inner_size([1280.0, 800.0])
+        .with_title("RustViewer")
+        .with_theme(eframe::Theme::Auto),  // 自动跟随系统
+    ..Default::default()
+};
+```
+
+深色模式颜色调整：
+
+```rust
+pub fn get_theme_colors(ctx: &egui::Context) -> ThemeColors {
+    if ctx.style().visuals.dark_mode {
+        ThemeColors {
+            window_bg: Color32::from_rgb(30, 30, 30),
+            panel_bg: Color32::from_rgba_premultiplied(40, 40, 40, 230),
+            card_bg: Color32::from_rgb(50, 50, 50),
+            text_primary: Color32::from_rgb(255, 255, 255),
+            text_secondary: Color32::from_rgb(152, 152, 157),
+        }
+    } else {
+        ThemeColors {
+            window_bg: Color32::from_rgb(246, 246, 246),
+            panel_bg: Color32::from_rgba_premultiplied(255, 255, 255, 230),
+            card_bg: Color32::WHITE,
+            text_primary: Color32::from_rgb(0, 0, 0),
+            text_secondary: Color32::from_rgb(142, 142, 147),
+        }
+    }
+}
+```
+
 ## Implementation Plan
 
 ### Tasks
