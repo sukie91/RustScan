@@ -140,7 +140,7 @@ development_status:
   8-1-create-workspace-cargo-toml: done
   8-2-add-viewer-types-feature-to-rustslam: done
   8-3-add-cfg-gates-for-heavy-dependencies: done
-  8-4-create-rustviewer-crate-structure: backlog
+  8-4-create-rustviewer-crate-structure: ready-for-dev
   8-5-create-main-and-app-skeleton: backlog
   8-6-define-scene-data-model: backlog
   8-7-implement-checkpoint-loader: backlog
