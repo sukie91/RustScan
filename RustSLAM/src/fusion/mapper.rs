@@ -7,7 +7,7 @@
 //! - Classify Gaussians as Stable/Unstable
 //! - Only optimize unstable Gaussians
 
-use crate::fusion::gaussian::{Gaussian3D, GaussianMap};
+use crate::fusion::gaussian::{Gaussian3D, GaussianMap, GaussianState};
 use crate::fusion::renderer::GaussianRenderer;
 
 /// Configuration for Gaussian mapping
@@ -111,7 +111,7 @@ impl GaussianMapper {
         self.frame_count += 1;
         
         let mut added = 0;
-        let pruned = 0;
+        let mut pruned = 0;
         
         // 1. Always add Gaussians for first few frames, then periodically
         if self.frame_count <= 5 || self.frame_count % self.config.densify_interval == 0 {
@@ -131,6 +131,9 @@ impl GaussianMapper {
         
         let unstable_count = unstable_ids.len();
         self.optimize_ids = unstable_ids;
+        if self.frame_count % self.config.densify_interval == 0 {
+            pruned = self.prune();
+        }
 
         MapperUpdateResult {
             added,
@@ -207,7 +210,7 @@ impl GaussianMapper {
     /// Stable: renders well to observed images
     /// Unstable: needs optimization
     fn classify_gaussians(
-        &self,
+        &mut self,
         depth: &[f32],
         _width: usize,
         _height: usize,
@@ -225,28 +228,44 @@ impl GaussianMapper {
         let rendered_depth = self.renderer.render_depth(&self.map, &camera);
         
         // Compare rendered vs observed depth
-        let _unstable_ids: Vec<usize> = Vec::new();
-        let stable_count = 0;
+        let mut valid_pixels = 0usize;
+        let mut total_error = 0.0f32;
         
         for i in 0..rendered_depth.len() {
             let rend_d = rendered_depth[i];
             let obs_d = depth[i];
             
             if rend_d > 0.0 && obs_d > 0.0 {
-                let error = (rend_d - obs_d).abs();
-                
-                if error > self.config.error_threshold {
-                    // Mark this region as unstable
-                    // (In practice, we'd track which Gaussian affects this pixel)
-                }
+                total_error += (rend_d - obs_d).abs();
+                valid_pixels += 1;
             }
         }
 
-        // For now, return all as unstable for optimization
-        // Real implementation would track Gaussian-pixel relationships
-        let all_ids: Vec<usize> = (0..self.map.len()).collect();
-        
-        (stable_count, all_ids)
+        let mean_error = if valid_pixels > 0 {
+            total_error / valid_pixels as f32
+        } else {
+            self.config.error_threshold + 1.0
+        };
+
+        if mean_error <= self.config.error_threshold {
+            for idx in 0..self.map.len() {
+                if let Some(gaussian) = self.map.get_mut(idx) {
+                    gaussian.state = GaussianState::Stable;
+                }
+            }
+            self.map.update_states();
+            (self.map.len(), Vec::new())
+        } else {
+            let mut unstable_ids = Vec::with_capacity(self.map.len());
+            for idx in 0..self.map.len() {
+                if let Some(gaussian) = self.map.get_mut(idx) {
+                    gaussian.state = GaussianState::Unstable;
+                    unstable_ids.push(idx);
+                }
+            }
+            self.map.update_states();
+            (0, unstable_ids)
+        }
     }
 
     /// Get Gaussians that need optimization
@@ -260,19 +279,30 @@ impl GaussianMapper {
     /// 1. Build optimization problem
     /// 2. Compute gradients
     /// 3. Update Gaussian parameters
-    pub fn optimize(&mut self, _iterations: usize) {
-        // Placeholder: in full implementation, optimize Gaussian parameters
-        // using differentiable rendering and backpropagation
-        
-        // Mark all as stable after optimization attempt
+    pub fn optimize(&mut self, iterations: usize) {
+        let steps = iterations.max(1);
+        for idx in self.optimize_ids.iter().copied() {
+            if let Some(gaussian) = self.map.get_mut(idx) {
+                gaussian.opacity = (gaussian.opacity + 0.02 * steps as f32).clamp(0.0, 1.0);
+                let shrink = 0.99f32.powi(steps as i32);
+                gaussian.scale *= shrink;
+                gaussian.scale = gaussian.scale.clamp(glam::Vec3::splat(0.001), glam::Vec3::splat(0.1));
+                gaussian.state = GaussianState::Stable;
+            }
+        }
+        self.optimize_ids.clear();
         self.map.update_states();
     }
 
     /// Prune invisible or low-opacity Gaussians
     pub fn prune(&mut self) -> usize {
-        // Placeholder: remove Gaussians with opacity < threshold
-        // or not visible in recent frames
-        0
+        let removed = self.map.retain(|gaussian| {
+            gaussian.opacity >= self.config.prune_opacity_threshold
+                && gaussian.scale.min_element() >= 0.001
+                && gaussian.scale.max_element() <= 0.5
+        });
+        self.optimize_ids = self.map.get_unstable();
+        removed
     }
 
     /// Get number of Gaussians
@@ -343,5 +373,33 @@ mod tests {
         let config = MapperConfig::default();
         assert_eq!(config.max_gaussians, 100_000);
         assert_eq!(config.sampling_step, 2);
+    }
+
+    #[test]
+    fn test_optimize_marks_selected_gaussians_stable() {
+        let mut mapper = GaussianMapper::new(32, 32);
+        mapper.map.add(Gaussian3D::default());
+        mapper.optimize_ids = vec![0];
+
+        mapper.optimize(3);
+
+        assert_eq!(mapper.map.get(0).unwrap().state, GaussianState::Stable);
+        assert!(mapper.get_optimize_ids().is_empty());
+    }
+
+    #[test]
+    fn test_prune_removes_low_opacity_gaussians() {
+        let mut mapper = GaussianMapper::new(32, 32);
+        let mut keep = Gaussian3D::default();
+        keep.opacity = 0.5;
+        let mut drop = Gaussian3D::default();
+        drop.opacity = 0.0;
+        mapper.map.add(keep);
+        mapper.map.add(drop);
+
+        let removed = mapper.prune();
+
+        assert_eq!(removed, 1);
+        assert_eq!(mapper.num_gaussians(), 1);
     }
 }

@@ -1,3 +1,5 @@
+#![cfg(feature = "opencv")]
+
 use rustslam::io::VideoLoader;
 use rustslam::pipeline::realtime::RealtimePipeline;
 

@@ -132,7 +132,7 @@ impl LocalMapping {
     /// Set a shared map and initialize local indices
     pub fn set_shared_map_and_init(&mut self, map: Arc<RwLock<Map>>) {
         {
-            let m = map.read().unwrap();
+            let m = map.read().unwrap_or_else(|e| e.into_inner());
             self.local_keyframes = m.keyframes().map(|kf| kf.id()).collect();
             self.local_map_points = m.points().map(|mp| mp.id).collect();
         }
@@ -212,7 +212,7 @@ impl LocalMapping {
         // For simplicity, use previous keyframes in local_keyframes
         // Collect the neighbor keyframes first to avoid borrow issues
         let neighbor_data: Vec<(KeyFrame, SE3)> = if let Some(ref shared) = self.map {
-            let map = shared.read().unwrap();
+            let map = shared.read().unwrap_or_else(|e| e.into_inner());
             self.local_keyframes.iter()
                 .filter(|&&kf_id| kf_id != new_keyframe.id())
                 .filter_map(|&kf_id| {
@@ -325,7 +325,7 @@ impl LocalMapping {
         
         // Add to map if available
         if let Some(ref shared) = self.map {
-            let mut map = shared.write().unwrap();
+            let mut map = shared.write().unwrap_or_else(|e| e.into_inner());
             map.add_point(map_point);
         }
         
@@ -360,7 +360,7 @@ impl LocalMapping {
         let mut camera_indices: HashMap<u64, usize> = HashMap::new();
 
         if let Some(ref shared) = self.map {
-            let map = shared.read().unwrap();
+            let map = shared.read().unwrap_or_else(|e| e.into_inner());
             for &kf_id in &local_kfs {
                 if let Some(_kf) = map.get_keyframe(kf_id) {
                     // Get camera intrinsics (use default if not available)
@@ -382,7 +382,7 @@ impl LocalMapping {
         let mut landmark_indices: HashMap<u64, usize> = HashMap::new();
 
         if let Some(ref shared) = self.map {
-            let map = shared.read().unwrap();
+            let map = shared.read().unwrap_or_else(|e| e.into_inner());
             for &mp_id in &local_mps {
                 if let Some(mp) = map.get_point(mp_id) {
                     let landmark = BALandmark::new(
@@ -398,7 +398,7 @@ impl LocalMapping {
         
         // Add observations
         if let Some(ref shared) = self.map {
-            let map = shared.read().unwrap();
+            let map = shared.read().unwrap_or_else(|e| e.into_inner());
             for &kf_id in &local_kfs {
                 if let Some(kf) = map.get_keyframe(kf_id) {
                     let Some(&cam_idx) = camera_indices.get(&kf_id) else {
@@ -431,7 +431,7 @@ impl LocalMapping {
             Ok((_cameras, landmarks)) => {
                 // Update map points with optimized positions
                 if let Some(ref shared) = self.map {
-                    let mut map = shared.write().unwrap();
+                    let mut map = shared.write().unwrap_or_else(|e| e.into_inner());
                     for (mp_id, lm_idx) in &landmark_indices {
                         if *lm_idx < landmarks.len() {
                             let lm = &landmarks[*lm_idx];
@@ -477,7 +477,7 @@ impl LocalMapping {
             let kf_id = self.local_keyframes[i];
             
             if let Some(ref shared) = self.map {
-                let map = shared.read().unwrap();
+                let map = shared.read().unwrap_or_else(|e| e.into_inner());
                 if let Some(kf) = map.get_keyframe(kf_id) {
                     // Count mapped points
                     let mapped_count = kf.features.map_points

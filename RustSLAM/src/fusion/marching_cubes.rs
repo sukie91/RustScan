@@ -534,8 +534,9 @@ impl MarchingCubes {
                             color: edge_colors[e2],
                         });
 
+                        // Swap i1 and i2 to reverse winding order for consistent normals
                         mesh.triangles.push(MeshTriangle {
-                            indices: [i0, i1, i2],
+                            indices: [i0, i2, i1],
                         });
 
                         i += 3;
@@ -727,8 +728,9 @@ pub fn extract_mesh_from_tsdf(volume: &TsdfVolume) -> Mesh {
             let i1 = edge_vertex_indices[e1];
             let i2 = edge_vertex_indices[e2];
 
+            // Swap i1 and i2 to reverse winding order for consistent normals
             mesh.triangles.push(MeshTriangle {
-                indices: [i0, i1, i2],
+                indices: [i0, i2, i1],
             });
 
             i += 3;

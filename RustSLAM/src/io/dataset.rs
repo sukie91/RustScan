@@ -303,6 +303,99 @@ fn load_color_image(_path: &Path) -> Result<Vec<u8>> {
     ))
 }
 
+fn collect_image_entries(dir: &Path) -> Result<Vec<PathBuf>> {
+    let mut entries = std::fs::read_dir(dir)?
+        .filter_map(|entry| entry.ok().map(|e| e.path()))
+        .filter(|path| {
+            path.extension()
+                .and_then(|ext| ext.to_str())
+                .map(|ext| matches!(ext.to_ascii_lowercase().as_str(), "png" | "jpg" | "jpeg"))
+                .unwrap_or(false)
+        })
+        .collect::<Vec<_>>();
+    entries.sort();
+    Ok(entries)
+}
+
+fn parse_projection_camera(line: &str, default_width: u32, default_height: u32) -> Result<Camera> {
+    let mut parts = line.split_whitespace();
+    let _label = parts.next();
+    let values = parts
+        .map(|value| {
+            value.parse::<f32>().map_err(|e| {
+                DatasetError::Format(format!("invalid calibration value '{}': {}", value, e))
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if values.len() < 12 {
+        return Err(DatasetError::Format(format!(
+            "expected 12 projection values, got {}",
+            values.len()
+        )));
+    }
+
+    Ok(Camera::new(
+        values[0],
+        values[5],
+        values[2],
+        values[6],
+        default_width,
+        default_height,
+    ))
+}
+
+fn parse_pose_matrix_row(values: &[&str], timestamp: f64) -> Result<(f64, SE3)> {
+    if values.len() < 12 {
+        return Err(DatasetError::Format(format!(
+            "expected at least 12 pose values, got {}",
+            values.len()
+        )));
+    }
+
+    let parsed = values
+        .iter()
+        .take(12)
+        .map(|value| {
+            value.parse::<f32>().map_err(|e| {
+                DatasetError::Format(format!("invalid pose value '{}': {}", value, e))
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    let rotation = [
+        [parsed[0], parsed[1], parsed[2]],
+        [parsed[4], parsed[5], parsed[6]],
+        [parsed[8], parsed[9], parsed[10]],
+    ];
+    let translation = [parsed[3], parsed[7], parsed[11]];
+    Ok((timestamp, SE3::from_rotation_translation(&rotation, &translation)))
+}
+
+fn find_closest_pose(poses: &[(f64, SE3)], timestamp: f64, threshold_seconds: f64) -> Option<SE3> {
+    if poses.is_empty() {
+        return None;
+    }
+
+    match poses.binary_search_by(|(ts, _)| ts.partial_cmp(&timestamp).unwrap_or(std::cmp::Ordering::Equal)) {
+        Ok(idx) => Some(poses[idx].1),
+        Err(idx) => {
+            let mut best: Option<(f64, SE3)> = None;
+            for candidate in [idx.checked_sub(1), Some(idx)].into_iter().flatten() {
+                if let Some((ts, pose)) = poses.get(candidate) {
+                    let diff = (ts - timestamp).abs();
+                    if best.map(|(best_diff, _)| diff < best_diff).unwrap_or(true) {
+                        best = Some((diff, *pose));
+                    }
+                }
+            }
+            match best {
+                Some((diff, pose)) if diff <= threshold_seconds => Some(pose),
+                _ => None,
+            }
+        }
+    }
+}
+
 /// TUM RGB-D dataset loader
 ///
 /// The TUM RGB-D dataset format:
@@ -637,39 +730,346 @@ impl Dataset for TumRgbdDataset {
     }
 }
 
-/// KITTI Odometry dataset loader (placeholder)
+/// KITTI Odometry dataset loader.
 ///
-/// The KITTI Odometry dataset format:
-/// - image_0/: left camera images
-/// - image_1/: right camera images (optional)
-/// - calib.txt: camera calibration
-/// - poses.txt: ground truth poses (optional)
+/// The loader currently reads the left monocular stream from `image_0/`,
+/// camera intrinsics from `calib.txt`, and optional poses from `poses.txt`.
 pub struct KittiDataset {
-    // TODO: Implement KITTI loader
-    _config: DatasetConfig,
+    config: DatasetConfig,
+    metadata: DatasetMetadata,
+    camera: Camera,
+    image_entries: Vec<PathBuf>,
+    poses: Vec<(f64, SE3)>,
 }
 
 impl KittiDataset {
-    pub fn load(_config: DatasetConfig) -> Result<Self> {
-        todo!("KITTI dataset loader not yet implemented")
+    pub fn load(config: DatasetConfig) -> Result<Self> {
+        let root = &config.root_path;
+        let image_dir = root.join("image_0");
+        if !image_dir.is_dir() {
+            return Err(DatasetError::Format(format!(
+                "KITTI image directory not found: {}",
+                image_dir.display()
+            )));
+        }
+
+        let calib_path = root.join("calib.txt");
+        let camera = if calib_path.exists() {
+            let calib = std::fs::read_to_string(&calib_path)?;
+            let line = calib
+                .lines()
+                .find(|line| line.starts_with("P0:") || line.starts_with("P2:"))
+                .ok_or_else(|| DatasetError::Format("calib.txt missing P0/P2 projection matrix".into()))?;
+            parse_projection_camera(line, 1241, 376)?
+        } else {
+            Camera::new(718.856, 718.856, 607.1928, 185.2157, 1241, 376)
+        };
+
+        let image_entries = collect_image_entries(&image_dir)?;
+        if image_entries.is_empty() {
+            return Err(DatasetError::Format(format!(
+                "no KITTI images found in {}",
+                image_dir.display()
+            )));
+        }
+
+        let poses = {
+            let poses_path = root.join("poses.txt");
+            if poses_path.exists() {
+                let file = File::open(&poses_path)?;
+                let reader = BufReader::new(file);
+                let mut parsed = Vec::new();
+                for (idx, line) in reader.lines().enumerate() {
+                    let line = line?;
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    let values = trimmed.split_whitespace().collect::<Vec<_>>();
+                    parsed.push(parse_pose_matrix_row(&values, idx as f64)?);
+                }
+                parsed
+            } else {
+                Vec::new()
+            }
+        };
+
+        let stride = config.stride.max(1);
+        let max_frames = if config.max_frames > 0 {
+            config.max_frames.min(image_entries.len())
+        } else {
+            image_entries.len()
+        };
+        let image_entries = image_entries
+            .into_iter()
+            .take(max_frames)
+            .step_by(stride)
+            .collect::<Vec<_>>();
+
+        let metadata = DatasetMetadata {
+            name: "KITTI Odometry".to_string(),
+            sequence: root.file_name().and_then(|n| n.to_str()).unwrap_or("unknown").to_string(),
+            total_frames: image_entries.len(),
+            has_depth: false,
+            has_ground_truth: !poses.is_empty(),
+            frame_rate: Some(10.0),
+            avg_speed: None,
+            trajectory_length: None,
+            notes: format!("Loaded monocular KITTI stream from {}", root.display()),
+        };
+
+        Ok(Self {
+            config,
+            metadata,
+            camera,
+            image_entries,
+            poses,
+        })
     }
 }
 
-/// EuRoC MAV dataset loader (placeholder)
+impl Dataset for KittiDataset {
+    fn len(&self) -> usize {
+        self.image_entries.len()
+    }
+
+    fn get_frame(&self, index: usize) -> Result<Frame> {
+        if index >= self.image_entries.len() {
+            return Err(DatasetError::FrameIndex(index));
+        }
+
+        let color = load_color_image(&self.image_entries[index])?;
+        let timestamp = index as f64 / self.metadata.frame_rate.unwrap_or(10.0) as f64;
+        let ground_truth_pose = if self.config.load_ground_truth {
+            self.poses.get(index).map(|(_, pose)| *pose)
+        } else {
+            None
+        };
+
+        Ok(Frame::new(
+            index,
+            timestamp,
+            color,
+            None,
+            self.camera.clone(),
+            ground_truth_pose,
+        ))
+    }
+
+    fn camera(&self) -> Camera {
+        self.camera.clone()
+    }
+
+    fn metadata(&self) -> &DatasetMetadata {
+        &self.metadata
+    }
+}
+
+/// EuRoC MAV dataset loader.
 ///
-/// The EuRoC MAV dataset format:
-/// - mav0/cam0/data/: left camera images
-/// - mav0/cam1/data/: right camera images
-/// - mav0/imu0/data.csv: IMU data
-/// - mav0/state_groundtruth_estimate0/data.csv: ground truth
+/// The current implementation reads the `mav0/cam0` monocular stream,
+/// parses optional intrinsics from `sensor.yaml`, and loads optional
+/// ground-truth poses from `state_groundtruth_estimate0/data.csv`.
 pub struct EurocDataset {
-    // TODO: Implement EuRoC loader
-    _config: DatasetConfig,
+    config: DatasetConfig,
+    metadata: DatasetMetadata,
+    camera: Camera,
+    image_entries: Vec<(f64, PathBuf)>,
+    ground_truth: Vec<(f64, SE3)>,
 }
 
 impl EurocDataset {
-    pub fn load(_config: DatasetConfig) -> Result<Self> {
-        todo!("EuRoC dataset loader not yet implemented")
+    pub fn load(config: DatasetConfig) -> Result<Self> {
+        let root = &config.root_path;
+        let cam0_dir = root.join("mav0").join("cam0");
+        let data_dir = cam0_dir.join("data");
+        let csv_path = cam0_dir.join("data.csv");
+        if !data_dir.is_dir() || !csv_path.exists() {
+            return Err(DatasetError::Format(format!(
+                "EuRoC cam0 data not found under {}",
+                root.display()
+            )));
+        }
+
+        let camera = {
+            let sensor_path = cam0_dir.join("sensor.yaml");
+            if sensor_path.exists() {
+                let sensor = std::fs::read_to_string(&sensor_path)?;
+                let intrinsics_line = sensor
+                    .lines()
+                    .find(|line| line.trim_start().starts_with("intrinsics:"));
+                let resolution_line = sensor
+                    .lines()
+                    .find(|line| line.trim_start().starts_with("resolution:"));
+
+                let (fx, fy, cx, cy) = intrinsics_line
+                    .and_then(|line| line.split_once('[').map(|(_, rest)| rest))
+                    .and_then(|rest| rest.split_once(']').map(|(vals, _)| vals))
+                    .map(|vals| {
+                        vals.split(',')
+                            .map(|v| v.trim().parse::<f32>())
+                            .collect::<std::result::Result<Vec<_>, _>>()
+                    })
+                    .transpose()
+                    .map_err(|e| DatasetError::Format(format!("invalid EuRoC intrinsics: {}", e)))?
+                    .and_then(|vals| (vals.len() == 4).then_some((vals[0], vals[1], vals[2], vals[3])))
+                    .unwrap_or((458.654, 457.296, 367.215, 248.375));
+
+                let (width, height) = resolution_line
+                    .and_then(|line| line.split_once('[').map(|(_, rest)| rest))
+                    .and_then(|rest| rest.split_once(']').map(|(vals, _)| vals))
+                    .map(|vals| {
+                        vals.split(',')
+                            .map(|v| v.trim().parse::<u32>())
+                            .collect::<std::result::Result<Vec<_>, _>>()
+                    })
+                    .transpose()
+                    .map_err(|e| DatasetError::Format(format!("invalid EuRoC resolution: {}", e)))?
+                    .and_then(|vals| (vals.len() == 2).then_some((vals[0], vals[1])))
+                    .unwrap_or((752, 480));
+
+                Camera::new(fx, fy, cx, cy, width, height)
+            } else {
+                Camera::new(458.654, 457.296, 367.215, 248.375, 752, 480)
+            }
+        };
+
+        let file = File::open(&csv_path)?;
+        let reader = BufReader::new(file);
+        let mut image_entries = Vec::new();
+        for line in reader.lines() {
+            let line = line?;
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let parts = line.split(',').map(|p| p.trim()).collect::<Vec<_>>();
+            if parts.len() < 2 {
+                return Err(DatasetError::Format(format!(
+                    "invalid EuRoC cam0 csv row '{}'",
+                    line
+                )));
+            }
+            let timestamp_ns = parts[0].parse::<u64>().map_err(|e| {
+                DatasetError::Format(format!("invalid EuRoC timestamp '{}': {}", parts[0], e))
+            })?;
+            image_entries.push((timestamp_ns as f64 / 1e9, data_dir.join(parts[1])));
+        }
+        if image_entries.is_empty() {
+            return Err(DatasetError::Format("no EuRoC images found".into()));
+        }
+
+        let ground_truth = if config.load_ground_truth {
+            let gt_path = root.join("mav0").join("state_groundtruth_estimate0").join("data.csv");
+            if gt_path.exists() {
+                let file = File::open(&gt_path)?;
+                let reader = BufReader::new(file);
+                let mut poses = Vec::new();
+                for line in reader.lines() {
+                    let line = line?;
+                    let line = line.trim();
+                    if line.is_empty() || line.starts_with('#') {
+                        continue;
+                    }
+                    let parts = line.split(',').map(|p| p.trim()).collect::<Vec<_>>();
+                    if parts.len() < 8 {
+                        return Err(DatasetError::Format(format!(
+                            "invalid EuRoC ground truth row '{}'",
+                            line
+                        )));
+                    }
+                    let timestamp = parts[0].parse::<u64>().map_err(|e| {
+                        DatasetError::Format(format!("invalid EuRoC ground truth timestamp '{}': {}", parts[0], e))
+                    })? as f64 / 1e9;
+                    let tx = parts[1].parse::<f32>().map_err(|e| DatasetError::Format(format!("invalid tx '{}': {}", parts[1], e)))?;
+                    let ty = parts[2].parse::<f32>().map_err(|e| DatasetError::Format(format!("invalid ty '{}': {}", parts[2], e)))?;
+                    let tz = parts[3].parse::<f32>().map_err(|e| DatasetError::Format(format!("invalid tz '{}': {}", parts[3], e)))?;
+                    let qw = parts[4].parse::<f32>().map_err(|e| DatasetError::Format(format!("invalid qw '{}': {}", parts[4], e)))?;
+                    let qx = parts[5].parse::<f32>().map_err(|e| DatasetError::Format(format!("invalid qx '{}': {}", parts[5], e)))?;
+                    let qy = parts[6].parse::<f32>().map_err(|e| DatasetError::Format(format!("invalid qy '{}': {}", parts[6], e)))?;
+                    let qz = parts[7].parse::<f32>().map_err(|e| DatasetError::Format(format!("invalid qz '{}': {}", parts[7], e)))?;
+                    poses.push((
+                        timestamp,
+                        SE3::from_quat_translation(Quat::from_xyzw(qx, qy, qz, qw), Vec3::new(tx, ty, tz)),
+                    ));
+                }
+                poses.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+                poses
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        };
+
+        let stride = config.stride.max(1);
+        let max_frames = if config.max_frames > 0 {
+            config.max_frames.min(image_entries.len())
+        } else {
+            image_entries.len()
+        };
+        let image_entries = image_entries
+            .into_iter()
+            .take(max_frames)
+            .step_by(stride)
+            .collect::<Vec<_>>();
+
+        let metadata = DatasetMetadata {
+            name: "EuRoC MAV".to_string(),
+            sequence: root.file_name().and_then(|n| n.to_str()).unwrap_or("unknown").to_string(),
+            total_frames: image_entries.len(),
+            has_depth: false,
+            has_ground_truth: !ground_truth.is_empty(),
+            frame_rate: Some(20.0),
+            avg_speed: None,
+            trajectory_length: None,
+            notes: format!("Loaded EuRoC cam0 stream from {}", root.display()),
+        };
+
+        Ok(Self {
+            config,
+            metadata,
+            camera,
+            image_entries,
+            ground_truth,
+        })
+    }
+}
+
+impl Dataset for EurocDataset {
+    fn len(&self) -> usize {
+        self.image_entries.len()
+    }
+
+    fn get_frame(&self, index: usize) -> Result<Frame> {
+        if index >= self.image_entries.len() {
+            return Err(DatasetError::FrameIndex(index));
+        }
+
+        let (timestamp, path) = &self.image_entries[index];
+        let color = load_color_image(path)?;
+        let ground_truth_pose = if self.config.load_ground_truth {
+            find_closest_pose(&self.ground_truth, *timestamp, 0.01)
+        } else {
+            None
+        };
+
+        Ok(Frame::new(
+            index,
+            *timestamp,
+            color,
+            None,
+            self.camera.clone(),
+            ground_truth_pose,
+        ))
+    }
+
+    fn camera(&self) -> Camera {
+        self.camera.clone()
+    }
+
+    fn metadata(&self) -> &DatasetMetadata {
+        &self.metadata
     }
 }
 
@@ -752,5 +1152,56 @@ mod tests {
         assert!(!frame.has_ground_truth());
         assert_eq!(frame.width, 640);
         assert_eq!(frame.height, 480);
+    }
+
+    #[test]
+    fn test_kitti_loader_reads_metadata() {
+        let dir = tempdir().unwrap();
+        let image_dir = dir.path().join("image_0");
+        std::fs::create_dir_all(&image_dir).unwrap();
+        std::fs::write(dir.path().join("calib.txt"), "P0: 718.856 0.0 607.1928 0.0 0.0 718.856 185.2157 0.0 0.0 0.0 1.0 0.0\n").unwrap();
+        std::fs::write(dir.path().join("poses.txt"), "1 0 0 0 0 1 0 0 0 0 1 0\n").unwrap();
+        std::fs::write(image_dir.join("000000.png"), b"dummy").unwrap();
+
+        let dataset = KittiDataset::load(DatasetConfig {
+            root_path: dir.path().to_path_buf(),
+            load_depth: false,
+            load_ground_truth: true,
+            max_frames: 0,
+            stride: 1,
+        }).unwrap();
+
+        assert_eq!(dataset.len(), 1);
+        assert!(dataset.metadata().has_ground_truth);
+        assert_eq!(dataset.camera().width, 1241);
+    }
+
+    #[test]
+    fn test_euroc_loader_reads_metadata() {
+        let dir = tempdir().unwrap();
+        let cam0 = dir.path().join("mav0").join("cam0");
+        let data_dir = cam0.join("data");
+        let gt_dir = dir.path().join("mav0").join("state_groundtruth_estimate0");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::create_dir_all(&gt_dir).unwrap();
+        std::fs::write(
+            cam0.join("sensor.yaml"),
+            "intrinsics: [458.654, 457.296, 367.215, 248.375]\nresolution: [752, 480]\n",
+        ).unwrap();
+        std::fs::write(cam0.join("data.csv"), "#timestamp,filename\n1403636579763555584,1403636579763555584.png\n").unwrap();
+        std::fs::write(gt_dir.join("data.csv"), "#timestamp,p_RS_R_x,p_RS_R_y,p_RS_R_z,q_RS_w,q_RS_x,q_RS_y,q_RS_z\n1403636579763555584,0,0,0,1,0,0,0\n").unwrap();
+        std::fs::write(data_dir.join("1403636579763555584.png"), b"dummy").unwrap();
+
+        let dataset = EurocDataset::load(DatasetConfig {
+            root_path: dir.path().to_path_buf(),
+            load_depth: false,
+            load_ground_truth: true,
+            max_frames: 0,
+            stride: 1,
+        }).unwrap();
+
+        assert_eq!(dataset.len(), 1);
+        assert!(dataset.metadata().has_ground_truth);
+        assert_eq!(dataset.camera().width, 752);
     }
 }

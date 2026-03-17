@@ -392,17 +392,24 @@ impl VisualOdometry {
 
     /// Try to relocalize after tracking lost
     fn relocalize(&mut self, keypoints: Vec<KeyPoint>, descriptors: Descriptors) -> VOResult {
-        // Similar to initialize, but start fresh
+        // First try a two-view re-initialization against the last retained frame.
+        let attempt = if !self.prev_keypoints.is_empty() && !self.prev_descriptors.is_empty() {
+            self.initialize(keypoints.clone(), descriptors.clone())
+        } else {
+            VOResult::failure()
+        };
+        if attempt.success {
+            return attempt;
+        }
+
+        // If re-initialization failed, stage the current frame as the new seed.
         self.prev_keypoints = keypoints;
         self.prev_descriptors = descriptors;
+        self.prev_3d_points.clear();
+        self.prev_frame_pose = None;
         self.state = VOState::Initializing;
-        
-        VOResult {
-            pose: SE3::identity(),
-            num_matches: 0,
-            num_inliers: 0,
-            success: true,
-        }
+
+        VOResult::failure()
     }
 
     /// Get current state
@@ -452,6 +459,50 @@ impl VisualOdometry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::features::base::{FeatureError, Match};
+
+    struct TestExtractor {
+        keypoints: Vec<KeyPoint>,
+        descriptors: Descriptors,
+    }
+
+    impl FeatureExtractor for TestExtractor {
+        fn detect_and_compute(
+            &mut self,
+            _image: &[u8],
+            _width: u32,
+            _height: u32,
+        ) -> Result<(Vec<KeyPoint>, Descriptors), FeatureError> {
+            Ok((self.keypoints.clone(), self.descriptors.clone()))
+        }
+
+        fn detect(
+            &mut self,
+            _image: &[u8],
+            _width: u32,
+            _height: u32,
+        ) -> Result<Vec<KeyPoint>, FeatureError> {
+            Ok(self.keypoints.clone())
+        }
+
+        fn num_features(&self) -> usize {
+            self.keypoints.len()
+        }
+
+        fn set_num_features(&mut self, _num: usize) {}
+    }
+
+    struct TestMatcher;
+
+    impl FeatureMatcher for TestMatcher {
+        fn match_descriptors(
+            &self,
+            _query: &Descriptors,
+            _train: &Descriptors,
+        ) -> Result<Vec<Match>, FeatureError> {
+            Ok(Vec::new())
+        }
+    }
 
     #[test]
     fn test_vo_state() {
@@ -470,5 +521,36 @@ mod tests {
         
         assert!(result.success);
         assert_eq!(result.num_inliers, 50);
+    }
+
+    #[test]
+    fn test_relocalize_failure_does_not_report_success() {
+        let camera = Camera::new(525.0, 525.0, 319.5, 239.5, 640, 480);
+        let current_kp = KeyPoint::new(10.0, 10.0);
+        let mut current_desc = Descriptors::with_capacity(1, 32);
+        current_desc.data[0] = 1;
+
+        let extractor = Box::new(TestExtractor {
+            keypoints: vec![current_kp.clone()],
+            descriptors: current_desc.clone(),
+        });
+        let matcher = Box::new(TestMatcher);
+        let mut vo = VisualOdometry::with_extractor(extractor, matcher, camera);
+
+        vo.state = VOState::TrackingLost;
+        vo.prev_keypoints = vec![KeyPoint::new(5.0, 5.0)];
+        vo.prev_descriptors = Descriptors::with_capacity(1, 32);
+        vo.prev_descriptors.data[0] = 2;
+        vo.prev_frame_pose = Some(SE3::identity());
+        vo.prev_3d_points = vec![Some([0.0, 0.0, 1.0])];
+
+        let result = vo.process_frame(&vec![0; 640 * 480], 640, 480);
+
+        assert!(!result.success);
+        assert_eq!(vo.state(), VOState::Initializing);
+        assert_eq!(vo.prev_keypoints.len(), 1);
+        assert_eq!(vo.prev_keypoints[0].x(), current_kp.x());
+        assert!(vo.prev_frame_pose.is_none());
+        assert!(vo.prev_3d_points.is_empty());
     }
 }

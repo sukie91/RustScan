@@ -83,7 +83,7 @@ impl GaussianRenderer {
             .collect();
 
         // Sort by camera-space depth (far to near for alpha blending)
-        gaussians_with_depth.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        gaussians_with_depth.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
         // Render each Gaussian
         for (gaussian, cam_depth, ux, uy, radius) in gaussians_with_depth {
@@ -189,7 +189,7 @@ impl GaussianRenderer {
             .collect();
 
         // Sort front-to-back so nearest depth wins when writing
-        gaussians_projected.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+        gaussians_projected.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
 
         for (_gaussian, cam_depth, ux, uy, radius) in gaussians_projected {
             self.render_depth_circle(
@@ -241,7 +241,7 @@ impl GaussianRenderer {
             .collect();
 
         // Sort front-to-back so nearest depth wins
-        gaussians_projected.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+        gaussians_projected.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
 
         for (gaussian, cam_depth, ux, uy, radius) in gaussians_projected {
             let gc = [

@@ -224,7 +224,7 @@ impl HarrisDetector {
         }
         
         // Sort by response (strongest first)
-        corners.sort_by(|a, b| b.response.partial_cmp(&a.response).unwrap());
+        corners.sort_by(|a, b| b.response.partial_cmp(&a.response).unwrap_or(std::cmp::Ordering::Equal));
         
         corners
     }

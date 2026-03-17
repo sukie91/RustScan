@@ -1,3 +1,5 @@
+#![cfg(feature = "opencv")]
+
 use rustslam::io::VideoLoader;
 
 fn sample_video_path() -> std::path::PathBuf {

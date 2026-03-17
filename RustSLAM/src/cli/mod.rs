@@ -23,7 +23,9 @@ use crate::fusion::{
     MeshExtractor,
     MeshExtractionConfig,
 };
-use crate::io::video_decoder as video;
+use crate::io::{
+    video_decoder as video, Dataset, DatasetConfig, EurocDataset, KittiDataset, TumRgbdDataset,
+};
 use crate::tracker::VisualOdometry;
 use glam::{Mat4, Vec3};
 use pipeline_checkpoint::{
@@ -48,8 +50,8 @@ mod integration_tests;
 #[derive(Parser, Debug)]
 #[command(name = "rustscan", version, about = "RustScan CLI")]
 struct CliArgs {
-    /// Input video file path.
-    #[arg(long, value_name = "FILE")]
+    /// Input video file path or TUM dataset directory.
+    #[arg(long, value_name = "FILE_OR_DIR")]
     input: Option<PathBuf>,
     /// Output directory path.
     #[arg(long, value_name = "DIR")]
@@ -262,7 +264,7 @@ impl CliError {
 
     fn suggestion(&self) -> &'static str {
         match self {
-            CliError::InputNotProvided => "Pass --input <video-file> or set input in the TOML config.",
+            CliError::InputNotProvided => "Pass --input <video-file-or-dataset-dir> or set input in the TOML config.",
             CliError::InputMissing(_) => "Verify the input path and ensure the file exists.",
             CliError::InputNotFile(_) => "Provide a valid video file path (not a directory).",
             CliError::ConfigRead { .. } => "Verify the config path and file permissions.",
@@ -341,12 +343,18 @@ struct DecodedVideo {
     total_frames: usize,
 }
 
+enum InputSource {
+    Video(DecodedVideo),
+    Dataset(Box<dyn Dataset>),
+}
+
 struct KeyframeSample {
     index: usize,
     timestamp: f64,
     width: u32,
     height: u32,
     color: Vec<u8>,
+    depth: Option<Vec<f32>>,
     pose: SE3,
 }
 
@@ -614,7 +622,8 @@ fn finalize_config(config: RustScanConfig) -> Result<ResolvedConfig, CliError> {
     }
 
     let metadata = fs::metadata(&input).map_err(|_| CliError::InputMissing(input.clone()))?;
-    if !metadata.is_file() {
+    // Accept both files (videos) and directories (datasets like TUM RGB-D)
+    if !metadata.is_file() && !metadata.is_dir() {
         return Err(CliError::InputNotFile(input));
     }
 
@@ -658,13 +667,13 @@ fn run_pipeline(config: &ResolvedConfig) -> Result<PipelineReport, CliError> {
 
     let (slam, mut checkpoint_state) = match load_slam_from_checkpoint(&config.output, checkpoint.as_ref()) {
         Some(slam) => {
-            info!("Stage 1/4: Video decode skipped (checkpoint)");
+            info!("Stage 1/4: Input loading skipped (checkpoint)");
             info!("Stage 2/4: SLAM skipped (checkpoint)");
             (slam, checkpoint.unwrap_or_default())
         }
         None => {
-            let decoded = decode_video(config)?;
-            let slam = run_slam_stage(decoded, config)?;
+            let input = load_input_source(config)?;
+            let slam = run_slam_stage(input, config)?;
             let checkpoint_state = save_slam_checkpoint(&config.output, &slam, checkpoint)
                 .map_err(|err| CliError::Pipeline(format!("Checkpoint save: {err}")))?;
             (slam, checkpoint_state)
@@ -746,6 +755,34 @@ fn load_slam_from_checkpoint(
             width: keyframe.width,
             height: keyframe.height,
             color,
+            depth: match &keyframe.depth_path {
+                Some(depth_path) => {
+                    let path = resolve_checkpoint_path(output_dir, depth_path);
+                    match fs::read(&path) {
+                        Ok(bytes) => {
+                            if bytes.len() % std::mem::size_of::<f32>() != 0 {
+                                warn!(
+                                    "Depth checkpoint {} has invalid byte length {}",
+                                    keyframe.index,
+                                    bytes.len()
+                                );
+                                return None;
+                            }
+                            let mut depth = Vec::with_capacity(bytes.len() / std::mem::size_of::<f32>());
+                            for chunk in bytes.chunks_exact(std::mem::size_of::<f32>()) {
+                                let arr: [u8; 4] = [chunk[0], chunk[1], chunk[2], chunk[3]];
+                                depth.push(f32::from_le_bytes(arr));
+                            }
+                            Some(depth)
+                        }
+                        Err(err) => {
+                            warn!("Failed to read depth keyframe {}: {}", keyframe.index, err);
+                            return None;
+                        }
+                    }
+                }
+                None => None,
+            },
             pose,
         });
     }
@@ -792,6 +829,28 @@ fn save_slam_checkpoint(
             .display()
             .to_string();
 
+        let depth_path = if let Some(depth) = &keyframe.depth {
+            let depth_file_name = format!("frame_{:06}.depth", keyframe.index);
+            let depth_full_path = frames_dir.join(&depth_file_name);
+            let mut bytes = Vec::with_capacity(depth.len() * std::mem::size_of::<f32>());
+            for value in depth {
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
+            fs::write(&depth_full_path, bytes).map_err(|source| PipelineCheckpointError::Write {
+                path: depth_full_path.display().to_string(),
+                source,
+            })?;
+            Some(
+                depth_full_path
+                    .strip_prefix(output_dir)
+                    .unwrap_or(depth_full_path.as_path())
+                    .display()
+                    .to_string(),
+            )
+        } else {
+            None
+        };
+
         keyframes.push(KeyframeCheckpoint {
             index: keyframe.index,
             timestamp: keyframe.timestamp,
@@ -802,6 +861,7 @@ fn save_slam_checkpoint(
                 translation: keyframe.pose.translation(),
             },
             color_path: relative,
+            depth_path,
         });
     }
 
@@ -875,6 +935,23 @@ fn validate_slam_checkpoint(
                 metadata.len()
             ));
         }
+        if let Some(depth_path) = &keyframe.depth_path {
+            let path = resolve_checkpoint_path(output_dir, depth_path);
+            let metadata = fs::metadata(&path)
+                .map_err(|_| format!("missing depth keyframe file {}", path.display()))?;
+            let expected = keyframe
+                .width
+                .saturating_mul(keyframe.height)
+                .saturating_mul(std::mem::size_of::<f32>() as u32) as u64;
+            if metadata.len() != expected {
+                return Err(format!(
+                    "depth keyframe {} size mismatch (expected {}, got {})",
+                    keyframe.index,
+                    expected,
+                    metadata.len()
+                ));
+            }
+        }
     }
 
     Ok(())
@@ -901,6 +978,117 @@ fn resolve_checkpoint_path(output_dir: &Path, stored: &str) -> PathBuf {
     match joined.canonicalize() {
         Ok(canonical) if canonical.starts_with(&base) => canonical,
         _ => output_dir.join("checkpoints").join("__blocked_path__"),
+    }
+}
+
+/// Check if a path is a TUM RGB-D dataset directory
+fn is_tum_dataset(path: &Path) -> bool {
+    if !path.is_dir() {
+        return false;
+    }
+
+    // Check for TUM dataset structure: rgb.txt or rgb/ directory
+    let has_rgb_txt = path.join("rgb.txt").exists();
+    let has_rgb_dir = path.join("rgb").is_dir();
+    let has_depth_txt = path.join("depth.txt").exists();
+    let has_depth_dir = path.join("depth").is_dir();
+
+    // TUM dataset should have at least rgb.txt or both rgb/ and depth/ directories
+    has_rgb_txt || (has_rgb_dir && (has_depth_txt || has_depth_dir))
+}
+
+fn is_kitti_dataset(path: &Path) -> bool {
+    path.is_dir() && path.join("image_0").is_dir() && path.join("calib.txt").exists()
+}
+
+fn is_euroc_dataset(path: &Path) -> bool {
+    let cam0 = path.join("mav0").join("cam0");
+    cam0.join("data").is_dir() && cam0.join("data.csv").exists()
+}
+
+#[derive(Debug, Clone, Copy)]
+enum DatasetKind {
+    Tum,
+    Kitti,
+    Euroc,
+}
+
+fn detect_dataset_kind(config: &ResolvedConfig) -> Option<DatasetKind> {
+    let configured = config.slam.dataset.dataset_type.trim().to_ascii_lowercase();
+    match configured.as_str() {
+        "tum" if is_tum_dataset(&config.input) => return Some(DatasetKind::Tum),
+        "kitti" if is_kitti_dataset(&config.input) => return Some(DatasetKind::Kitti),
+        "euroc" if is_euroc_dataset(&config.input) => return Some(DatasetKind::Euroc),
+        _ => {}
+    }
+
+    if is_tum_dataset(&config.input) {
+        Some(DatasetKind::Tum)
+    } else if is_kitti_dataset(&config.input) {
+        Some(DatasetKind::Kitti)
+    } else if is_euroc_dataset(&config.input) {
+        Some(DatasetKind::Euroc)
+    } else {
+        None
+    }
+}
+
+fn load_input_source(config: &ResolvedConfig) -> Result<InputSource, CliError> {
+    let dataset_config = DatasetConfig {
+        root_path: config.input.clone(),
+        load_depth: config.slam.dataset.load_depth,
+        load_ground_truth: config.slam.dataset.load_ground_truth,
+        max_frames: config.slam.dataset.max_frames,
+        stride: config.slam.dataset.stride,
+    };
+
+    match detect_dataset_kind(config) {
+        Some(DatasetKind::Tum) => {
+            info!("Stage 1/4: Loading TUM RGB-D dataset");
+            let dataset = TumRgbdDataset::load(dataset_config)
+                .map_err(|err| CliError::Pipeline(format!("TUM dataset load: {err}")))?;
+            let metadata = dataset.metadata();
+            info!(
+                "TUM dataset loaded: sequence={}, frames={}, has_depth={}, has_ground_truth={}",
+                metadata.sequence,
+                metadata.total_frames,
+                metadata.has_depth,
+                metadata.has_ground_truth
+            );
+            Ok(InputSource::Dataset(Box::new(dataset)))
+        }
+        Some(DatasetKind::Kitti) => {
+            info!("Stage 1/4: Loading KITTI odometry dataset");
+            let dataset = KittiDataset::load(dataset_config)
+                .map_err(|err| CliError::Pipeline(format!("KITTI dataset load: {err}")))?;
+            let metadata = dataset.metadata();
+            info!(
+                "KITTI dataset loaded: sequence={}, frames={}, has_depth={}, has_ground_truth={}",
+                metadata.sequence,
+                metadata.total_frames,
+                metadata.has_depth,
+                metadata.has_ground_truth
+            );
+            Ok(InputSource::Dataset(Box::new(dataset)))
+        }
+        Some(DatasetKind::Euroc) => {
+            info!("Stage 1/4: Loading EuRoC MAV dataset");
+            let dataset = EurocDataset::load(dataset_config)
+                .map_err(|err| CliError::Pipeline(format!("EuRoC dataset load: {err}")))?;
+            let metadata = dataset.metadata();
+            info!(
+                "EuRoC dataset loaded: sequence={}, frames={}, has_depth={}, has_ground_truth={}",
+                metadata.sequence,
+                metadata.total_frames,
+                metadata.has_depth,
+                metadata.has_ground_truth
+            );
+            Ok(InputSource::Dataset(Box::new(dataset)))
+        }
+        None => {
+            let decoded = decode_video(config)?;
+            Ok(InputSource::Video(decoded))
+        }
     }
 }
 
@@ -951,11 +1139,23 @@ fn decode_video(config: &ResolvedConfig) -> Result<DecodedVideo, CliError> {
 }
 
 fn run_slam_stage(
-    mut decoded: DecodedVideo,
+    input: InputSource,
     config: &ResolvedConfig,
 ) -> Result<SlamStageOutput, CliError> {
     info!("Stage 2/4: SLAM");
     let stage_start = Instant::now();
+
+    match input {
+        InputSource::Video(decoded) => run_slam_from_video(decoded, config, stage_start),
+        InputSource::Dataset(dataset) => run_slam_from_dataset(dataset, config, stage_start),
+    }
+}
+
+fn run_slam_from_video(
+    mut decoded: DecodedVideo,
+    config: &ResolvedConfig,
+    stage_start: Instant,
+) -> Result<SlamStageOutput, CliError> {
 
     let mut vo = VisualOdometry::with_params(decoded.camera, config.slam.tracker.clone());
     let keyframe_interval = config.slam.mapper.keyframe_interval.max(1);
@@ -1016,6 +1216,7 @@ fn run_slam_stage(
                 width: frame.width,
                 height: frame.height,
                 color: frame.data.as_ref().clone(),
+                depth: None,
                 pose,
             });
         }
@@ -1063,6 +1264,97 @@ fn run_slam_stage(
     })
 }
 
+fn run_slam_from_dataset(
+    dataset: Box<dyn Dataset>,
+    config: &ResolvedConfig,
+    stage_start: Instant,
+) -> Result<SlamStageOutput, CliError> {
+    let camera = dataset.camera();
+    let mut vo = VisualOdometry::with_params(camera.clone(), config.slam.tracker.clone());
+
+    let keyframe_interval = config.slam.mapper.keyframe_interval.max(1);
+    let max_keyframes = config.slam.mapper.max_keyframes.max(1);
+    let total_frames = dataset.len();
+    let log_interval = progress_interval(total_frames);
+
+    let mut keyframes = Vec::new();
+    let mut processed = 0usize;
+    let mut success_frames = 0usize;
+    let mut last_pose = SE3::identity();
+
+    for index in 0..total_frames {
+        let frame = match dataset.get_frame(index) {
+            Ok(frame) => frame,
+            Err(err) => {
+                return Err(CliError::Pipeline(format!(
+                    "SLAM: failed to load frame {}: {err}",
+                    index
+                )));
+            }
+        };
+
+        let gray = rgb_to_grayscale(&frame.color, frame.width as usize, frame.height as usize);
+        let result = vo.process_frame(&gray, frame.width, frame.height);
+
+        if result.success {
+            success_frames += 1;
+            last_pose = result.pose;
+        }
+        let pose = if result.success { result.pose } else { last_pose };
+
+        if processed % keyframe_interval == 0 && keyframes.len() < max_keyframes {
+            keyframes.push(KeyframeSample {
+                index: frame.index,
+                timestamp: frame.timestamp,
+                width: frame.width,
+                height: frame.height,
+                color: frame.color,
+                depth: frame.depth,
+                pose,
+            });
+        }
+
+        processed += 1;
+        if should_log_progress(processed, total_frames, log_interval) {
+            log_progress("SLAM", processed, total_frames, stage_start);
+        }
+    }
+
+    if processed == 0 {
+        return Err(CliError::Pipeline("SLAM: no frames loaded".to_string()));
+    }
+
+    let tracking_success_ratio = if processed > 0 {
+        Some(success_frames as f32 / processed as f32)
+    } else {
+        None
+    };
+
+    log_progress("SLAM", processed, total_frames, stage_start);
+    if let Some(ratio) = tracking_success_ratio {
+        info!(
+            "SLAM completed: frames={}, keyframes={}, tracking_success={:.1}%",
+            processed,
+            keyframes.len(),
+            ratio * 100.0
+        );
+    } else {
+        info!(
+            "SLAM completed: frames={}, keyframes={}",
+            processed,
+            keyframes.len()
+        );
+    }
+
+    Ok(SlamStageOutput {
+        keyframes,
+        camera,
+        frame_count: processed,
+        tracking_success_ratio,
+        tracking_success_frames: success_frames,
+    })
+}
+
 fn run_gaussian_stage(
     slam: SlamStageOutput,
     _config: &ResolvedConfig,
@@ -1079,7 +1371,10 @@ fn run_gaussian_stage(
         });
     }
 
-    warn!("No depth input; using synthetic depth for 3DGS mapping");
+    let has_real_depth = slam.keyframes.iter().any(|kf| kf.depth.is_some());
+    if !has_real_depth {
+        warn!("No depth input; using synthetic depth for 3DGS mapping");
+    }
 
     let width = slam.camera.width as usize;
     let height = slam.camera.height as usize;
@@ -1092,13 +1387,15 @@ fn run_gaussian_stage(
     let log_interval = progress_interval(total_keyframes);
 
     for (idx, keyframe) in slam.keyframes.iter().enumerate() {
-        let depth = synthetic_depth(
-            &keyframe.color,
-            keyframe.width as usize,
-            keyframe.height as usize,
-            mapper_config.min_depth,
-            mapper_config.max_depth,
-        );
+        let depth = keyframe.depth.clone().unwrap_or_else(|| {
+            synthetic_depth(
+                &keyframe.color,
+                keyframe.width as usize,
+                keyframe.height as usize,
+                mapper_config.min_depth,
+                mapper_config.max_depth,
+            )
+        });
         let colors: Vec<[u8; 3]> = keyframe
             .color
             .chunks_exact(3)

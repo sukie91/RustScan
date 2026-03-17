@@ -82,6 +82,8 @@ pub struct KeyframeCheckpoint {
     pub height: u32,
     pub pose: PoseCheckpoint,
     pub color_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub depth_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

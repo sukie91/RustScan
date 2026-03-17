@@ -20,22 +20,26 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(feature = "gpu")]
+use std::time::Instant;
 use std::path::PathBuf;
 
 use crate::core::{Camera, Frame as CoreFrame, FrameFeatures as CoreFrameFeatures, KeyFrame, Map, MapPoint, SE3};
+#[cfg(feature = "gpu")]
 use crate::fusion::{
     CompleteTrainer,
     DiffCamera,
     GaussianInitConfig,
-    GaussianMapper,
     TrainableGaussians,
     initialize_trainable_gaussians_from_map,
 };
+use crate::fusion::GaussianMapper;
 use crate::io::{Dataset, Frame};
 use crate::mapping::local_mapping::{LocalMapping, LocalMappingConfig};
 use crate::optimizer::ba::{BACamera, BAObservation, BALandmark, BundleAdjuster};
 use crate::pipeline::checkpoint::{CheckpointConfig, CheckpointManager, load_latest_checkpoint};
+#[cfg(feature = "gpu")]
 use candle_core::Device;
 #[cfg(feature = "opencv")]
 use std::path::Path;
@@ -432,9 +436,13 @@ fn optimization_thread_main(
     map_rx: Receiver<MappingMessage>,
     stop_flag: Arc<AtomicBool>,
 ) {
+    #[cfg(feature = "gpu")]
     let mut trainer: Option<CompleteTrainer> = None;
+    #[cfg(feature = "gpu")]
     let mut trainer_dims: Option<(usize, usize)> = None;
+    #[cfg(feature = "gpu")]
     let mut last_train = Instant::now();
+    #[cfg(feature = "gpu")]
     let mut gaussians: Option<TrainableGaussians> = None;
 
     let mut ba = BundleAdjuster::new();
@@ -452,6 +460,7 @@ fn optimization_thread_main(
         match map_rx.recv_timeout(Duration::from_secs(1)) {
             Ok(msg) => {
                 let frame = msg.frame;
+                #[cfg(feature = "gpu")]
                 let (width, height) = (frame.width as usize, frame.height as usize);
 
                 // Run lightweight BA (best-effort) on sampled depth points
@@ -475,6 +484,7 @@ fn optimization_thread_main(
                 }
 
                 // 3DGS training step (best-effort)
+                #[cfg(feature = "gpu")]
                 if last_train.elapsed() >= Duration::from_millis(500) {
                     if trainer_dims != Some((width, height)) {
                         trainer = Some(CompleteTrainer::new(
@@ -533,6 +543,7 @@ fn optimization_thread_main(
     }
 }
 
+#[cfg(feature = "gpu")]
 fn initialize_gaussians_from_points(
     points: &[MapPoint],
     device: &Device,
@@ -554,6 +565,7 @@ fn initialize_gaussians_from_points(
     initialize_trainable_gaussians_from_map(&map, &config, device).ok()
 }
 
+#[cfg(feature = "gpu")]
 fn build_training_targets(
     frame: &Frame,
     device: &Device,
@@ -592,6 +604,7 @@ fn build_training_targets(
     Some((camera, target_color, depth.clone()))
 }
 
+#[cfg(feature = "gpu")]
 fn build_training_batch(
     frame: &Frame,
     device: &Device,
@@ -812,6 +825,7 @@ impl Default for RealtimePipelineBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Instant;
 
     #[test]
     fn test_pipeline_config_default() {

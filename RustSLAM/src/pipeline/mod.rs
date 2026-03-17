@@ -4,5 +4,5 @@
 pub mod realtime;
 pub mod checkpoint;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "slam-pipeline"))]
 mod additional_tests;

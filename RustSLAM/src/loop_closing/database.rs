@@ -42,8 +42,8 @@ impl KeyFrameDatabase {
 
     /// Add a keyframe to the database
     pub fn add_keyframe(&self, entry: KeyFrameEntry) {
-        let mut entries = self.entries.write().unwrap();
-        let mut inverted = self.inverted_index.write().unwrap();
+        let mut entries = self.entries.write().unwrap_or_else(|e| e.into_inner());
+        let mut inverted = self.inverted_index.write().unwrap_or_else(|e| e.into_inner());
 
         // Add to entries
         entries.insert(entry.id, entry.clone());
@@ -56,8 +56,8 @@ impl KeyFrameDatabase {
 
     /// Remove a keyframe from the database
     pub fn remove_keyframe(&self, keyframe_id: u64) {
-        let mut entries = self.entries.write().unwrap();
-        let mut inverted = self.inverted_index.write().unwrap();
+        let mut entries = self.entries.write().unwrap_or_else(|e| e.into_inner());
+        let mut inverted = self.inverted_index.write().unwrap_or_else(|e| e.into_inner());
 
         if let Some(entry) = entries.remove(&keyframe_id) {
             // Remove from inverted index
@@ -71,7 +71,7 @@ impl KeyFrameDatabase {
 
     /// Get a keyframe entry
     pub fn get_keyframe(&self, keyframe_id: u64) -> Option<KeyFrameEntry> {
-        let entries = self.entries.read().unwrap();
+        let entries = self.entries.read().unwrap_or_else(|e| e.into_inner());
         entries.get(&keyframe_id).cloned()
     }
 
@@ -84,8 +84,8 @@ impl KeyFrameDatabase {
     /// # Returns
     /// Vector of (keyframe_id, shared_word_count) sorted by count
     pub fn get_candidates(&self, word_ids: &[u32], min_shared_words: usize) -> Vec<(u64, usize)> {
-        let inverted = self.inverted_index.read().unwrap();
-        let _entries = self.entries.read().unwrap();
+        let inverted = self.inverted_index.read().unwrap_or_else(|e| e.into_inner());
+        let _entries = self.entries.read().unwrap_or_else(|e| e.into_inner());
 
         // Count shared words for each keyframe
         let mut shared_counts: HashMap<u64, usize> = HashMap::new();
@@ -111,7 +111,7 @@ impl KeyFrameDatabase {
 
     /// Get keyframes connected to a given keyframe (covisibility)
     pub fn get_connected(&self, keyframe_id: u64) -> Vec<u64> {
-        let entries = self.entries.read().unwrap();
+        let entries = self.entries.read().unwrap_or_else(|e| e.into_inner());
         entries
             .get(&keyframe_id)
             .map(|e| e.connected_ids.clone())
@@ -139,7 +139,7 @@ impl KeyFrameDatabase {
         // Get candidates with shared words
         let candidates = self.get_candidates(word_ids, min_shared);
 
-        let entries = self.entries.read().unwrap();
+        let entries = self.entries.read().unwrap_or_else(|e| e.into_inner());
         let mut results = Vec::new();
 
         for (kf_id, _shared_count) in candidates {
@@ -166,22 +166,22 @@ impl KeyFrameDatabase {
         }
 
         // Sort by score
-        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
         results
     }
 
     /// Clear the database
     pub fn clear(&self) {
-        let mut entries = self.entries.write().unwrap();
-        let mut inverted = self.inverted_index.write().unwrap();
+        let mut entries = self.entries.write().unwrap_or_else(|e| e.into_inner());
+        let mut inverted = self.inverted_index.write().unwrap_or_else(|e| e.into_inner());
         entries.clear();
         inverted.clear();
     }
 
     /// Get number of keyframes
     pub fn num_keyframes(&self) -> usize {
-        let entries = self.entries.read().unwrap();
+        let entries = self.entries.read().unwrap_or_else(|e| e.into_inner());
         entries.len()
     }
 }

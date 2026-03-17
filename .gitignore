@@ -22,6 +22,7 @@ Thumbs.db
 # Large test data (optional - keep small test files)
 test_data/large/
 !test_data/large/*.obj
+test_data
 
 # OpenMesh source (external dependency)
 Mirror/

@@ -257,6 +257,17 @@ impl GaussianMap {
             .collect()
     }
 
+    /// Retain gaussians matching the predicate and return number removed.
+    pub fn retain<F>(&mut self, mut keep: F) -> usize
+    where
+        F: FnMut(&Gaussian3D) -> bool,
+    {
+        let before = self.gaussians.len();
+        self.gaussians.retain(|g| keep(g));
+        self.update_states();
+        before.saturating_sub(self.gaussians.len())
+    }
+
     /// Clear all Gaussians
     pub fn clear(&mut self) {
         self.gaussians.clear();

@@ -54,6 +54,21 @@ fn find_test_video() -> Option<PathBuf> {
     None
 }
 
+fn test_resolved_config(input: PathBuf) -> ResolvedConfig {
+    ResolvedConfig {
+        input,
+        output: tempdir().unwrap().keep(),
+        output_format: OutputFormat::Json,
+        slam: SlamConfig::default(),
+        video: VideoConfig {
+            cache_capacity: 4,
+            prefer_hardware: false,
+        },
+        log_format: LogFormat::Text,
+        mesh_voxel_size: None,
+    }
+}
+
 fn average_psnr(gaussian: &GaussianStageOutput, samples: usize) -> f32 {
     if gaussian.keyframes.is_empty() || gaussian.map.is_empty() {
         return 0.0;
@@ -91,6 +106,45 @@ fn average_psnr(gaussian: &GaussianStageOutput, samples: usize) -> f32 {
     }
 
     if count == 0 { 0.0 } else { sum / count as f32 }
+}
+
+#[test]
+fn test_load_input_source_detects_kitti_dataset() {
+    let dir = tempdir().unwrap();
+    let image_dir = dir.path().join("image_0");
+    std::fs::create_dir_all(&image_dir).unwrap();
+    std::fs::write(
+        dir.path().join("calib.txt"),
+        "P0: 718.856 0.0 607.1928 0.0 0.0 718.856 185.2157 0.0 0.0 0.0 1.0 0.0\n",
+    )
+    .unwrap();
+    std::fs::write(image_dir.join("000000.png"), b"dummy").unwrap();
+
+    let mut resolved = test_resolved_config(dir.path().to_path_buf());
+    resolved.slam.dataset.dataset_type = "kitti".to_string();
+
+    let input = load_input_source(&resolved).unwrap();
+    assert!(matches!(input, InputSource::Dataset(_)));
+}
+
+#[test]
+fn test_load_input_source_detects_euroc_dataset() {
+    let dir = tempdir().unwrap();
+    let cam0 = dir.path().join("mav0").join("cam0");
+    let data_dir = cam0.join("data");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    std::fs::write(
+        cam0.join("data.csv"),
+        "#timestamp,filename\n1403636579763555584,1403636579763555584.png\n",
+    )
+    .unwrap();
+    std::fs::write(data_dir.join("1403636579763555584.png"), b"dummy").unwrap();
+
+    let mut resolved = test_resolved_config(dir.path().to_path_buf());
+    resolved.slam.dataset.dataset_type = "euroc".to_string();
+
+    let input = load_input_source(&resolved).unwrap();
+    assert!(matches!(input, InputSource::Dataset(_)));
 }
 
 #[test]
@@ -137,7 +191,7 @@ fn test_end_to_end_pipeline_video() {
     let start = Instant::now();
 
     let decoded = decode_video(&resolved).expect("decode video");
-    let slam_output = run_slam_stage(decoded, &resolved).expect("run SLAM stage");
+    let slam_output = run_slam_stage(InputSource::Video(decoded), &resolved).expect("run SLAM stage");
     let tracking_ratio = slam_output.tracking_success_ratio.unwrap_or(0.0);
     let camera_count = slam_output.keyframes.len();
 
