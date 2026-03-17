@@ -1,6 +1,6 @@
 # Story 8.3: Add cfg Gates for Heavy Dependencies
 
-Status: review
+Status: done
 
 ## Story
 
