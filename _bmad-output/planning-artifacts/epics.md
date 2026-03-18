@@ -76,10 +76,10 @@ NFR6: Compatibility: Blender and Unity importable
 
 FR1, FR2 → Epic 1: 视频输入处理
 FR3, FR4, FR5, FR6, FR7 → Epic 2: SLAM处理管道
-FR8, FR9, FR10 → Epic 3: 3DGS训练和场景生成
-FR11, FR12, FR13 → Epic 4: 网格提取和导出
+FR8, FR9, FR10 → Epic 3: 3DGS训练和场景生成 → **迁移至 Epic 9: RustGS**
+FR11, FR12, FR13 → Epic 4: 网格提取和导出 → **迁移至 Epic 10: RustMesh网格提取**
 FR14, FR15, FR16, FR17, FR18, FR19, FR20, FR21 → Epic 5: CLI接口和配置管理
-NFR1, NFR2, NFR3, NFR4 → Epic 6: 端到端管道集成
+NFR1, NFR2, NFR3, NFR4 → Epic 6: 端到端管道集成 → **重构为 Epic 11: 管道集成更新**
 架构技术需求 → Epic 7: 基础设施质量保证
 RustViewer需求 → Epic 8: RustViewer 3D可视化GUI
 
@@ -116,6 +116,38 @@ RustViewer需求 → Epic 8: RustViewer 3D可视化GUI
 ### Epic 8: RustViewer 3D可视化GUI
 用户可以交互式查看SLAM重建结果，包括相机轨迹、稀疏点云、高斯体和网格
 **FRs covered:** RustViewer技术规范中的所有需求
+
+### Epic 9: RustGS Crate 提取
+将3DGS训练代码从RustSLAM分离到独立的RustGS crate，实现离线3DGS训练
+**FRs covered:** FR8, FR9, FR10 (从 Epic 3 迁移)
+**Stories:**
+- 9-1: 创建 rustscan-types 共享 crate
+- 9-2: 创建 RustGS crate 结构
+- 9-3: 迁移核心 Gaussian 文件
+- 9-4: 迁移渲染文件
+- 9-5: 迁移可微渲染
+- 9-6: 迁移训练文件
+- 9-7: 迁移 IO 和初始化
+- 9-8: 创建 RustGS CLI
+- 9-9: 更新 RustSLAM 依赖
+
+### Epic 10: RustMesh 网格提取集成
+将网格提取功能从RustSLAM迁移到RustMesh，RustGS提供深度渲染API
+**FRs covered:** FR11, FR12, FR13 (从 Epic 4 迁移)
+**Stories:**
+- 10-1: 迁移 TSDF 到 RustMesh
+- 10-2: 迁移 Marching Cubes
+- 10-3: 迁移网格提取器
+- 10-4: 集成 RustGS 深度渲染
+- 10-5: 创建网格提取 CLI
+
+### Epic 11: 管道集成更新
+更新端到端管道以支持新的架构：RustSLAM → RustGS → RustMesh
+**FRs covered:** NFR1, NFR2, NFR3, NFR4 (重构)
+**Stories:**
+- 11-1: 更新 RustSLAM 输出格式
+- 11-2: 创建端到端管道脚本
+- 11-3: 更新文档
 
 <!-- Repeat for each epic in epics_list (N = 1, 2, 3...) -->
 
