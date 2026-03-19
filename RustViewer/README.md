@@ -1,0 +1,69 @@
+# RustViewer
+
+Interactive 3D visualization GUI for RustScan SLAM results.
+
+## Overview
+
+RustViewer is a desktop application for visualizing SLAM reconstruction results, including:
+
+- **Camera trajectory** — Polylines showing camera motion path
+- **Sparse point cloud** — Map points from SLAM reconstruction
+- **Gaussian point cloud** — 3DGS scene from training
+- **Mesh** — Extracted mesh with solid/wireframe rendering
+
+## Features
+
+- **Offline file loading** — Load `pipeline.json`, `scene.ply`, `mesh.obj/ply`
+- **3D navigation** — Arcball camera with mouse orbit/pan/zoom
+- **Layer visibility** — Toggle trajectory, points, Gaussians, mesh
+- **Apple HIG design** — Clean, native-feeling UI
+
+## Architecture
+
+```
+RustViewer/
+├── Cargo.toml              # Crate config with eframe/egui deps
+├── src/
+│   ├── main.rs             # Binary entry point
+│   ├── lib.rs              # Library root, module declarations
+│   ├── app.rs              # Main eframe app struct
+│   ├── loader/             # File loading utilities
+│   │   ├── mod.rs          # Loader trait and exports
+│   │   ├── checkpoint.rs   # Checkpoint JSON loader
+│   │   ├── gaussian.rs     # Gaussian PLY loader
+│   │   └── mesh.rs         # OBJ/PLY mesh loader
+│   ├── renderer/           # 3D rendering
+│   │   ├── mod.rs          # Renderer trait and scene graph
+│   │   ├── camera.rs       # Arcball camera controller
+│   │   ├── scene.rs        # Scene graph and data buffers
+│   │   └── pipelines.rs    # wgpu render pipelines
+│   └── ui/                 # User interface
+│       ├── mod.rs          # UI panel exports
+│       ├── panel.rs        # Side panel with controls
+│       ├── viewport.rs     # 3D viewport widget
+│       └── theme.rs        # egui theme/styling
+└── tests/                  # Integration tests
+```
+
+## Usage
+
+```bash
+# Run the viewer
+cargo run -p rust-viewer
+
+# Build release
+cargo build -p rust-viewer --release
+```
+
+## Dependencies
+
+- **eframe/egui** — Immediate mode GUI framework
+- **wgpu** — Cross-platform GPU rendering (via eframe)
+- **glam** — SIMD-accelerated math library
+- **rustslam** — SLAM library with `viewer-types` feature
+
+## Notes
+
+- RustViewer uses `viewer-types` feature from RustSLAM to avoid heavy dependencies (ffmpeg, candle)
+- GPU rendering is handled through eframe's wgpu integration
+- The crate compiles without the `--features default` flag and still functions correctly

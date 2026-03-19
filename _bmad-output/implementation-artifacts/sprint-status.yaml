@@ -163,10 +163,11 @@ development_status:
   epic-9: in-progress
   9-1-create-rustscan-types-crate: done
   9-2-create-rustgs-crate-structure: done
-  9-3-migrate-core-gaussian-files: backlog
+  9-3-migrate-core-gaussian-files: done
+  9-4-migrate-rendering-files: done
   9-4-migrate-rendering-files: backlog
-  9-5-migrate-differentiable-rendering: backlog
-  9-6-migrate-training-files: backlog
+  9-5-migrate-differentiable-rendering: done
+  9-6-migrate-training-files: done
   9-7-migrate-io-and-initialization: backlog
   9-8-create-rustgs-cli: backlog
   9-9-update-rustslam-dependencies: backlog

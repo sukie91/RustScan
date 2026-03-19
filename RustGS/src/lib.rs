@@ -43,7 +43,11 @@ pub use rustscan_types::{SE3, Intrinsics, TrainingDataset, ScenePose, SlamOutput
 pub use crate::core::{Gaussian3D, GaussianMap, GaussianCamera, GaussianState};
 
 // Re-export render types
-pub use crate::render::{GaussianRenderer, RenderOutput};
+pub use crate::render::{
+    GaussianRenderer, RenderOutput,
+    Gaussian, ProjectedGaussian, TiledRenderer, RenderBuffer,
+    densify, prune,
+};
 
 // Re-export training types
 pub use crate::training::{TrainingConfig, TrainingResult};
