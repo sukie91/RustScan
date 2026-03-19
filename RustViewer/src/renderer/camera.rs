@@ -34,6 +34,9 @@ impl ArcballCamera {
     const MIN_DISTANCE: f32 = 0.1;
     const ORBIT_SENSITIVITY: f32 = 0.005;
     const MAX_PITCH: f32 = std::f32::consts::FRAC_PI_2 - 0.01;
+    const ZOOM_FACTOR: f32 = 1.1;
+    const PAN_SCALE: f32 = 0.001;
+    const FIT_MARGIN: f32 = 1.5;
 
     /// Eye position in world space.
     pub fn eye(&self) -> Vec3 {
@@ -70,7 +73,7 @@ impl ArcballCamera {
 
     /// Pan the target point (right-button drag).
     pub fn pan(&mut self, delta_x: f32, delta_y: f32) {
-        let scale = self.distance * 0.001;
+        let scale = self.distance * Self::PAN_SCALE;
         let right = self.view_matrix().col(0).truncate();
         let up = self.view_matrix().col(1).truncate();
         self.target -= right * delta_x * scale;
@@ -80,9 +83,9 @@ impl ArcballCamera {
     /// Zoom by scaling distance (scroll wheel).
     pub fn zoom(&mut self, delta: f32) {
         if delta > 0.0 {
-            self.distance /= 1.1;
+            self.distance /= Self::ZOOM_FACTOR;
         } else if delta < 0.0 {
-            self.distance *= 1.1;
+            self.distance *= Self::ZOOM_FACTOR;
         }
         self.distance = self.distance.max(Self::MIN_DISTANCE);
     }
@@ -95,7 +98,7 @@ impl ArcballCamera {
         let center = bounds.center();
         self.target = Vec3::new(center[0], center[1], center[2]);
         let diag = bounds.diagonal();
-        self.distance = (diag * 1.5).max(Self::MIN_DISTANCE);
+        self.distance = (diag * Self::FIT_MARGIN).max(Self::MIN_DISTANCE);
     }
 }
 

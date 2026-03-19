@@ -5,6 +5,7 @@ use rust_viewer::renderer::scene::Scene;
 use std::path::Path;
 
 #[test]
+#[ignore = "requires checkpoint file at ../RustSLAM/output/checkpoints/pipeline.json"]
 fn test_load_checkpoint_from_output() {
     let checkpoint_path = Path::new("../RustSLAM/output/checkpoints/pipeline.json");
     if !checkpoint_path.exists() {
@@ -25,6 +26,7 @@ fn test_load_checkpoint_from_output() {
 }
 
 #[test]
+#[ignore = "requires test file at ../test_data/middle/cube.obj"]
 fn test_load_obj_cube() {
     let obj_path = Path::new("../test_data/middle/cube.obj");
     if !obj_path.exists() {
@@ -46,6 +48,7 @@ fn test_load_obj_cube() {
 }
 
 #[test]
+#[ignore = "requires test file at ../test_data/large/FinalBaseMesh.obj"]
 fn test_load_obj_finalbasemesh() {
     let obj_path = Path::new("../test_data/large/FinalBaseMesh.obj");
     if !obj_path.exists() {

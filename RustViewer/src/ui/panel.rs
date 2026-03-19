@@ -324,29 +324,29 @@ fn draw_stats_cards(ui: &mut egui::Ui, scene: &Scene) {
     ui.vertical(|ui| {
         ui.spacing_mut().item_spacing = Vec2::new(0.0, 8.0);
 
-        // Get values - use placeholders if no data
+        // Get values - show "—" when no data loaded
         let mesh_vertices = if scene.has_data() {
             scene.mesh_vertex_count()
         } else {
-            102_924
+            0
         };
 
         let keyframes = if scene.has_data() {
             scene.keyframe_count()
         } else {
-            100
+            0
         };
 
         let map_points = if scene.has_data() {
             scene.map_point_count()
         } else {
-            15_234
+            0
         };
 
         let gaussians = if scene.has_data() {
             scene.gaussian_count()
         } else {
-            100_000
+            0
         };
 
         // Mesh vertices card

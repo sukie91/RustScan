@@ -1,6 +1,6 @@
 # Story 8.4: Create RustViewer Crate Structure
 
-Status: review
+Status: done
 
 ## Story
 
@@ -51,6 +51,15 @@ so that the codebase is maintainable and follows Rust best practices.
 - [x] Task 4: Testing infrastructure (optional)
   - [x] 4.1: Add basic unit test for module structure
   - [x] 4.2: Add integration test placeholder
+
+## Review Follow-ups (AI)
+
+- [x] [AI-Review][MEDIUM] panel.rs: Replace misleading placeholder values in draw_stats_cards() with "—" or "0" when no data loaded [panel.rs:328-350]
+- [x] [AI-Review][MEDIUM] Verify viewer-types feature exposes necessary types from RustSLAM for Gaussian loading [RustSLAM/Cargo.toml:64]
+- [x] [AI-Review][LOW] Convert integration test skips to #[ignore] attributes for visibility [tests/loader_integration_test.rs]
+- [x] [AI-Review][LOW] Add named constants for camera magic numbers (ORBIT_SENSITIVITY, ZOOM_FACTOR, FIT_FACTOR) [camera.rs:35-36]
+- [x] [AI-Review][LOW] Add # Example doc blocks to public loader functions [loader/*.rs]
+- [x] [AI-Review][LOW] Remove or utilize unused scene_bounds snapshot in app.rs:191 [app.rs:191]
 
 ## Dev Notes
 
@@ -131,3 +140,9 @@ N/A
 - RustViewer/src/renderer/mod.rs (verified)
 - RustViewer/src/ui/mod.rs (verified)
 - RustViewer/tests/loader_integration_test.rs (verified)
+
+## Change Log
+
+| Date | Reviewer | Action | Notes |
+|------|----------|--------|-------|
+| 2026-03-19 | Claude Opus 4.6 | Code Review | Approved. 0 High, 2 Medium, 4 Low issues. Created 6 action items for follow-up. All ACs verified. |

@@ -11,6 +11,15 @@ use crate::renderer::scene::{MeshGpuVertex, Scene};
 
 /// Load an OBJ mesh (RustSLAM format: `v x y z r g b`, `vn nx ny nz`, `f A//A B//B C//C`).
 /// Returns (vertices, triangle_indices, edge_indices).
+///
+/// # Example
+/// ```no_run
+/// use std::path::Path;
+/// use rust_viewer::loader::mesh::load_obj;
+///
+/// let (vertices, indices, edges) = load_obj(Path::new("mesh.obj")).unwrap();
+/// println!("Loaded {} vertices", vertices.len());
+/// ```
 pub fn load_obj(path: &Path) -> Result<(Vec<MeshGpuVertex>, Vec<u32>, Vec<u32>), LoadError> {
     let file = std::fs::File::open(path)?;
     let reader = BufReader::new(file);
@@ -280,6 +289,17 @@ pub fn load_ply(path: &Path) -> Result<(Vec<MeshGpuVertex>, Vec<u32>, Vec<u32>),
 }
 
 /// Load a mesh file (OBJ or PLY) and merge into the scene.
+///
+/// # Example
+/// ```no_run
+/// use std::path::Path;
+/// use rust_viewer::loader::mesh::load_mesh;
+/// use rust_viewer::renderer::scene::Scene;
+///
+/// let mut scene = Scene::default();
+/// load_mesh(Path::new("mesh.obj"), &mut scene).unwrap();
+/// println!("Loaded {} vertices", scene.mesh_vertices.len());
+/// ```
 pub fn load_mesh(path: &Path, scene: &mut Scene) -> Result<(), LoadError> {
     let ext = path
         .extension()

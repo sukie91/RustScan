@@ -59,6 +59,17 @@ struct MapPointEntry {
 ///
 /// Accepts the `pipeline.json` format written by the RustSLAM pipeline
 /// (`checkpoints/pipeline.json`).
+///
+/// # Example
+/// ```no_run
+/// use std::path::Path;
+/// use rust_viewer::loader::checkpoint::load_checkpoint;
+/// use rust_viewer::renderer::scene::Scene;
+///
+/// let mut scene = Scene::default();
+/// load_checkpoint(Path::new("pipeline.json"), &mut scene).unwrap();
+/// println!("Loaded {} keyframes", scene.trajectory.len());
+/// ```
 pub fn load_checkpoint(path: &Path, scene: &mut Scene) -> Result<(), LoadError> {
     let data = std::fs::read(path)?;
     let checkpoint: PipelineCheckpoint = serde_json::from_slice(&data)?;
