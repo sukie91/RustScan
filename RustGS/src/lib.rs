@@ -52,22 +52,26 @@ pub use crate::render::{
 // Re-export training types
 pub use crate::training::{TrainingConfig, TrainingResult};
 
-// Re-export IO functions
-pub use crate::io::{save_scene_ply, load_scene_ply, TrainingCheckpoint};
+// Re-export IO types
+pub use crate::io::TrainingCheckpoint;
+pub use crate::io::scene_io::{save_scene_ply, load_scene_ply, SceneMetadata, SceneIoError};
+#[cfg(feature = "gpu")]
+pub use crate::io::training_checkpoint::{
+    FullTrainingCheckpoint, CheckpointGaussian,
+    save_checkpoint, load_checkpoint, load_latest_checkpoint, resume_latest_checkpoint,
+    TrainingCheckpointError,
+};
 
-/// Initialize Gaussians from a point cloud.
-///
-/// # Arguments
-/// * `points` - Points as (position, optional color) tuples
-/// * `config` - Initialization configuration
-///
-/// # Returns
-/// A vector of initialized Gaussians.
+// Re-export initialization types
+pub use crate::init::GaussianInitConfig;
+pub use crate::init::{initialize_gaussians_from_points, initialize_gaussian3d_from_points};
+
+/// Initialize Gaussians from a point cloud (convenience wrapper).
 pub fn initialize_from_points(
     points: &[([f32; 3], Option<[f32; 3]>)],
-    config: &init::InitializationConfig,
+    config: &GaussianInitConfig,
 ) -> Vec<Gaussian3D> {
-    init::initialize_gaussians_from_points(points, config)
+    initialize_gaussian3d_from_points(points, config)
 }
 
 /// Train a 3DGS scene from a SLAM output.

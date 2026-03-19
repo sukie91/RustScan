@@ -80,8 +80,22 @@ fn main() -> anyhow::Result<()> {
                 let scene = rustgs::train_from_slam(&slam_output, &config)?;
                 log::info!("Trained {} Gaussians", scene.len());
 
-                // Save scene
-                rustgs::save_scene_ply(&scene, &output)?;
+                // Save scene - convert Gaussian3D to array-based Gaussian for PLY export
+                let gaussians: Vec<rustgs::Gaussian> = scene.gaussians().iter().map(|g| {
+                    rustgs::Gaussian::new(
+                        g.position.into(),
+                        g.scale.into(),
+                        [g.rotation.w, g.rotation.x, g.rotation.y, g.rotation.z],
+                        g.opacity,
+                        g.color,
+                    )
+                }).collect();
+                let metadata = rustgs::SceneMetadata {
+                    iterations: config.iterations,
+                    final_loss: 0.0,
+                    gaussian_count: gaussians.len(),
+                };
+                rustgs::save_scene_ply(&output, &gaussians, &metadata)?;
                 log::info!("Saved scene to {:?}", output);
             }
 
@@ -97,8 +111,9 @@ fn main() -> anyhow::Result<()> {
             log::info!("Output: {:?}", output);
 
             // Load scene
-            let scene = rustgs::load_scene_ply(&input)?;
-            log::info!("Loaded {} Gaussians", scene.len());
+            let (gaussians, metadata) = rustgs::load_scene_ply(&input)?;
+            log::info!("Loaded {} Gaussians", gaussians.len());
+            let _ = metadata;
 
             // TODO: Load camera and render
             let _ = output;
