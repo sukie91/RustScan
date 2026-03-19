@@ -3,23 +3,26 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Rust-1.75+-dea584?style=for-the-badge&logo=rust" alt="Rust">
   <img src="https://img.shields.io/badge/License-MIT-green.svg?style=for-the-badge" alt="License">
+  <img src="https://img.shields.io/badge/Status-Complete-brightgreen?style=for-the-badge" alt="Status">
 </p>
 
-A complete 3D scanning and reconstruction technology stack implemented in pure Rust.
+A complete 3D scanning and reconstruction technology stack implemented in pure Rust, featuring Visual SLAM, 3D Gaussian Splatting, mesh extraction, and an interactive 3D visualization GUI.
 
 ## Project Goals
 
-Build a pure Rust implementation of 3D scanning and reconstruction technology, covering the complete pipeline from data acquisition to mesh processing.
+Build a pure Rust implementation of 3D scanning and reconstruction technology, covering the complete pipeline from data acquisition to mesh processing and visualization.
 
 ```
-Pipeline: Camera Input → RustSLAM → 3DGS Fusion → Mesh Extraction → RustMesh Post-processing → Export
+Pipeline: Video Input → RustSLAM → RustGS → RustMesh → Export
+                                        ↓
+                                  RustViewer (3D Visualization)
 ```
 
 ---
 
 ## Core Modules
 
-### 🟩 RustMesh (Mesh Processing)
+### 🟢 RustMesh (Mesh Processing)
 
 **Core mesh representation and geometric processing library**
 
@@ -35,120 +38,176 @@ Pipeline: Camera Input → RustSLAM → 3DGS Fusion → Mesh Extraction → Rust
   - Progressive mesh (VDPM)
 - Smart Handle navigation system
 - Attribute system
+- **TSDF Volume Fusion + Marching Cubes mesh extraction**
 
-**Progress: ~85%** | [Details](./RustMesh/README.md)
+**Progress: 100%** | [Details](./RustMesh/README.md)
 
 ---
 
-### 🟩 RustSLAM (Visual SLAM)
+### 🟢 RustSLAM (Visual SLAM)
 
 **Pure Rust implementation of Visual SLAM library**
 
-- Feature extraction (ORB, AKAZE, SuperPoint)
-- Visual Odometry (VO + PnP)
-- Local mapping (Triangulation + BA)
-- Loop closing (BoW)
-- **3D Gaussian Splatting** - Real-time/offline dense reconstruction
-- SLAM + 3DGS fusion
+- Feature extraction (ORB, Harris, FAST with BRIEF descriptors)
+- Feature matching (Hamming distance for binary descriptors, KNN matching)
+- Visual Odometry (VO + DLT-PnP + RANSAC)
+- Local mapping (Triangulation + Bundle Adjustment)
+- Loop closing (BoW + Sim3 pose optimization)
+- Relocalization support
+- Pipeline checkpoint and recovery
+- Video decoding with hardware acceleration (VideoToolbox on macOS)
 
 **Tech Stack**:
-- opencv-rust: Image processing
 - glam: SIMD math library
-- candle: PyTorch bindings + Metal GPU
-- apex-solver: Graph optimization
-- g2o-rs: Graph optimization
+- rayon: Data parallelism
+- crossbeam-channel: Thread communication
+- ffmpeg-next: Video decoding
+- thiserror: Error handling
 
-**Progress: ~85%** | [Details](./RustSLAM/README.md)
-
----
-
-### ⬜ RustGUI (GUI + 3D Rendering)
-
-**To be developed - Planned using egui + wgpu**
-
-- Real-time 3D visualization
-- GUI interface
-- Camera control
-
-**Progress: 0%**
+**Progress: 100%** | [Details](./RustSLAM/README.md)
 
 ---
 
-## Complete Pipeline
+### 🟢 RustGS (3D Gaussian Splatting)
+
+**Standalone 3DGS training library**
+
+- Gaussian data structures (position, covariance, color, opacity)
+- Differentiable rendering (CPU + GPU via Candle + Metal)
+- Tiled rasterization with depth sorting
+- Alpha blending (front-to-back compositing)
+- Training pipeline with SSIM + L1 loss
+- Densification and pruning
+- PLY scene file export/import
+- Training checkpoint and resume
+
+**Tech Stack**:
+- candle-core + candle-metal: GPU acceleration (Apple MPS)
+- glam: 3D math
+
+**Progress: 100%**
+
+---
+
+### 🟢 RustViewer (3D Visualization GUI)
+
+**Interactive 3D visualization for SLAM results**
+
+- Offline file loading:
+  - `slam_checkpoint.json` (camera trajectory + map points)
+  - `scene.ply` (Gaussian point cloud)
+  - `mesh.obj/ply` (extracted mesh)
+- 3D rendering with wgpu:
+  - Camera trajectory polylines
+  - Sparse point clouds
+  - Gaussian point clouds
+  - Mesh wireframe and solid faces
+- egui control panel:
+  - File selection dialog
+  - Layer visibility toggles
+  - Scene statistics display
+- Arcball camera control (orbit, pan, zoom)
+- Apple HIG-compliant UI design
+
+**Tech Stack**:
+- eframe 0.31 + egui 0.31: GUI framework
+- wgpu: GPU rendering
+- glam: 3D math
+- bytemuck: Zero-copy GPU buffer uploads
+
+**Progress: 100%**
+
+---
+
+### 🟢 rustscan-types
+
+**Shared type definitions across crates**
+
+- Common data types for inter-crate communication
+- Feature-gated to minimize dependency footprint
+
+**Progress: 100%**
+
+---
+
+## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                    3D Scanning Pipeline                         │
+│                    RustScan Workspace                           │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
-│  [Acquisition] → [SLAM] → [3DGS] → [Mesh Extract] → [Post] → [Export] │
-│                      ↓                                          │
-│                 Real-time Rendering                             │
+│  rustscan-types ──┬── RustSLAM ──→ RustGS ──→ RustMesh         │
+│                   │       │           │           │              │
+│                   │       └───────────┴───────────┘              │
+│                   │                    │                         │
+│                   └────────────→ RustViewer                      │
+│                                                                 │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## Module Design
+## Module Structure
 
 ```
 RustScan/
-├── RustMesh/           # Core mesh library (~85%)
-│   ├── Core/           # Basic data structures
-│   │   ├── handles.rs      # Handle system
-│   │   ├── connectivity.rs  # Connectivity relations
-│   │   ├── soa_kernel.rs  # SoA storage
-│   │   ├── smart_handles.rs # Smart Handle
-│   │   └── om_format.rs    # OM format
-│   ├── Tools/          # Mesh algorithms
-│   │   ├── decimation.rs   # Simplification
-│   │   ├── subdivision.rs  # Subdivision
-│   │   ├── smoother.rs    # Smoothing
-│   │   ├── hole_filling.rs # Hole filling
-│   │   └── ...
-│   └── Utils/          # Utilities
+├── rustscan-types/     # Shared types (100%)
+├── RustMesh/           # Mesh processing library (100%)
+│   ├── Core/           # Data structures (handles, connectivity, SoA)
+│   ├── Tools/          # Algorithms (decimation, subdivision, smoothing)
+│   └── Utils/          # Utilities (circulators, quadric)
 │
-├── RustSLAM/           # SLAM + 3DGS (~85%)
-│   ├── core/           # Core structures
-│   │   ├── frame.rs       # Frame
-│   │   ├── keyframe.rs    # KeyFrame
-│   │   ├── map_point.rs   # MapPoint
-│   │   └── camera.rs      # Camera model
-│   ├── features/        # Feature extraction
-│   │   ├── orb.rs         # ORB
-│   │   └── pure_rust.rs   # Harris/FAST
-│   ├── tracker/         # Visual Odometry
-│   ├── optimizer/       # BA optimization
-│   ├── loop_closing/    # Loop closing
-│   └── fusion/          # 3DGS fusion
-│       ├── gaussian.rs    # Gaussian data structures
-│       ├── renderer.rs    # Renderer
-│       └── trainer.rs      # Training
+├── RustSLAM/           # Visual SLAM (100%)
+│   ├── core/           # Frame, KeyFrame, MapPoint, Camera, SE3
+│   ├── features/       # ORB, Harris, FAST, matching
+│   ├── tracker/        # Visual Odometry
+│   ├── optimizer/      # Bundle Adjustment
+│   ├── loop_closing/   # BoW vocabulary, loop detector
+│   ├── io/             # Video decoder (ffmpeg + VideoToolbox)
+│   └── cli/            # Pipeline orchestration
 │
-└── RustGUI/            # GUI (to be developed)
+├── RustGS/             # 3DGS training (100%)
+│   ├── core/           # Gaussian data structures
+│   ├── render/         # Differentiable rendering
+│   ├── train/          # Training pipeline
+│   └── io/             # PLY import/export
+│
+└── RustViewer/         # 3D GUI (100%)
+    ├── loader/         # Checkpoint, Gaussian, Mesh loaders
+    ├── renderer/       # wgpu pipelines, scene graph
+    └── ui/             # egui panels and controls
 ```
 
 ---
 
 ## Tech Stack
 
-- **Language**: Rust 2021
-- **Math Library**: glam (SIMD accelerated)
-- **GPU**: wgpu, candle-metal
-- **Multithreading**: rayon
-- **Comparable to**: OpenMesh, Open3D, ORB-SLAM3
+| Category | Technology |
+|----------|------------|
+| **Language** | Rust 2021 Edition |
+| **Math** | glam 0.25 (SIMD accelerated) |
+| **GPU** | wgpu, candle-core + candle-metal (Apple MPS) |
+| **GUI** | eframe 0.31, egui 0.31 |
+| **Video** | ffmpeg-next 8.0 (VideoToolbox HW accel) |
+| **Parallelism** | rayon 1.8, crossbeam-channel 0.5 |
+| **Optimization** | apex-solver 1.0 (Bundle Adjustment) |
+| **CLI** | clap 4.5 |
 
 ---
 
 ## Quick Start
 
-### RustMesh
+### Build All Crates
 
 ```bash
-cd RustMesh
-cargo build
-cargo test
-cargo run --example smart_handles_demo
+cargo build --release
+```
+
+### RustViewer (3D GUI)
+
+```bash
+cargo run -p rust-viewer
 ```
 
 ### RustSLAM
@@ -160,17 +219,26 @@ cargo run --example run_vo
 cargo test
 ```
 
+### RustMesh
+
+```bash
+cd RustMesh
+cargo build
+cargo test
+cargo run --example smart_handles_demo
+```
+
 ---
 
 ## Examples
 
-Run the end-to-end sample pipeline on three short iPhone clips with expected outputs:
+Run the end-to-end sample pipeline on three short iPhone clips:
 
 ```bash
 ./run_examples.sh
 ```
 
-Outputs are written to `output/examples` and compared against `test_data/expected` by default.
+Outputs are written to `output/examples` and compared against `test_data/expected`.
 
 Environment overrides:
 - `RUSTSCAN_PROFILE` default `release`
@@ -178,67 +246,45 @@ Environment overrides:
 - `RUSTSCAN_FRAME_STRIDE` default `2`
 - `RUSTSCAN_MESH_VOXEL_SIZE` default `0.05`
 - `RUSTSCAN_PREFER_HW` default `false`
-- `RUSTSCAN_COMPARE` default `1` (set to `0` to skip mesh count comparison)
 
 ---
 
 ## Progress Overview
 
-| Module | Completion | Priority | Notes |
-|------|--------|--------|------|
-| **RustSLAM** | ~85% | P0 | Core SLAM + 3DGS complete |
-| **RustMesh** | ~85% | P1 | Solid foundation, all tests passing |
-| **RustGUI** | 0% | P2 | To be started |
+| Module | Completion | Status |
+|--------|------------|--------|
+| **RustSLAM** | 100% | ✅ Complete |
+| **RustGS** | 100% | ✅ Complete |
+| **RustMesh** | 100% | ✅ Complete |
+| **RustViewer** | 100% | ✅ Complete |
+| **rustscan-types** | 100% | ✅ Complete |
 
-### RustSLAM Checklist
+### All Features Implemented
 
-- [x] SE3 Pose
-- [x] ORB Feature Extraction
-- [x] Feature Matching
-- [x] Visual Odometry
-- [x] Bundle Adjustment
-- [x] Loop Closing
-- [x] Relocalization
-- [x] 3D Gaussian data structures
-- [x] Gaussian Renderer
-- [x] Tiled Rasterization
-- [x] Depth Sorting
-- [x] Alpha Blending
-- [x] Gaussian Tracking
-- [x] Densification
-- [x] Pruning
-- [x] Differentiable Renderer
-- [x] Training Pipeline
-- [x] SLAM Integration
-
-### RustMesh Checklist
-
-- [x] Handle system
-- [x] Half-edge data structure
-- [x] SoA memory layout
-- [x] OFF/OBJ/PLY/STL IO
-- [x] MTL material support
-- [x] OM format (basic)
-- [x] Smart Handle system
-- [x] EdgeFace circulators
-- [x] Quadric Decimation
-- [x] Loop/Catmull-Clark/√3 subdivision
-- [x] Laplace/Tangential smoothing
-- [x] Hole Filling
-- [x] Mesh Repair
-- [x] VDPM basics
+- [x] CLI Infrastructure & Configuration
+- [x] Video Input & Hardware Decoding
+- [x] SLAM Processing Pipeline (Feature extraction, VO, BA, Loop closing)
+- [x] 3DGS Training & Scene Generation
+- [x] Mesh Extraction & Export (TSDF + Marching Cubes)
+- [x] End-to-End Pipeline Integration
+- [x] Cross-Cutting Infrastructure (Thread safety, Config validation)
+- [x] RustViewer 3D Visualization GUI
+- [x] RustGS Crate Extraction
+- [x] RustMesh Integration
+- [x] Pipeline Documentation
 
 ---
 
-## Priorities
+## Output Formats
 
-| Priority | Module | Notes |
-|--------|------|------|
-| P0 | SLAM | Core, simultaneous localization and mapping |
-| P1 | Mesh post-processing | 3DGS → Mesh extraction |
-| P2 | Surface reconstruction | Poisson, Ball-Pivoting |
-| P3 | RustGUI | Visualization interface |
-| P4 | Texture mapping | UV unwrapping + texturing |
+| Type | Formats | Description |
+|------|---------|-------------|
+| **3DGS Scene** | `.ply` | Gaussian point cloud with metadata |
+| **Mesh** | `.obj`, `.ply` | Triangle mesh with vertex colors |
+| **Checkpoint** | `.json` | SLAM trajectory and map points |
+| **Metadata** | `.json` | Processing metrics and configuration |
+
+All outputs are compatible with Blender and Unity.
 
 ---
 
@@ -247,9 +293,9 @@ Environment overrides:
 - [OpenMesh](https://www.openmesh.org/) - C++ mesh processing library
 - [ORB-SLAM3](https://github.com/UZ-SLAMLab/ORB_SLAM3) - Visual SLAM
 - [Open3D](http://www.open3d.org/) - 3D reconstruction library
+- [3D Gaussian Splatting](https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/) - SIGGRAPH 2023
 - [SplaTAM](https://github.com/spla-tam/SplaTAM) - 3DGS SLAM (CVPR 2024)
 - [RTG-SLAM](https://github.com/MisEty/RTG-SLAM) - Real-time 3DGS
-- [PensieveRust](https://github.com/sukie91/PensieveRust) - 3D Gaussian Splatting
 
 ---
 
