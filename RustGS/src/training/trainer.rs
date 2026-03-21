@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use candle_core::{Device, Tensor, Var};
 
 #[cfg(feature = "gpu")]
-use crate::diff::diff_splat::{TrainableGaussians, DiffSplatRenderer, DiffCamera};
+use crate::diff::diff_splat::{DiffCamera, DiffSplatRenderer, TrainableGaussians};
 
 const TRAINER_CHECKPOINT_VERSION: u32 = 1;
 
@@ -132,11 +132,8 @@ pub struct Trainer {
 #[cfg(feature = "gpu")]
 impl Trainer {
     /// Create a new trainer
-    pub fn new(
-        config: TrainConfig,
-        initial_gaussians: usize,
-    ) -> candle_core::Result<Self> {
-        let device = Device::new_metal(0).unwrap_or_else(|_| Device::Cpu);
+    pub fn new(config: TrainConfig, initial_gaussians: usize) -> candle_core::Result<Self> {
+        let device = crate::preferred_device();
         println!("Trainer using device: {:?}", device);
 
         // Initialize with random Gaussians
@@ -147,12 +144,7 @@ impl Trainer {
         let colors = vec![1.0f32, 0.5, 0.25].repeat(initial_gaussians);
 
         let gaussians = TrainableGaussians::new(
-            &positions,
-            &scales,
-            &rotations,
-            &opacities,
-            &colors,
-            &device,
+            &positions, &scales, &rotations, &opacities, &colors, &device,
         )?;
 
         let renderer = DiffSplatRenderer::new(640, 480);
@@ -218,24 +210,22 @@ impl Trainer {
         let mut colors = flatten_2d(&self.gaussians.colors().to_vec2::<f32>()?);
 
         let output = self.renderer.render(&self.gaussians, camera)?;
-        let loss = self.renderer.compute_loss(
-            &output,
-            observed_color,
-            observed_depth,
-        )?;
+        let loss = self
+            .renderer
+            .compute_loss(&output, observed_color, observed_depth)?;
         let loss_value = loss.total.to_vec0::<f32>()?;
 
-        let (mut pos_grad, mut scale_grad, mut rot_grad, mut opacity_grad, mut color_grad) =
-            self.estimate_gradients(
-                camera,
-                observed_color,
-                observed_depth,
-                &mut positions,
-                &mut scales,
-                &mut rotations,
-                &mut opacities,
-                &mut colors,
-            )?;
+        let (mut pos_grad, mut scale_grad, mut rot_grad, mut opacity_grad, mut color_grad) = self
+            .estimate_gradients(
+            camera,
+            observed_color,
+            observed_depth,
+            &mut positions,
+            &mut scales,
+            &mut rotations,
+            &mut opacities,
+            &mut colors,
+        )?;
 
         let surrogate = self.renderer.compute_surrogate_gradients(&self.gaussians)?;
         blend_gradients(&mut pos_grad, &surrogate.positions, 0.1);
@@ -278,9 +268,7 @@ impl Trainer {
         if self.state.iteration % self.config.print_interval == 0 {
             println!(
                 "Iter {} | Loss: {:.4} | Gaussians: {}",
-                self.state.iteration,
-                loss_value,
-                self.state.num_gaussians
+                self.state.iteration, loss_value, self.state.num_gaussians
             );
         }
 
@@ -388,11 +376,18 @@ impl Trainer {
                 positions[p + 2] + direction[2] * offset_scale[2] * 0.5,
             ]);
             let scale_copy = [scales[p], scales[p + 1], scales[p + 2]];
-            let rotation_copy = [rotations[r], rotations[r + 1], rotations[r + 2], rotations[r + 3]];
+            let rotation_copy = [
+                rotations[r],
+                rotations[r + 1],
+                rotations[r + 2],
+                rotations[r + 3],
+            ];
             let color_copy = [colors[c], colors[c + 1], colors[c + 2]];
             scales.extend_from_slice(&scale_copy);
             rotations.extend_from_slice(&rotation_copy);
-            opacities.push(opacity_to_logit((actual_opacities[idx] * 0.75).clamp(0.05, 0.95)));
+            opacities.push(opacity_to_logit(
+                (actual_opacities[idx] * 0.75).clamp(0.05, 0.95),
+            ));
             colors.extend_from_slice(&color_copy);
         }
 
@@ -495,16 +490,19 @@ impl Trainer {
         };
         let file = File::create(path)?;
         let writer = BufWriter::new(file);
-        serde_json::to_writer_pretty(writer, &checkpoint)
-            .map_err(|err: serde_json::Error| candle_core::Error::Wrapped(Box::new(err.to_string())))?;
+        serde_json::to_writer_pretty(writer, &checkpoint).map_err(|err: serde_json::Error| {
+            candle_core::Error::Wrapped(Box::new(err.to_string()))
+        })?;
         Ok(())
     }
 
     pub fn load(&mut self, path: &str) -> candle_core::Result<()> {
         let file = File::open(path)?;
         let reader = BufReader::new(file);
-        let checkpoint: TrainerCheckpoint = serde_json::from_reader(reader)
-            .map_err(|err: serde_json::Error| candle_core::Error::Wrapped(Box::new(err.to_string())))?;
+        let checkpoint: TrainerCheckpoint =
+            serde_json::from_reader(reader).map_err(|err: serde_json::Error| {
+                candle_core::Error::Wrapped(Box::new(err.to_string()))
+            })?;
         if checkpoint.version != TRAINER_CHECKPOINT_VERSION {
             return Err(candle_core::Error::Wrapped(Box::new(format!(
                 "unsupported trainer checkpoint version {}",
@@ -553,11 +551,25 @@ impl Trainer {
                 let slot = idx * 3 + dim;
                 positions[slot] += eps;
                 let plus = self.evaluate_loss(
-                    positions, scales, rotations, opacities, colors, camera, observed_color, observed_depth,
+                    positions,
+                    scales,
+                    rotations,
+                    opacities,
+                    colors,
+                    camera,
+                    observed_color,
+                    observed_depth,
                 )?;
                 positions[slot] -= 2.0 * eps;
                 let minus = self.evaluate_loss(
-                    positions, scales, rotations, opacities, colors, camera, observed_color, observed_depth,
+                    positions,
+                    scales,
+                    rotations,
+                    opacities,
+                    colors,
+                    camera,
+                    observed_color,
+                    observed_depth,
                 )?;
                 positions[slot] += eps;
                 pos_grad[slot] = (plus - minus) / (2.0 * eps);
@@ -567,11 +579,25 @@ impl Trainer {
                 let slot = idx * 3 + dim;
                 scales[slot] += eps;
                 let plus = self.evaluate_loss(
-                    positions, scales, rotations, opacities, colors, camera, observed_color, observed_depth,
+                    positions,
+                    scales,
+                    rotations,
+                    opacities,
+                    colors,
+                    camera,
+                    observed_color,
+                    observed_depth,
                 )?;
                 scales[slot] -= 2.0 * eps;
                 let minus = self.evaluate_loss(
-                    positions, scales, rotations, opacities, colors, camera, observed_color, observed_depth,
+                    positions,
+                    scales,
+                    rotations,
+                    opacities,
+                    colors,
+                    camera,
+                    observed_color,
+                    observed_depth,
                 )?;
                 scales[slot] += eps;
                 scale_grad[slot] = (plus - minus) / (2.0 * eps);
@@ -579,11 +605,25 @@ impl Trainer {
 
             opacities[idx] += eps;
             let plus = self.evaluate_loss(
-                positions, scales, rotations, opacities, colors, camera, observed_color, observed_depth,
+                positions,
+                scales,
+                rotations,
+                opacities,
+                colors,
+                camera,
+                observed_color,
+                observed_depth,
             )?;
             opacities[idx] -= 2.0 * eps;
             let minus = self.evaluate_loss(
-                positions, scales, rotations, opacities, colors, camera, observed_color, observed_depth,
+                positions,
+                scales,
+                rotations,
+                opacities,
+                colors,
+                camera,
+                observed_color,
+                observed_depth,
             )?;
             opacities[idx] += eps;
             opacity_grad[idx] = (plus - minus) / (2.0 * eps);
@@ -592,11 +632,25 @@ impl Trainer {
                 let slot = idx * 3 + dim;
                 colors[slot] += eps;
                 let plus = self.evaluate_loss(
-                    positions, scales, rotations, opacities, colors, camera, observed_color, observed_depth,
+                    positions,
+                    scales,
+                    rotations,
+                    opacities,
+                    colors,
+                    camera,
+                    observed_color,
+                    observed_depth,
                 )?;
                 colors[slot] -= 2.0 * eps;
                 let minus = self.evaluate_loss(
-                    positions, scales, rotations, opacities, colors, camera, observed_color, observed_depth,
+                    positions,
+                    scales,
+                    rotations,
+                    opacities,
+                    colors,
+                    camera,
+                    observed_color,
+                    observed_depth,
                 )?;
                 colors[slot] += eps;
                 color_grad[slot] = (plus - minus) / (2.0 * eps);
@@ -633,9 +687,15 @@ impl Trainer {
             &self.device,
         )?;
         let output = self.renderer.render(&candidate, camera)?;
-        let loss = self.renderer.compute_loss(&output, observed_color, observed_depth)?;
+        let loss = self
+            .renderer
+            .compute_loss(&output, observed_color, observed_depth)?;
         let value = loss.total.to_vec0::<f32>()?;
-        if value.is_finite() { Ok(value) } else { Ok(0.0) }
+        if value.is_finite() {
+            Ok(value)
+        } else {
+            Ok(0.0)
+        }
     }
 }
 
@@ -732,7 +792,9 @@ fn clamp_colors(colors: &mut [f32]) {
 }
 
 #[cfg(feature = "gpu")]
-fn export_gaussians(gaussians: &TrainableGaussians) -> candle_core::Result<Vec<CheckpointGaussian>> {
+fn export_gaussians(
+    gaussians: &TrainableGaussians,
+) -> candle_core::Result<Vec<CheckpointGaussian>> {
     let positions = flatten_2d(&gaussians.positions().to_vec2::<f32>()?);
     let scales = flatten_2d(&gaussians.scales()?.to_vec2::<f32>()?);
     let rotations = flatten_2d(&gaussians.rotations()?.to_vec2::<f32>()?);
@@ -747,7 +809,12 @@ fn export_gaussians(gaussians: &TrainableGaussians) -> candle_core::Result<Vec<C
         output.push(CheckpointGaussian {
             position: [positions[p], positions[p + 1], positions[p + 2]],
             scale: [scales[p], scales[p + 1], scales[p + 2]],
-            rotation: [rotations[r], rotations[r + 1], rotations[r + 2], rotations[r + 3]],
+            rotation: [
+                rotations[r],
+                rotations[r + 1],
+                rotations[r + 2],
+                rotations[r + 3],
+            ],
             opacity: opacities[idx],
             color: [colors[c], colors[c + 1], colors[c + 2]],
         });
@@ -839,13 +906,25 @@ mod tests {
         let device = Device::Cpu;
         let gaussians = test_gaussians(&device, &[0.6, 0.4]);
         let mut trainer = Trainer::from_gaussians(TrainConfig::default(), gaussians, 4, 4);
-        let before = trainer.gaussians.opacities.as_tensor().to_vec1::<f32>().unwrap();
+        let before = trainer
+            .gaussians
+            .opacities
+            .as_tensor()
+            .to_vec1::<f32>()
+            .unwrap();
         let camera = test_camera(&device);
         let observed_color = vec![0.0f32; 4 * 4 * 3];
         let observed_depth = vec![0.0f32; 4 * 4];
 
-        let loss = trainer.step(&camera, &observed_color, &observed_depth).unwrap();
-        let after = trainer.gaussians.opacities.as_tensor().to_vec1::<f32>().unwrap();
+        let loss = trainer
+            .step(&camera, &observed_color, &observed_depth)
+            .unwrap();
+        let after = trainer
+            .gaussians
+            .opacities
+            .as_tensor()
+            .to_vec1::<f32>()
+            .unwrap();
 
         assert!(loss.is_finite());
         assert_eq!(trainer.state().iteration, 1);
@@ -888,7 +967,8 @@ mod tests {
         trainer.save(file.path().to_str().unwrap()).unwrap();
 
         let restored_gaussians = test_gaussians(&device, &[0.2, 0.2]);
-        let mut restored = Trainer::from_gaussians(TrainConfig::default(), restored_gaussians, 4, 4);
+        let mut restored =
+            Trainer::from_gaussians(TrainConfig::default(), restored_gaussians, 4, 4);
         restored.load(file.path().to_str().unwrap()).unwrap();
 
         assert_eq!(restored.state().iteration, 7);

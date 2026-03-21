@@ -2,13 +2,15 @@
 //!
 //! - `scene_io`: PLY scene export/import
 //! - `training_checkpoint`: Full training checkpoint with Adam optimizer state
+//! - `tum_dataset`: TUM RGB-D dataset loading for direct RustGS training
 
 pub mod scene_io;
 pub mod training_checkpoint;
+pub mod tum_dataset;
 
-use std::path::Path;
 use crate::core::GaussianMap;
 use crate::TrainingError;
+use std::path::Path;
 
 /// Simple training checkpoint used by the trainer's incremental save.
 #[derive(Debug, Clone, Default)]

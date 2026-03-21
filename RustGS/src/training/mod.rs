@@ -14,6 +14,9 @@ pub mod training_pipeline;
 pub mod trainer;
 
 #[cfg(feature = "gpu")]
+mod data_loading;
+
+#[cfg(feature = "gpu")]
 pub mod complete_trainer;
 
 #[cfg(feature = "gpu")]
@@ -27,67 +30,41 @@ pub mod autodiff_trainer;
 
 // Re-export common types at module level
 pub use training_pipeline::{
-    TrainingConfig as PipelineConfig,
-    TrainableGaussian,
-    TrainingState,
-    SceneMetadata,
-    SceneIoError,
-    densify_gaussians,
-    prune_gaussians,
-    reset_opacity,
-    compute_ssim_loss,
-    compute_training_loss,
-    compute_psnr,
-    default_camera_intrinsics,
+    compute_psnr, compute_ssim_loss, compute_training_loss, default_camera_intrinsics,
+    densify_gaussians, prune_gaussians, reset_opacity, SceneIoError, SceneMetadata,
+    TrainableGaussian, TrainingConfig as PipelineConfig, TrainingState,
 };
 
 #[cfg(feature = "gpu")]
-pub use trainer::{
-    TrainConfig,
-    TrainState,
-    Trainer,
-};
+pub use trainer::{TrainConfig, TrainState, Trainer};
 
 #[cfg(feature = "gpu")]
 pub use complete_trainer::{
-    CompleteTrainer,
-    LrScheduler,
+    adam_update, CompleteTrainer, LrScheduler, TrainerAdamState,
     TrainingResult as DetailedTrainingResult,
-    TrainerAdamState,
-    adam_update,
 };
 
 #[cfg(feature = "gpu")]
 pub use gpu_trainer::{
-    GpuTrainerConfig,
-    SyncData,
-    GpuGaussianBuffer,
-    GpuAdamState,
-    GpuTrainer,
-    GpuTrainerBuilder,
+    GpuAdamState, GpuGaussianBuffer, GpuTrainer, GpuTrainerBuilder, GpuTrainerConfig, SyncData,
 };
 
 #[cfg(feature = "gpu")]
-pub use autodiff::{
-    VarGaussian,
-    VarCamera,
-    VarRenderer,
-    VarOutput,
-    TrueAutodiffTrainer,
-};
+pub use autodiff::{TrueAutodiffTrainer, VarCamera, VarGaussian, VarOutput, VarRenderer};
 
 #[cfg(feature = "gpu")]
 pub use autodiff_trainer::{
-    DiffGaussian,
-    DiffRenderCamera,
-    DiffSplat,
-    DiffRendered,
-    DiffLoss,
-    AutodiffTrainer,
+    AutodiffTrainer, DiffGaussian, DiffLoss, DiffRenderCamera, DiffRendered, DiffSplat,
 };
 
-use crate::{TrainingDataset, GaussianMap};
 use crate::TrainingError;
+use crate::{GaussianMap, TrainingDataset};
+
+#[cfg(feature = "gpu")]
+use std::time::Instant;
+
+#[cfg(feature = "gpu")]
+use data_loading::{load_training_data, map_from_trainable, trainable_from_map};
 
 /// Legacy training configuration (kept for API compatibility).
 #[derive(Debug, Clone)]
@@ -108,6 +85,16 @@ pub struct TrainingConfig {
     pub densify_interval: usize,
     /// Pruning threshold
     pub prune_threshold: f32,
+    /// Maximum number of Gaussians created during initialization
+    pub max_initial_gaussians: usize,
+    /// Sampling step for frame-to-Gaussian initialization (0 = auto)
+    pub sampling_step: usize,
+    /// Minimum valid depth in meters
+    pub min_depth: f32,
+    /// Maximum valid depth in meters
+    pub max_depth: f32,
+    /// Generate synthetic depth from image luminance when depth is unavailable
+    pub use_synthetic_depth: bool,
 }
 
 impl Default for TrainingConfig {
@@ -121,6 +108,11 @@ impl Default for TrainingConfig {
             lr_color: 0.0025,
             densify_interval: 100,
             prune_threshold: 0.005,
+            max_initial_gaussians: 100_000,
+            sampling_step: 0,
+            min_depth: 0.01,
+            max_depth: 10.0,
+            use_synthetic_depth: true,
         }
     }
 }
@@ -140,7 +132,51 @@ pub struct TrainingResult {
 ///
 /// This is a convenience function that uses CompleteTrainer internally.
 #[cfg(feature = "gpu")]
-pub fn train(_dataset: &TrainingDataset, _config: &TrainingConfig) -> Result<GaussianMap, TrainingError> {
-    // TODO: Implement using CompleteTrainer once TrainingDataset integration is complete
-    Ok(GaussianMap::default())
+pub fn train(
+    dataset: &TrainingDataset,
+    config: &TrainingConfig,
+) -> Result<GaussianMap, TrainingError> {
+    let start = Instant::now();
+    let device = crate::preferred_device();
+    let loaded = load_training_data(dataset, config, &device)?;
+    let mut gaussians = trainable_from_map(&loaded.initial_map, &device)?;
+
+    if gaussians.len() == 0 {
+        return Err(TrainingError::InvalidInput(
+            "training initialization produced zero Gaussians".to_string(),
+        ));
+    }
+
+    let mut trainer = CompleteTrainer::with_device(
+        dataset.intrinsics.width as usize,
+        dataset.intrinsics.height as usize,
+        config.lr_position,
+        config.lr_scale,
+        config.lr_rotation,
+        config.lr_opacity,
+        config.lr_color,
+        device.clone(),
+    );
+
+    let color_refs: Vec<&[f32]> = loaded.colors.iter().map(|color| color.as_slice()).collect();
+    let depth_refs: Vec<&[f32]> = loaded.depths.iter().map(|depth| depth.as_slice()).collect();
+    let result = trainer.train(
+        &mut gaussians,
+        &loaded.cameras,
+        &color_refs,
+        &depth_refs,
+        config.iterations,
+    )?;
+
+    let trained_map = map_from_trainable(&gaussians)?;
+    log::info!(
+        "RustGS training complete in {:.2}s | frames={} | initial_gaussians={} | final_gaussians={} | final_loss={:.6}",
+        start.elapsed().as_secs_f64(),
+        dataset.poses.len(),
+        loaded.initial_map.len(),
+        trained_map.len(),
+        result.final_loss,
+    );
+
+    Ok(trained_map)
 }

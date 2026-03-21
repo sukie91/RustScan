@@ -3,7 +3,7 @@
 //! This module provides GPU-accelerated differentiable rendering
 //! for 3D Gaussian Splatting using Candle with Metal MPS backend.
 
-use candle_core::{Tensor, Device};
+use candle_core::{Device, Tensor};
 
 #[cfg(feature = "gpu")]
 use crate::render::{Gaussian, RenderBuffer, TiledRenderer};
@@ -82,9 +82,15 @@ impl CameraTensors {
         device: &Device,
     ) -> candle_core::Result<Self> {
         let rotation_data = [
-            rotation[0][0], rotation[0][1], rotation[0][2],
-            rotation[1][0], rotation[1][1], rotation[1][2],
-            rotation[2][0], rotation[2][1], rotation[2][2],
+            rotation[0][0],
+            rotation[0][1],
+            rotation[0][2],
+            rotation[1][0],
+            rotation[1][1],
+            rotation[1][2],
+            rotation[2][0],
+            rotation[2][1],
+            rotation[2][2],
         ];
 
         Ok(Self {
@@ -124,7 +130,7 @@ impl DiffGaussianRenderer {
     /// Create a new renderer
     pub fn new(width: usize, height: usize) -> Self {
         // Try to use Metal MPS if available, otherwise CPU
-        let device = Device::new_metal(0).unwrap_or_else(|_| Device::Cpu);
+        let device = crate::preferred_device();
 
         println!("Using device: {:?}", device);
 
@@ -160,11 +166,7 @@ impl DiffGaussianRenderer {
         camera: &CameraTensors,
     ) -> candle_core::Result<Tensor> {
         let render = self.render_tiled(gaussians, camera)?;
-        Tensor::from_slice(
-            &render.color,
-            (self.height, self.width, 3),
-            &self.device,
-        )
+        Tensor::from_slice(&render.color, (self.height, self.width, 3), &self.device)
     }
 
     /// Render Gaussians to depth image (differentiable)
@@ -176,11 +178,7 @@ impl DiffGaussianRenderer {
         camera: &CameraTensors,
     ) -> candle_core::Result<Tensor> {
         let render = self.render_tiled(gaussians, camera)?;
-        Tensor::from_slice(
-            &render.depth,
-            (self.height, self.width),
-            &self.device,
-        )
+        Tensor::from_slice(&render.depth, (self.height, self.width), &self.device)
     }
 
     /// Compute loss between rendered and observed images (L1)
@@ -220,17 +218,11 @@ impl DiffGaussianRenderer {
         let rendered_depth = self.render_depth(gaussians, camera)?;
 
         // Convert observed to tensors
-        let obs_color = Tensor::from_slice(
-            observed_color,
-            (self.height, self.width, 3),
-            &self.device,
-        )?;
+        let obs_color =
+            Tensor::from_slice(observed_color, (self.height, self.width, 3), &self.device)?;
 
-        let obs_depth = Tensor::from_slice(
-            observed_depth,
-            (self.height, self.width),
-            &self.device,
-        )?;
+        let obs_depth =
+            Tensor::from_slice(observed_depth, (self.height, self.width), &self.device)?;
 
         // Compute losses
         let color_loss = self.compute_color_loss(&rendered_color, &obs_color)?;
@@ -293,7 +285,12 @@ fn tensors_to_gaussians(gaussians: &GaussianTensors) -> candle_core::Result<Vec<
         output.push(Gaussian::new(
             [positions[p], positions[p + 1], positions[p + 2]],
             [scales[p], scales[p + 1], scales[p + 2]],
-            [rotations[r], rotations[r + 1], rotations[r + 2], rotations[r + 3]],
+            [
+                rotations[r],
+                rotations[r + 1],
+                rotations[r + 2],
+                rotations[r + 3],
+            ],
             opacities[i],
             [colors[c], colors[c + 1], colors[c + 2]],
         ));
@@ -334,28 +331,24 @@ mod tiled_tests {
         let colors = vec![1.0f32, 0.0, 0.0];
 
         let gaussians = GaussianTensors::new(
-            &positions,
-            &scales,
-            &rotations,
-            &opacities,
-            &colors,
-            &device,
-        ).unwrap();
+            &positions, &scales, &rotations, &opacities, &colors, &device,
+        )
+        .unwrap();
 
-        let rotation = [
-            [1.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0],
-            [0.0, 0.0, 1.0],
-        ];
+        let rotation = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
         let translation = [0.0, 0.0, 0.0];
         let camera = CameraTensors::new(
-            500.0, 500.0, 4.0, 4.0,
+            500.0,
+            500.0,
+            4.0,
+            4.0,
             &rotation,
             &translation,
             8,
             8,
             &device,
-        ).unwrap();
+        )
+        .unwrap();
 
         let color = renderer.render_color(&gaussians, &camera).unwrap();
         let depth = renderer.render_depth(&gaussians, &camera).unwrap();
@@ -379,22 +372,19 @@ mod tests {
     #[test]
     fn test_gaussian_tensors() {
         // Try to create on available device
-        let device = Device::new_metal(0).unwrap_or_else(|_| Device::Cpu);
+        let device = crate::preferred_device();
 
         // 3 Gaussians: each position is 3 floats, each color is 3 floats
-        let positions = vec![0.0f32, 0.0, 0.0,  1.0, 0.0, 0.0,  0.0, 1.0, 0.0];
+        let positions = vec![0.0f32, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
         let scales = vec![0.01f32; 9];
-        let rotations = vec![1.0f32, 0.0, 0.0, 0.0,  1.0f32, 0.0, 0.0, 0.0,  1.0f32, 0.0, 0.0, 0.0];
+        let rotations = vec![
+            1.0f32, 0.0, 0.0, 0.0, 1.0f32, 0.0, 0.0, 0.0, 1.0f32, 0.0, 0.0, 0.0,
+        ];
         let opacities = vec![0.5f32, 0.5f32, 0.5f32];
-        let colors = vec![1.0f32, 0.5, 0.25,  0.5, 1.0, 0.25,  0.25, 0.5, 1.0];
+        let colors = vec![1.0f32, 0.5, 0.25, 0.5, 1.0, 0.25, 0.25, 0.5, 1.0];
 
         let tensors = GaussianTensors::new(
-            &positions,
-            &scales,
-            &rotations,
-            &opacities,
-            &colors,
-            &device,
+            &positions, &scales, &rotations, &opacities, &colors, &device,
         );
 
         // May fail on non-Mac, that's ok

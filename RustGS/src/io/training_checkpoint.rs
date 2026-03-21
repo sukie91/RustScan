@@ -11,15 +11,30 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 pub enum TrainingCheckpointError {
     #[error("failed to create checkpoint directory {path}: {source}")]
-    CreateDir { path: PathBuf, source: std::io::Error },
+    CreateDir {
+        path: PathBuf,
+        source: std::io::Error,
+    },
     #[error("failed to write checkpoint {path}: {source}")]
-    Write { path: PathBuf, source: std::io::Error },
+    Write {
+        path: PathBuf,
+        source: std::io::Error,
+    },
     #[error("failed to read checkpoint {path}: {source}")]
-    Read { path: PathBuf, source: std::io::Error },
+    Read {
+        path: PathBuf,
+        source: std::io::Error,
+    },
     #[error("failed to serialize checkpoint {path}: {source}")]
-    Serialize { path: PathBuf, source: serde_json::Error },
+    Serialize {
+        path: PathBuf,
+        source: serde_json::Error,
+    },
     #[error("failed to deserialize checkpoint {path}: {source}")]
-    Deserialize { path: PathBuf, source: serde_json::Error },
+    Deserialize {
+        path: PathBuf,
+        source: serde_json::Error,
+    },
     #[error("invalid checkpoint: {0}")]
     Invalid(String),
 }
@@ -49,9 +64,11 @@ impl TrainingCheckpointManager {
 
     pub fn new(config: TrainingCheckpointConfig) -> Result<Self, TrainingCheckpointError> {
         if !config.dir.exists() {
-            fs::create_dir_all(&config.dir).map_err(|source| TrainingCheckpointError::CreateDir {
-                path: config.dir.clone(),
-                source,
+            fs::create_dir_all(&config.dir).map_err(|source| {
+                TrainingCheckpointError::CreateDir {
+                    path: config.dir.clone(),
+                    source,
+                }
             })?;
         }
 
@@ -118,11 +135,11 @@ mod gpu_checkpoint {
 
     use serde::{Deserialize, Serialize};
 
-    use candle_core::Device;
-    use crate::training::complete_trainer::{CompleteTrainer, TrainerAdamState};
     use crate::diff::diff_splat::TrainableGaussians;
+    use crate::training::complete_trainer::{CompleteTrainer, TrainerAdamState};
+    use candle_core::Device;
 
-    use super::{TrainingCheckpointError, checkpoint_path, parse_checkpoint_name};
+    use super::{checkpoint_path, parse_checkpoint_name, TrainingCheckpointError};
 
     const TRAINING_CHECKPOINT_VERSION: u32 = 1;
 
@@ -159,7 +176,10 @@ mod gpu_checkpoint {
             })
         }
 
-        pub fn to_trainable_gaussians(&self, device: &Device) -> candle_core::Result<TrainableGaussians> {
+        pub fn to_trainable_gaussians(
+            &self,
+            device: &Device,
+        ) -> candle_core::Result<TrainableGaussians> {
             let mut positions = Vec::with_capacity(self.gaussians.len() * 3);
             let mut scales = Vec::with_capacity(self.gaussians.len() * 3);
             let mut rotations = Vec::with_capacity(self.gaussians.len() * 4);
@@ -168,11 +188,7 @@ mod gpu_checkpoint {
 
             for g in &self.gaussians {
                 positions.extend_from_slice(&g.position);
-                scales.extend_from_slice(&[
-                    g.scale[0].ln(),
-                    g.scale[1].ln(),
-                    g.scale[2].ln(),
-                ]);
+                scales.extend_from_slice(&[g.scale[0].ln(), g.scale[1].ln(), g.scale[2].ln()]);
                 rotations.extend_from_slice(&g.rotation);
                 opacities.push(opacity_to_logit(g.opacity));
                 colors.extend_from_slice(&g.color);
@@ -188,15 +204,20 @@ mod gpu_checkpoint {
         }
     }
 
-    pub fn save_checkpoint(checkpoint: &FullTrainingCheckpoint, path: &Path) -> Result<(), TrainingCheckpointError> {
+    pub fn save_checkpoint(
+        checkpoint: &FullTrainingCheckpoint,
+        path: &Path,
+    ) -> Result<(), TrainingCheckpointError> {
         let file = File::create(path).map_err(|source| TrainingCheckpointError::Write {
             path: path.to_path_buf(),
             source,
         })?;
         let writer = BufWriter::new(file);
-        serde_json::to_writer_pretty(writer, checkpoint).map_err(|source| TrainingCheckpointError::Serialize {
-            path: path.to_path_buf(),
-            source,
+        serde_json::to_writer_pretty(writer, checkpoint).map_err(|source| {
+            TrainingCheckpointError::Serialize {
+                path: path.to_path_buf(),
+                source,
+            }
         })?;
         Ok(())
     }
@@ -207,10 +228,13 @@ mod gpu_checkpoint {
             source,
         })?;
         let reader = BufReader::new(file);
-        let checkpoint: FullTrainingCheckpoint = serde_json::from_reader(reader).map_err(|source| TrainingCheckpointError::Deserialize {
-            path: path.to_path_buf(),
-            source,
-        })?;
+        let checkpoint: FullTrainingCheckpoint =
+            serde_json::from_reader(reader).map_err(|source| {
+                TrainingCheckpointError::Deserialize {
+                    path: path.to_path_buf(),
+                    source,
+                }
+            })?;
         if checkpoint.version != TRAINING_CHECKPOINT_VERSION {
             return Err(TrainingCheckpointError::Invalid(format!(
                 "unsupported checkpoint version {}",
@@ -220,7 +244,9 @@ mod gpu_checkpoint {
         Ok(checkpoint)
     }
 
-    pub fn load_latest_checkpoint(dir: &Path) -> Result<Option<FullTrainingCheckpoint>, TrainingCheckpointError> {
+    pub fn load_latest_checkpoint(
+        dir: &Path,
+    ) -> Result<Option<FullTrainingCheckpoint>, TrainingCheckpointError> {
         if !dir.exists() {
             return Ok(None);
         }
@@ -236,13 +262,19 @@ mod gpu_checkpoint {
             })?;
             let path = entry.path();
             if let Some(iteration) = parse_checkpoint_name(&path) {
-                if best.as_ref().map(|(idx, _)| iteration > *idx).unwrap_or(true) {
+                if best
+                    .as_ref()
+                    .map(|(idx, _)| iteration > *idx)
+                    .unwrap_or(true)
+                {
                     best = Some((iteration, path));
                 }
             }
         }
 
-        let Some((_idx, path)) = best else { return Ok(None); };
+        let Some((_idx, path)) = best else {
+            return Ok(None);
+        };
         load_checkpoint(&path).map(Some)
     }
 
@@ -270,22 +302,31 @@ mod gpu_checkpoint {
         Ok(Some(gaussians))
     }
 
-    fn export_gaussians(gaussians: &TrainableGaussians) -> Result<Vec<CheckpointGaussian>, TrainingCheckpointError> {
-        let positions = gaussians.positions().to_vec2::<f32>()
+    fn export_gaussians(
+        gaussians: &TrainableGaussians,
+    ) -> Result<Vec<CheckpointGaussian>, TrainingCheckpointError> {
+        let positions = gaussians
+            .positions()
+            .to_vec2::<f32>()
             .map_err(|err| TrainingCheckpointError::Invalid(err.to_string()))?;
-        let scales = gaussians.scales()
+        let scales = gaussians
+            .scales()
             .map_err(|err| TrainingCheckpointError::Invalid(err.to_string()))?
             .to_vec2::<f32>()
             .map_err(|err| TrainingCheckpointError::Invalid(err.to_string()))?;
-        let rotations = gaussians.rotations()
+        let rotations = gaussians
+            .rotations()
             .map_err(|err| TrainingCheckpointError::Invalid(err.to_string()))?
             .to_vec2::<f32>()
             .map_err(|err| TrainingCheckpointError::Invalid(err.to_string()))?;
-        let opacities = gaussians.opacities()
+        let opacities = gaussians
+            .opacities()
             .map_err(|err| TrainingCheckpointError::Invalid(err.to_string()))?
             .to_vec1::<f32>()
             .map_err(|err| TrainingCheckpointError::Invalid(err.to_string()))?;
-        let colors = gaussians.colors().to_vec2::<f32>()
+        let colors = gaussians
+            .colors()
+            .to_vec2::<f32>()
             .map_err(|err| TrainingCheckpointError::Invalid(err.to_string()))?;
 
         let positions: Vec<f32> = positions.into_iter().flatten().collect();
@@ -303,7 +344,12 @@ mod gpu_checkpoint {
             output.push(CheckpointGaussian {
                 position: [positions[p], positions[p + 1], positions[p + 2]],
                 scale: [scales[p], scales[p + 1], scales[p + 2]],
-                rotation: [rotations[r], rotations[r + 1], rotations[r + 2], rotations[r + 3]],
+                rotation: [
+                    rotations[r],
+                    rotations[r + 1],
+                    rotations[r + 2],
+                    rotations[r + 3],
+                ],
                 opacity: opacities[i],
                 color: [colors[c], colors[c + 1], colors[c + 2]],
             });
@@ -332,13 +378,9 @@ mod gpu_checkpoint {
             let colors = vec![0.2f32, 0.3, 0.4];
 
             let gaussians = TrainableGaussians::new(
-                &positions,
-                &scales,
-                &rotations,
-                &opacities,
-                &colors,
-                &device,
-            ).unwrap();
+                &positions, &scales, &rotations, &opacities, &colors, &device,
+            )
+            .unwrap();
 
             let trainer = CompleteTrainer::new(4, 4, 0.001, 0.001, 0.001, 0.001, 0.001);
 
@@ -366,13 +408,9 @@ mod gpu_checkpoint {
             let colors = vec![0.2f32, 0.3, 0.4];
 
             let gaussians = TrainableGaussians::new(
-                &positions,
-                &scales,
-                &rotations,
-                &opacities,
-                &colors,
-                &device,
-            ).unwrap();
+                &positions, &scales, &rotations, &opacities, &colors, &device,
+            )
+            .unwrap();
 
             let mut trainer = CompleteTrainer::new(4, 4, 0.001, 0.001, 0.001, 0.001, 0.001);
             trainer.set_iteration(500);

@@ -21,12 +21,13 @@ serde = { workspace = true }
 serde_json = "1.0"
 thiserror = { workspace = true }
 kiddo = "5.2.1"
+image = "0.25"
+log = "0.4"
 
 # CLI dependencies
 clap = { version = "4", features = ["derive"], optional = true }
 env_logger = { version = "0.11", optional = true }
 anyhow = { version = "1", optional = true }
-log = { version = "0.4", optional = true }
 
 # GPU dependencies (optional)
 candle-core = { version = "0.9.2", features = ["metal"], optional = true }
@@ -35,7 +36,7 @@ candle-metal = { version = "0.27.1", features = ["mps"], optional = true }
 [features]
 default = ["gpu", "cli"]
 gpu = ["dep:candle-core", "dep:candle-metal"]
-cli = ["dep:clap", "dep:env_logger", "dep:anyhow", "dep:log"]
+cli = ["dep:clap", "dep:env_logger", "dep:anyhow"]
 
 [dev-dependencies]
 tempfile = "3"

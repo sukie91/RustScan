@@ -1,7 +1,7 @@
 //! Arcball camera controller for 3D navigation.
 
-use glam::{Mat4, Vec3};
 use crate::renderer::scene::SceneBounds;
+use glam::{Mat4, Vec3};
 
 /// Arcball camera: orbits around a target point.
 #[derive(Debug, Clone)]
@@ -66,8 +66,11 @@ impl ArcballCamera {
 
     /// Orbit around target (left-button drag).
     pub fn orbit(&mut self, delta_x: f32, delta_y: f32) {
-        self.yaw += delta_x * Self::ORBIT_SENSITIVITY;
-        self.pitch -= delta_y * Self::ORBIT_SENSITIVITY;
+        // Match common DCC/model-viewer interaction:
+        // dragging the pointer should make the scene appear to move
+        // in the same direction as the drag.
+        self.yaw -= delta_x * Self::ORBIT_SENSITIVITY;
+        self.pitch += delta_y * Self::ORBIT_SENSITIVITY;
         self.pitch = self.pitch.clamp(-Self::MAX_PITCH, Self::MAX_PITCH);
     }
 
@@ -116,7 +119,11 @@ mod tests {
             fov_y: std::f32::consts::FRAC_PI_4,
         };
         let eye = cam.eye();
-        assert!((eye.z - 5.0).abs() < 1e-4, "eye.z should be ~5.0, got {}", eye.z);
+        assert!(
+            (eye.z - 5.0).abs() < 1e-4,
+            "eye.z should be ~5.0, got {}",
+            eye.z
+        );
         assert!(eye.x.abs() < 1e-4);
         assert!(eye.y.abs() < 1e-4);
     }
@@ -128,6 +135,21 @@ mod tests {
         cam.orbit(0.0, -100000.0);
         assert!(cam.pitch <= ArcballCamera::MAX_PITCH + 1e-4);
         assert!(cam.pitch >= -ArcballCamera::MAX_PITCH - 1e-4);
+    }
+
+    #[test]
+    fn test_orbit_drag_direction_follows_pointer() {
+        let mut cam = ArcballCamera::default();
+        let initial_yaw = cam.yaw;
+        let initial_pitch = cam.pitch;
+
+        // Dragging right should rotate the view so the scene appears to move right.
+        cam.orbit(100.0, 0.0);
+        assert!(cam.yaw < initial_yaw);
+
+        // Dragging up should rotate the view so the scene appears to move up.
+        cam.orbit(0.0, -100.0);
+        assert!(cam.pitch < initial_pitch);
     }
 
     #[test]

@@ -97,7 +97,13 @@ pub fn backward(
     let mut dl_dc = vec![0.0f32; pixel_count * 3];
     for i in 0..pixel_count * 3 {
         let diff = intermediate.rendered_color[i] - target_color[i];
-        dl_dc[i] = if diff > 0.0 { 1.0 } else if diff < 0.0 { -1.0 } else { 0.0 };
+        dl_dc[i] = if diff > 0.0 {
+            1.0
+        } else if diff < 0.0 {
+            -1.0
+        } else {
+            0.0
+        };
     }
 
     // Per-pixel running state (front-to-back)
@@ -146,27 +152,31 @@ pub fn backward(
                 // S_i = running_S + contribution * c_i
                 let r_i = [
                     intermediate.rendered_color[c3] - running_s[c3] - contribution * rec.color[0],
-                    intermediate.rendered_color[c3+1] - running_s[c3+1] - contribution * rec.color[1],
-                    intermediate.rendered_color[c3+2] - running_s[c3+2] - contribution * rec.color[2],
+                    intermediate.rendered_color[c3 + 1]
+                        - running_s[c3 + 1]
+                        - contribution * rec.color[1],
+                    intermediate.rendered_color[c3 + 2]
+                        - running_s[c3 + 2]
+                        - contribution * rec.color[2],
                 ];
 
                 // dC/dα_i = T_i · c_i - R_i / (1 - α_i)
                 let inv_one_minus_alpha = 1.0 / (1.0 - alpha).max(1e-6);
-                let dl_dalpha =
-                    (transmittance * rec.color[0] - r_i[0] * inv_one_minus_alpha) * dl_dc[c3]
-                  + (transmittance * rec.color[1] - r_i[1] * inv_one_minus_alpha) * dl_dc[c3+1]
-                  + (transmittance * rec.color[2] - r_i[2] * inv_one_minus_alpha) * dl_dc[c3+2];
+                let dl_dalpha = (transmittance * rec.color[0] - r_i[0] * inv_one_minus_alpha)
+                    * dl_dc[c3]
+                    + (transmittance * rec.color[1] - r_i[1] * inv_one_minus_alpha) * dl_dc[c3 + 1]
+                    + (transmittance * rec.color[2] - r_i[2] * inv_one_minus_alpha) * dl_dc[c3 + 2];
 
                 // dL/dc_i = T_i · α_i · dL/dC_p
                 let gi = idx * 3;
-                grad_color[gi]   += contribution * dl_dc[c3];
-                grad_color[gi+1] += contribution * dl_dc[c3+1];
-                grad_color[gi+2] += contribution * dl_dc[c3+2];
+                grad_color[gi] += contribution * dl_dc[c3];
+                grad_color[gi + 1] += contribution * dl_dc[c3 + 1];
+                grad_color[gi + 2] += contribution * dl_dc[c3 + 2];
 
                 // Update running state inline
-                running_s[c3]   += contribution * rec.color[0];
-                running_s[c3+1] += contribution * rec.color[1];
-                running_s[c3+2] += contribution * rec.color[2];
+                running_s[c3] += contribution * rec.color[0];
+                running_s[c3 + 1] += contribution * rec.color[1];
+                running_s[c3 + 2] += contribution * rec.color[2];
                 running_alpha[pidx] += contribution;
 
                 // Chain through alpha clamp
@@ -197,23 +207,31 @@ pub fn backward(
         let gi = idx * 3;
 
         // dL/dX = dL/du · du/dX = dL/du · fx/Z
-        grad_pos[gi]   += dl_du * fx * inv_z;
+        grad_pos[gi] += dl_du * fx * inv_z;
         // dL/dY = dL/dv · dv/dY = dL/dv · fy/Z
-        grad_pos[gi+1] += dl_dv * fy * inv_z;
+        grad_pos[gi + 1] += dl_dv * fy * inv_z;
         // dL/dZ = dL/du·(-(u-cx)/Z) + dL/dv·(-(v-cy)/Z)
         //       + dL/dσx·(-σx_raw/Z) + dL/dσy·(-σy_raw/Z)
         let dl_dz = dl_du * (-(rec.u - cx) * inv_z)
             + dl_dv * (-(rec.v - cy) * inv_z)
             + dl_dsigma_x * (-rec.raw_scale_2d_x * inv_z)
             + dl_dsigma_y * (-rec.raw_scale_2d_y * inv_z);
-        grad_pos[gi+2] += dl_dz;
+        grad_pos[gi + 2] += dl_dz;
 
         // Scale: σ_2d = scale_3d · f / Z
-        let dl_dscale3d_x = if sx_clamp_pass { dl_dsigma_x * fx * inv_z } else { 0.0 };
-        let dl_dscale3d_y = if sy_clamp_pass { dl_dsigma_y * fy * inv_z } else { 0.0 };
+        let dl_dscale3d_x = if sx_clamp_pass {
+            dl_dsigma_x * fx * inv_z
+        } else {
+            0.0
+        };
+        let dl_dscale3d_y = if sy_clamp_pass {
+            dl_dsigma_y * fy * inv_z
+        } else {
+            0.0
+        };
         // log_scale chain: scale_3d = exp(log_scale) => d/d_log_scale = scale_3d
-        grad_log_scale[gi]   += dl_dscale3d_x * rec.scale_3d[0];
-        grad_log_scale[gi+1] += dl_dscale3d_y * rec.scale_3d[1];
+        grad_log_scale[gi] += dl_dscale3d_x * rec.scale_3d[0];
+        grad_log_scale[gi + 1] += dl_dscale3d_y * rec.scale_3d[1];
 
         // Opacity: base_alpha = clamp(sigmoid(logit), 0, 1)
         if opacity_clamp_pass {
@@ -258,7 +276,7 @@ mod tests {
                 let alpha = (base_alpha * kernel).clamp(0.0, 0.99);
                 let pidx = py * w + px;
                 let contribution = (1.0 - alpha_acc[pidx]) * alpha;
-                rendered[pidx * 3]     += contribution * color[0];
+                rendered[pidx * 3] += contribution * color[0];
                 rendered[pidx * 3 + 1] += contribution * color[1];
                 rendered[pidx * 3 + 2] += contribution * color[2];
                 alpha_acc[pidx] += contribution;
@@ -267,14 +285,17 @@ mod tests {
 
         let rec = GaussianRenderRecord {
             gaussian_idx: 0,
-            u, v,
+            u,
+            v,
             sigma_x: sigma,
             sigma_y: sigma,
             z: 2.0,
             base_alpha,
             color,
-            min_x: 0, max_x: w - 1,
-            min_y: 0, max_y: h - 1,
+            min_x: 0,
+            max_x: w - 1,
+            min_y: 0,
+            max_y: h - 1,
             raw_scale_2d_x: sigma,
             raw_scale_2d_y: sigma,
             raw_opacity: sig,
@@ -282,9 +303,7 @@ mod tests {
             opacity_logit,
         };
 
-        let target_color: Vec<f32> = (0..w * h)
-            .flat_map(|_| target.iter().copied())
-            .collect();
+        let target_color: Vec<f32> = (0..w * h).flat_map(|_| target.iter().copied()).collect();
 
         let inter = ForwardIntermediate {
             records: vec![rec],
@@ -304,15 +323,22 @@ mod tests {
         // Build scene and use the actual rendered output as target
         let (inter, _) = single_gaussian_scene(color, color, 0.0);
         // Re-run backward with rendered == target
-        let grads = backward(
-            &inter, &inter.rendered_color, 1, 100.0, 100.0, 2.0, 2.0,
+        let grads = backward(&inter, &inter.rendered_color, 1, 100.0, 100.0, 2.0, 2.0);
+        assert!(
+            grads.colors.iter().all(|g| g.abs() < 1e-6),
+            "color grads should be zero: {:?}",
+            grads.colors
         );
-        assert!(grads.colors.iter().all(|g| g.abs() < 1e-6),
-            "color grads should be zero: {:?}", grads.colors);
-        assert!(grads.opacity_logits.iter().all(|g| g.abs() < 1e-6),
-            "opacity grads should be zero: {:?}", grads.opacity_logits);
-        assert!(grads.positions.iter().all(|g| g.abs() < 1e-6),
-            "position grads should be zero: {:?}", grads.positions);
+        assert!(
+            grads.opacity_logits.iter().all(|g| g.abs() < 1e-6),
+            "opacity grads should be zero: {:?}",
+            grads.opacity_logits
+        );
+        assert!(
+            grads.positions.iter().all(|g| g.abs() < 1e-6),
+            "position grads should be zero: {:?}",
+            grads.positions
+        );
     }
 
     #[test]
@@ -320,9 +346,21 @@ mod tests {
         // Rendered color > target => loss gradient is positive => color grad should be positive
         // (moving color down would reduce loss)
         let (_, grads) = single_gaussian_scene([0.8, 0.8, 0.8], [0.2, 0.2, 0.2], 0.5);
-        assert!(grads.colors[0] > 0.0, "color grad[0] should be positive: {}", grads.colors[0]);
-        assert!(grads.colors[1] > 0.0, "color grad[1] should be positive: {}", grads.colors[1]);
-        assert!(grads.colors[2] > 0.0, "color grad[2] should be positive: {}", grads.colors[2]);
+        assert!(
+            grads.colors[0] > 0.0,
+            "color grad[0] should be positive: {}",
+            grads.colors[0]
+        );
+        assert!(
+            grads.colors[1] > 0.0,
+            "color grad[1] should be positive: {}",
+            grads.colors[1]
+        );
+        assert!(
+            grads.colors[2] > 0.0,
+            "color grad[2] should be positive: {}",
+            grads.colors[2]
+        );
     }
 
     #[test]
@@ -376,13 +414,15 @@ mod tests {
                     let alpha = (base_alpha * kernel).clamp(0.0, 0.99);
                     let pidx = py * w + px;
                     let contribution = (1.0 - aa[pidx]) * alpha;
-                    rendered[pidx * 3]     += contribution * c[0];
+                    rendered[pidx * 3] += contribution * c[0];
                     rendered[pidx * 3 + 1] += contribution * c[1];
                     rendered[pidx * 3 + 2] += contribution * c[2];
                     aa[pidx] += contribution;
                 }
             }
-            rendered.iter().zip(target.iter())
+            rendered
+                .iter()
+                .zip(target.iter())
                 .map(|(r, t)| (r - t).abs())
                 .sum()
         };
@@ -399,7 +439,12 @@ mod tests {
         let fd_grad = (render_loss(c_plus) - render_loss(c_minus)) / (2.0 * eps);
 
         let rel_err = (grads.colors[0] - fd_grad).abs() / (fd_grad.abs() + 1e-8);
-        assert!(rel_err < 0.05,
-            "analytical={} vs fd={}, rel_err={}", grads.colors[0], fd_grad, rel_err);
+        assert!(
+            rel_err < 0.05,
+            "analytical={} vs fd={}, rel_err={}",
+            grads.colors[0],
+            fd_grad,
+            rel_err
+        );
     }
 }

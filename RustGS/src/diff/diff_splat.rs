@@ -4,8 +4,8 @@
 //! "3D Gaussian Splatting for Real-Time Radiance Field Rendering"
 //! Uses Candle with Metal MPS backend for GPU acceleration.
 
-use candle_core::{Tensor, Device, DType, Var};
-use crate::diff::analytical_backward::{GaussianRenderRecord, ForwardIntermediate};
+use crate::diff::analytical_backward::{ForwardIntermediate, GaussianRenderRecord};
+use candle_core::{DType, Device, Tensor, Var};
 use rayon::prelude::*;
 
 /// Tile size for parallel rasterization (16x16 matches GPU warp-friendly sizing)
@@ -134,7 +134,7 @@ pub struct DiffCamera {
     pub width: usize,
     pub height: usize,
     /// World to camera transform
-    pub extrinsics: Tensor,  // [3, 4]
+    pub extrinsics: Tensor, // [3, 4]
 }
 
 impl DiffCamera {
@@ -193,7 +193,7 @@ pub struct DiffSplatRenderer {
 
 impl DiffSplatRenderer {
     pub fn new(width: usize, height: usize) -> Self {
-        let device = Device::new_metal(0).unwrap_or_else(|_| Device::Cpu);
+        let device = crate::preferred_device();
         log::info!("DiffSplatRenderer using: {:?}", device);
 
         Self {
@@ -214,18 +214,20 @@ impl DiffSplatRenderer {
     /// Project 3D Gaussians to 2D
     fn project_gaussians(
         &self,
-        positions: &Tensor,    // [N, 3]
-        scales: &Tensor,       // [N, 3]
-        _rotations: &Tensor,   // [N, 4]
+        positions: &Tensor,  // [N, 3]
+        scales: &Tensor,     // [N, 3]
+        _rotations: &Tensor, // [N, 4]
         camera: &DiffCamera,
     ) -> candle_core::Result<ProjectedGaussiansTensor> {
         // Apply camera extrinsics: p_cam = R * p_world + t
         // extrinsics is [3, 4] = [R|t], positions is [N, 3]
-        let rot = camera.extrinsics.narrow(1, 0, 3)?;  // [3, 3]
-        let trans = camera.extrinsics.narrow(1, 3, 1)?.squeeze(1)?;  // [3]
+        let rot = camera.extrinsics.narrow(1, 0, 3)?; // [3, 3]
+        let trans = camera.extrinsics.narrow(1, 3, 1)?.squeeze(1)?; // [3]
 
         // p_cam = positions @ R^T + t  (equivalent to R * p for each point)
-        let cam_pos = positions.matmul(&rot.t()?)?.broadcast_add(&trans.unsqueeze(0)?)?;  // [N, 3]
+        let cam_pos = positions
+            .matmul(&rot.t()?)?
+            .broadcast_add(&trans.unsqueeze(0)?)?; // [N, 3]
 
         // Extract x, y, z in camera space
         let x = cam_pos.narrow(1, 0, 1)?.squeeze(1)?;
@@ -535,11 +537,11 @@ impl DiffSplatRenderer {
         let proj_z = proj.z.to_vec1::<f32>()?;
 
         // Build per-Gaussian records (sequential, just metadata)
-        let mut order: Vec<usize> = (0..gaussians.n)
-            .filter(|&i| proj_z[i] > 1e-6)
-            .collect();
+        let mut order: Vec<usize> = (0..gaussians.n).filter(|&i| proj_z[i] > 1e-6).collect();
         order.sort_by(|&a, &b| {
-            proj_z[a].partial_cmp(&proj_z[b]).unwrap_or(std::cmp::Ordering::Equal)
+            proj_z[a]
+                .partial_cmp(&proj_z[b])
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
 
         let mut records = Vec::with_capacity(order.len());
@@ -570,12 +572,17 @@ impl DiffSplatRenderer {
 
             records.push(GaussianRenderRecord {
                 gaussian_idx: idx,
-                u, v,
-                sigma_x, sigma_y,
+                u,
+                v,
+                sigma_x,
+                sigma_y,
                 z,
                 base_alpha,
                 color: rgb,
-                min_x, max_x, min_y, max_y,
+                min_x,
+                max_x,
+                min_y,
+                max_y,
                 raw_scale_2d_x: raw_sx,
                 raw_scale_2d_y: raw_sy,
                 raw_opacity: opacity_data[idx],
@@ -631,13 +638,7 @@ impl DiffSplatRenderer {
         let color_loss = l1_sum(&rendered_color, target_color);
         let depth_loss = masked_depth_l1(&rendered_depth, target_depth);
         let ssim = if expected_color > 0 {
-            compute_ssim_loss(
-                &rendered_color,
-                target_color,
-                self.width,
-                self.height,
-                3,
-            )
+            compute_ssim_loss(&rendered_color, target_color, self.width, self.height, 3)
         } else {
             1.0
         };
@@ -689,7 +690,8 @@ impl DiffSplatRenderer {
         let w_op = Tensor::new(5e-5f32, &self.device)?;
         let w_color = Tensor::new(1e-4f32, &self.device)?;
 
-        let loss = pos_reg.broadcast_mul(&w_pos)?
+        let loss = pos_reg
+            .broadcast_mul(&w_pos)?
             .broadcast_add(&scale_reg.broadcast_mul(&w_scale)?)?
             .broadcast_add(&rot_reg.broadcast_mul(&w_rot)?)?
             .broadcast_add(&op_reg.broadcast_mul(&w_op)?)?
@@ -819,7 +821,7 @@ fn flatten_2d(data: &[Vec<f32>]) -> Vec<f32> {
 ///
 /// Uses the standard SSIM formula with constants C1=0.01^2 and C2=0.03^2.
 pub fn compute_ssim_loss(
-    pred: &[f32],  // [H, W, C]
+    pred: &[f32],   // [H, W, C]
     target: &[f32], // [H, W, C]
     width: usize,
     height: usize,
@@ -861,8 +863,7 @@ pub fn compute_ssim_loss(
 
     // SSIM formula
     let numerator = (2.0 * mu_pred * mu_target + c1) * (2.0 * covar + c2);
-    let denominator = (mu_pred.powi(2) + mu_target.powi(2) + c1) *
-                     (var_pred + var_target + c2);
+    let denominator = (mu_pred.powi(2) + mu_target.powi(2) + c1) * (var_pred + var_target + c2);
 
     numerator / denominator
 }
@@ -880,7 +881,7 @@ mod tests {
 
     #[test]
     fn test_trainable_gaussians() {
-        let device = Device::new_metal(0).unwrap_or_else(|_| Device::Cpu);
+        let device = crate::preferred_device();
         let gaussians = TrainableGaussians::new(
             &[0.0, 0.0, 0.0, 1.0, 0.0, 0.0],
             &[-2.0, -2.0, -2.0, -2.0, -2.0, -2.0],
@@ -904,7 +905,9 @@ mod tests {
         let target_color = vec![0.0f32; 2 * 2 * 3];
         let target_depth = vec![0.0f32; 2 * 2];
 
-        let loss = renderer.compute_loss(&rendered, &target_color, &target_depth).unwrap();
+        let loss = renderer
+            .compute_loss(&rendered, &target_color, &target_depth)
+            .unwrap();
         let total = loss.total.to_vec0::<f32>().unwrap();
         let ssim = loss.ssim.to_vec0::<f32>().unwrap();
 
@@ -955,7 +958,12 @@ mod tests {
         .unwrap();
 
         let camera = DiffCamera::new(
-            500.0, 500.0, 16.0, 16.0, 32, 32,
+            500.0,
+            500.0,
+            16.0,
+            16.0,
+            32,
+            32,
             &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
             &[0.0, 0.0, 0.0],
             &device,
@@ -969,7 +977,13 @@ mod tests {
         // Verify non-zero rendering occurred (Gaussians should be visible)
         let has_color = color.iter().flatten().flatten().any(|&v| v > 0.01);
         let has_depth = depth.iter().flatten().any(|&v| v > 0.01);
-        assert!(has_color, "Tiled parallel render should produce non-zero color");
-        assert!(has_depth, "Tiled parallel render should produce non-zero depth");
+        assert!(
+            has_color,
+            "Tiled parallel render should produce non-zero color"
+        );
+        assert!(
+            has_depth,
+            "Tiled parallel render should produce non-zero depth"
+        );
     }
 }

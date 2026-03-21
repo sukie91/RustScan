@@ -8,8 +8,8 @@
 //! - SSIM loss
 //! - Progressive training
 
+use crate::render::tiled_renderer::{Gaussian, RenderBuffer, TiledRenderer};
 use std::path::{Path, PathBuf};
-use crate::render::tiled_renderer::{Gaussian, TiledRenderer, RenderBuffer};
 
 /// Complete training configuration
 #[derive(Debug, Clone)]
@@ -84,7 +84,7 @@ impl Default for TrainingConfig {
             prune_scale_threshold: 0.5,
 
             // Rendering
-            sh_degree: 0,  // Use RGB colors, not SH
+            sh_degree: 0, // Use RGB colors, not SH
         }
     }
 }
@@ -122,11 +122,7 @@ impl TrainableGaussian {
             x: g.position[0],
             y: g.position[1],
             z: g.position[2],
-            scale_log: [
-                g.scale[0].ln(),
-                g.scale[1].ln(),
-                g.scale[2].ln(),
-            ],
+            scale_log: [g.scale[0].ln(), g.scale[1].ln(), g.scale[2].ln()],
             rotation: g.rotation,
             opacity_logit: (g.opacity / (1.0 - g.opacity + 1e-6)).ln(),
             color: g.color,
@@ -171,10 +167,7 @@ impl TrainableGaussian {
 /// "We densify by cloning Gaussians that are
 /// too large and splitting those that are
 /// in dense areas"
-pub fn densify_gaussians(
-    gaussians: &mut Vec<TrainableGaussian>,
-    config: &TrainingConfig,
-) {
+pub fn densify_gaussians(gaussians: &mut Vec<TrainableGaussian>, config: &TrainingConfig) {
     let mut new_gaussians = Vec::new();
     let mut split_count = 0;
 
@@ -232,10 +225,7 @@ pub fn densify_gaussians(
 /// From the paper:
 /// "We prune Gaussians with opacity below a
 /// threshold"
-pub fn prune_gaussians(
-    gaussians: &mut Vec<TrainableGaussian>,
-    config: &TrainingConfig,
-) -> usize {
+pub fn prune_gaussians(gaussians: &mut Vec<TrainableGaussian>, config: &TrainingConfig) -> usize {
     let original_len = gaussians.len();
 
     gaussians.retain(|g| {
@@ -252,23 +242,16 @@ pub fn prune_gaussians(
 /// From the paper:
 /// "We reset the opacity of low-opacity
 /// Gaussians to prevent floaters"
-pub fn reset_opacity(
-    gaussians: &mut Vec<TrainableGaussian>,
-    config: &TrainingConfig,
-) {
+pub fn reset_opacity(gaussians: &mut Vec<TrainableGaussian>, config: &TrainingConfig) {
     for g in gaussians.iter_mut() {
         if g.opacity() < config.opacity_reset_threshold {
-            g.opacity_logit = 0.0;  // opacity = 0.5
+            g.opacity_logit = 0.0; // opacity = 0.5
         }
     }
 }
 
 /// Learning rate schedule with exponential decay
-pub fn get_learning_rate(
-    iteration: usize,
-    base_lr: f32,
-    decay: f32,
-) -> f32 {
+pub fn get_learning_rate(iteration: usize, base_lr: f32, decay: f32) -> f32 {
     base_lr * (-decay * iteration as f32).exp()
 }
 
@@ -276,7 +259,7 @@ pub fn get_learning_rate(
 ///
 /// More perceptually accurate than L1/L2
 pub fn compute_ssim_loss(
-    pred: &[f32],  // [H, W, C]
+    pred: &[f32],   // [H, W, C]
     target: &[f32], // [H, W, C]
     width: usize,
     height: usize,
@@ -320,8 +303,7 @@ pub fn compute_ssim_loss(
 
     // SSIM formula
     let numerator = (2.0 * mu_pred * mu_target + c1) * (2.0 * covar + c2);
-    let denominator = (mu_pred.powi(2) + mu_target.powi(2) + c1) *
-                     (var_pred + var_target + c2);
+    let denominator = (mu_pred.powi(2) + mu_target.powi(2) + c1) * (var_pred + var_target + c2);
 
     numerator / denominator
 }
@@ -357,7 +339,10 @@ pub fn compute_training_loss(
     // SSIM loss (optional)
     let ssim = compute_ssim_loss(
         &rendered.color,
-        &target_color.iter().map(|&x| x as f32 / 255.0).collect::<Vec<_>>(),
+        &target_color
+            .iter()
+            .map(|&x| x as f32 / 255.0)
+            .collect::<Vec<_>>(),
         width,
         height,
         3,
@@ -370,12 +355,7 @@ pub fn compute_training_loss(
 }
 
 /// Compute PSNR (Peak Signal-to-Noise Ratio) for RGB buffers.
-pub fn compute_psnr(
-    rendered: &[f32],
-    target_color: &[u8],
-    width: usize,
-    height: usize,
-) -> f32 {
+pub fn compute_psnr(rendered: &[f32], target_color: &[u8], width: usize, height: usize) -> f32 {
     let expected = width * height * 3;
     if rendered.len() != expected || target_color.len() != expected {
         return 0.0;
@@ -446,7 +426,7 @@ pub fn load_scene_ply(_path: &Path) -> Result<(Vec<Gaussian>, SceneMetadata), Sc
 
 /// Default camera intrinsics (typical iPhone camera)
 pub fn default_camera_intrinsics() -> (f32, f32, f32, f32) {
-    (1446.0, 1446.0, 960.0, 720.0)  // fx, fy, cx, cy for 1920x1440
+    (1446.0, 1446.0, 960.0, 720.0) // fx, fy, cx, cy for 1920x1440
 }
 
 /// Complete training state
@@ -480,7 +460,14 @@ impl TrainingState {
     }
 
     /// Create with custom camera intrinsics
-    pub fn with_intrinsics(width: usize, height: usize, fx: f32, fy: f32, cx: f32, cy: f32) -> Self {
+    pub fn with_intrinsics(
+        width: usize,
+        height: usize,
+        fx: f32,
+        fy: f32,
+        cx: f32,
+        cy: f32,
+    ) -> Self {
         Self {
             iteration: 0,
             gaussians: Vec::new(),
@@ -537,17 +524,29 @@ impl TrainingState {
                 let y_cam = (y as f32 - cy) * z / fy;
 
                 // Transform to world
-                let wx = rotation[0][0] * x_cam + rotation[0][1] * y_cam + rotation[0][2] * z + translation[0];
-                let wy = rotation[1][0] * x_cam + rotation[1][1] * y_cam + rotation[1][2] * z + translation[1];
-                let wz = rotation[2][0] * x_cam + rotation[2][1] * y_cam + rotation[2][2] * z + translation[2];
+                let wx = rotation[0][0] * x_cam
+                    + rotation[0][1] * y_cam
+                    + rotation[0][2] * z
+                    + translation[0];
+                let wy = rotation[1][0] * x_cam
+                    + rotation[1][1] * y_cam
+                    + rotation[1][2] * z
+                    + translation[1];
+                let wz = rotation[2][0] * x_cam
+                    + rotation[2][1] * y_cam
+                    + rotation[2][2] * z
+                    + translation[2];
 
                 let c_idx = idx * 3;
                 let gaussian = Gaussian::from_depth_point(
-                    wx, wy, wz,
+                    wx,
+                    wy,
+                    wz,
                     [color[c_idx], color[c_idx + 1], color[c_idx + 2]],
                 );
 
-                self.gaussians.push(TrainableGaussian::from_gaussian(&gaussian));
+                self.gaussians
+                    .push(TrainableGaussian::from_gaussian(&gaussian));
             }
         }
     }
@@ -564,12 +563,16 @@ impl TrainingState {
         self.iteration += 1;
 
         // Convert to Gaussians for rendering
-        let render_gaussians: Vec<Gaussian> = self.gaussians.iter().map(|g| g.to_gaussian()).collect();
+        let render_gaussians: Vec<Gaussian> =
+            self.gaussians.iter().map(|g| g.to_gaussian()).collect();
 
         // Render
         let rendered = self.renderer.render(
             &render_gaussians,
-            self.fx, self.fy, self.cx, self.cy,
+            self.fx,
+            self.fy,
+            self.cx,
+            self.cy,
             rotation,
             translation,
         );
@@ -579,14 +582,20 @@ impl TrainingState {
         self.loss_history.push(loss);
 
         // Compute PSNR for diagnostics
-        let psnr = compute_psnr(&rendered.color, target_color, rendered.width, rendered.height);
+        let psnr = compute_psnr(
+            &rendered.color,
+            target_color,
+            rendered.width,
+            rendered.height,
+        );
         self.psnr_history.push(psnr);
 
         // === Simplified optimization ===
         let (render_mean, target_mean) = mean_rgb(&rendered.color, target_color);
         let depth_error = mean_depth_error(&rendered.depth, target_depth);
 
-        let lr_pos = get_learning_rate(self.iteration, config.lr_position, config.position_lr_decay);
+        let lr_pos =
+            get_learning_rate(self.iteration, config.lr_position, config.position_lr_decay);
         let lr_scale = config.lr_scale;
         let lr_rot = config.lr_rotation;
         let lr_op = config.lr_opacity;
@@ -605,14 +614,23 @@ impl TrainingState {
                 target_mean[2] - render_mean[2],
             ];
 
-            if let Some((u, v, _z)) = project_world_to_pixel(g, fx, fy, cx, cy, rotation, translation) {
+            if let Some((u, v, _z)) =
+                project_world_to_pixel(g, fx, fy, cx, cy, rotation, translation)
+            {
                 let px = u.round() as isize;
                 let py = v.round() as isize;
-                if px >= 0 && py >= 0 && px < rendered.width as isize && py < rendered.height as isize {
+                if px >= 0
+                    && py >= 0
+                    && px < rendered.width as isize
+                    && py < rendered.height as isize
+                {
                     let pidx = py as usize * rendered.width + px as usize;
                     let cidx = pidx * 3;
 
-                    if pidx < rendered.depth.len() && pidx < target_depth.len() && target_depth[pidx] > 0.0 {
+                    if pidx < rendered.depth.len()
+                        && pidx < target_depth.len()
+                        && target_depth[pidx] > 0.0
+                    {
                         local_depth_error = rendered.depth[pidx] - target_depth[pidx];
                     }
                     if cidx + 2 < rendered.color.len() && cidx + 2 < target_color.len() {
@@ -704,8 +722,16 @@ fn mean_rgb(rendered: &[f32], target_color: &[u8]) -> ([f32; 3], [f32; 3]) {
 
     let inv = 1.0 / pixels.max(1) as f32;
     (
-        [render_sum[0] * inv, render_sum[1] * inv, render_sum[2] * inv],
-        [target_sum[0] * inv, target_sum[1] * inv, target_sum[2] * inv],
+        [
+            render_sum[0] * inv,
+            render_sum[1] * inv,
+            render_sum[2] * inv,
+        ],
+        [
+            target_sum[0] * inv,
+            target_sum[1] * inv,
+            target_sum[2] * inv,
+        ],
     )
 }
 
@@ -777,7 +803,7 @@ mod tests {
     #[test]
     fn test_lr_schedule() {
         let lr = get_learning_rate(1000, 0.001, 0.001);
-        assert!(lr < 0.001);  // Should decay
+        assert!(lr < 0.001); // Should decay
     }
 
     #[test]
@@ -785,19 +811,23 @@ mod tests {
         let config = TrainingConfig::default();
         let mut gaussians = vec![
             TrainableGaussian {
-                x: 0.0, y: 0.0, z: 0.0,
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
                 scale_log: [-5.0, -5.0, -5.0],
                 rotation: [1.0, 0.0, 0.0, 0.0],
-                opacity_logit: -10.0,  // Very low opacity (~0.00005)
+                opacity_logit: -10.0, // Very low opacity (~0.00005)
                 color: [1.0, 1.0, 1.0],
                 grad_accum: 0.0,
                 age: 0,
             },
             TrainableGaussian {
-                x: 1.0, y: 0.0, z: 0.0,
+                x: 1.0,
+                y: 0.0,
+                z: 0.0,
                 scale_log: [1.0, 1.0, 1.0],
                 rotation: [1.0, 0.0, 0.0, 0.0],
-                opacity_logit: 10.0,  // High opacity
+                opacity_logit: 10.0, // High opacity
                 color: [1.0, 1.0, 1.0],
                 grad_accum: 0.0,
                 age: 0,
@@ -846,6 +876,9 @@ mod tests {
         let image: Vec<f32> = vec![0.5; width * height * 3];
 
         let ssim = compute_ssim_loss(&image, &image, width, height, 3);
-        assert!((ssim - 1.0).abs() < 0.01, "SSIM of identical images should be 1.0");
+        assert!(
+            (ssim - 1.0).abs() < 0.01,
+            "SSIM of identical images should be 1.0"
+        );
     }
 }

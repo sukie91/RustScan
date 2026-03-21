@@ -1,7 +1,7 @@
 //! RustGS CLI - 3D Gaussian Splatting Training
 //!
 //! Usage:
-//!   rustgs train --input <slam_output.json> --output <scene.ply>
+//!   rustgs train --input <slam_output.json|tum_dataset_dir> --output <scene.ply>
 //!   rustgs render --input <scene.ply> --camera <pose.json> --output <image.png>
 
 use std::path::PathBuf;
@@ -16,9 +16,9 @@ struct Cli {
 
 #[derive(Debug, clap::Subcommand)]
 enum Commands {
-    /// Train a 3DGS scene from SLAM output
+    /// Train a 3DGS scene from SLAM output JSON or a TUM RGB-D dataset directory
     Train {
-        /// Path to SLAM output JSON file
+        /// Path to SLAM output JSON file or TUM RGB-D dataset directory
         #[arg(short, long)]
         input: PathBuf,
 
@@ -29,6 +29,14 @@ enum Commands {
         /// Number of training iterations
         #[arg(long, default_value = "30000")]
         iterations: usize,
+
+        /// Maximum number of input frames to consider (0 = all)
+        #[arg(long, default_value = "0")]
+        max_frames: usize,
+
+        /// Keep every Nth frame when loading a dataset directory
+        #[arg(long, default_value = "1")]
+        frame_stride: usize,
 
         /// Log level (trace, debug, info, warn, error)
         #[arg(long, default_value = "info")]
@@ -55,20 +63,27 @@ fn main() -> anyhow::Result<()> {
     let cli = <Cli as clap::Parser>::parse();
 
     match cli.command {
-        Commands::Train { input, output, iterations, log_level } => {
+        Commands::Train {
+            input,
+            output,
+            iterations,
+            max_frames,
+            frame_stride,
+            log_level,
+        } => {
             // Initialize logging
-            env_logger::Builder::new()
-                .parse_filters(&log_level)
-                .init();
+            env_logger::Builder::new().parse_filters(&log_level).init();
 
             log::info!("Training 3DGS scene from {:?}", input);
             log::info!("Output: {:?}", output);
             log::info!("Iterations: {}", iterations);
 
-            // Load SLAM output
-            let slam_output = rustscan_types::SlamOutput::load(&input)?;
-            log::info!("Loaded {} poses, {} map points",
-                slam_output.num_poses(), slam_output.num_points());
+            let slam_output = load_training_input(&input, max_frames, frame_stride)?;
+            log::info!(
+                "Loaded {} poses, {} map points",
+                slam_output.num_poses(),
+                slam_output.num_points()
+            );
 
             // Configure training
             let mut config = rustgs::TrainingConfig::default();
@@ -81,15 +96,19 @@ fn main() -> anyhow::Result<()> {
                 log::info!("Trained {} Gaussians", scene.len());
 
                 // Save scene - convert Gaussian3D to array-based Gaussian for PLY export
-                let gaussians: Vec<rustgs::Gaussian> = scene.gaussians().iter().map(|g| {
-                    rustgs::Gaussian::new(
-                        g.position.into(),
-                        g.scale.into(),
-                        [g.rotation.w, g.rotation.x, g.rotation.y, g.rotation.z],
-                        g.opacity,
-                        g.color,
-                    )
-                }).collect();
+                let gaussians: Vec<rustgs::Gaussian> = scene
+                    .gaussians()
+                    .iter()
+                    .map(|g| {
+                        rustgs::Gaussian::new(
+                            g.position.into(),
+                            g.scale.into(),
+                            [g.rotation.w, g.rotation.x, g.rotation.y, g.rotation.z],
+                            g.opacity,
+                            g.color,
+                        )
+                    })
+                    .collect();
                 let metadata = rustgs::SceneMetadata {
                     iterations: config.iterations,
                     final_loss: 0.0,
@@ -105,7 +124,11 @@ fn main() -> anyhow::Result<()> {
                 std::process::exit(1);
             }
         }
-        Commands::Render { input, camera, output } => {
+        Commands::Render {
+            input,
+            camera,
+            output,
+        } => {
             log::info!("Rendering scene from {:?}", input);
             log::info!("Camera: {:?}", camera);
             log::info!("Output: {:?}", output);
@@ -122,4 +145,31 @@ fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+fn load_training_input(
+    input: &std::path::Path,
+    max_frames: usize,
+    frame_stride: usize,
+) -> anyhow::Result<rustscan_types::SlamOutput> {
+    let dataset = rustgs::load_training_dataset(
+        input,
+        &rustgs::TumRgbdConfig {
+            max_frames,
+            frame_stride,
+            ..Default::default()
+        },
+    )?;
+
+    if input.is_dir() {
+        log::info!(
+            "Resolved {:?} as a TUM RGB-D dataset with {} poses",
+            input,
+            dataset.poses.len(),
+        );
+    } else {
+        log::info!("Resolved {:?} as serialized training input", input);
+    }
+
+    Ok(rustscan_types::SlamOutput::from_dataset(dataset))
 }

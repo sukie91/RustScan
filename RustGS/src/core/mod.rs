@@ -1,7 +1,7 @@
 //! Core Gaussian data structures.
 
-mod gaussian;
 mod camera;
+mod gaussian;
 
-pub use gaussian::{Gaussian3D, GaussianMap, GaussianState};
 pub use camera::GaussianCamera;
+pub use gaussian::{Gaussian3D, GaussianMap, GaussianState};

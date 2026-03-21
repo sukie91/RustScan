@@ -3,9 +3,13 @@
 //! This module provides camera intrinsic parameters and dataset types
 //! for 3DGS offline training.
 
-use std::path::PathBuf;
-use serde::{Deserialize, Serialize};
 use crate::SE3;
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+
+fn default_depth_scale() -> f32 {
+    1000.0
+}
 
 /// Camera intrinsic parameters.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -27,7 +31,14 @@ pub struct Intrinsics {
 impl Intrinsics {
     /// Create new intrinsic parameters.
     pub fn new(fx: f32, fy: f32, cx: f32, cy: f32, width: u32, height: u32) -> Self {
-        Self { fx, fy, cx, cy, width, height }
+        Self {
+            fx,
+            fy,
+            cx,
+            cy,
+            width,
+            height,
+        }
     }
 
     /// Create from a single focal length (assumes square pixels).
@@ -84,6 +95,9 @@ pub struct ScenePose {
     pub frame_id: u64,
     /// Path to the image file
     pub image_path: PathBuf,
+    /// Optional path to the depth file associated with this frame
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub depth_path: Option<PathBuf>,
     /// Camera pose (world-to-camera transform)
     pub pose: SE3,
     /// Timestamp in seconds
@@ -93,7 +107,19 @@ pub struct ScenePose {
 impl ScenePose {
     /// Create a new scene pose.
     pub fn new(frame_id: u64, image_path: PathBuf, pose: SE3, timestamp: f64) -> Self {
-        Self { frame_id, image_path, pose, timestamp }
+        Self {
+            frame_id,
+            image_path,
+            depth_path: None,
+            pose,
+            timestamp,
+        }
+    }
+
+    /// Attach an optional depth path to this pose.
+    pub fn with_depth_path(mut self, depth_path: PathBuf) -> Self {
+        self.depth_path = Some(depth_path);
+        self
     }
 }
 
@@ -107,6 +133,9 @@ impl ScenePose {
 pub struct TrainingDataset {
     /// Camera intrinsics (shared across all frames)
     pub intrinsics: Intrinsics,
+    /// Scale factor used to convert raster depth pixels into meters.
+    #[serde(default = "default_depth_scale")]
+    pub depth_scale: f32,
     /// Per-frame poses with image paths
     pub poses: Vec<ScenePose>,
     /// Initial point cloud for Gaussian initialization
@@ -119,9 +148,16 @@ impl TrainingDataset {
     pub fn new(intrinsics: Intrinsics) -> Self {
         Self {
             intrinsics,
+            depth_scale: default_depth_scale(),
             poses: Vec::new(),
             initial_points: Vec::new(),
         }
+    }
+
+    /// Set the depth scale used by raster depth images.
+    pub fn with_depth_scale(mut self, depth_scale: f32) -> Self {
+        self.depth_scale = depth_scale;
+        self
     }
 
     /// Add a pose to the dataset.
@@ -189,17 +225,13 @@ mod tests {
         let intrinsics = Intrinsics::from_focal(1000.0, 1920, 1080);
         let mut dataset = TrainingDataset::new(intrinsics);
 
-        let pose = ScenePose::new(
-            0,
-            PathBuf::from("frame_0000.jpg"),
-            SE3::identity(),
-            0.0,
-        );
+        let pose = ScenePose::new(0, PathBuf::from("frame_0000.jpg"), SE3::identity(), 0.0);
         dataset.add_pose(pose);
         dataset.add_point([0.0, 0.0, 1.0], Some([0.5, 0.5, 0.5]));
 
         assert_eq!(dataset.len(), 1);
         assert_eq!(dataset.initial_points.len(), 1);
+        assert_eq!(dataset.depth_scale, 1000.0);
     }
 
     #[test]
@@ -207,16 +239,26 @@ mod tests {
         let intrinsics = Intrinsics::from_focal(1000.0, 1920, 1080);
         let mut dataset = TrainingDataset::new(intrinsics);
 
-        let pose = ScenePose::new(
-            0,
-            PathBuf::from("frame_0000.jpg"),
-            SE3::identity(),
-            0.0,
-        );
+        let pose = ScenePose::new(0, PathBuf::from("frame_0000.jpg"), SE3::identity(), 0.0);
         dataset.add_pose(pose);
 
         let json = serde_json::to_string(&dataset).unwrap();
         let decoded: TrainingDataset = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded.depth_scale, 1000.0);
+    }
+
+    #[test]
+    fn test_training_dataset_default_depth_scale_on_legacy_json() {
+        let decoded: TrainingDataset = serde_json::from_str(
+            r#"{
+                "intrinsics":{"fx":1000.0,"fy":1000.0,"cx":960.0,"cy":540.0,"width":1920,"height":1080},
+                "poses":[],
+                "initial_points":[]
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(decoded.depth_scale, 1000.0);
     }
 }

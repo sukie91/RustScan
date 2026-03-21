@@ -8,12 +8,17 @@ use eframe::egui_wgpu;
 use eframe::wgpu;
 
 use camera::ArcballCamera;
-use pipelines::{PointVertex, create_line_pipeline, create_mesh_pipeline, create_point_pipeline, create_wireframe_pipeline, expand_points_to_quads};
-use scene::{Scene, MeshGpuVertex};
+use pipelines::{
+    create_gaussian_pipeline, create_line_pipeline, create_mesh_pipeline, create_point_pipeline,
+    create_wireframe_pipeline, expand_points_to_quads, project_gaussians_to_splats, PointVertex,
+    GAUSSIAN_QUAD_INDICES, GAUSSIAN_QUAD_VERTICES,
+};
+use scene::{MeshGpuVertex, Scene};
 
 /// Holds all GPU resources needed to render a scene.
 pub struct SceneRenderer {
     point_pipeline: wgpu::RenderPipeline,
+    gaussian_pipeline: wgpu::RenderPipeline,
     line_pipeline: wgpu::RenderPipeline,
     mesh_pipeline: wgpu::RenderPipeline,
     wireframe_pipeline: wgpu::RenderPipeline,
@@ -23,9 +28,10 @@ pub struct SceneRenderer {
     point_vbuf: Option<wgpu::Buffer>,
     point_ibuf: Option<wgpu::Buffer>,
     point_count: u32,
-    gauss_vbuf: Option<wgpu::Buffer>,
-    gauss_ibuf: Option<wgpu::Buffer>,
-    gauss_count: u32,
+    gauss_quad_vbuf: wgpu::Buffer,
+    gauss_ibuf: wgpu::Buffer,
+    gauss_instance_vbuf: Option<wgpu::Buffer>,
+    gauss_instance_count: u32,
     line_vbuf: Option<wgpu::Buffer>,
     line_count: u32,
     mesh_vbuf: Option<wgpu::Buffer>,
@@ -81,12 +87,17 @@ impl SceneRenderer {
         });
 
         let point_pipeline = create_point_pipeline(device, surface_format);
+        let gaussian_pipeline = create_gaussian_pipeline(device, surface_format);
         let line_pipeline = create_line_pipeline(device, surface_format);
         let mesh_pipeline = create_mesh_pipeline(device, surface_format, &uniform_bgl);
         let wireframe_pipeline = create_wireframe_pipeline(device, surface_format, &uniform_bgl);
+        let gauss_quad_vbuf =
+            create_vertex_buffer(device, bytemuck::cast_slice(&GAUSSIAN_QUAD_VERTICES));
+        let gauss_ibuf = create_index_buffer(device, bytemuck::cast_slice(&GAUSSIAN_QUAD_INDICES));
 
         Self {
             point_pipeline,
+            gaussian_pipeline,
             line_pipeline,
             mesh_pipeline,
             wireframe_pipeline,
@@ -95,9 +106,10 @@ impl SceneRenderer {
             point_vbuf: None,
             point_ibuf: None,
             point_count: 0,
-            gauss_vbuf: None,
-            gauss_ibuf: None,
-            gauss_count: 0,
+            gauss_quad_vbuf,
+            gauss_ibuf,
+            gauss_instance_vbuf: None,
+            gauss_instance_count: 0,
             line_vbuf: None,
             line_count: 0,
             mesh_vbuf: None,
@@ -154,20 +166,13 @@ impl SceneRenderer {
 
         // Gaussians
         if scene.layers.gaussians && !scene.gaussians.is_empty() {
-            let positions: Vec<[f32; 3]> = scene.gaussians.iter().map(|g| g.position).collect();
-            let colors: Vec<[f32; 3]> = scene.gaussians.iter().map(|g| g.color).collect();
-            let (verts, idxs) = expand_points_to_quads(
-                &positions,
-                &colors,
-                viewport_size[0],
-                viewport_size[1],
-                vp_arr,
-            );
-            self.gauss_count = idxs.len() as u32;
-            self.gauss_vbuf = Some(create_vertex_buffer(device, bytemuck::cast_slice(&verts)));
-            self.gauss_ibuf = Some(create_index_buffer(device, bytemuck::cast_slice(&idxs)));
+            let instances = project_gaussians_to_splats(&scene.gaussians, camera, viewport_size);
+            self.gauss_instance_count = instances.len() as u32;
+            self.gauss_instance_vbuf = (!instances.is_empty())
+                .then(|| create_vertex_buffer(device, bytemuck::cast_slice(&instances)));
         } else {
-            self.gauss_count = 0;
+            self.gauss_instance_count = 0;
+            self.gauss_instance_vbuf = None;
         }
 
         // Trajectory (line list — also pre-project to NDC)
@@ -178,7 +183,10 @@ impl SceneRenderer {
                 // Project both endpoints; skip the segment if either is behind the camera.
                 let mut ndc_pair = [[0.0f32; 3]; 2];
                 let mut valid = true;
-                for (j, &pos) in [scene.trajectory[i], scene.trajectory[i + 1]].iter().enumerate() {
+                for (j, &pos) in [scene.trajectory[i], scene.trajectory[i + 1]]
+                    .iter()
+                    .enumerate()
+                {
                     let p = glam::Vec4::new(pos[0], pos[1], pos[2], 1.0);
                     let clip = vp * p;
                     if clip.w <= 0.0 {
@@ -197,13 +205,18 @@ impl SceneRenderer {
                 }
             }
             self.line_count = line_verts.len() as u32;
-            self.line_vbuf = Some(create_vertex_buffer(device, bytemuck::cast_slice(&line_verts)));
+            self.line_vbuf = Some(create_vertex_buffer(
+                device,
+                bytemuck::cast_slice(&line_verts),
+            ));
         } else {
             self.line_count = 0;
         }
 
         // Mesh (uses uniform buffer for world-space transform)
-        if (scene.layers.mesh_solid || scene.layers.mesh_wireframe) && !scene.mesh_vertices.is_empty() {
+        if (scene.layers.mesh_solid || scene.layers.mesh_wireframe)
+            && !scene.mesh_vertices.is_empty()
+        {
             self.mesh_index_count = scene.mesh_indices.len() as u32;
             self.wireframe_index_count = scene.mesh_edge_indices.len() as u32;
             self.mesh_vbuf = Some(create_vertex_buffer(
@@ -245,9 +258,11 @@ impl SceneRenderer {
         }
 
         if self.layer_mesh_wireframe {
-            if let (Some(vbuf), Some(ibuf), count) =
-                (&self.mesh_vbuf, &self.wireframe_ibuf, self.wireframe_index_count)
-            {
+            if let (Some(vbuf), Some(ibuf), count) = (
+                &self.mesh_vbuf,
+                &self.wireframe_ibuf,
+                self.wireframe_index_count,
+            ) {
                 if count > 0 {
                     rpass.set_pipeline(&self.wireframe_pipeline);
                     rpass.set_bind_group(0, &self.uniform_bg, &[]);
@@ -282,14 +297,15 @@ impl SceneRenderer {
         }
 
         if self.layer_gaussians {
-            if let (Some(vbuf), Some(ibuf), count) =
-                (&self.gauss_vbuf, &self.gauss_ibuf, self.gauss_count)
+            if let (Some(instance_vbuf), count) =
+                (&self.gauss_instance_vbuf, self.gauss_instance_count)
             {
                 if count > 0 {
-                    rpass.set_pipeline(&self.point_pipeline);
-                    rpass.set_vertex_buffer(0, vbuf.slice(..));
-                    rpass.set_index_buffer(ibuf.slice(..), wgpu::IndexFormat::Uint32);
-                    rpass.draw_indexed(0..count, 0, 0..1);
+                    rpass.set_pipeline(&self.gaussian_pipeline);
+                    rpass.set_vertex_buffer(0, self.gauss_quad_vbuf.slice(..));
+                    rpass.set_vertex_buffer(1, instance_vbuf.slice(..));
+                    rpass.set_index_buffer(self.gauss_ibuf.slice(..), wgpu::IndexFormat::Uint32);
+                    rpass.draw_indexed(0..GAUSSIAN_QUAD_INDICES.len() as u32, 0, 0..count);
                 }
             }
         }

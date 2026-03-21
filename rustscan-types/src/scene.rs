@@ -2,8 +2,12 @@
 //!
 //! This module provides types for SLAM output and point cloud data.
 
-use serde::{Deserialize, Serialize};
 use crate::{Intrinsics, ScenePose};
+use serde::{Deserialize, Serialize};
+
+fn default_depth_scale() -> f32 {
+    1000.0
+}
 
 /// Map point data for SLAM output.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -32,6 +36,9 @@ impl MapPointData {
 pub struct SlamOutput {
     /// Camera intrinsics (shared across all frames)
     pub intrinsics: Intrinsics,
+    /// Scale factor used to convert raster depth pixels into meters.
+    #[serde(default = "default_depth_scale")]
+    pub depth_scale: f32,
     /// Per-frame poses with image paths
     pub poses: Vec<ScenePose>,
     /// Sparse 3D point cloud from SLAM
@@ -43,17 +50,21 @@ impl SlamOutput {
     pub fn new(intrinsics: Intrinsics) -> Self {
         Self {
             intrinsics,
+            depth_scale: default_depth_scale(),
             poses: Vec::new(),
             map_points: Vec::new(),
         }
-    } 
+    }
 
     /// Create from a training dataset (without map points).
     pub fn from_dataset(dataset: crate::TrainingDataset) -> Self {
         Self {
             intrinsics: dataset.intrinsics,
+            depth_scale: dataset.depth_scale,
             poses: dataset.poses,
-            map_points: dataset.initial_points.into_iter()
+            map_points: dataset
+                .initial_points
+                .into_iter()
                 .map(|(pos, color)| MapPointData::new(pos, color))
                 .collect(),
         }
@@ -63,8 +74,11 @@ impl SlamOutput {
     pub fn to_dataset(&self) -> crate::TrainingDataset {
         crate::TrainingDataset {
             intrinsics: self.intrinsics,
+            depth_scale: self.depth_scale,
             poses: self.poses.clone(),
-            initial_points: self.map_points.iter()
+            initial_points: self
+                .map_points
+                .iter()
                 .map(|mp| (mp.position, mp.color))
                 .collect(),
         }
@@ -133,12 +147,7 @@ mod tests {
         let intrinsics = Intrinsics::from_focal(1000.0, 1920, 1080);
         let mut output = SlamOutput::new(intrinsics);
 
-        let pose = ScenePose::new(
-            0,
-            PathBuf::from("frame_0000.jpg"),
-            SE3::identity(),
-            0.0,
-        );
+        let pose = ScenePose::new(0, PathBuf::from("frame_0000.jpg"), SE3::identity(), 0.0);
         output.add_pose(pose);
         output.add_map_point(MapPointData::new([0.0, 0.0, 1.0], None));
 
@@ -151,18 +160,14 @@ mod tests {
         let intrinsics = Intrinsics::from_focal(1000.0, 1920, 1080);
         let mut output = SlamOutput::new(intrinsics);
 
-        let pose = ScenePose::new(
-            0,
-            PathBuf::from("frame_0000.jpg"),
-            SE3::identity(),
-            0.0,
-        );
+        let pose = ScenePose::new(0, PathBuf::from("frame_0000.jpg"), SE3::identity(), 0.0);
         output.add_pose(pose);
         output.add_map_point(MapPointData::new([0.0, 0.0, 1.0], Some([0.5, 0.5, 0.5])));
 
         let dataset = output.to_dataset();
         assert_eq!(dataset.len(), 1);
         assert_eq!(dataset.initial_points.len(), 1);
+        assert_eq!(dataset.depth_scale, 1000.0);
     }
 
     #[test]
@@ -170,16 +175,25 @@ mod tests {
         let intrinsics = Intrinsics::from_focal(1000.0, 1920, 1080);
         let mut output = SlamOutput::new(intrinsics);
 
-        let pose = ScenePose::new(
-            0,
-            PathBuf::from("frame_0000.jpg"),
-            SE3::identity(),
-            0.0,
-        );
+        let pose = ScenePose::new(0, PathBuf::from("frame_0000.jpg"), SE3::identity(), 0.0);
         output.add_pose(pose);
 
         let json = serde_json::to_string(&output).unwrap();
         let decoded: SlamOutput = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.num_poses(), 1);
+        assert_eq!(decoded.depth_scale, 1000.0);
+    }
+
+    #[test]
+    fn test_slam_output_depth_scale_round_trip() {
+        let intrinsics = Intrinsics::from_focal(1000.0, 1920, 1080);
+        let mut output = SlamOutput::new(intrinsics);
+        output.depth_scale = 5000.0;
+
+        let dataset = output.to_dataset();
+        assert_eq!(dataset.depth_scale, 5000.0);
+
+        let restored = SlamOutput::from_dataset(dataset);
+        assert_eq!(restored.depth_scale, 5000.0);
     }
 }

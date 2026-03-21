@@ -2,8 +2,8 @@
 //!
 //! This module will be populated from RustSLAM/src/fusion/gaussian.rs in Story 9-3.
 
-use crate::SE3;
 use crate::Intrinsics;
+use crate::SE3;
 use glam::Mat4;
 
 /// Camera for Gaussian rendering.
@@ -20,7 +20,10 @@ pub struct GaussianCamera {
 impl GaussianCamera {
     /// Create a new Gaussian camera.
     pub fn new(intrinsics: Intrinsics, extrinsics: SE3) -> Self {
-        Self { intrinsics, extrinsics }
+        Self {
+            intrinsics,
+            extrinsics,
+        }
     }
 
     /// Get the view matrix (world-to-camera).
@@ -30,7 +33,14 @@ impl GaussianCamera {
 
     /// Get the projection matrix.
     pub fn projection_matrix(&self) -> Mat4 {
-        let Intrinsics { fx, fy, cx, cy, width, height } = self.intrinsics;
+        let Intrinsics {
+            fx,
+            fy,
+            cx,
+            cy,
+            width,
+            height,
+        } = self.intrinsics;
         let near = 0.01;
         let far = 100.0;
 
@@ -39,10 +49,22 @@ impl GaussianCamera {
         let h = height as f32;
 
         Mat4::from_cols_array(&[
-            2.0 * fx / w, 0.0, 0.0, 0.0,
-            0.0, 2.0 * fy / h, 0.0, 0.0,
-            1.0 - 2.0 * cx / w, 1.0 - 2.0 * cy / h, -(far + near) / (far - near), -1.0,
-            0.0, 0.0, -2.0 * far * near / (far - near), 0.0,
+            2.0 * fx / w,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            2.0 * fy / h,
+            0.0,
+            0.0,
+            1.0 - 2.0 * cx / w,
+            1.0 - 2.0 * cy / h,
+            -(far + near) / (far - near),
+            -1.0,
+            0.0,
+            0.0,
+            -2.0 * far * near / (far - near),
+            0.0,
         ])
     }
 

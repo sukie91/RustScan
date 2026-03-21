@@ -30,41 +30,77 @@
 //! ```
 
 pub mod core;
-pub mod render;
 pub mod diff;
-pub mod training;
-pub mod io;
 pub mod init;
+pub mod io;
+pub mod render;
+pub mod training;
+
+#[cfg(feature = "gpu")]
+use candle_core::Device;
+use std::path::Path;
+#[cfg(feature = "gpu")]
+use std::sync::{Mutex, OnceLock};
 
 // Re-export shared types from rustscan-types
-pub use rustscan_types::{SE3, Intrinsics, TrainingDataset, ScenePose, SlamOutput, MapPointData};
+pub use rustscan_types::{Intrinsics, MapPointData, ScenePose, SlamOutput, TrainingDataset, SE3};
 
 // Re-export core types
-pub use crate::core::{Gaussian3D, GaussianMap, GaussianCamera, GaussianState};
+pub use crate::core::{Gaussian3D, GaussianCamera, GaussianMap, GaussianState};
 
 // Re-export render types
 pub use crate::render::{
-    GaussianRenderer, RenderOutput,
-    Gaussian, ProjectedGaussian, TiledRenderer, RenderBuffer,
-    densify, prune,
+    densify, prune, Gaussian, GaussianRenderer, ProjectedGaussian, RenderBuffer, RenderOutput,
+    TiledRenderer,
 };
 
 // Re-export training types
 pub use crate::training::{TrainingConfig, TrainingResult};
 
 // Re-export IO types
-pub use crate::io::TrainingCheckpoint;
-pub use crate::io::scene_io::{save_scene_ply, load_scene_ply, SceneMetadata, SceneIoError};
+pub use crate::io::scene_io::{load_scene_ply, save_scene_ply, SceneIoError, SceneMetadata};
 #[cfg(feature = "gpu")]
 pub use crate::io::training_checkpoint::{
-    FullTrainingCheckpoint, CheckpointGaussian,
-    save_checkpoint, load_checkpoint, load_latest_checkpoint, resume_latest_checkpoint,
-    TrainingCheckpointError,
+    load_checkpoint, load_latest_checkpoint, resume_latest_checkpoint, save_checkpoint,
+    CheckpointGaussian, FullTrainingCheckpoint, TrainingCheckpointError,
 };
+pub use crate::io::tum_dataset::{load_tum_rgbd_dataset, TumRgbdConfig};
+pub use crate::io::TrainingCheckpoint;
 
 // Re-export initialization types
 pub use crate::init::GaussianInitConfig;
-pub use crate::init::{initialize_gaussians_from_points, initialize_gaussian3d_from_points};
+pub use crate::init::{initialize_gaussian3d_from_points, initialize_gaussians_from_points};
+
+#[cfg(feature = "gpu")]
+pub(crate) fn preferred_device() -> Device {
+    match try_metal_device() {
+        Ok(device) => device,
+        Err(err) => {
+            log::warn!("{err}; falling back to CPU");
+            Device::Cpu
+        }
+    }
+}
+
+#[cfg(feature = "gpu")]
+fn try_metal_device() -> Result<Device, String> {
+    static PANIC_HOOK_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    let hook_lock = PANIC_HOOK_LOCK.get_or_init(|| Mutex::new(()));
+    let _guard = hook_lock
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let previous_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let result = std::panic::catch_unwind(|| Device::new_metal(0));
+    std::panic::set_hook(previous_hook);
+
+    match result {
+        Ok(Ok(device)) => Ok(device),
+        Ok(Err(err)) => Err(format!("Metal unavailable: {err}")),
+        Err(_) => Err("Metal initialization panicked".to_string()),
+    }
+}
 
 /// Initialize Gaussians from a point cloud (convenience wrapper).
 pub fn initialize_from_points(
@@ -72,6 +108,31 @@ pub fn initialize_from_points(
     config: &GaussianInitConfig,
 ) -> Vec<Gaussian3D> {
     initialize_gaussian3d_from_points(points, config)
+}
+
+/// Load a training dataset from a TUM RGB-D directory, a SLAM output JSON file,
+/// or a serialized `TrainingDataset` JSON file.
+pub fn load_training_dataset(
+    input: &Path,
+    tum_config: &TumRgbdConfig,
+) -> Result<TrainingDataset, TrainingError> {
+    if input.is_dir() {
+        return load_tum_rgbd_dataset(input, tum_config);
+    }
+
+    let input_buf = input.to_path_buf();
+    match SlamOutput::load(&input_buf) {
+        Ok(slam_output) => Ok(slam_output.to_dataset()),
+        Err(slam_err) => match TrainingDataset::load(&input_buf) {
+            Ok(dataset) => Ok(dataset),
+            Err(dataset_err) => Err(TrainingError::InvalidInput(format!(
+                "failed to load {} as SlamOutput JSON ({}) or TrainingDataset JSON ({})",
+                input.display(),
+                slam_err,
+                dataset_err,
+            ))),
+        },
+    }
 }
 
 /// Train a 3DGS scene from a SLAM output.
@@ -90,6 +151,20 @@ pub fn train_from_slam(
     config: &TrainingConfig,
 ) -> Result<GaussianMap, TrainingError> {
     let dataset = slam_output.to_dataset();
+    training::train(&dataset, config)
+}
+
+/// Train a 3DGS scene directly from a dataset path.
+///
+/// `input` can be a TUM RGB-D dataset directory, a serialized `SlamOutput` JSON
+/// file, or a serialized `TrainingDataset` JSON file.
+#[cfg(feature = "gpu")]
+pub fn train_from_path(
+    input: &Path,
+    tum_config: &TumRgbdConfig,
+    config: &TrainingConfig,
+) -> Result<GaussianMap, TrainingError> {
+    let dataset = load_training_dataset(input, tum_config)?;
     training::train(&dataset, config)
 }
 

@@ -72,10 +72,13 @@ impl SceneBounds {
     }
 }
 
-/// A single Gaussian point (position + display color).
+/// A single 3D Gaussian primitive for splat rendering.
 #[derive(Debug, Clone, Copy)]
-pub struct GaussianPoint {
+pub struct GaussianSplat {
     pub position: [f32; 3],
+    pub scale: [f32; 3],
+    pub rotation: [f32; 4],
+    pub opacity: f32,
     pub color: [f32; 3],
 }
 
@@ -97,8 +100,8 @@ pub struct Scene {
     pub map_points: Vec<[f32; 3]>,
     /// Map point display colors (depth-shaded).
     pub map_point_colors: Vec<[f32; 3]>,
-    /// Gaussian point cloud.
-    pub gaussians: Vec<GaussianPoint>,
+    /// Gaussian splats.
+    pub gaussians: Vec<GaussianSplat>,
     /// Mesh vertices (GPU ready).
     pub mesh_vertices: Vec<MeshGpuVertex>,
     /// Mesh triangle indices.

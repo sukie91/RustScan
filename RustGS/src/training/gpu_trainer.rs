@@ -9,7 +9,7 @@
 //! - Only sync CPU-GPU for densify/prune operations
 
 #[cfg(feature = "gpu")]
-use candle_core::{Tensor, Device, DType};
+use candle_core::{DType, Device, Tensor};
 
 /// Configuration for GPU trainer
 #[derive(Debug, Clone)]
@@ -268,13 +268,12 @@ impl GpuTrainer {
         colors: &[f32],
         config: GpuTrainerConfig,
     ) -> candle_core::Result<Self> {
-        let device = Device::new_metal(0).unwrap_or_else(|_| Device::Cpu);
+        let device = crate::preferred_device();
         println!("GpuTrainer using device: {:?}", device);
 
         let n = positions.len() / 3;
-        let gaussians = GpuGaussianBuffer::from_cpu(
-            positions, scales, rotations, opacities, colors, &device,
-        )?;
+        let gaussians =
+            GpuGaussianBuffer::from_cpu(positions, scales, rotations, opacities, colors, &device)?;
         let adam_state = GpuAdamState::new(n, &device)?;
 
         Ok(Self {
@@ -325,11 +324,7 @@ impl GpuTrainer {
     }
 
     /// Compute loss (L1 + SSIM) on GPU
-    fn compute_loss(
-        &self,
-        _rendered: Tensor,
-        _target: &[f32],
-    ) -> candle_core::Result<f32> {
+    fn compute_loss(&self, _rendered: Tensor, _target: &[f32]) -> candle_core::Result<f32> {
         // Simplified loss computation
         // Full implementation would compute L1 + SSIM on GPU
         Ok(0.0)
@@ -427,14 +422,7 @@ impl GpuTrainerBuilder {
         opacities: &[f32],
         colors: &[f32],
     ) -> candle_core::Result<GpuTrainer> {
-        GpuTrainer::new(
-            positions,
-            scales,
-            rotations,
-            opacities,
-            colors,
-            self.config,
-        )
+        GpuTrainer::new(positions, scales, rotations, opacities, colors, self.config)
     }
 }
 

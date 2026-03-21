@@ -34,7 +34,13 @@ impl Gaussian {
         opacity: f32,
         color: [f32; 3],
     ) -> Self {
-        Self { position, scale, rotation, opacity, color }
+        Self {
+            position,
+            scale,
+            rotation,
+            opacity,
+            color,
+        }
     }
 
     /// Create from depth point
@@ -44,7 +50,11 @@ impl Gaussian {
             scale: [0.01, 0.01, 0.01],
             rotation: [1.0, 0.0, 0.0, 0.0],
             opacity: 0.5,
-            color: [color[0] as f32 / 255.0, color[1] as f32 / 255.0, color[2] as f32 / 255.0],
+            color: [
+                color[0] as f32 / 255.0,
+                color[1] as f32 / 255.0,
+                color[2] as f32 / 255.0,
+            ],
         }
     }
 
@@ -65,7 +75,12 @@ impl Gaussian {
         Gaussian3D::new(
             Vec3::from(self.position),
             Vec3::from(self.scale),
-            Quat::from_xyzw(self.rotation[1], self.rotation[2], self.rotation[3], self.rotation[0]),
+            Quat::from_xyzw(
+                self.rotation[1],
+                self.rotation[2],
+                self.rotation[3],
+                self.rotation[0],
+            ),
             self.opacity,
             self.color,
         )
@@ -189,7 +204,11 @@ impl TiledRenderer {
     }
 
     /// Compute bounding box in tiles
-    pub fn compute_tile_bounds(&self, g: &ProjectedGaussian, tile_alpha: f32) -> (usize, usize, usize, usize) {
+    pub fn compute_tile_bounds(
+        &self,
+        g: &ProjectedGaussian,
+        tile_alpha: f32,
+    ) -> (usize, usize, usize, usize) {
         // Compute standard deviation
         let sigma_x = (g.cov_xx * tile_alpha).sqrt().max(1.0);
         let sigma_y = (g.cov_yy * tile_alpha).sqrt().max(1.0);
@@ -211,7 +230,11 @@ impl TiledRenderer {
 
     /// Sort Gaussians by depth (front to back)
     pub fn sort_by_depth(&self, gaussians: &mut [ProjectedGaussian]) {
-        gaussians.sort_by(|a, b| a.depth.partial_cmp(&b.depth).unwrap_or(std::cmp::Ordering::Equal));
+        gaussians.sort_by(|a, b| {
+            a.depth
+                .partial_cmp(&b.depth)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
     }
 
     /// Render with tiled rasterization
@@ -285,7 +308,9 @@ impl TiledRenderer {
                     // Precompute inverse covariance for Mahalanobis distance
                     // Σ⁻¹ = (1/det) * [[cov_yy, -cov_xy], [-cov_xy, cov_xx]]
                     let det = g.cov_xx * g.cov_yy - g.cov_xy * g.cov_xy;
-                    if det < 1e-10 { continue; }
+                    if det < 1e-10 {
+                        continue;
+                    }
                     let inv_det = 1.0 / det;
 
                     for py in py_start..py_end {
@@ -298,7 +323,9 @@ impl TiledRenderer {
 
                             let dx = px as f32 - g.x;
                             let dy = py as f32 - g.y;
-                            let d_sq = (g.cov_yy * dx * dx - 2.0 * g.cov_xy * dx * dy + g.cov_xx * dy * dy) * inv_det;
+                            let d_sq = (g.cov_yy * dx * dx - 2.0 * g.cov_xy * dx * dy
+                                + g.cov_xx * dy * dy)
+                                * inv_det;
 
                             if d_sq < 9.0 {
                                 let weight = (-0.5 * d_sq).exp() * g.opacity;
@@ -339,8 +366,8 @@ impl TiledRenderer {
 
 /// Render output buffer
 pub struct RenderBuffer {
-    pub color: Vec<f32>,   // [H, W, 3] RGB
-    pub depth: Vec<f32>,  // [H, W]
+    pub color: Vec<f32>, // [H, W, 3] RGB
+    pub depth: Vec<f32>, // [H, W]
     pub width: usize,
     pub height: usize,
 }
@@ -405,23 +432,25 @@ mod tests {
     fn test_gaussian_projection() {
         let renderer = TiledRenderer::new(64, 64);
 
-        let gaussians = vec![
-            Gaussian::new(
-                [0.0, 0.0, 1.0],
-                [0.01, 0.01, 0.01],
-                [1.0, 0.0, 0.0, 0.0],
-                0.5,
-                [1.0, 0.5, 0.25],
-            ),
-        ];
-
-        let rotation = [
-            [1.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0],
+        let gaussians = vec![Gaussian::new(
             [0.0, 0.0, 1.0],
-        ];
+            [0.01, 0.01, 0.01],
+            [1.0, 0.0, 0.0, 0.0],
+            0.5,
+            [1.0, 0.5, 0.25],
+        )];
 
-        let projected = renderer.project_gaussians(&gaussians, 500.0, 500.0, 32.0, 32.0, &rotation, &[0.0, 0.0, 0.0]);
+        let rotation = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+
+        let projected = renderer.project_gaussians(
+            &gaussians,
+            500.0,
+            500.0,
+            32.0,
+            32.0,
+            &rotation,
+            &[0.0, 0.0, 0.0],
+        );
 
         assert!(!projected.is_empty());
         assert!(projected[0].depth > 0.0);
@@ -430,9 +459,39 @@ mod tests {
     #[test]
     fn test_depth_sorting() {
         let mut gaussians = vec![
-            ProjectedGaussian { x: 0.0, y: 0.0, depth: 2.0, cov_xx: 1.0, cov_xy: 0.0, cov_yy: 1.0, opacity: 0.5, color: [1.0, 0.0, 0.0], orig_idx: 0 },
-            ProjectedGaussian { x: 0.0, y: 0.0, depth: 1.0, cov_xx: 1.0, cov_xy: 0.0, cov_yy: 1.0, opacity: 0.5, color: [0.0, 1.0, 0.0], orig_idx: 1 },
-            ProjectedGaussian { x: 0.0, y: 0.0, depth: 3.0, cov_xx: 1.0, cov_xy: 0.0, cov_yy: 1.0, opacity: 0.5, color: [0.0, 0.0, 1.0], orig_idx: 2 },
+            ProjectedGaussian {
+                x: 0.0,
+                y: 0.0,
+                depth: 2.0,
+                cov_xx: 1.0,
+                cov_xy: 0.0,
+                cov_yy: 1.0,
+                opacity: 0.5,
+                color: [1.0, 0.0, 0.0],
+                orig_idx: 0,
+            },
+            ProjectedGaussian {
+                x: 0.0,
+                y: 0.0,
+                depth: 1.0,
+                cov_xx: 1.0,
+                cov_xy: 0.0,
+                cov_yy: 1.0,
+                opacity: 0.5,
+                color: [0.0, 1.0, 0.0],
+                orig_idx: 1,
+            },
+            ProjectedGaussian {
+                x: 0.0,
+                y: 0.0,
+                depth: 3.0,
+                cov_xx: 1.0,
+                cov_xy: 0.0,
+                cov_yy: 1.0,
+                opacity: 0.5,
+                color: [0.0, 0.0, 1.0],
+                orig_idx: 2,
+            },
         ];
 
         let renderer = TiledRenderer::new(64, 64);

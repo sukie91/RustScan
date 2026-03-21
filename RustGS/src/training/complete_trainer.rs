@@ -7,10 +7,10 @@
 //! - Parameter update with Adam
 
 #[cfg(feature = "gpu")]
-use candle_core::{Tensor, Device, Var};
+use candle_core::{Device, Tensor, Var};
 
 #[cfg(feature = "gpu")]
-use crate::diff::diff_splat::{TrainableGaussians, DiffSplatRenderer, DiffCamera};
+use crate::diff::diff_splat::{DiffCamera, DiffSplatRenderer, TrainableGaussians};
 
 #[cfg(feature = "gpu")]
 use crate::diff::analytical_backward;
@@ -141,7 +141,28 @@ impl CompleteTrainer {
         lr_op: f32,
         lr_color: f32,
     ) -> Self {
-        let device = Device::new_metal(0).unwrap_or_else(|_| Device::Cpu);
+        Self::with_device(
+            width,
+            height,
+            lr_pos,
+            lr_scale,
+            lr_rot,
+            lr_op,
+            lr_color,
+            crate::preferred_device(),
+        )
+    }
+
+    pub fn with_device(
+        width: usize,
+        height: usize,
+        lr_pos: f32,
+        lr_scale: f32,
+        lr_rot: f32,
+        lr_op: f32,
+        lr_color: f32,
+        device: Device,
+    ) -> Self {
         let renderer = DiffSplatRenderer::with_device(width, height, device.clone());
 
         log::info!("CompleteTrainer using device: {:?}", device);
@@ -224,13 +245,28 @@ impl CompleteTrainer {
         let (loss_value, pos_grad, scale_grad, rot_grad, op_grad, color_grad) =
             if self.use_analytical_backward {
                 self.analytical_training_step(
-                    gaussians, camera, target_color, target_depth, n,
-                    &pos_data, &scale_data, &op_data, &color_data,
+                    gaussians,
+                    camera,
+                    target_color,
+                    target_depth,
+                    n,
+                    &pos_data,
+                    &scale_data,
+                    &op_data,
+                    &color_data,
                 )?
             } else {
                 self.finite_diff_training_step(
-                    gaussians, camera, target_color, target_depth, n,
-                    &mut pos_data, &mut scale_data, &mut rot_data, &mut op_data, &mut color_data,
+                    gaussians,
+                    camera,
+                    target_color,
+                    target_depth,
+                    n,
+                    &mut pos_data,
+                    &mut scale_data,
+                    &mut rot_data,
+                    &mut op_data,
+                    &mut color_data,
                 )?
             };
 
@@ -238,34 +274,81 @@ impl CompleteTrainer {
         self.iteration += 1;
 
         let lr_factor = self.lr_scheduler.get_lr(self.iteration).max(1e-4);
-        adam_update(&mut pos_data, &pos_grad, &mut self.m_pos, &mut self.v_pos,
-            self.lr_pos * lr_factor, self.beta1, self.beta2, self.iteration);
-        adam_update(&mut scale_data, &scale_grad, &mut self.m_scale, &mut self.v_scale,
-            self.lr_scale * lr_factor, self.beta1, self.beta2, self.iteration);
-        adam_update(&mut rot_data, &rot_grad, &mut self.m_rot, &mut self.v_rot,
-            self.lr_rot * lr_factor, self.beta1, self.beta2, self.iteration);
-        adam_update(&mut op_data, &op_grad, &mut self.m_op, &mut self.v_op,
-            self.lr_op * lr_factor, self.beta1, self.beta2, self.iteration);
-        adam_update(&mut color_data, &color_grad, &mut self.m_color, &mut self.v_color,
-            self.lr_color * lr_factor, self.beta1, self.beta2, self.iteration);
+        adam_update(
+            &mut pos_data,
+            &pos_grad,
+            &mut self.m_pos,
+            &mut self.v_pos,
+            self.lr_pos * lr_factor,
+            self.beta1,
+            self.beta2,
+            self.iteration,
+        );
+        adam_update(
+            &mut scale_data,
+            &scale_grad,
+            &mut self.m_scale,
+            &mut self.v_scale,
+            self.lr_scale * lr_factor,
+            self.beta1,
+            self.beta2,
+            self.iteration,
+        );
+        adam_update(
+            &mut rot_data,
+            &rot_grad,
+            &mut self.m_rot,
+            &mut self.v_rot,
+            self.lr_rot * lr_factor,
+            self.beta1,
+            self.beta2,
+            self.iteration,
+        );
+        adam_update(
+            &mut op_data,
+            &op_grad,
+            &mut self.m_op,
+            &mut self.v_op,
+            self.lr_op * lr_factor,
+            self.beta1,
+            self.beta2,
+            self.iteration,
+        );
+        adam_update(
+            &mut color_data,
+            &color_grad,
+            &mut self.m_color,
+            &mut self.v_color,
+            self.lr_color * lr_factor,
+            self.beta1,
+            self.beta2,
+            self.iteration,
+        );
 
         // Normalize rotations
         for i in 0..n {
             let r = i * 4;
-            let norm = (rot_data[r]*rot_data[r] + rot_data[r+1]*rot_data[r+1]
-                + rot_data[r+2]*rot_data[r+2] + rot_data[r+3]*rot_data[r+3])
-                .sqrt().max(1e-6);
+            let norm = (rot_data[r] * rot_data[r]
+                + rot_data[r + 1] * rot_data[r + 1]
+                + rot_data[r + 2] * rot_data[r + 2]
+                + rot_data[r + 3] * rot_data[r + 3])
+                .sqrt()
+                .max(1e-6);
             rot_data[r] /= norm;
-            rot_data[r+1] /= norm;
-            rot_data[r+2] /= norm;
-            rot_data[r+3] /= norm;
+            rot_data[r + 1] /= norm;
+            rot_data[r + 2] /= norm;
+            rot_data[r + 3] /= norm;
         }
 
-        gaussians.positions = Var::from_tensor(&Tensor::from_slice(&pos_data, (n, 3), &self.device)?)?;
-        gaussians.scales = Var::from_tensor(&Tensor::from_slice(&scale_data, (n, 3), &self.device)?)?;
-        gaussians.rotations = Var::from_tensor(&Tensor::from_slice(&rot_data, (n, 4), &self.device)?)?;
+        gaussians.positions =
+            Var::from_tensor(&Tensor::from_slice(&pos_data, (n, 3), &self.device)?)?;
+        gaussians.scales =
+            Var::from_tensor(&Tensor::from_slice(&scale_data, (n, 3), &self.device)?)?;
+        gaussians.rotations =
+            Var::from_tensor(&Tensor::from_slice(&rot_data, (n, 4), &self.device)?)?;
         gaussians.opacities = Var::from_tensor(&Tensor::from_slice(&op_data, (n,), &self.device)?)?;
-        gaussians.colors = Var::from_tensor(&Tensor::from_slice(&color_data, (n, 3), &self.device)?)?;
+        gaussians.colors =
+            Var::from_tensor(&Tensor::from_slice(&color_data, (n, 3), &self.device)?)?;
 
         Ok(loss_value)
     }
@@ -285,13 +368,20 @@ impl CompleteTrainer {
     ) -> candle_core::Result<(f32, Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>)> {
         // Forward pass with intermediates
         let (output, intermediate) = self.renderer.render_with_intermediates(gaussians, camera)?;
-        let loss = self.renderer.compute_loss(&output, target_color, target_depth)?;
+        let loss = self
+            .renderer
+            .compute_loss(&output, target_color, target_depth)?;
         let loss_value = loss.total.to_vec0::<f32>()?;
 
         // Analytical backward
         let grads = analytical_backward::backward(
-            &intermediate, target_color, n,
-            camera.fx, camera.fy, camera.cx, camera.cy,
+            &intermediate,
+            target_color,
+            n,
+            camera.fx,
+            camera.fy,
+            camera.cx,
+            camera.cy,
         );
 
         // Blend with surrogate gradients (10% weight for regularization)
@@ -310,7 +400,9 @@ impl CompleteTrainer {
             rot_grad = vec![0.0; n * 4];
         }
 
-        Ok((loss_value, pos_grad, scale_grad, rot_grad, op_grad, color_grad))
+        Ok((
+            loss_value, pos_grad, scale_grad, rot_grad, op_grad, color_grad,
+        ))
     }
 
     /// Legacy finite-difference gradient estimation.
@@ -328,7 +420,9 @@ impl CompleteTrainer {
         color_data: &mut Vec<f32>,
     ) -> candle_core::Result<(f32, Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>)> {
         let output = self.renderer.render(gaussians, camera)?;
-        let loss = self.renderer.compute_loss(&output, target_color, target_depth)?;
+        let loss = self
+            .renderer
+            .compute_loss(&output, target_color, target_depth)?;
         let loss_value = loss.total.to_vec0::<f32>()?;
 
         let mut pos_grad = vec![0.0f32; n * 3];
@@ -341,14 +435,36 @@ impl CompleteTrainer {
 
         for s in 0..sample_count {
             let i = s * stride;
-            if i >= n { break; }
+            if i >= n {
+                break;
+            }
 
             for d in 0..3 {
                 let idx = i * 3 + d;
                 pos_data[idx] += eps;
-                let plus = self.evaluate_loss(pos_data, scale_data, rot_data, op_data, color_data, n, camera, target_color, target_depth)?;
+                let plus = self.evaluate_loss(
+                    pos_data,
+                    scale_data,
+                    rot_data,
+                    op_data,
+                    color_data,
+                    n,
+                    camera,
+                    target_color,
+                    target_depth,
+                )?;
                 pos_data[idx] -= 2.0 * eps;
-                let minus = self.evaluate_loss(pos_data, scale_data, rot_data, op_data, color_data, n, camera, target_color, target_depth)?;
+                let minus = self.evaluate_loss(
+                    pos_data,
+                    scale_data,
+                    rot_data,
+                    op_data,
+                    color_data,
+                    n,
+                    camera,
+                    target_color,
+                    target_depth,
+                )?;
                 pos_data[idx] += eps;
                 pos_grad[idx] = (plus - minus) / (2.0 * eps);
             }
@@ -356,27 +472,87 @@ impl CompleteTrainer {
             for d in 0..3 {
                 let idx = i * 3 + d;
                 scale_data[idx] += eps;
-                let plus = self.evaluate_loss(pos_data, scale_data, rot_data, op_data, color_data, n, camera, target_color, target_depth)?;
+                let plus = self.evaluate_loss(
+                    pos_data,
+                    scale_data,
+                    rot_data,
+                    op_data,
+                    color_data,
+                    n,
+                    camera,
+                    target_color,
+                    target_depth,
+                )?;
                 scale_data[idx] -= 2.0 * eps;
-                let minus = self.evaluate_loss(pos_data, scale_data, rot_data, op_data, color_data, n, camera, target_color, target_depth)?;
+                let minus = self.evaluate_loss(
+                    pos_data,
+                    scale_data,
+                    rot_data,
+                    op_data,
+                    color_data,
+                    n,
+                    camera,
+                    target_color,
+                    target_depth,
+                )?;
                 scale_data[idx] += eps;
                 scale_grad[idx] = (plus - minus) / (2.0 * eps);
             }
 
             let op_idx = i;
             op_data[op_idx] += eps;
-            let plus = self.evaluate_loss(pos_data, scale_data, rot_data, op_data, color_data, n, camera, target_color, target_depth)?;
+            let plus = self.evaluate_loss(
+                pos_data,
+                scale_data,
+                rot_data,
+                op_data,
+                color_data,
+                n,
+                camera,
+                target_color,
+                target_depth,
+            )?;
             op_data[op_idx] -= 2.0 * eps;
-            let minus = self.evaluate_loss(pos_data, scale_data, rot_data, op_data, color_data, n, camera, target_color, target_depth)?;
+            let minus = self.evaluate_loss(
+                pos_data,
+                scale_data,
+                rot_data,
+                op_data,
+                color_data,
+                n,
+                camera,
+                target_color,
+                target_depth,
+            )?;
             op_data[op_idx] += eps;
             op_grad[op_idx] = (plus - minus) / (2.0 * eps);
 
             for d in 0..3 {
                 let idx = i * 3 + d;
                 color_data[idx] += eps;
-                let plus = self.evaluate_loss(pos_data, scale_data, rot_data, op_data, color_data, n, camera, target_color, target_depth)?;
+                let plus = self.evaluate_loss(
+                    pos_data,
+                    scale_data,
+                    rot_data,
+                    op_data,
+                    color_data,
+                    n,
+                    camera,
+                    target_color,
+                    target_depth,
+                )?;
                 color_data[idx] -= 2.0 * eps;
-                let minus = self.evaluate_loss(pos_data, scale_data, rot_data, op_data, color_data, n, camera, target_color, target_depth)?;
+                let minus = self.evaluate_loss(
+                    pos_data,
+                    scale_data,
+                    rot_data,
+                    op_data,
+                    color_data,
+                    n,
+                    camera,
+                    target_color,
+                    target_depth,
+                )?;
                 color_data[idx] += eps;
                 color_grad[idx] = (plus - minus) / (2.0 * eps);
             }
@@ -392,7 +568,9 @@ impl CompleteTrainer {
             rot_grad = vec![0.0; n * 4];
         }
 
-        Ok((loss_value, pos_grad, scale_grad, rot_grad, op_grad, color_grad))
+        Ok((
+            loss_value, pos_grad, scale_grad, rot_grad, op_grad, color_grad,
+        ))
     }
 
     fn evaluate_loss(
@@ -416,7 +594,9 @@ impl CompleteTrainer {
             &self.device,
         )?;
         let output = self.renderer.render(&temp, camera)?;
-        let loss = self.renderer.compute_loss(&output, target_color, target_depth)?;
+        let loss = self
+            .renderer
+            .compute_loss(&output, target_color, target_depth)?;
         let value = loss.total.to_vec0::<f32>()?;
         if !value.is_finite() {
             return Ok(0.0);
@@ -438,7 +618,11 @@ impl CompleteTrainer {
     ) -> candle_core::Result<TrainingResult> {
         let num_frames = cameras.len();
 
-        log::info!("Training on {} frames, max {} iterations", num_frames, max_iterations);
+        log::info!(
+            "Training on {} frames, max {} iterations",
+            num_frames,
+            max_iterations
+        );
 
         for iter in 0..max_iterations {
             // Sample a frame
@@ -615,10 +799,7 @@ mod tests {
 
     #[test]
     fn test_trainer_creation() {
-        let trainer = CompleteTrainer::new(
-            640, 480,
-            0.00016, 0.005, 0.001, 0.05, 0.0025,
-        );
+        let trainer = CompleteTrainer::new(640, 480, 0.00016, 0.005, 0.001, 0.05, 0.0025);
 
         assert_eq!(trainer.width, 640);
         assert_eq!(trainer.height, 480);

@@ -5,9 +5,7 @@
 pub mod initialization;
 
 pub use initialization::{
-    GaussianInitConfig,
-    initialize_gaussians_from_points,
-    initialize_gaussian3d_from_points,
+    initialize_gaussian3d_from_points, initialize_gaussians_from_points, GaussianInitConfig,
 };
 
 #[cfg(feature = "gpu")]

@@ -13,15 +13,13 @@ pub mod diff_splat;
 
 // Always export analytical backward (no GPU dependency)
 pub use analytical_backward::{
-    GaussianRenderRecord, ForwardIntermediate, AnalyticalGradients, backward,
+    backward, AnalyticalGradients, ForwardIntermediate, GaussianRenderRecord,
 };
 
 #[cfg(feature = "gpu")]
-pub use diff_renderer::{
-    GaussianTensors, CameraTensors, RenderLoss, DiffGaussianRenderer,
-};
+pub use diff_renderer::{CameraTensors, DiffGaussianRenderer, GaussianTensors, RenderLoss};
 
 #[cfg(feature = "gpu")]
 pub use diff_splat::{
-    DiffSplatRenderer, TrainableGaussians, DiffCamera, DiffRenderOutput, DiffLoss,
+    DiffCamera, DiffLoss, DiffRenderOutput, DiffSplatRenderer, TrainableGaussians,
 };

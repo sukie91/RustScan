@@ -4,7 +4,7 @@
 //! The key is using Var for gradient tracking and calling backward() on the loss.
 
 #[cfg(feature = "gpu")]
-use candle_core::{Tensor, Device, DType, Var};
+use candle_core::{DType, Device, Tensor, Var};
 
 /// Trainable Gaussian parameters with TRUE gradient tracking
 ///
@@ -99,10 +99,14 @@ impl VarGaussian {
     }
 
     /// Number of Gaussians
-    pub fn len(&self) -> usize { self.n }
+    pub fn len(&self) -> usize {
+        self.n
+    }
 
     /// Device
-    pub fn device(&self) -> &Device { &self.device }
+    pub fn device(&self) -> &Device {
+        &self.device
+    }
 
     /// Get gradients and update parameters
     ///
@@ -154,13 +158,24 @@ impl VarGaussian {
 /// Camera for differentiable rendering
 #[derive(Debug, Clone)]
 pub struct VarCamera {
-    pub fx: f32, pub fy: f32, pub cx: f32, pub cy: f32,
-    pub width: usize, pub height: usize,
+    pub fx: f32,
+    pub fy: f32,
+    pub cx: f32,
+    pub cy: f32,
+    pub width: usize,
+    pub height: usize,
 }
 
 impl VarCamera {
     pub fn new(fx: f32, fy: f32, cx: f32, cy: f32, width: usize, height: usize) -> Self {
-        Self { fx, fy, cx, cy, width, height }
+        Self {
+            fx,
+            fy,
+            cx,
+            cy,
+            width,
+            height,
+        }
     }
     pub fn default640() -> Self {
         Self::new(500.0, 500.0, 320.0, 240.0, 640, 480)
@@ -185,9 +200,13 @@ pub struct VarRenderer {
 #[cfg(feature = "gpu")]
 impl VarRenderer {
     pub fn new(width: usize, height: usize) -> Self {
-        let device = Device::new_metal(0).unwrap_or_else(|_| Device::Cpu);
+        let device = crate::preferred_device();
         println!("VarRenderer device: {:?}", device);
-        Self { device, width, height }
+        Self {
+            device,
+            width,
+            height,
+        }
     }
 
     /// Forward pass - builds computation graph with Var
@@ -215,8 +234,14 @@ impl VarRenderer {
 
         let z_safe = z.clamp(1e-6, f32::MAX)?;
 
-        let _u = x.broadcast_mul(&fx_t)?.broadcast_div(&z_safe)?.broadcast_add(&cx_t)?;
-        let _v = y.broadcast_mul(&fy_t)?.broadcast_div(&z_safe)?.broadcast_add(&cy_t)?;
+        let _u = x
+            .broadcast_mul(&fx_t)?
+            .broadcast_div(&z_safe)?
+            .broadcast_add(&cx_t)?;
+        let _v = y
+            .broadcast_mul(&fy_t)?
+            .broadcast_div(&z_safe)?
+            .broadcast_add(&cy_t)?;
 
         // Scale by depth
         let _scale_x = scale.narrow(1, 0, 1)?.squeeze(1)?.broadcast_div(&z)?;
@@ -238,7 +263,10 @@ impl VarRenderer {
         // Depth
         let rendered_depth = z.broadcast_mul(&weights)?.sum(0)?;
 
-        Ok(VarOutput { color: rendered_color, depth: rendered_depth })
+        Ok(VarOutput {
+            color: rendered_color,
+            depth: rendered_depth,
+        })
     }
 
     /// Compute loss
@@ -248,7 +276,8 @@ impl VarRenderer {
         target_color: &[f32],
         target_depth: &[f32],
     ) -> candle_core::Result<Tensor> {
-        let target_c = Tensor::from_slice(target_color, (self.height, self.width, 3), &self.device)?;
+        let target_c =
+            Tensor::from_slice(target_color, (self.height, self.width, 3), &self.device)?;
         let target_d = Tensor::from_slice(target_depth, (self.height, self.width), &self.device)?;
 
         // L1 color loss
@@ -279,7 +308,7 @@ impl TrueAutodiffTrainer {
     pub fn new(width: usize, height: usize) -> Self {
         Self {
             renderer: VarRenderer::new(width, height),
-            device: Device::new_metal(0).unwrap_or_else(|_| Device::Cpu),
+            device: crate::preferred_device(),
             lr_pos: 0.00016,
             lr_scale: 0.005,
             lr_opacity: 0.05,
@@ -326,7 +355,9 @@ impl TrueAutodiffTrainer {
 
         // === PARAMETER UPDATE ===
         // Apply gradient descent with learning rates
-        if let (Some(pg), Some(sg), Some(og), Some(cg)) = (pos_grad, scale_grad, opacity_grad, color_grad) {
+        if let (Some(pg), Some(sg), Some(og), Some(cg)) =
+            (pos_grad, scale_grad, opacity_grad, color_grad)
+        {
             gaussians.update_with_gradients(
                 pg,
                 sg,
@@ -357,7 +388,12 @@ impl TrueAutodiffTrainer {
         let num_frames = cameras.len();
 
         println!("\n=== TRUE Autodiff Training (with backward!) ===");
-        println!("Gaussians: {}, Frames: {}, Iterations: {}", gaussians.len(), num_frames, iterations);
+        println!(
+            "Gaussians: {}, Frames: {}, Iterations: {}",
+            gaussians.len(),
+            num_frames,
+            iterations
+        );
 
         for iter in 0..iterations {
             let frame_idx = iter % num_frames;
@@ -391,7 +427,7 @@ mod tests {
 
     #[test]
     fn test_var_gaussian() {
-        let device = Device::new_metal(0).unwrap_or_else(|_| Device::Cpu);
+        let device = crate::preferred_device();
 
         if !matches!(device, Device::Metal(_)) {
             return;

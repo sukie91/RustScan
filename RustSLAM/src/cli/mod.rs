@@ -15,13 +15,7 @@ use thiserror::Error;
 use crate::config::SlamConfig;
 use crate::core::{Camera, SE3};
 use crate::fusion::{
-    GaussianCamera,
-    GaussianMap,
-    GaussianMapper,
-    GaussianRenderer,
-    MapperConfig,
-    MeshExtractor,
-    MeshExtractionConfig,
+    GaussianCamera, GaussianMap, GaussianRenderer, MeshExtractionConfig, MeshExtractor,
 };
 use crate::io::{
     video_decoder as video, Dataset, DatasetConfig, EurocDataset, KittiDataset, TumRgbdDataset,
@@ -29,22 +23,18 @@ use crate::io::{
 use crate::tracker::VisualOdometry;
 use glam::{Mat4, Vec3};
 use pipeline_checkpoint::{
-    CameraCheckpoint,
-    KeyframeCheckpoint,
-    MapPointCheckpoint,
-    PipelineCheckpoint,
-    PipelineCheckpointError,
-    PoseCheckpoint,
-    SlamCheckpoint,
-    load_pipeline_checkpoint,
-    save_pipeline_checkpoint,
-    slam_frames_dir,
+    load_pipeline_checkpoint, save_pipeline_checkpoint, slam_frames_dir, CameraCheckpoint,
+    KeyframeCheckpoint, MapPointCheckpoint, PipelineCheckpoint, PipelineCheckpointError,
+    PoseCheckpoint, SlamCheckpoint,
 };
 
-mod slam_pipeline;
-mod pipeline_checkpoint;
 #[cfg(test)]
 mod integration_tests;
+mod pipeline_checkpoint;
+mod slam_pipeline;
+
+#[cfg(not(feature = "gpu"))]
+use crate::fusion::{GaussianMapper, MapperConfig};
 
 /// RustScan command-line arguments.
 #[derive(Parser, Debug)]
@@ -208,15 +198,27 @@ enum CliError {
     #[error("input path is not a file: {0}")]
     InputNotFile(PathBuf),
     #[error("failed to read config file {path}: {source}")]
-    ConfigRead { path: PathBuf, source: std::io::Error },
+    ConfigRead {
+        path: PathBuf,
+        source: std::io::Error,
+    },
     #[error("failed to parse config file {path}: {source}")]
-    ConfigParse { path: PathBuf, source: toml::de::Error },
+    ConfigParse {
+        path: PathBuf,
+        source: toml::de::Error,
+    },
     #[error("output path exists but is not a directory: {0}")]
     OutputNotDirectory(PathBuf),
     #[error("failed to create output directory {path}: {source}")]
-    OutputCreate { path: PathBuf, source: std::io::Error },
+    OutputCreate {
+        path: PathBuf,
+        source: std::io::Error,
+    },
     #[error("failed to write results to {path}: {source}")]
-    OutputWrite { path: PathBuf, source: std::io::Error },
+    OutputWrite {
+        path: PathBuf,
+        source: std::io::Error,
+    },
     #[error("pipeline failed: {0}")]
     Pipeline(String),
 }
@@ -238,9 +240,9 @@ impl CliError {
 
     fn error_type(&self) -> &'static str {
         match self {
-            CliError::InputNotProvided
-            | CliError::InputMissing(_)
-            | CliError::InputNotFile(_) => "InputError",
+            CliError::InputNotProvided | CliError::InputMissing(_) | CliError::InputNotFile(_) => {
+                "InputError"
+            }
             CliError::ConfigRead { .. } | CliError::ConfigParse { .. } => "ConfigError",
             CliError::OutputNotDirectory(_)
             | CliError::OutputCreate { .. }
@@ -251,9 +253,9 @@ impl CliError {
 
     fn component(&self) -> &'static str {
         match self {
-            CliError::InputNotProvided
-            | CliError::InputMissing(_)
-            | CliError::InputNotFile(_) => "cli",
+            CliError::InputNotProvided | CliError::InputMissing(_) | CliError::InputNotFile(_) => {
+                "cli"
+            }
             CliError::ConfigRead { .. } | CliError::ConfigParse { .. } => "config",
             CliError::OutputNotDirectory(_)
             | CliError::OutputCreate { .. }
@@ -264,15 +266,23 @@ impl CliError {
 
     fn suggestion(&self) -> &'static str {
         match self {
-            CliError::InputNotProvided => "Pass --input <video-file-or-dataset-dir> or set input in the TOML config.",
+            CliError::InputNotProvided => {
+                "Pass --input <video-file-or-dataset-dir> or set input in the TOML config."
+            }
             CliError::InputMissing(_) => "Verify the input path and ensure the file exists.",
             CliError::InputNotFile(_) => "Provide a valid video file path (not a directory).",
             CliError::ConfigRead { .. } => "Verify the config path and file permissions.",
             CliError::ConfigParse { .. } => "Fix TOML syntax and ensure fields match the schema.",
             CliError::OutputNotDirectory(_) => "Choose an output path that is a directory.",
-            CliError::OutputCreate { .. } => "Check write permissions or select a different output directory.",
-            CliError::OutputWrite { .. } => "Ensure the output directory is writable and has free space.",
-            CliError::Pipeline(_) => "Run with RUST_LOG=debug for diagnostics and verify dependencies (OpenCV, ffmpeg).",
+            CliError::OutputCreate { .. } => {
+                "Check write permissions or select a different output directory."
+            }
+            CliError::OutputWrite { .. } => {
+                "Ensure the output directory is writable and has free space."
+            }
+            CliError::Pipeline(_) => {
+                "Run with RUST_LOG=debug for diagnostics and verify dependencies (OpenCV, ffmpeg)."
+            }
         }
     }
 }
@@ -380,7 +390,14 @@ pub fn run() -> ExitCode {
     let config = match load_config(&cli) {
         Ok(config) => config,
         Err(err) => {
-            return handle_error(&err, start, None, cli.output_format, cli.output, config_path);
+            return handle_error(
+                &err,
+                start,
+                None,
+                cli.output_format,
+                cli.output,
+                config_path,
+            );
         }
     };
 
@@ -402,14 +419,28 @@ pub fn run() -> ExitCode {
     let resolved = match finalize_config(merged) {
         Ok(resolved) => resolved,
         Err(err) => {
-            return handle_error(&err, start, None, cli.output_format, cli.output, config_path);
+            return handle_error(
+                &err,
+                start,
+                None,
+                cli.output_format,
+                cli.output,
+                config_path,
+            );
         }
     };
 
     let output_dir = match ensure_output_dir(&resolved.output) {
         Ok(dir) => dir,
         Err(err) => {
-            return handle_error(&err, start, Some(&resolved), Some(resolved.output_format), Some(resolved.output.clone()), config_path);
+            return handle_error(
+                &err,
+                start,
+                Some(&resolved),
+                Some(resolved.output_format),
+                Some(resolved.output.clone()),
+                config_path,
+            );
         }
     };
 
@@ -418,14 +449,20 @@ pub fn run() -> ExitCode {
     info!("Output: {}", output_dir.display());
     debug!(
         "Loaded SLAM config camera: {}x{}",
-        resolved.slam.camera.width,
-        resolved.slam.camera.height
+        resolved.slam.camera.width, resolved.slam.camera.height
     );
 
     let pipeline_report = match run_pipeline(&resolved) {
         Ok(report) => report,
         Err(err) => {
-            return handle_error(&err, start, Some(&resolved), Some(resolved.output_format), Some(resolved.output.clone()), config_path);
+            return handle_error(
+                &err,
+                start,
+                Some(&resolved),
+                Some(resolved.output_format),
+                Some(resolved.output.clone()),
+                config_path,
+            );
         }
     };
 
@@ -445,7 +482,14 @@ pub fn run() -> ExitCode {
     };
 
     if let Err(err) = write_results(&results, &output_dir, resolved.output_format) {
-        return handle_error(&err, start, Some(&resolved), Some(resolved.output_format), Some(resolved.output.clone()), config_path);
+        return handle_error(
+            &err,
+            start,
+            Some(&resolved),
+            Some(resolved.output_format),
+            Some(resolved.output.clone()),
+            config_path,
+        );
     }
 
     if resolved.output_format == OutputFormat::Text {
@@ -457,13 +501,12 @@ pub fn run() -> ExitCode {
 
 fn load_config(cli: &CliArgs) -> Result<RustScanConfig, CliError> {
     if let Some(path) = &cli.config {
-        let content = fs::read_to_string(path)
-            .map_err(|source| CliError::ConfigRead {
-                path: path.clone(),
-                source,
-            })?;
-        let config: RustScanConfig = toml::from_str(&content)
-            .map_err(|source| CliError::ConfigParse {
+        let content = fs::read_to_string(path).map_err(|source| CliError::ConfigRead {
+            path: path.clone(),
+            source,
+        })?;
+        let config: RustScanConfig =
+            toml::from_str(&content).map_err(|source| CliError::ConfigParse {
                 path: path.clone(),
                 source,
             })?;
@@ -665,27 +708,29 @@ fn run_pipeline(config: &ResolvedConfig) -> Result<PipelineReport, CliError> {
         }
     };
 
-    let (slam, mut checkpoint_state) = match load_slam_from_checkpoint(&config.output, checkpoint.as_ref()) {
-        Some(slam) => {
-            info!("Stage 1/4: Input loading skipped (checkpoint)");
-            info!("Stage 2/4: SLAM skipped (checkpoint)");
-            (slam, checkpoint.unwrap_or_default())
-        }
-        None => {
-            let input = load_input_source(config)?;
-            let slam = run_slam_stage(input, config)?;
-            let checkpoint_state = save_slam_checkpoint(&config.output, &slam, checkpoint)
-                .map_err(|err| CliError::Pipeline(format!("Checkpoint save: {err}")))?;
-            (slam, checkpoint_state)
-        }
-    };
+    let (slam, mut checkpoint_state) =
+        match load_slam_from_checkpoint(&config.output, checkpoint.as_ref()) {
+            Some(slam) => {
+                info!("Stage 1/4: Input loading skipped (checkpoint)");
+                info!("Stage 2/4: SLAM skipped (checkpoint)");
+                (slam, checkpoint.unwrap_or_default())
+            }
+            None => {
+                let input = load_input_source(config)?;
+                let slam = run_slam_stage(input, config)?;
+                let checkpoint_state = save_slam_checkpoint(&config.output, &slam, checkpoint)
+                    .map_err(|err| CliError::Pipeline(format!("Checkpoint save: {err}")))?;
+                (slam, checkpoint_state)
+            }
+        };
     let camera_count = slam.keyframes.len();
     let gaussian = run_gaussian_stage(slam, config)?;
 
     // Write Gaussian positions into the SLAM checkpoint as map_points so that
     // RustViewer can display them without a separate scene.ply load.
-    checkpoint_state = update_stage_completion(&config.output, checkpoint_state, StageMarker::Gaussian)
-        .map_err(|err| CliError::Pipeline(format!("Checkpoint save: {err}")))?;
+    checkpoint_state =
+        update_stage_completion(&config.output, checkpoint_state, StageMarker::Gaussian)
+            .map_err(|err| CliError::Pipeline(format!("Checkpoint save: {err}")))?;
     if let Some(slam_ck) = checkpoint_state.slam.as_mut() {
         slam_ck.map_points = gaussian
             .map
@@ -703,10 +748,7 @@ fn run_pipeline(config: &ResolvedConfig) -> Result<PipelineReport, CliError> {
     let _ = update_stage_completion(&config.output, checkpoint_state, StageMarker::Mesh)
         .map_err(|err| CliError::Pipeline(format!("Checkpoint save: {err}")))?;
 
-    Ok(PipelineReport {
-        camera_count,
-        mesh,
-    })
+    Ok(PipelineReport { camera_count, mesh })
 }
 
 fn load_slam_from_checkpoint(
@@ -741,14 +783,12 @@ fn load_slam_from_checkpoint(
         let color = match fs::read(&path) {
             Ok(bytes) => bytes,
             Err(err) => {
-                warn!(
-                    "Failed to read keyframe {}: {}",
-                    keyframe.index, err
-                );
+                warn!("Failed to read keyframe {}: {}", keyframe.index, err);
                 return None;
             }
         };
-        let pose = SE3::from_rotation_translation(&keyframe.pose.rotation, &keyframe.pose.translation);
+        let pose =
+            SE3::from_rotation_translation(&keyframe.pose.rotation, &keyframe.pose.translation);
         keyframes.push(KeyframeSample {
             index: keyframe.index,
             timestamp: keyframe.timestamp,
@@ -768,7 +808,8 @@ fn load_slam_from_checkpoint(
                                 );
                                 return None;
                             }
-                            let mut depth = Vec::with_capacity(bytes.len() / std::mem::size_of::<f32>());
+                            let mut depth =
+                                Vec::with_capacity(bytes.len() / std::mem::size_of::<f32>());
                             for chunk in bytes.chunks_exact(std::mem::size_of::<f32>()) {
                                 let arr: [u8; 4] = [chunk[0], chunk[1], chunk[2], chunk[3]];
                                 depth.push(f32::from_le_bytes(arr));
@@ -836,9 +877,11 @@ fn save_slam_checkpoint(
             for value in depth {
                 bytes.extend_from_slice(&value.to_le_bytes());
             }
-            fs::write(&depth_full_path, bytes).map_err(|source| PipelineCheckpointError::Write {
-                path: depth_full_path.display().to_string(),
-                source,
+            fs::write(&depth_full_path, bytes).map_err(|source| {
+                PipelineCheckpointError::Write {
+                    path: depth_full_path.display().to_string(),
+                    source,
+                }
             })?;
             Some(
                 depth_full_path
@@ -902,10 +945,7 @@ fn update_stage_completion(
     Ok(checkpoint)
 }
 
-fn validate_slam_checkpoint(
-    output_dir: &Path,
-    checkpoint: &SlamCheckpoint,
-) -> Result<(), String> {
+fn validate_slam_checkpoint(output_dir: &Path, checkpoint: &SlamCheckpoint) -> Result<(), String> {
     if checkpoint.keyframes.is_empty() {
         return Err("no keyframes in checkpoint".to_string());
     }
@@ -921,8 +961,8 @@ fn validate_slam_checkpoint(
             return Err(format!("invalid keyframe dimensions {}", keyframe.index));
         }
         let path = resolve_checkpoint_path(output_dir, &keyframe.color_path);
-        let metadata = fs::metadata(&path)
-            .map_err(|_| format!("missing keyframe file {}", path.display()))?;
+        let metadata =
+            fs::metadata(&path).map_err(|_| format!("missing keyframe file {}", path.display()))?;
         let expected = keyframe
             .width
             .saturating_mul(keyframe.height)
@@ -942,7 +982,8 @@ fn validate_slam_checkpoint(
             let expected = keyframe
                 .width
                 .saturating_mul(keyframe.height)
-                .saturating_mul(std::mem::size_of::<f32>() as u32) as u64;
+                .saturating_mul(std::mem::size_of::<f32>() as u32)
+                as u64;
             if metadata.len() != expected {
                 return Err(format!(
                     "depth keyframe {} size mismatch (expected {}, got {})",
@@ -1096,8 +1137,7 @@ fn decode_video(config: &ResolvedConfig) -> Result<DecodedVideo, CliError> {
     info!("Stage 1/4: Video decode");
     debug!(
         "Video decoder config: cache_capacity={}, prefer_hardware={}",
-        config.video.cache_capacity,
-        config.video.prefer_hardware
+        config.video.cache_capacity, config.video.prefer_hardware
     );
 
     let mut decoder = video::VideoDecoder::open(
@@ -1110,7 +1150,11 @@ fn decode_video(config: &ResolvedConfig) -> Result<DecodedVideo, CliError> {
     .map_err(|err| CliError::Pipeline(format!("Video decode: {err}")))?;
 
     let info = decoder.info().clone();
-    let decoder_mode = if info.hardware_accel { "hardware" } else { "software" };
+    let decoder_mode = if info.hardware_accel {
+        "hardware"
+    } else {
+        "software"
+    };
     info!(
         "Video stream: {}x{}, codec={}, container={}, fps={:.2}, decoder={}, mode={}",
         info.width,
@@ -1156,7 +1200,6 @@ fn run_slam_from_video(
     config: &ResolvedConfig,
     stage_start: Instant,
 ) -> Result<SlamStageOutput, CliError> {
-
     let mut vo = VisualOdometry::with_params(decoded.camera, config.slam.tracker.clone());
     let keyframe_interval = config.slam.mapper.keyframe_interval.max(1);
     let max_keyframes = config.slam.mapper.max_keyframes.max(1);
@@ -1207,7 +1250,11 @@ fn run_slam_from_video(
             success_frames += 1;
             last_pose = result.pose;
         }
-        let pose = if result.success { result.pose } else { last_pose };
+        let pose = if result.success {
+            result.pose
+        } else {
+            last_pose
+        };
 
         if processed % keyframe_interval == 0 && keyframes.len() < max_keyframes {
             keyframes.push(KeyframeSample {
@@ -1300,7 +1347,11 @@ fn run_slam_from_dataset(
             success_frames += 1;
             last_pose = result.pose;
         }
-        let pose = if result.success { result.pose } else { last_pose };
+        let pose = if result.success {
+            result.pose
+        } else {
+            last_pose
+        };
 
         if processed % keyframe_interval == 0 && keyframes.len() < max_keyframes {
             keyframes.push(KeyframeSample {
@@ -1357,7 +1408,7 @@ fn run_slam_from_dataset(
 
 fn run_gaussian_stage(
     slam: SlamStageOutput,
-    _config: &ResolvedConfig,
+    config: &ResolvedConfig,
 ) -> Result<GaussianStageOutput, CliError> {
     info!("Stage 3/4: 3DGS mapping");
     let stage_start = Instant::now();
@@ -1371,66 +1422,207 @@ fn run_gaussian_stage(
         });
     }
 
-    let has_real_depth = slam.keyframes.iter().any(|kf| kf.depth.is_some());
-    if !has_real_depth {
-        warn!("No depth input; using synthetic depth for 3DGS mapping");
-    }
+    #[cfg(feature = "gpu")]
+    {
+        let slam_output = build_rustgs_slam_output(&slam, &config.output)?;
+        let mut training_config = rustgs::TrainingConfig::default();
+        let iterations = std::env::var("RUSTSCAN_GAUSSIAN_ITERATIONS")
+            .ok()
+            .or_else(|| std::env::var("RUSTSCAN_E2E_GAUSSIAN_ITERS").ok())
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(3_000)
+            .max(1);
+        training_config.iterations = iterations;
+        training_config.max_initial_gaussians = 100_000;
+        training_config.use_synthetic_depth = true;
 
-    let width = slam.camera.width as usize;
-    let height = slam.camera.height as usize;
-    let mut mapper_config = MapperConfig::default();
-    let target_gaussians = mapper_config.max_gaussians.max(1);
-    mapper_config.sampling_step = compute_sampling_step(width, height, target_gaussians);
-
-    let mut mapper = GaussianMapper::with_config(mapper_config.clone(), width, height);
-    let total_keyframes = slam.keyframes.len();
-    let log_interval = progress_interval(total_keyframes);
-
-    for (idx, keyframe) in slam.keyframes.iter().enumerate() {
-        let depth = keyframe.depth.clone().unwrap_or_else(|| {
-            synthetic_depth(
-                &keyframe.color,
-                keyframe.width as usize,
-                keyframe.height as usize,
-                mapper_config.min_depth,
-                mapper_config.max_depth,
-            )
-        });
-        let colors: Vec<[u8; 3]> = keyframe
-            .color
-            .chunks_exact(3)
-            .map(|c| [c[0], c[1], c[2]])
-            .collect();
-
-        let rotation = keyframe.pose.rotation();
-        let translation = keyframe.pose.translation();
-        let _ = mapper.update(
-            &depth,
-            &colors,
-            keyframe.width as usize,
-            keyframe.height as usize,
-            slam.camera.focal.x,
-            slam.camera.focal.y,
-            slam.camera.principal.x,
-            slam.camera.principal.y,
-            &rotation,
-            &translation,
+        info!(
+            "Delegating 3DGS training to RustGS (frames={}, iterations={})",
+            slam_output.num_poses(),
+            training_config.iterations,
         );
 
-        let processed = idx + 1;
-        if should_log_progress(processed, total_keyframes, log_interval) {
-            log_progress("3DGS", processed, total_keyframes, stage_start);
-        }
+        let trained = rustgs::train_from_slam(&slam_output, &training_config)
+            .map_err(|err| CliError::Pipeline(format!("RustGS training: {err}")))?;
+        let map = convert_rustgs_map(&trained);
+
+        log_progress(
+            "3DGS",
+            slam.keyframes.len(),
+            slam.keyframes.len(),
+            stage_start,
+        );
+        info!("3DGS training completed: gaussians={}", map.len());
+
+        return Ok(GaussianStageOutput {
+            map,
+            keyframes: slam.keyframes,
+            camera: slam.camera,
+        });
     }
 
-    log_progress("3DGS", total_keyframes, total_keyframes, stage_start);
-    info!("3DGS mapping completed: gaussians={}", mapper.map().len());
+    #[cfg(not(feature = "gpu"))]
+    {
+        let has_real_depth = slam.keyframes.iter().any(|kf| kf.depth.is_some());
+        if !has_real_depth {
+            warn!("No depth input; using synthetic depth for 3DGS mapping");
+        }
 
-    Ok(GaussianStageOutput {
-        map: mapper.map().clone(),
-        keyframes: slam.keyframes,
-        camera: slam.camera,
-    })
+        let width = slam.camera.width as usize;
+        let height = slam.camera.height as usize;
+        let mut mapper_config = MapperConfig::default();
+        let target_gaussians = mapper_config.max_gaussians.max(1);
+        mapper_config.sampling_step = compute_sampling_step(width, height, target_gaussians);
+
+        let mut mapper = GaussianMapper::with_config(mapper_config.clone(), width, height);
+        let total_keyframes = slam.keyframes.len();
+        let log_interval = progress_interval(total_keyframes);
+
+        for (idx, keyframe) in slam.keyframes.iter().enumerate() {
+            let depth = keyframe.depth.clone().unwrap_or_else(|| {
+                synthetic_depth(
+                    &keyframe.color,
+                    keyframe.width as usize,
+                    keyframe.height as usize,
+                    mapper_config.min_depth,
+                    mapper_config.max_depth,
+                )
+            });
+            let colors: Vec<[u8; 3]> = keyframe
+                .color
+                .chunks_exact(3)
+                .map(|c| [c[0], c[1], c[2]])
+                .collect();
+
+            let rotation = keyframe.pose.rotation();
+            let translation = keyframe.pose.translation();
+            let _ = mapper.update(
+                &depth,
+                &colors,
+                keyframe.width as usize,
+                keyframe.height as usize,
+                slam.camera.focal.x,
+                slam.camera.focal.y,
+                slam.camera.principal.x,
+                slam.camera.principal.y,
+                &rotation,
+                &translation,
+            );
+
+            let processed = idx + 1;
+            if should_log_progress(processed, total_keyframes, log_interval) {
+                log_progress("3DGS", processed, total_keyframes, stage_start);
+            }
+        }
+
+        log_progress("3DGS", total_keyframes, total_keyframes, stage_start);
+        info!("3DGS mapping completed: gaussians={}", mapper.map().len());
+
+        Ok(GaussianStageOutput {
+            map: mapper.map().clone(),
+            keyframes: slam.keyframes,
+            camera: slam.camera,
+        })
+    }
+}
+
+#[cfg(feature = "gpu")]
+fn build_rustgs_slam_output(
+    slam: &SlamStageOutput,
+    output_dir: &Path,
+) -> Result<rustgs::SlamOutput, CliError> {
+    let mut output = rustgs::SlamOutput::new(rustgs::Intrinsics::new(
+        slam.camera.focal.x,
+        slam.camera.focal.y,
+        slam.camera.principal.x,
+        slam.camera.principal.y,
+        slam.camera.width,
+        slam.camera.height,
+    ));
+
+    let frames_dir = slam_frames_dir(output_dir);
+    fs::create_dir_all(&frames_dir)
+        .map_err(|err| CliError::Pipeline(format!("prepare RustGS frame directory: {err}")))?;
+    for keyframe in &slam.keyframes {
+        let color_path = frames_dir.join(format!("frame_{:06}.rgb", keyframe.index));
+        let expected_color = (keyframe.width as usize)
+            .saturating_mul(keyframe.height as usize)
+            .saturating_mul(3);
+        if keyframe.color.len() != expected_color {
+            return Err(CliError::Pipeline(format!(
+                "keyframe {} RGB buffer size mismatch: got {}, expected {}",
+                keyframe.index,
+                keyframe.color.len(),
+                expected_color,
+            )));
+        }
+        fs::write(&color_path, &keyframe.color).map_err(|err| {
+            CliError::Pipeline(format!(
+                "write RustGS color frame {}: {err}",
+                color_path.display(),
+            ))
+        })?;
+
+        let pose = rustgs::SE3::from_rotation_translation(
+            &keyframe.pose.rotation(),
+            &keyframe.pose.translation(),
+        );
+        let mut scene_pose =
+            rustgs::ScenePose::new(keyframe.index as u64, color_path, pose, keyframe.timestamp);
+
+        if let Some(depth) = &keyframe.depth {
+            let depth_path = frames_dir.join(format!("frame_{:06}.depth", keyframe.index));
+            let expected_depth = (keyframe.width as usize).saturating_mul(keyframe.height as usize);
+            if depth.len() != expected_depth {
+                return Err(CliError::Pipeline(format!(
+                    "keyframe {} depth buffer size mismatch: got {}, expected {}",
+                    keyframe.index,
+                    depth.len(),
+                    expected_depth,
+                )));
+            }
+
+            let mut bytes = Vec::with_capacity(depth.len() * std::mem::size_of::<f32>());
+            for value in depth {
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
+            fs::write(&depth_path, bytes).map_err(|err| {
+                CliError::Pipeline(format!(
+                    "write RustGS depth frame {}: {err}",
+                    depth_path.display(),
+                ))
+            })?;
+
+            scene_pose = scene_pose.with_depth_path(depth_path);
+        }
+
+        output.add_pose(scene_pose);
+    }
+
+    Ok(output)
+}
+
+#[cfg(feature = "gpu")]
+fn convert_rustgs_map(source: &rustgs::GaussianMap) -> GaussianMap {
+    let mut map = GaussianMap::new(source.len().max(100_000));
+    for gaussian in source.gaussians() {
+        let converted = crate::fusion::gaussian::Gaussian3D {
+            position: gaussian.position,
+            scale: gaussian.scale,
+            rotation: gaussian.rotation,
+            opacity: gaussian.opacity,
+            color: gaussian.color,
+            features: gaussian.features.clone(),
+            state: match gaussian.state {
+                rustgs::GaussianState::New => crate::fusion::gaussian::GaussianState::New,
+                rustgs::GaussianState::Unstable => crate::fusion::gaussian::GaussianState::Unstable,
+                rustgs::GaussianState::Stable => crate::fusion::gaussian::GaussianState::Stable,
+            },
+        };
+        let _ = map.add(converted);
+    }
+    map.update_states();
+    map
 }
 
 fn run_mesh_stage(
@@ -1461,10 +1653,8 @@ fn run_mesh_stage(
         let (depth, color) = renderer.render_depth_and_color(&gaussian.map, &camera);
         let mat = keyframe.pose.to_matrix();
         let flat = [
-            mat[0][0], mat[0][1], mat[0][2], mat[0][3],
-            mat[1][0], mat[1][1], mat[1][2], mat[1][3],
-            mat[2][0], mat[2][1], mat[2][2], mat[2][3],
-            mat[3][0], mat[3][1], mat[3][2], mat[3][3],
+            mat[0][0], mat[0][1], mat[0][2], mat[0][3], mat[1][0], mat[1][1], mat[1][2], mat[1][3],
+            mat[2][0], mat[2][1], mat[2][2], mat[2][3], mat[3][0], mat[3][1], mat[3][2], mat[3][3],
         ];
         let extrinsics = Mat4::from_cols_array(&flat);
 
@@ -1548,6 +1738,7 @@ fn rgb_to_grayscale(rgb: &[u8], width: usize, height: usize) -> Vec<u8> {
     gray
 }
 
+#[cfg(not(feature = "gpu"))]
 fn synthetic_depth(
     color: &[u8],
     width: usize,
@@ -1575,6 +1766,7 @@ fn synthetic_depth(
     depth
 }
 
+#[cfg(not(feature = "gpu"))]
 fn compute_sampling_step(width: usize, height: usize, max_gaussians: usize) -> usize {
     let pixels = width.saturating_mul(height).max(1);
     let ratio = (pixels as f32 / max_gaussians.max(1) as f32).sqrt();
@@ -1637,9 +1829,15 @@ fn log_progress(stage: &str, processed: usize, total: usize, started_at: Instant
     let mem_mb = current_process_memory_mb();
     let gpu_util = current_gpu_utilization_percent();
 
-    let eta_label = eta_ms.map(|ms| format!("{ms}ms")).unwrap_or_else(|| "n/a".to_string());
-    let mem_label = mem_mb.map(|mb| format!("{mb:.1}MB")).unwrap_or_else(|| "n/a".to_string());
-    let gpu_label = gpu_util.map(|u| format!("{u:.1}%")).unwrap_or_else(|| "n/a".to_string());
+    let eta_label = eta_ms
+        .map(|ms| format!("{ms}ms"))
+        .unwrap_or_else(|| "n/a".to_string());
+    let mem_label = mem_mb
+        .map(|mb| format!("{mb:.1}MB"))
+        .unwrap_or_else(|| "n/a".to_string());
+    let gpu_label = gpu_util
+        .map(|u| format!("{u:.1}%"))
+        .unwrap_or_else(|| "n/a".to_string());
 
     if total > 0 {
         info!(
@@ -1686,7 +1884,11 @@ fn current_gpu_utilization_percent() -> Option<f32> {
     None
 }
 
-fn write_results(results: &ResultsJson, output_dir: &Path, format: OutputFormat) -> Result<(), CliError> {
+fn write_results(
+    results: &ResultsJson,
+    output_dir: &Path,
+    format: OutputFormat,
+) -> Result<(), CliError> {
     if format != OutputFormat::Json {
         return Ok(());
     }
@@ -1696,7 +1898,10 @@ fn write_results(results: &ResultsJson, output_dir: &Path, format: OutputFormat)
         .map_err(|err| CliError::Pipeline(format!("Failed to serialize results: {err}")))?;
 
     fs::write(&path, payload).map_err(|source| CliError::OutputWrite { path, source })?;
-    info!("Results written to {}", output_dir.join("results.json").display());
+    info!(
+        "Results written to {}",
+        output_dir.join("results.json").display()
+    );
 
     Ok(())
 }
@@ -1716,7 +1921,11 @@ fn print_text_summary(results: &ResultsJson) {
     println!("Mesh triangles: {}", results.mesh.triangle_count);
 }
 
-fn build_diagnostics(input: Option<&Path>, output: Option<&Path>, config: Option<&Path>) -> Diagnostics {
+fn build_diagnostics(
+    input: Option<&Path>,
+    output: Option<&Path>,
+    config: Option<&Path>,
+) -> Diagnostics {
     Diagnostics {
         os: std::env::consts::OS.to_string(),
         arch: std::env::consts::ARCH.to_string(),
@@ -1739,15 +1948,10 @@ fn handle_error(
     config_path: Option<PathBuf>,
 ) -> ExitCode {
     let input = resolved.map(|r| r.input.clone());
-    let output = resolved
-        .map(|r| r.output.clone())
-        .or(output_override);
+    let output = resolved.map(|r| r.output.clone()).or(output_override);
 
-    let diagnostics = build_diagnostics(
-        input.as_deref(),
-        output.as_deref(),
-        config_path.as_deref(),
-    );
+    let diagnostics =
+        build_diagnostics(input.as_deref(), output.as_deref(), config_path.as_deref());
 
     let error_info = ErrorInfo {
         error_type: err.error_type().to_string(),
@@ -1758,9 +1962,7 @@ fn handle_error(
 
     error!(
         "{}: {} (component: {})",
-        error_info.error_type,
-        error_info.root_cause,
-        error_info.component
+        error_info.error_type, error_info.root_cause, error_info.component
     );
 
     eprintln!("Error: {}", error_info.error_type);

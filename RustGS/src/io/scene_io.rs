@@ -30,9 +30,15 @@ impl Default for SceneMetadata {
 #[derive(Debug, Error)]
 pub enum SceneIoError {
     #[error("failed to write scene {path}: {source}")]
-    Write { path: String, source: std::io::Error },
+    Write {
+        path: String,
+        source: std::io::Error,
+    },
     #[error("failed to read scene {path}: {source}")]
-    Read { path: String, source: std::io::Error },
+    Read {
+        path: String,
+        source: std::io::Error,
+    },
     #[error("invalid scene format: {message}")]
     InvalidFormat { message: String },
     #[error("parse error: {0}")]
@@ -62,22 +68,30 @@ pub fn save_scene_ply(
         path: path.display().to_string(),
         source,
     })?;
-    writeln!(writer, "comment iterations {}", metadata.iterations).map_err(|source| SceneIoError::Write {
-        path: path.display().to_string(),
-        source,
+    writeln!(writer, "comment iterations {}", metadata.iterations).map_err(|source| {
+        SceneIoError::Write {
+            path: path.display().to_string(),
+            source,
+        }
     })?;
-    writeln!(writer, "comment final_loss {}", metadata.final_loss).map_err(|source| SceneIoError::Write {
-        path: path.display().to_string(),
-        source,
+    writeln!(writer, "comment final_loss {}", metadata.final_loss).map_err(|source| {
+        SceneIoError::Write {
+            path: path.display().to_string(),
+            source,
+        }
     })?;
-    writeln!(writer, "comment gaussian_count {}", metadata.gaussian_count).map_err(|source| SceneIoError::Write {
-        path: path.display().to_string(),
-        source,
+    writeln!(writer, "comment gaussian_count {}", metadata.gaussian_count).map_err(|source| {
+        SceneIoError::Write {
+            path: path.display().to_string(),
+            source,
+        }
     })?;
 
-    writeln!(writer, "element vertex {}", gaussians.len()).map_err(|source| SceneIoError::Write {
-        path: path.display().to_string(),
-        source,
+    writeln!(writer, "element vertex {}", gaussians.len()).map_err(|source| {
+        SceneIoError::Write {
+            path: path.display().to_string(),
+            source,
+        }
     })?;
     writeln!(writer, "property float x").map_err(|source| SceneIoError::Write {
         path: path.display().to_string(),
@@ -158,7 +172,8 @@ pub fn save_scene_ply(
             g.color[0],
             g.color[1],
             g.color[2],
-        ).map_err(|source| SceneIoError::Write {
+        )
+        .map_err(|source| SceneIoError::Write {
             path: path.display().to_string(),
             source,
         })?;

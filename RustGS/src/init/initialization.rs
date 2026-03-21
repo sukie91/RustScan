@@ -7,8 +7,8 @@
 use glam::Vec3;
 use kiddo::{KdTree, SquaredEuclidean};
 
-use crate::render::tiled_renderer::Gaussian;
 use crate::core::Gaussian3D;
+use crate::render::tiled_renderer::Gaussian;
 
 #[cfg(feature = "gpu")]
 use candle_core::Device;
@@ -132,24 +132,13 @@ pub fn initialize_trainable_gaussians_from_points(
 
     for g in gaussians {
         positions.extend_from_slice(&g.position);
-        scales.extend_from_slice(&[
-            g.scale[0].ln(),
-            g.scale[1].ln(),
-            g.scale[2].ln(),
-        ]);
+        scales.extend_from_slice(&[g.scale[0].ln(), g.scale[1].ln(), g.scale[2].ln()]);
         rotations.extend_from_slice(&g.rotation);
         opacities.push(opacity_to_logit(g.opacity));
         colors.extend_from_slice(&g.color);
     }
 
-    TrainableGaussians::new(
-        &positions,
-        &scales,
-        &rotations,
-        &opacities,
-        &colors,
-        device,
-    )
+    TrainableGaussians::new(&positions, &scales, &rotations, &opacities, &colors, device)
 }
 
 fn compute_scales(points: &[Vec3], config: &GaussianInitConfig) -> Vec<f32> {
@@ -176,8 +165,7 @@ fn compute_scales(points: &[Vec3], config: &GaussianInitConfig) -> Vec<f32> {
         }
 
         let dist = nearest.map(|d| d.sqrt()).unwrap_or(config.min_scale);
-        let scale = (dist * config.scale_factor)
-            .clamp(config.min_scale, config.max_scale);
+        let scale = (dist * config.scale_factor).clamp(config.min_scale, config.max_scale);
         scales.push(scale);
     }
 
@@ -224,9 +212,7 @@ mod tests {
 
     #[test]
     fn test_initialize_gaussian3d_count() {
-        let points = vec![
-            ([0.0, 0.0, 1.0], None),
-        ];
+        let points = vec![([0.0, 0.0, 1.0], None)];
 
         let config = GaussianInitConfig::default();
         let gaussians = initialize_gaussian3d_from_points(&points, &config);
@@ -235,9 +221,7 @@ mod tests {
 
     #[test]
     fn test_initialize_gaussians_defaults() {
-        let points = vec![
-            ([0.0, 0.0, 1.0], None),
-        ];
+        let points = vec![([0.0, 0.0, 1.0], None)];
 
         let config = GaussianInitConfig::default();
         let gaussians = initialize_gaussians_from_points(&points, &config);

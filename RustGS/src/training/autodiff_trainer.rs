@@ -4,7 +4,7 @@
 //! Based on: "3D Gaussian Splatting for Real-Time Radiance Field Rendering"
 
 #[cfg(feature = "gpu")]
-use candle_core::{Tensor, Device, Var};
+use candle_core::{Device, Tensor, Var};
 
 /// Trainable Gaussian parameters with gradient tracking via `Var`.
 #[cfg(feature = "gpu")]
@@ -88,7 +88,13 @@ impl DiffGaussian {
 
     /// All trainable `Var`s (for manual SGD updates).
     pub fn vars(&self) -> [&Var; 5] {
-        [&self.pos, &self.scale, &self.rot, &self.opacity, &self.color]
+        [
+            &self.pos,
+            &self.scale,
+            &self.rot,
+            &self.opacity,
+            &self.color,
+        ]
     }
 }
 
@@ -113,7 +119,14 @@ pub struct DiffRenderCamera {
 
 impl DiffRenderCamera {
     pub fn new(fx: f32, fy: f32, cx: f32, cy: f32, width: usize, height: usize) -> Self {
-        Self { fx, fy, cx, cy, width, height }
+        Self {
+            fx,
+            fy,
+            cx,
+            cy,
+            width,
+            height,
+        }
     }
 }
 
@@ -143,8 +156,12 @@ pub struct DiffSplat {
 #[cfg(feature = "gpu")]
 impl DiffSplat {
     pub fn new(width: usize, height: usize) -> Self {
-        let device = Device::new_metal(0).unwrap_or(Device::Cpu);
-        Self { device, width, height }
+        let device = crate::preferred_device();
+        Self {
+            device,
+            width,
+            height,
+        }
     }
 
     /// Forward pass: render Gaussians to color + depth images.
@@ -164,7 +181,10 @@ impl DiffSplat {
         let rendered_color = self.alpha_blend(color, &opacity, &weights)?;
         let rendered_depth = self.depth_blend(&depth, &opacity, &weights)?;
 
-        Ok(DiffRendered { color: rendered_color, depth: rendered_depth })
+        Ok(DiffRendered {
+            color: rendered_color,
+            depth: rendered_depth,
+        })
     }
 
     fn project(
@@ -182,8 +202,14 @@ impl DiffSplat {
         let cy = Tensor::new(camera.cy, &self.device)?;
 
         let z_safe = z.clamp(1e-6f64, f64::MAX)?;
-        let u = x.broadcast_mul(&fx)?.broadcast_div(&z_safe)?.broadcast_add(&cx)?;
-        let v = y.broadcast_mul(&fy)?.broadcast_div(&z_safe)?.broadcast_add(&cy)?;
+        let u = x
+            .broadcast_mul(&fx)?
+            .broadcast_div(&z_safe)?
+            .broadcast_add(&cx)?;
+        let v = y
+            .broadcast_mul(&fy)?
+            .broadcast_div(&z_safe)?
+            .broadcast_add(&cy)?;
 
         Ok((u, v, z))
     }
@@ -230,7 +256,8 @@ impl DiffSplat {
         target_color: &[f32],
         target_depth: &[f32],
     ) -> candle_core::Result<DiffLoss> {
-        let target_c = Tensor::from_slice(target_color, (self.height, self.width, 3), &self.device)?;
+        let target_c =
+            Tensor::from_slice(target_color, (self.height, self.width, 3), &self.device)?;
         let target_d = Tensor::from_slice(target_depth, (self.height, self.width), &self.device)?;
 
         let color_loss = rendered.color.sub(&target_c)?.abs()?.sum(0)?;
@@ -243,7 +270,11 @@ impl DiffSplat {
             .broadcast_mul(&color_weight)?
             .add(&depth_loss.broadcast_mul(&depth_weight)?)?;
 
-        Ok(DiffLoss { total, color_loss, depth_loss })
+        Ok(DiffLoss {
+            total,
+            color_loss,
+            depth_loss,
+        })
     }
 }
 
@@ -257,7 +288,7 @@ pub struct AutodiffTrainer {
 #[cfg(feature = "gpu")]
 impl AutodiffTrainer {
     pub fn new(width: usize, height: usize) -> Self {
-        let device = Device::new_metal(0).unwrap_or(Device::Cpu);
+        let device = crate::preferred_device();
         Self {
             renderer: DiffSplat::new(width, height),
             device,
@@ -278,7 +309,9 @@ impl AutodiffTrainer {
     ) -> candle_core::Result<f32> {
         // Forward
         let rendered = self.renderer.render(gaussians, camera)?;
-        let loss = self.renderer.compute_loss(&rendered, target_color, target_depth)?;
+        let loss = self
+            .renderer
+            .compute_loss(&rendered, target_color, target_depth)?;
 
         // Backward — returns GradStore (candle 0.9.x)
         let grads = loss.total.backward()?;
@@ -306,18 +339,15 @@ impl AutodiffTrainer {
         iterations: usize,
     ) -> candle_core::Result<()> {
         let num_frames = cameras.len();
-        println!("AutodiffTrainer: {} iterations over {} frames", iterations, num_frames);
+        println!(
+            "AutodiffTrainer: {} iterations over {} frames",
+            iterations, num_frames
+        );
 
         for iter in 0..iterations {
             let f = iter % num_frames;
-            let loss = self.training_step(
-                gaussians,
-                &cameras[f],
-                colors[f],
-                depths[f],
-                1.6e-4,
-                5e-3,
-            )?;
+            let loss =
+                self.training_step(gaussians, &cameras[f], colors[f], depths[f], 1.6e-4, 5e-3)?;
             if iter % 10 == 0 {
                 println!("  iter {:5} | loss {:.6}", iter, loss);
             }
@@ -345,7 +375,7 @@ mod tests {
 
     #[test]
     fn test_diff_gaussian_creation() {
-        let device = Device::new_metal(0).unwrap_or(Device::Cpu);
+        let device = crate::preferred_device();
 
         let g = DiffGaussian::new(
             &[0.0, 0.0, 0.0],
