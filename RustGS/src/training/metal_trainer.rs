@@ -50,11 +50,30 @@ struct ProjectedGaussians {
     depth: Tensor,
     opacity: Tensor,
     colors: Tensor,
+    min_x: Tensor,
+    max_x: Tensor,
+    min_y: Tensor,
+    max_y: Tensor,
 }
 
 struct RenderedFrame {
     color: Tensor,
     depth: Tensor,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ScreenRect {
+    min_x: usize,
+    max_x: usize,
+    min_y: usize,
+    max_y: usize,
+}
+
+struct ChunkPixelWindow {
+    pixel_x: Tensor,
+    pixel_y: Tensor,
+    indices: Tensor,
+    pixel_count: usize,
 }
 
 struct MetalAdamState {
@@ -92,8 +111,6 @@ pub struct MetalTrainer {
     render_width: usize,
     render_height: usize,
     pixel_count: usize,
-    pixel_x: Tensor,
-    pixel_y: Tensor,
     chunk_size: usize,
     lr_pos: f32,
     lr_scale: f32,
@@ -286,15 +303,12 @@ impl MetalTrainer {
         let (render_width, render_height) =
             scaled_dimensions(input_width, input_height, config.metal_render_scale);
         let pixel_count = render_width * render_height;
-        let (pixel_x, pixel_y) = build_pixel_grids(render_width, render_height, &device)?;
 
         Ok(Self {
             device,
             render_width,
             render_height,
             pixel_count,
-            pixel_x,
-            pixel_y,
             chunk_size: config.metal_gaussian_chunk_size.max(1),
             lr_pos: config.lr_position,
             lr_scale: config.lr_scale,
@@ -612,6 +626,18 @@ impl MetalTrainer {
         let valid = z.ge(1e-4f64)?.to_dtype(DType::F32)?;
         let support_x = sx.affine(3.0, 0.0)?;
         let support_y = sy.affine(3.0, 0.0)?;
+        let min_x = u
+            .broadcast_sub(&support_x)?
+            .clamp(0.0f64, (camera.width.saturating_sub(1)) as f64)?;
+        let max_x = u
+            .broadcast_add(&support_x)?
+            .clamp(0.0f64, (camera.width.saturating_sub(1)) as f64)?;
+        let min_y = v
+            .broadcast_sub(&support_y)?
+            .clamp(0.0f64, (camera.height.saturating_sub(1)) as f64)?;
+        let max_y = v
+            .broadcast_add(&support_y)?
+            .clamp(0.0f64, (camera.height.saturating_sub(1)) as f64)?;
         let left_ok = u
             .broadcast_add(&support_x)?
             .ge(0.0f64)?
@@ -655,6 +681,10 @@ impl MetalTrainer {
             depth: z.index_select(&visible_idx, 0)?,
             opacity: opacity.index_select(&visible_idx, 0)?,
             colors: gaussians.colors().index_select(&visible_idx, 0)?,
+            min_x: min_x.index_select(&visible_idx, 0)?,
+            max_x: max_x.index_select(&visible_idx, 0)?,
+            min_y: min_y.index_select(&visible_idx, 0)?,
+            max_y: max_y.index_select(&visible_idx, 0)?,
         };
         self.synchronize_if_needed(should_profile)?;
         profile.sorting = sort_start.elapsed();
@@ -667,12 +697,22 @@ impl MetalTrainer {
         let mut depth_acc = Tensor::zeros((self.pixel_count,), DType::F32, &self.device)?;
         let mut alpha_acc = Tensor::zeros((self.pixel_count,), DType::F32, &self.device)?;
         let mut trans = Tensor::ones((self.pixel_count,), DType::F32, &self.device)?;
-        let trans_col = |t: &Tensor| t.reshape((self.pixel_count, 1));
 
         let total = projected.depth.dim(0)?;
         for start in (0..total).step_by(self.chunk_size) {
             let len = (total - start).min(self.chunk_size);
+            let Some(rect) = self.chunk_screen_rect(
+                &projected.min_x.narrow(0, start, len)?,
+                &projected.max_x.narrow(0, start, len)?,
+                &projected.min_y.narrow(0, start, len)?,
+                &projected.max_y.narrow(0, start, len)?,
+            )?
+            else {
+                continue;
+            };
+            let window = self.build_chunk_pixel_window(rect)?;
             let alpha = self.chunk_alpha(
+                &window,
                 &projected.u.narrow(0, start, len)?,
                 &projected.v.narrow(0, start, len)?,
                 &projected.sigma_x.narrow(0, start, len)?,
@@ -684,12 +724,27 @@ impl MetalTrainer {
                 &projected.colors.narrow(0, start, len)?,
                 &projected.depth.narrow(0, start, len)?,
             )?;
+            let trans_local = trans.index_select(&window.indices, 0)?;
+            let trans_local_col = trans_local.reshape((window.pixel_count, 1))?;
 
-            color_acc =
-                color_acc.broadcast_add(&chunk_color.broadcast_mul(&trans_col(&trans)?)?)?;
-            depth_acc = depth_acc.broadcast_add(&chunk_depth.broadcast_mul(&trans)?)?;
-            alpha_acc = alpha_acc.broadcast_add(&chunk_alpha.broadcast_mul(&trans)?)?;
-            trans = trans.broadcast_mul(&tail_trans)?;
+            color_acc = color_acc.index_add(
+                &window.indices,
+                &chunk_color.broadcast_mul(&trans_local_col)?,
+                0,
+            )?;
+            depth_acc = depth_acc.index_add(
+                &window.indices,
+                &chunk_depth.broadcast_mul(&trans_local)?,
+                0,
+            )?;
+            alpha_acc = alpha_acc.index_add(
+                &window.indices,
+                &chunk_alpha.broadcast_mul(&trans_local)?,
+                0,
+            )?;
+            let updated_trans_local = trans_local.broadcast_mul(&tail_trans)?;
+            let delta = updated_trans_local.sub(&trans_local)?;
+            trans = trans.index_add(&window.indices, &delta, 0)?;
         }
 
         let denom = alpha_acc.broadcast_add(&Tensor::new(1e-6f32, &self.device)?)?;
@@ -701,6 +756,7 @@ impl MetalTrainer {
 
     fn chunk_alpha(
         &self,
+        window: &ChunkPixelWindow,
         u: &Tensor,
         v: &Tensor,
         sigma_x: &Tensor,
@@ -708,11 +764,11 @@ impl MetalTrainer {
         opacity: &Tensor,
     ) -> candle_core::Result<Tensor> {
         let len = u.dim(0)?;
-        let dx = self
+        let dx = window
             .pixel_x
             .broadcast_sub(&u.reshape((len, 1))?)?
             .broadcast_div(&sigma_x.reshape((len, 1))?)?;
-        let dy = self
+        let dy = window
             .pixel_y
             .broadcast_sub(&v.reshape((len, 1))?)?
             .broadcast_div(&sigma_y.reshape((len, 1))?)?;
@@ -721,6 +777,74 @@ impl MetalTrainer {
             .exp()?
             .broadcast_mul(&opacity.reshape((len, 1))?)?
             .clamp(0.0, 0.99)
+    }
+
+    fn chunk_screen_rect(
+        &self,
+        min_x: &Tensor,
+        max_x: &Tensor,
+        min_y: &Tensor,
+        max_y: &Tensor,
+    ) -> candle_core::Result<Option<ScreenRect>> {
+        let min_x_values = min_x.to_vec1::<f32>()?;
+        let max_x_values = max_x.to_vec1::<f32>()?;
+        let min_y_values = min_y.to_vec1::<f32>()?;
+        let max_y_values = max_y.to_vec1::<f32>()?;
+        if min_x_values.is_empty() {
+            return Ok(None);
+        }
+
+        let min_x = min_x_values
+            .into_iter()
+            .fold(self.render_width.saturating_sub(1), |acc, value| {
+                acc.min(value.floor().max(0.0) as usize)
+            });
+        let max_x = max_x_values
+            .into_iter()
+            .fold(0usize, |acc, value| acc.max(value.ceil().max(0.0) as usize));
+        let min_y = min_y_values
+            .into_iter()
+            .fold(self.render_height.saturating_sub(1), |acc, value| {
+                acc.min(value.floor().max(0.0) as usize)
+            });
+        let max_y = max_y_values
+            .into_iter()
+            .fold(0usize, |acc, value| acc.max(value.ceil().max(0.0) as usize));
+
+        if min_x > max_x || min_y > max_y {
+            return Ok(None);
+        }
+
+        Ok(Some(ScreenRect {
+            min_x: min_x.min(self.render_width.saturating_sub(1)),
+            max_x: max_x.min(self.render_width.saturating_sub(1)),
+            min_y: min_y.min(self.render_height.saturating_sub(1)),
+            max_y: max_y.min(self.render_height.saturating_sub(1)),
+        }))
+    }
+
+    fn build_chunk_pixel_window(&self, rect: ScreenRect) -> candle_core::Result<ChunkPixelWindow> {
+        let width = rect.max_x - rect.min_x + 1;
+        let height = rect.max_y - rect.min_y + 1;
+        let mut xs = Vec::with_capacity(width * height);
+        let mut ys = Vec::with_capacity(width * height);
+        let mut indices = Vec::with_capacity(width * height);
+
+        for y in rect.min_y..=rect.max_y {
+            for x in rect.min_x..=rect.max_x {
+                xs.push(x as f32 + 0.5);
+                ys.push(y as f32 + 0.5);
+                indices.push((y * self.render_width + x) as u32);
+            }
+        }
+
+        let pixel_count = indices.len();
+        Ok(ChunkPixelWindow {
+            pixel_x: Tensor::from_slice(&xs, (1, pixel_count), &self.device)?,
+            pixel_y: Tensor::from_slice(&ys, (1, pixel_count), &self.device)?,
+            indices: Tensor::from_slice(&indices, pixel_count, &self.device)?,
+            pixel_count,
+        })
     }
 
     fn integrate_chunk(
@@ -1033,25 +1157,6 @@ fn normalize_rotations(rotations: &Var) -> candle_core::Result<()> {
     Ok(())
 }
 
-fn build_pixel_grids(
-    width: usize,
-    height: usize,
-    device: &Device,
-) -> candle_core::Result<(Tensor, Tensor)> {
-    let mut xs = Vec::with_capacity(width * height);
-    let mut ys = Vec::with_capacity(width * height);
-    for y in 0..height {
-        for x in 0..width {
-            xs.push(x as f32 + 0.5);
-            ys.push(y as f32 + 0.5);
-        }
-    }
-    Ok((
-        Tensor::from_slice(&xs, (1, width * height), device)?,
-        Tensor::from_slice(&ys, (1, width * height), device)?,
-    ))
-}
-
 fn scale_camera(
     src: &DiffCamera,
     width: usize,
@@ -1249,6 +1354,18 @@ mod tests {
         let profile = MetalStepProfile::from_render(render);
         assert_eq!(profile.visible_gaussians, 12);
         assert_eq!(profile.total_gaussians, 40);
+    }
+
+    #[test]
+    fn chunk_rect_area_matches_bounds() {
+        let rect = ScreenRect {
+            min_x: 2,
+            max_x: 5,
+            min_y: 3,
+            max_y: 4,
+        };
+        assert_eq!(rect.max_x - rect.min_x + 1, 4);
+        assert_eq!(rect.max_y - rect.min_y + 1, 2);
     }
 
     #[test]
