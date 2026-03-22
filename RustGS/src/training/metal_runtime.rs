@@ -2,7 +2,8 @@ use std::collections::HashMap;
 use std::mem::size_of;
 use std::sync::{Arc, RwLockReadGuard};
 
-use candle_core::{DType, Device, Storage, Tensor};
+use candle_core::op::BackpropOp;
+use candle_core::{DType, Device, MetalStorage, Shape, Storage, Tensor};
 use candle_metal_kernels::metal::{Buffer, ComputePipeline};
 use objc2_foundation::NSRange;
 use objc2_metal::MTLSize;
@@ -25,6 +26,94 @@ kernel void fill_u32(
         return;
     }
     dst[gid] = value;
+}
+"#;
+
+const METAL_TILE_FORWARD_KERNEL: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+struct CameraUniform {
+    float fx;
+    float fy;
+    float cx;
+    float cy;
+    uint width;
+    uint height;
+    uint tile_size;
+    uint num_tiles_x;
+};
+
+struct TileRecord {
+    uint start;
+    uint count;
+    uint _pad0;
+    uint _pad1;
+};
+
+struct ProjectedGaussian {
+    float u;
+    float v;
+    float sigma_x;
+    float sigma_y;
+    float depth;
+    float opacity;
+    float color_r;
+    float color_g;
+    float color_b;
+    float _pad0;
+    float _pad1;
+    float _pad2;
+};
+
+kernel void tile_forward(
+    constant CameraUniform& camera [[buffer(0)]],
+    device const TileRecord* tile_records [[buffer(1)]],
+    device const uint* tile_indices [[buffer(2)]],
+    device const ProjectedGaussian* gaussians [[buffer(3)]],
+    device float* out_color [[buffer(4)]],
+    device float* out_depth [[buffer(5)]],
+    device float* out_alpha [[buffer(6)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    if (gid.x >= camera.width || gid.y >= camera.height) {
+        return;
+    }
+
+    const uint pixel_idx = gid.y * camera.width + gid.x;
+    const uint tile_x = gid.x / camera.tile_size;
+    const uint tile_y = gid.y / camera.tile_size;
+    const uint tile_idx = tile_y * camera.num_tiles_x + tile_x;
+    const TileRecord record = tile_records[tile_idx];
+
+    const float px = float(gid.x) + 0.5f;
+    const float py = float(gid.y) + 0.5f;
+    float trans = 1.0f;
+    float3 color = float3(0.0f);
+    float depth = 0.0f;
+    float alpha_acc = 0.0f;
+
+    for (uint i = 0; i < record.count; ++i) {
+        const ProjectedGaussian gaussian = gaussians[tile_indices[record.start + i]];
+        const float dx = (px - gaussian.u) / gaussian.sigma_x;
+        const float dy = (py - gaussian.v) / gaussian.sigma_y;
+        const float exponent = -0.5f * (dx * dx + dy * dy);
+        const float alpha = clamp(exp(exponent) * gaussian.opacity, 0.0f, 0.99f);
+        const float contrib = alpha * trans;
+        color += contrib * float3(gaussian.color_r, gaussian.color_g, gaussian.color_b);
+        depth += contrib * gaussian.depth;
+        alpha_acc += contrib;
+        trans *= (1.0f - alpha);
+        if (trans <= 1e-4f) {
+            break;
+        }
+    }
+
+    out_color[pixel_idx * 3 + 0] = clamp(color.x, 0.0f, 1.0f);
+    out_color[pixel_idx * 3 + 1] = clamp(color.y, 0.0f, 1.0f);
+    out_color[pixel_idx * 3 + 2] = clamp(color.z, 0.0f, 1.0f);
+    out_alpha[pixel_idx] = alpha_acc;
+    out_depth[pixel_idx] = depth / (alpha_acc + 1e-6f);
 }
 "#;
 
@@ -53,18 +142,84 @@ struct MetalCameraUniform {
     width: u32,
     height: u32,
     tile_size: u32,
-    _padding: u32,
+    num_tiles_x: u32,
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
-struct MetalTileRecord {
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct MetalTileDispatchRecord {
     start: u32,
     count: u32,
-    min_x: u32,
-    max_x: u32,
-    min_y: u32,
-    max_y: u32,
+    _pad0: u32,
+    _pad1: u32,
+}
+
+impl MetalTileDispatchRecord {
+    pub(crate) fn new(start: u32, count: u32) -> Self {
+        Self {
+            start,
+            count,
+            ..Default::default()
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct MetalProjectedGaussian {
+    pub u: f32,
+    pub v: f32,
+    pub sigma_x: f32,
+    pub sigma_y: f32,
+    pub depth: f32,
+    pub opacity: f32,
+    pub color_r: f32,
+    pub color_g: f32,
+    pub color_b: f32,
+    _pad0: f32,
+    _pad1: f32,
+    _pad2: f32,
+}
+
+impl MetalProjectedGaussian {
+    pub(crate) fn new(
+        u: f32,
+        v: f32,
+        sigma_x: f32,
+        sigma_y: f32,
+        depth: f32,
+        opacity: f32,
+        color_r: f32,
+        color_g: f32,
+        color_b: f32,
+    ) -> Self {
+        Self {
+            u,
+            v,
+            sigma_x,
+            sigma_y,
+            depth,
+            opacity,
+            color_r,
+            color_g,
+            color_b,
+            ..Default::default()
+        }
+    }
+}
+
+pub(crate) struct NativeForwardFrame {
+    pub color: Tensor,
+    pub depth: Tensor,
+    pub alpha: Tensor,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct NativeForwardProfile {
+    pub setup: std::time::Duration,
+    pub staging: std::time::Duration,
+    pub kernel: std::time::Duration,
+    pub total: std::time::Duration,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -72,6 +227,10 @@ pub(crate) enum MetalBufferSlot {
     CameraUniforms,
     TileMetadata,
     TileIndices,
+    ProjectedGaussians,
+    OutputColor,
+    OutputDepth,
+    OutputAlpha,
 }
 
 impl MetalBufferSlot {
@@ -80,6 +239,10 @@ impl MetalBufferSlot {
             Self::CameraUniforms => "camera_uniforms",
             Self::TileMetadata => "tile_metadata",
             Self::TileIndices => "tile_indices",
+            Self::ProjectedGaussians => "projected_gaussians",
+            Self::OutputColor => "output_color",
+            Self::OutputDepth => "output_depth",
+            Self::OutputAlpha => "output_alpha",
         }
     }
 }
@@ -87,18 +250,21 @@ impl MetalBufferSlot {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum MetalKernel {
     FillU32,
+    TileForward,
 }
 
 impl MetalKernel {
     fn function_name(self) -> &'static str {
         match self {
             Self::FillU32 => "fill_u32",
+            Self::TileForward => "tile_forward",
         }
     }
 
     fn source(self) -> &'static str {
         match self {
             Self::FillU32 => METAL_FILL_U32_KERNEL,
+            Self::TileForward => METAL_TILE_FORWARD_KERNEL,
         }
     }
 }
@@ -251,7 +417,7 @@ impl MetalRuntime {
             MetalBufferSlot::TileMetadata,
             self.tile_windows
                 .len()
-                .saturating_mul(size_of::<MetalTileRecord>()),
+                .saturating_mul(size_of::<MetalTileDispatchRecord>()),
         )?;
         self.ensure_buffer(
             MetalBufferSlot::TileIndices,
@@ -281,7 +447,7 @@ impl MetalRuntime {
             width: camera.width as u32,
             height: camera.height as u32,
             tile_size: METAL_TILE_SIZE as u32,
-            _padding: 0,
+            num_tiles_x: self.num_tiles_x as u32,
         };
         self.write_struct(MetalBufferSlot::CameraUniforms, &camera_uniform)
     }
@@ -318,6 +484,150 @@ impl MetalRuntime {
             opacities: self.bind_tensor(gaussians.opacities.as_tensor())?,
             colors: self.bind_tensor(gaussians.colors())?,
         })
+    }
+
+    pub(crate) fn reserve_forward_buffers(
+        &mut self,
+        gaussian_count: usize,
+        tile_ref_count: usize,
+        pixel_count: usize,
+    ) -> candle_core::Result<()> {
+        self.ensure_buffer(
+            MetalBufferSlot::ProjectedGaussians,
+            gaussian_count.saturating_mul(size_of::<MetalProjectedGaussian>()),
+        )?;
+        self.ensure_buffer(
+            MetalBufferSlot::TileMetadata,
+            self.tile_windows
+                .len()
+                .saturating_mul(size_of::<MetalTileDispatchRecord>()),
+        )?;
+        self.ensure_buffer(
+            MetalBufferSlot::TileIndices,
+            tile_ref_count.saturating_mul(size_of::<u32>()),
+        )?;
+        self.ensure_buffer(
+            MetalBufferSlot::OutputColor,
+            pixel_count
+                .saturating_mul(3)
+                .saturating_mul(size_of::<f32>()),
+        )?;
+        self.ensure_buffer(
+            MetalBufferSlot::OutputDepth,
+            pixel_count.saturating_mul(size_of::<f32>()),
+        )?;
+        self.ensure_buffer(
+            MetalBufferSlot::OutputAlpha,
+            pixel_count.saturating_mul(size_of::<f32>()),
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn rasterize_forward(
+        &mut self,
+        gaussians: &[MetalProjectedGaussian],
+        tile_records: &[MetalTileDispatchRecord],
+        tile_indices: &[u32],
+        render_width: usize,
+        render_height: usize,
+    ) -> candle_core::Result<(NativeForwardFrame, NativeForwardProfile)> {
+        let total_start = std::time::Instant::now();
+        let pixel_count = render_width.saturating_mul(render_height);
+        let setup_start = std::time::Instant::now();
+        self.reserve_forward_buffers(gaussians.len(), tile_indices.len(), pixel_count)?;
+        let pipeline = self.ensure_pipeline(MetalKernel::TileForward)?.clone();
+        let color_buffer = self
+            .buffer_handle(MetalBufferSlot::OutputColor)?
+            .cloned()
+            .ok_or_else(|| candle_core::Error::Msg("missing output color buffer".into()))?;
+        let depth_buffer = self
+            .buffer_handle(MetalBufferSlot::OutputDepth)?
+            .cloned()
+            .ok_or_else(|| candle_core::Error::Msg("missing output depth buffer".into()))?;
+        let alpha_buffer = self
+            .buffer_handle(MetalBufferSlot::OutputAlpha)?
+            .cloned()
+            .ok_or_else(|| candle_core::Error::Msg("missing output alpha buffer".into()))?;
+        let tile_buffer = self
+            .buffer_handle(MetalBufferSlot::TileMetadata)?
+            .cloned()
+            .ok_or_else(|| candle_core::Error::Msg("missing tile metadata buffer".into()))?;
+        let tile_index_buffer = self
+            .buffer_handle(MetalBufferSlot::TileIndices)?
+            .cloned()
+            .ok_or_else(|| candle_core::Error::Msg("missing tile index buffer".into()))?;
+        let gaussian_buffer = self
+            .buffer_handle(MetalBufferSlot::ProjectedGaussians)?
+            .cloned()
+            .ok_or_else(|| candle_core::Error::Msg("missing gaussian buffer".into()))?;
+        let setup = setup_start.elapsed();
+
+        let staging_start = std::time::Instant::now();
+        self.write_slice(MetalBufferSlot::ProjectedGaussians, gaussians)?;
+        self.write_slice(MetalBufferSlot::TileMetadata, tile_records)?;
+        self.write_slice(MetalBufferSlot::TileIndices, tile_indices)?;
+        let staging = staging_start.elapsed();
+
+        let kernel_start = std::time::Instant::now();
+        let metal = self.device.as_metal_device()?;
+        let encoder = metal.command_encoder()?;
+        encoder.set_label(MetalKernel::TileForward.function_name());
+        encoder.set_compute_pipeline_state(&pipeline);
+        encoder.set_buffer(
+            0,
+            self.buffer_handle(MetalBufferSlot::CameraUniforms)?
+                .map(|buffer| buffer.as_ref()),
+            0,
+        );
+        encoder.set_buffer(1, Some(tile_buffer.as_ref()), 0);
+        encoder.set_buffer(2, Some(tile_index_buffer.as_ref()), 0);
+        encoder.set_buffer(3, Some(gaussian_buffer.as_ref()), 0);
+        encoder.set_buffer(4, Some(color_buffer.as_ref()), 0);
+        encoder.set_buffer(5, Some(depth_buffer.as_ref()), 0);
+        encoder.set_buffer(6, Some(alpha_buffer.as_ref()), 0);
+        let threads_per_group = tile_group_dims(&pipeline);
+        encoder.dispatch_threads(
+            MTLSize {
+                width: render_width,
+                height: render_height,
+                depth: 1,
+            },
+            threads_per_group,
+        );
+        drop(encoder);
+        self.device.synchronize()?;
+        let kernel = kernel_start.elapsed();
+
+        let frame = NativeForwardFrame {
+            color: self.tensor_from_buffer(
+                MetalBufferSlot::OutputColor,
+                pixel_count.saturating_mul(3),
+                DType::F32,
+                (pixel_count, 3),
+            )?,
+            depth: self.tensor_from_buffer(
+                MetalBufferSlot::OutputDepth,
+                pixel_count,
+                DType::F32,
+                (pixel_count,),
+            )?,
+            alpha: self.tensor_from_buffer(
+                MetalBufferSlot::OutputAlpha,
+                pixel_count,
+                DType::F32,
+                (pixel_count,),
+            )?,
+        };
+
+        Ok((
+            frame,
+            NativeForwardProfile {
+                setup,
+                staging,
+                kernel,
+                total: total_start.elapsed(),
+            },
+        ))
     }
 
     pub(crate) fn dispatch_fill_u32(
@@ -382,6 +692,14 @@ impl MetalRuntime {
         Ok(values.to_vec())
     }
 
+    fn buffer_handle(&self, slot: MetalBufferSlot) -> candle_core::Result<Option<&Arc<Buffer>>> {
+        Ok(self
+            .buffers
+            .get(&slot)
+            .map(|buffer| buffer.backing.as_ref())
+            .flatten())
+    }
+
     fn ensure_pipeline(&mut self, kernel: MetalKernel) -> candle_core::Result<&ComputePipeline> {
         if !self.pipelines.contains_key(&kernel) {
             let metal = self.device.as_metal_device()?;
@@ -428,6 +746,30 @@ impl MetalRuntime {
         Ok(())
     }
 
+    fn tensor_from_buffer<S: Into<Shape>>(
+        &self,
+        slot: MetalBufferSlot,
+        element_count: usize,
+        dtype: DType,
+        shape: S,
+    ) -> candle_core::Result<Tensor> {
+        let Some(buffer) = self
+            .buffers
+            .get(&slot)
+            .and_then(|buffer| buffer.backing.as_ref().cloned())
+        else {
+            candle_core::bail!("buffer {:?} is not backed by Metal", slot);
+        };
+        let metal = self.device.as_metal_device()?.clone();
+        let storage = Storage::Metal(MetalStorage::new(buffer, metal, element_count, dtype));
+        Ok(Tensor::from_storage(
+            storage,
+            shape,
+            BackpropOp::none(),
+            false,
+        ))
+    }
+
     fn write_struct<T: Copy>(
         &mut self,
         slot: MetalBufferSlot,
@@ -435,6 +777,17 @@ impl MetalRuntime {
     ) -> candle_core::Result<()> {
         let data =
             unsafe { std::slice::from_raw_parts((value as *const T).cast::<u8>(), size_of::<T>()) };
+        self.write_bytes(slot, data)
+    }
+
+    fn write_slice<T: Copy>(
+        &mut self,
+        slot: MetalBufferSlot,
+        values: &[T],
+    ) -> candle_core::Result<()> {
+        let data = unsafe {
+            std::slice::from_raw_parts(values.as_ptr().cast::<u8>(), std::mem::size_of_val(values))
+        };
         self.write_bytes(slot, data)
     }
 
@@ -456,6 +809,18 @@ impl MetalRuntime {
         }
         buffer.did_modify_range(NSRange::new(0, data.len()));
         Ok(())
+    }
+}
+
+fn tile_group_dims(pipeline: &ComputePipeline) -> MTLSize {
+    let max_threads = pipeline.max_total_threads_per_threadgroup().max(1);
+    let side = (max_threads as f64).sqrt().floor() as usize;
+    let width = side.clamp(1, METAL_TILE_SIZE);
+    let height = (max_threads / width).max(1).min(METAL_TILE_SIZE);
+    MTLSize {
+        width,
+        height,
+        depth: 1,
     }
 }
 

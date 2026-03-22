@@ -16,7 +16,10 @@ use crate::{GaussianMap, TrainingDataset, TrainingError};
 use super::data_loading::{
     load_training_data, map_from_trainable, trainable_from_map, LoadedTrainingData,
 };
-use super::metal_runtime::{ChunkPixelWindow, MetalBufferSlot, MetalRuntime, METAL_TILE_SIZE};
+use super::metal_runtime::{
+    ChunkPixelWindow, MetalBufferSlot, MetalProjectedGaussian, MetalRuntime,
+    MetalTileDispatchRecord, METAL_TILE_SIZE,
+};
 use super::TrainingConfig;
 
 #[cfg(test)]
@@ -63,6 +66,7 @@ struct ProjectedGaussians {
 struct RenderedFrame {
     color: Tensor,
     depth: Tensor,
+    alpha: Tensor,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -83,6 +87,17 @@ struct TileBinningStats {
     active_tiles: usize,
     tile_gaussian_refs: usize,
     max_gaussians_per_tile: usize,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct NativeParityProfile {
+    setup: Duration,
+    staging: Duration,
+    kernel: Duration,
+    total: Duration,
+    color_max_abs: f32,
+    depth_max_abs: f32,
+    alpha_max_abs: f32,
 }
 
 struct MetalAdamState {
@@ -256,6 +271,7 @@ struct MetalRenderProfile {
     projection: Duration,
     sorting: Duration,
     rasterization: Duration,
+    native_forward: Option<NativeParityProfile>,
     visible_gaussians: usize,
     total_gaussians: usize,
     active_tiles: usize,
@@ -268,6 +284,7 @@ struct MetalStepProfile {
     projection: Duration,
     sorting: Duration,
     rasterization: Duration,
+    native_forward: Option<NativeParityProfile>,
     loss: Duration,
     backward: Duration,
     optimizer: Duration,
@@ -285,6 +302,7 @@ impl MetalStepProfile {
             projection: render.projection,
             sorting: render.sorting,
             rasterization: render.rasterization,
+            native_forward: render.native_forward,
             visible_gaussians: render.visible_gaussians,
             total_gaussians: render.total_gaussians,
             active_tiles: render.active_tiles,
@@ -295,8 +313,36 @@ impl MetalStepProfile {
     }
 
     fn log(&self, iter: usize, max_iterations: usize) {
+        let native_total_ms = self
+            .native_forward
+            .map(|profile| duration_ms(profile.total))
+            .unwrap_or(0.0);
+        let native_setup_ms = self
+            .native_forward
+            .map(|profile| duration_ms(profile.setup))
+            .unwrap_or(0.0);
+        let native_stage_ms = self
+            .native_forward
+            .map(|profile| duration_ms(profile.staging))
+            .unwrap_or(0.0);
+        let native_kernel_ms = self
+            .native_forward
+            .map(|profile| duration_ms(profile.kernel))
+            .unwrap_or(0.0);
+        let native_color_diff = self
+            .native_forward
+            .map(|profile| profile.color_max_abs)
+            .unwrap_or(0.0);
+        let native_depth_diff = self
+            .native_forward
+            .map(|profile| profile.depth_max_abs)
+            .unwrap_or(0.0);
+        let native_alpha_diff = self
+            .native_forward
+            .map(|profile| profile.alpha_max_abs)
+            .unwrap_or(0.0);
         log::info!(
-            "Metal profile iter {:5}/{:5} | visible={:5}/{:5} | tiles={:4} | tile_refs={:5} | max_tile={:4} | total={:.2}ms | project={:.2}ms | sort={:.2}ms | raster={:.2}ms | loss={:.2}ms | backward={:.2}ms | optimizer={:.2}ms",
+            "Metal profile iter {:5}/{:5} | visible={:5}/{:5} | tiles={:4} | tile_refs={:5} | max_tile={:4} | total={:.2}ms | project={:.2}ms | sort={:.2}ms | raster={:.2}ms | native={:.2}ms(setup={:.2} stage={:.2} kernel={:.2}) | diff(c={:.5} d={:.5} a={:.5}) | loss={:.2}ms | backward={:.2}ms | optimizer={:.2}ms",
             iter,
             max_iterations,
             self.visible_gaussians,
@@ -308,6 +354,13 @@ impl MetalStepProfile {
             duration_ms(self.projection),
             duration_ms(self.sorting),
             duration_ms(self.rasterization),
+            native_total_ms,
+            native_setup_ms,
+            native_stage_ms,
+            native_kernel_ms,
+            native_color_diff,
+            native_depth_diff,
+            native_alpha_diff,
             duration_ms(self.loss),
             duration_ms(self.backward),
             duration_ms(self.optimizer),
@@ -586,6 +639,7 @@ impl MetalTrainer {
                 RenderedFrame {
                     color: Tensor::zeros((self.pixel_count, 3), DType::F32, &self.device)?,
                     depth: Tensor::zeros((self.pixel_count,), DType::F32, &self.device)?,
+                    alpha: Tensor::zeros((self.pixel_count,), DType::F32, &self.device)?,
                 },
                 MetalRenderProfile::default(),
             ));
@@ -608,12 +662,17 @@ impl MetalTrainer {
 
         let (projected, mut profile) = self.project_gaussians(gaussians, camera, should_profile)?;
         let raster_start = Instant::now();
-        let (rendered, tile_stats) = self.rasterize(&projected)?;
+        let tile_bins = self.build_tile_bins(&projected)?;
+        let (rendered, tile_stats) = self.rasterize(&projected, &tile_bins)?;
         self.synchronize_if_needed(should_profile)?;
         profile.rasterization = raster_start.elapsed();
         profile.active_tiles = tile_stats.active_tiles;
         profile.tile_gaussian_refs = tile_stats.tile_gaussian_refs;
         profile.max_gaussians_per_tile = tile_stats.max_gaussians_per_tile;
+        if should_profile && self.device.is_metal() {
+            profile.native_forward =
+                Some(self.profile_native_forward(&projected, &tile_bins, &rendered)?);
+        }
         Ok((rendered, profile))
     }
 
@@ -747,11 +806,11 @@ impl MetalTrainer {
     fn rasterize(
         &mut self,
         projected: &ProjectedGaussians,
+        tile_bins: &TileBins,
     ) -> candle_core::Result<(RenderedFrame, TileBinningStats)> {
         let mut color_acc = Tensor::zeros((self.pixel_count, 3), DType::F32, &self.device)?;
         let mut depth_acc = Tensor::zeros((self.pixel_count,), DType::F32, &self.device)?;
         let mut alpha_acc = Tensor::zeros((self.pixel_count,), DType::F32, &self.device)?;
-        let tile_bins = self.build_tile_bins(projected)?;
         self.runtime
             .reserve_tile_index_capacity(tile_bins.total_assignments)?;
         let tile_stats = TileBinningStats {
@@ -812,6 +871,7 @@ impl MetalTrainer {
             RenderedFrame {
                 color: color_acc.clamp(0.0, 1.0)?,
                 depth: depth_acc.broadcast_div(&denom)?,
+                alpha: alpha_acc,
             },
             tile_stats,
         ))
@@ -882,10 +942,6 @@ impl MetalTrainer {
                 continue;
             }
             max_gaussians_per_tile = max_gaussians_per_tile.max(indices.len());
-            let tile_y = tile_idx / num_tiles_x;
-            let tile_x = tile_idx % num_tiles_x;
-            let _px_start = tile_x * METAL_TILE_SIZE;
-            let _py_start = tile_y * METAL_TILE_SIZE;
             metadata.push(TileMetadata {
                 tile_idx,
                 gaussian_count: indices.len(),
@@ -898,6 +954,97 @@ impl MetalTrainer {
             total_assignments,
             max_gaussians_per_tile,
         })
+    }
+
+    fn profile_native_forward(
+        &mut self,
+        projected: &ProjectedGaussians,
+        tile_bins: &TileBins,
+        baseline: &RenderedFrame,
+    ) -> candle_core::Result<NativeParityProfile> {
+        let packed_gaussians = self.pack_projected_gaussians(projected)?;
+        let (tile_records, tile_indices) = self.pack_native_tile_data(tile_bins);
+        let (native_frame, native_profile) = self.runtime.rasterize_forward(
+            &packed_gaussians,
+            &tile_records,
+            &tile_indices,
+            self.render_width,
+            self.render_height,
+        )?;
+        let color_max_abs = baseline
+            .color
+            .sub(&native_frame.color)?
+            .abs()?
+            .max_all()?
+            .to_vec0::<f32>()?;
+        let depth_max_abs = baseline
+            .depth
+            .sub(&native_frame.depth)?
+            .abs()?
+            .max_all()?
+            .to_vec0::<f32>()?;
+        let alpha_max_abs = baseline
+            .alpha
+            .sub(&native_frame.alpha)?
+            .abs()?
+            .max_all()?
+            .to_vec0::<f32>()?;
+        Ok(NativeParityProfile {
+            setup: native_profile.setup,
+            staging: native_profile.staging,
+            kernel: native_profile.kernel,
+            total: native_profile.total,
+            color_max_abs,
+            depth_max_abs,
+            alpha_max_abs,
+        })
+    }
+
+    fn pack_projected_gaussians(
+        &self,
+        projected: &ProjectedGaussians,
+    ) -> candle_core::Result<Vec<MetalProjectedGaussian>> {
+        let u = projected.u.to_vec1::<f32>()?;
+        let v = projected.v.to_vec1::<f32>()?;
+        let sigma_x = projected.sigma_x.to_vec1::<f32>()?;
+        let sigma_y = projected.sigma_y.to_vec1::<f32>()?;
+        let depth = projected.depth.to_vec1::<f32>()?;
+        let opacity = projected.opacity.to_vec1::<f32>()?;
+        let colors = projected.colors.to_vec2::<f32>()?;
+
+        let mut packed = Vec::with_capacity(u.len());
+        for idx in 0..u.len() {
+            packed.push(MetalProjectedGaussian::new(
+                u[idx],
+                v[idx],
+                sigma_x[idx],
+                sigma_y[idx],
+                depth[idx],
+                opacity[idx],
+                colors[idx][0],
+                colors[idx][1],
+                colors[idx][2],
+            ));
+        }
+        Ok(packed)
+    }
+
+    fn pack_native_tile_data(
+        &self,
+        tile_bins: &TileBins,
+    ) -> (Vec<MetalTileDispatchRecord>, Vec<u32>) {
+        let mut records = Vec::with_capacity(tile_bins.gaussian_indices.len());
+        let mut indices = Vec::with_capacity(tile_bins.total_assignments);
+        let mut start = 0usize;
+        for gaussian_indices in &tile_bins.gaussian_indices {
+            records.push(MetalTileDispatchRecord::new(
+                start as u32,
+                gaussian_indices.len() as u32,
+            ));
+            indices.extend_from_slice(gaussian_indices);
+            start += gaussian_indices.len();
+        }
+        (records, indices)
     }
 
     fn integrate_chunk(
@@ -1450,6 +1597,67 @@ mod tests {
         assert_eq!(bins.max_gaussians_per_tile, 2);
         assert_eq!(bins.gaussian_indices[0], vec![0, 1]);
         assert_eq!(bins.gaussian_indices[1], vec![1]);
+    }
+
+    #[test]
+    fn native_forward_matches_baseline_on_tiny_scene() {
+        let Ok(device) = Device::new_metal(0) else {
+            return;
+        };
+        let trainer_config = TrainingConfig {
+            metal_render_scale: 1.0,
+            ..TrainingConfig::default()
+        };
+        let mut trainer = MetalTrainer::new(32, 16, &trainer_config, device.clone()).unwrap();
+        let camera = DiffCamera::new(
+            1.0,
+            1.0,
+            16.0,
+            8.0,
+            32,
+            16,
+            &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            &[0.0, 0.0, 0.0],
+            &device,
+        )
+        .unwrap();
+        trainer.runtime.stage_camera(&camera).unwrap();
+        let projected = ProjectedGaussians {
+            u: Tensor::from_slice(&[8.0f32, 10.0], 2, &device).unwrap(),
+            v: Tensor::from_slice(&[8.0f32, 8.5], 2, &device).unwrap(),
+            sigma_x: Tensor::from_slice(&[2.0f32, 2.5], 2, &device).unwrap(),
+            sigma_y: Tensor::from_slice(&[2.0f32, 2.5], 2, &device).unwrap(),
+            depth: Tensor::from_slice(&[1.0f32, 2.0], 2, &device).unwrap(),
+            opacity: Tensor::from_slice(&[0.6f32, 0.4], 2, &device).unwrap(),
+            colors: Tensor::from_slice(&[1.0f32, 0.0, 0.0, 0.0, 1.0, 0.0], (2, 3), &device)
+                .unwrap(),
+            min_x: Tensor::from_slice(&[2.0f32, 3.0], 2, &device).unwrap(),
+            max_x: Tensor::from_slice(&[14.0f32, 17.0], 2, &device).unwrap(),
+            min_y: Tensor::from_slice(&[2.0f32, 2.0], 2, &device).unwrap(),
+            max_y: Tensor::from_slice(&[14.0f32, 15.0], 2, &device).unwrap(),
+        };
+
+        let tile_bins = trainer.build_tile_bins(&projected).unwrap();
+        let (baseline, _) = trainer.rasterize(&projected, &tile_bins).unwrap();
+        let parity = trainer
+            .profile_native_forward(&projected, &tile_bins, &baseline)
+            .unwrap();
+
+        assert!(
+            parity.color_max_abs < 5e-4,
+            "color diff={}",
+            parity.color_max_abs
+        );
+        assert!(
+            parity.depth_max_abs < 5e-4,
+            "depth diff={}",
+            parity.depth_max_abs
+        );
+        assert!(
+            parity.alpha_max_abs < 5e-4,
+            "alpha diff={}",
+            parity.alpha_max_abs
+        );
     }
 
     #[test]
