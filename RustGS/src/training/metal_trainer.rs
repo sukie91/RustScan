@@ -382,6 +382,27 @@ impl MetalStepProfile {
 }
 
 impl MetalTrainer {
+    fn empty_projected_gaussians(&self) -> candle_core::Result<ProjectedGaussians> {
+        Ok(ProjectedGaussians {
+            source_indices: Tensor::zeros((0,), DType::U32, &self.device)?,
+            u: Tensor::zeros((0,), DType::F32, &self.device)?,
+            v: Tensor::zeros((0,), DType::F32, &self.device)?,
+            sigma_x: Tensor::zeros((0,), DType::F32, &self.device)?,
+            sigma_y: Tensor::zeros((0,), DType::F32, &self.device)?,
+            raw_sigma_x: Tensor::zeros((0,), DType::F32, &self.device)?,
+            raw_sigma_y: Tensor::zeros((0,), DType::F32, &self.device)?,
+            depth: Tensor::zeros((0,), DType::F32, &self.device)?,
+            opacity: Tensor::zeros((0,), DType::F32, &self.device)?,
+            opacity_logits: Tensor::zeros((0,), DType::F32, &self.device)?,
+            scale3d: Tensor::zeros((0, 3), DType::F32, &self.device)?,
+            colors: Tensor::zeros((0, 3), DType::F32, &self.device)?,
+            min_x: Tensor::zeros((0,), DType::F32, &self.device)?,
+            max_x: Tensor::zeros((0,), DType::F32, &self.device)?,
+            min_y: Tensor::zeros((0,), DType::F32, &self.device)?,
+            max_y: Tensor::zeros((0,), DType::F32, &self.device)?,
+        })
+    }
+
     pub fn new(
         input_width: usize,
         input_height: usize,
@@ -661,24 +682,7 @@ impl MetalTrainer {
                     depth: Tensor::zeros((self.pixel_count,), DType::F32, &self.device)?,
                     alpha: Tensor::zeros((self.pixel_count,), DType::F32, &self.device)?,
                 },
-                ProjectedGaussians {
-                    source_indices: Tensor::zeros((0,), DType::U32, &self.device)?,
-                    u: Tensor::zeros((0,), DType::F32, &self.device)?,
-                    v: Tensor::zeros((0,), DType::F32, &self.device)?,
-                    sigma_x: Tensor::zeros((0,), DType::F32, &self.device)?,
-                    sigma_y: Tensor::zeros((0,), DType::F32, &self.device)?,
-                    raw_sigma_x: Tensor::zeros((0,), DType::F32, &self.device)?,
-                    raw_sigma_y: Tensor::zeros((0,), DType::F32, &self.device)?,
-                    depth: Tensor::zeros((0,), DType::F32, &self.device)?,
-                    opacity: Tensor::zeros((0,), DType::F32, &self.device)?,
-                    opacity_logits: Tensor::zeros((0,), DType::F32, &self.device)?,
-                    scale3d: Tensor::zeros((0, 3), DType::F32, &self.device)?,
-                    colors: Tensor::zeros((0, 3), DType::F32, &self.device)?,
-                    min_x: Tensor::zeros((0,), DType::F32, &self.device)?,
-                    max_x: Tensor::zeros((0,), DType::F32, &self.device)?,
-                    min_y: Tensor::zeros((0,), DType::F32, &self.device)?,
-                    max_y: Tensor::zeros((0,), DType::F32, &self.device)?,
-                },
+                self.empty_projected_gaussians()?,
                 MetalRenderProfile::default(),
             ));
         }
@@ -812,11 +816,15 @@ impl MetalTrainer {
             .broadcast_mul(&bottom_ok)?;
         let opacity = opacity.broadcast_mul(&visible)?;
         profile.visible_gaussians = visible.sum_all()?.to_vec0::<f32>()?.round() as usize;
-        let visible_mask = visible.ge(0.5f64)?;
         self.synchronize_if_needed(should_profile)?;
         profile.projection = projection_start.elapsed();
 
+        if profile.visible_gaussians == 0 {
+            return Ok((self.empty_projected_gaussians()?, profile));
+        }
+
         let sort_start = Instant::now();
+        let visible_mask = visible.ge(0.5f64)?;
         let culled_depth = Tensor::full(f32::MAX, (gaussians.len(),), &self.device)?;
         let visible_depth = visible_mask.where_cond(&z, &culled_depth)?;
         let sort_idx = visible_depth
@@ -1585,8 +1593,6 @@ fn resize_depth(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::training::TrainingBackend;
-
     #[test]
     fn scaled_dimensions_keep_minimum_size() {
         assert_eq!(scaled_dimensions(640, 480, 0.25), (160, 120));
@@ -1603,9 +1609,7 @@ mod tests {
 
     #[test]
     fn metal_config_uses_safer_default_budget() {
-        let mut cfg = TrainingConfig::default();
-        cfg.backend = TrainingBackend::Metal;
-        let effective = effective_metal_config(&cfg);
+        let effective = effective_metal_config(&TrainingConfig::default());
         assert_eq!(
             effective.max_initial_gaussians,
             DEFAULT_METAL_MAX_INITIAL_GAUSSIANS
@@ -1802,5 +1806,44 @@ mod tests {
         assert!(!should_profile_iteration(true, 25, 5));
         assert!(should_profile_iteration(true, 25, 25));
         assert!(!should_profile_iteration(false, 25, 25));
+    }
+
+    #[test]
+    fn project_gaussians_handles_zero_visible_without_index_select() {
+        let device = Device::Cpu;
+        let trainer_config = TrainingConfig {
+            metal_render_scale: 1.0,
+            ..TrainingConfig::default()
+        };
+        let trainer = MetalTrainer::new(32, 16, &trainer_config, device.clone()).unwrap();
+        let camera = DiffCamera::new(
+            1.0,
+            1.0,
+            16.0,
+            8.0,
+            32,
+            16,
+            &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            &[0.0, 0.0, 0.0],
+            &device,
+        )
+        .unwrap();
+        let gaussians = TrainableGaussians::new(
+            &[0.0, 0.0, -1.0],
+            &[0.0, 0.0, 0.0],
+            &[1.0, 0.0, 0.0, 0.0],
+            &[0.0],
+            &[1.0, 0.0, 0.0],
+            &device,
+        )
+        .unwrap();
+
+        let (projected, profile) = trainer.project_gaussians(&gaussians, &camera, false).unwrap();
+
+        assert_eq!(profile.total_gaussians, 1);
+        assert_eq!(profile.visible_gaussians, 0);
+        assert_eq!(projected.source_indices.dim(0).unwrap(), 0);
+        assert_eq!(projected.u.dim(0).unwrap(), 0);
+        assert_eq!(projected.colors.dim(0).unwrap(), 0);
     }
 }

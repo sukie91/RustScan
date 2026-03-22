@@ -98,7 +98,10 @@ pub struct ScenePose {
     /// Optional path to the depth file associated with this frame
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub depth_path: Option<PathBuf>,
-    /// Camera pose (world-to-camera transform)
+    /// Camera pose in camera-to-world form.
+    ///
+    /// This matches TUM RGB-D ground truth and lets downstream code reuse the
+    /// camera center directly for backprojection / world-space initialization.
     pub pose: SE3,
     /// Timestamp in seconds
     pub timestamp: f64,

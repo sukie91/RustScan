@@ -15,7 +15,7 @@ use crate::diff::diff_splat::{DiffCamera, TrainableGaussians};
 #[cfg(feature = "gpu")]
 use crate::init::{initialize_gaussian3d_from_points, GaussianInitConfig};
 #[cfg(feature = "gpu")]
-use crate::{TrainingDataset, TrainingError};
+use crate::{TrainingDataset, TrainingError, SE3};
 
 #[cfg(feature = "gpu")]
 struct FrameSample {
@@ -82,15 +82,14 @@ pub(crate) fn load_training_data(
 
         let rotation = pose.pose.rotation();
         let translation = pose.pose.translation();
-        let camera = DiffCamera::new(
+        let camera = diff_camera_from_scene_pose(
+            &pose.pose,
             dataset.intrinsics.fx,
             dataset.intrinsics.fy,
             dataset.intrinsics.cx,
             dataset.intrinsics.cy,
             width,
             height,
-            &rotation,
-            &translation,
             device,
         )?;
 
@@ -129,6 +128,37 @@ pub(crate) fn load_training_data(
         depths,
         initial_map,
     })
+}
+
+#[cfg(feature = "gpu")]
+fn diff_camera_from_scene_pose(
+    pose: &SE3,
+    fx: f32,
+    fy: f32,
+    cx: f32,
+    cy: f32,
+    width: usize,
+    height: usize,
+    device: &Device,
+) -> candle_core::Result<DiffCamera> {
+    // ScenePose stores camera-to-world poses so they can be reused for
+    // backprojection during Gaussian initialization. The differentiable
+    // renderer, however, expects world-to-camera extrinsics.
+    let view_pose = pose.inverse();
+    let rotation = view_pose.rotation();
+    let translation = view_pose.translation();
+
+    DiffCamera::new(
+        fx,
+        fy,
+        cx,
+        cy,
+        width,
+        height,
+        &rotation,
+        &translation,
+        device,
+    )
 }
 
 #[cfg(feature = "gpu")]
@@ -507,5 +537,23 @@ mod tests {
         assert!(depth[0] >= 0.1 && depth[0] <= 2.0);
         assert!(depth[1] >= 0.1 && depth[1] <= 2.0);
         assert!(depth[0] > depth[1]);
+    }
+
+    #[test]
+    fn test_diff_camera_uses_world_to_camera_view_pose() {
+        let device = Device::Cpu;
+        let pose = crate::SE3::from_axis_angle(&[0.0, 0.0, 0.0], &[1.0, -2.0, 3.5]);
+
+        let camera =
+            diff_camera_from_scene_pose(&pose, 500.0, 510.0, 320.0, 240.0, 640, 480, &device)
+                .unwrap();
+
+        assert_eq!(
+            camera.rotation,
+            [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+        );
+        assert!((camera.translation[0] + 1.0).abs() < 1e-6);
+        assert!((camera.translation[1] - 2.0).abs() < 1e-6);
+        assert!((camera.translation[2] + 3.5).abs() < 1e-6);
     }
 }

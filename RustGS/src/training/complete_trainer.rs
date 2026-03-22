@@ -383,23 +383,25 @@ impl CompleteTrainer {
         // Forward pass with intermediates (GPU projection + CPU rendering)
         let (_output, intermediate) = self.renderer.render_with_intermediates(gaussians, camera)?;
 
-        // Use CPU data directly — avoids GPU→CPU tensor copy from compute_loss
-        let loss_value = self.renderer.compute_loss_from_cpu(
-            &intermediate.rendered_color,
-            &intermediate.rendered_depth,
-            target_color,
-            target_depth,
-        );
+        // Keep the analytical path aligned with the gradients we actually
+        // backpropagate: mean color L1 + weighted mean valid-depth L1.
+        let color_grad_scale = mean_l1_grad_scale(target_color.len());
+        let depth_grad_scale = masked_depth_grad_scale(target_depth, 0.1);
+        let loss_value = mean_abs_diff(&intermediate.rendered_color, target_color)
+            + masked_depth_mean_abs_diff(&intermediate.rendered_depth, target_depth) * 0.1;
 
         // Analytical backward
-        let grads = analytical_backward::backward(
+        let grads = analytical_backward::backward_weighted_l1(
             &intermediate,
             target_color,
+            target_depth,
             n,
             camera.fx,
             camera.fy,
             camera.cx,
             camera.cy,
+            color_grad_scale,
+            depth_grad_scale,
         );
 
         // Blend with surrogate gradients (10% weight for regularization)
@@ -928,9 +930,56 @@ fn blend_gradients(dst: &mut [f32], src: &[f32], weight: f32) {
     }
 }
 
+fn mean_l1_grad_scale(len: usize) -> f32 {
+    if len == 0 {
+        0.0
+    } else {
+        1.0 / len as f32
+    }
+}
+
+fn mean_abs_diff(pred: &[f32], target: &[f32]) -> f32 {
+    let n = pred.len().min(target.len());
+    if n == 0 {
+        return 0.0;
+    }
+    let mut sum = 0.0f32;
+    for i in 0..n {
+        sum += (pred[i] - target[i]).abs();
+    }
+    sum / n as f32
+}
+
+fn masked_depth_mean_abs_diff(pred: &[f32], target: &[f32]) -> f32 {
+    let n = pred.len().min(target.len());
+    let mut sum = 0.0f32;
+    let mut count = 0usize;
+    for i in 0..n {
+        if target[i] > 0.0 {
+            sum += (pred[i] - target[i]).abs();
+            count += 1;
+        }
+    }
+    if count == 0 {
+        0.0
+    } else {
+        sum / count as f32
+    }
+}
+
+fn masked_depth_grad_scale(target_depth: &[f32], loss_weight: f32) -> f32 {
+    let valid = target_depth.iter().filter(|&&depth| depth > 0.0).count();
+    if valid == 0 {
+        0.0
+    } else {
+        loss_weight / valid as f32
+    }
+}
+
 #[cfg(all(test, feature = "gpu"))]
 mod tests {
     use super::*;
+    use candle_core::Device;
 
     #[test]
     fn test_trainer_creation() {
@@ -963,5 +1012,52 @@ mod tests {
 
         // Parameters should have moved
         assert!(param[0] != 0.0 || param[1] != 0.0 || param[2] != 0.0);
+    }
+
+    #[test]
+    fn test_mean_loss_helpers_ignore_invalid_depth() {
+        let color_loss = mean_abs_diff(&[0.0, 0.5, 1.0], &[1.0, 0.5, 0.0]);
+        let depth_loss = masked_depth_mean_abs_diff(&[1.0, 4.0, 3.0], &[2.0, 0.0, 1.0]);
+
+        assert!((color_loss - (2.0 / 3.0)).abs() < 1e-6);
+        assert!((depth_loss - 1.5).abs() < 1e-6);
+        assert!((masked_depth_grad_scale(&[2.0, 0.0, 1.0], 0.1) - 0.05).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_training_step_returns_finite_loss_on_tiny_scene() {
+        let device = Device::Cpu;
+        let mut trainer =
+            CompleteTrainer::with_device(8, 8, 1.6e-4, 5e-3, 1e-3, 5e-2, 2.5e-3, device.clone());
+        let mut gaussians = TrainableGaussians::new(
+            &[0.0, 0.0, 1.5],
+            &[-3.0, -3.0, -3.0],
+            &[1.0, 0.0, 0.0, 0.0],
+            &[0.0],
+            &[0.8, 0.2, 0.1],
+            &device,
+        )
+        .unwrap();
+        let camera = DiffCamera::new(
+            6.0,
+            6.0,
+            4.0,
+            4.0,
+            8,
+            8,
+            &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            &[0.0, 0.0, 0.0],
+            &device,
+        )
+        .unwrap();
+        let target_color = vec![0.0f32; 8 * 8 * 3];
+        let target_depth = vec![1.0f32; 8 * 8];
+
+        let loss = trainer
+            .training_step(&mut gaussians, &camera, &target_color, &target_depth)
+            .unwrap();
+
+        assert!(loss.is_finite());
+        assert_eq!(trainer.loss_history.len(), 1);
     }
 }

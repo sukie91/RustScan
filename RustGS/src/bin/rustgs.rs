@@ -6,22 +6,6 @@
 
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, Copy, clap::ValueEnum)]
-#[value(rename_all = "kebab-case")]
-enum TrainBackendArg {
-    LegacyHybrid,
-    Metal,
-}
-
-impl From<TrainBackendArg> for rustgs::TrainingBackend {
-    fn from(value: TrainBackendArg) -> Self {
-        match value {
-            TrainBackendArg::LegacyHybrid => rustgs::TrainingBackend::LegacyHybrid,
-            TrainBackendArg::Metal => rustgs::TrainingBackend::Metal,
-        }
-    }
-}
-
 #[derive(Debug, clap::Parser)]
 #[command(name = "rustgs")]
 #[command(about = "3D Gaussian Splatting Training", long_about = None)]
@@ -46,10 +30,6 @@ enum Commands {
         #[arg(long, default_value = "30000")]
         iterations: usize,
 
-        /// Training backend
-        #[arg(long, value_enum, default_value = "legacy-hybrid")]
-        backend: TrainBackendArg,
-
         /// Maximum number of Gaussians created during initialization
         #[arg(long, default_value = "100000")]
         max_initial_gaussians: usize,
@@ -66,15 +46,15 @@ enum Commands {
         #[arg(long, default_value = "1")]
         frame_stride: usize,
 
-        /// Relative render scale used by the Metal backend
+        /// Relative render scale used by Metal training
         #[arg(long, default_value = "0.25")]
         metal_render_scale: f32,
 
-        /// Number of Gaussians processed per GPU chunk in the Metal backend
+        /// Number of Gaussians processed per GPU chunk during Metal training
         #[arg(long, default_value = "32")]
         metal_gaussian_chunk_size: usize,
 
-        /// Emit per-step timing breakdowns for the Metal backend
+        /// Emit per-step timing breakdowns for Metal training
         #[arg(long, default_value_t = false)]
         metal_profile_steps: bool,
 
@@ -111,7 +91,6 @@ fn main() -> anyhow::Result<()> {
             input,
             output,
             iterations,
-            backend,
             max_initial_gaussians,
             sampling_step,
             max_frames,
@@ -128,7 +107,7 @@ fn main() -> anyhow::Result<()> {
             log::info!("Training 3DGS scene from {:?}", input);
             log::info!("Output: {:?}", output);
             log::info!("Iterations: {}", iterations);
-            log::info!("Backend: {:?}", backend);
+            log::info!("Backend: metal");
 
             let slam_output = load_training_input(&input, max_frames, frame_stride)?;
             log::info!(
@@ -139,7 +118,6 @@ fn main() -> anyhow::Result<()> {
 
             // Configure training
             let mut config = rustgs::TrainingConfig::default();
-            config.backend = backend.into();
             config.iterations = iterations;
             config.max_initial_gaussians = max_initial_gaussians;
             config.sampling_step = sampling_step;

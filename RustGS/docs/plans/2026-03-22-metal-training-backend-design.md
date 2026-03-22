@@ -1,5 +1,9 @@
 # Metal Training Backend Design
 
+> Historical note: this document describes the transition away from the old
+> `legacy-hybrid` path. The current top-level training flow in RustGS is now
+> standardized on the Metal backend.
+
 ## Goal
 
 Add a real Metal training backend to RustGS so projection, rasterization, loss,
