@@ -5,7 +5,7 @@
 //! tensor ops. It is intentionally lower resolution than the legacy hybrid
 //! path so we can keep the whole step on GPU without CPU tile rasterization.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use candle_core::backprop::GradStore;
 use candle_core::{DType, Device, Tensor, Var};
@@ -89,6 +89,8 @@ pub struct MetalTrainer {
     beta1: f32,
     beta2: f32,
     eps: f32,
+    profile_steps: bool,
+    profile_interval: usize,
     adam: Option<MetalAdamState>,
     iteration: usize,
     loss_history: Vec<f32>,
@@ -96,6 +98,50 @@ pub struct MetalTrainer {
 
 struct MetalTrainingStats {
     final_loss: f32,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct MetalRenderProfile {
+    projection: Duration,
+    sorting: Duration,
+    rasterization: Duration,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct MetalStepProfile {
+    projection: Duration,
+    sorting: Duration,
+    rasterization: Duration,
+    loss: Duration,
+    backward: Duration,
+    optimizer: Duration,
+    total: Duration,
+}
+
+impl MetalStepProfile {
+    fn from_render(render: MetalRenderProfile) -> Self {
+        Self {
+            projection: render.projection,
+            sorting: render.sorting,
+            rasterization: render.rasterization,
+            ..Default::default()
+        }
+    }
+
+    fn log(&self, iter: usize, max_iterations: usize) {
+        log::info!(
+            "Metal profile iter {:5}/{:5} | total={:.2}ms | project={:.2}ms | sort={:.2}ms | raster={:.2}ms | loss={:.2}ms | backward={:.2}ms | optimizer={:.2}ms",
+            iter,
+            max_iterations,
+            duration_ms(self.total),
+            duration_ms(self.projection),
+            duration_ms(self.sorting),
+            duration_ms(self.rasterization),
+            duration_ms(self.loss),
+            duration_ms(self.backward),
+            duration_ms(self.optimizer),
+        );
+    }
 }
 
 impl MetalTrainer {
@@ -126,6 +172,8 @@ impl MetalTrainer {
             beta1: 0.9,
             beta2: 0.999,
             eps: 1e-8,
+            profile_steps: config.metal_profile_steps,
+            profile_interval: config.metal_profile_interval.max(1),
             adam: None,
             iteration: 0,
             loss_history: Vec::new(),
@@ -200,8 +248,11 @@ impl MetalTrainer {
         for iter in 0..max_iterations {
             let frame_idx = iter % frames.len();
             let should_log = iter < 5 || iter % 25 == 0;
+            let should_profile =
+                should_profile_iteration(self.profile_steps, self.profile_interval, iter);
             let step_start = Instant::now();
-            let loss = self.training_step(gaussians, &frames[frame_idx])?;
+            let (loss, profile) =
+                self.training_step(gaussians, &frames[frame_idx], should_profile)?;
             if should_log {
                 log::info!(
                     "Metal iter {:5}/{:5} | frame {:3}/{:3} | loss {:.6} | step_time={:.2}s | elapsed={:.2}s",
@@ -214,6 +265,9 @@ impl MetalTrainer {
                     train_start.elapsed().as_secs_f64()
                 );
             }
+            if let Some(profile) = profile {
+                profile.log(iter, max_iterations);
+            }
         }
 
         Ok(MetalTrainingStats {
@@ -225,20 +279,37 @@ impl MetalTrainer {
         &mut self,
         gaussians: &mut TrainableGaussians,
         frame: &MetalTrainingFrame,
-    ) -> candle_core::Result<f32> {
+        should_profile: bool,
+    ) -> candle_core::Result<(f32, Option<MetalStepProfile>)> {
         self.iteration += 1;
-        let rendered = self.render(gaussians, &frame.camera)?;
+        let total_start = Instant::now();
+        let (rendered, render_profile) = self.render(gaussians, &frame.camera, should_profile)?;
+        let mut profile = MetalStepProfile::from_render(render_profile);
 
+        let loss_start = Instant::now();
         let color_loss = rendered.color.sub(&frame.target_color)?.abs()?.mean_all()?;
         let depth_loss = rendered.depth.sub(&frame.target_depth)?.abs()?.mean_all()?;
         let total = color_loss.broadcast_add(&depth_loss.affine(0.1, 0.0)?)?;
         let loss_value = total.to_vec0::<f32>()?;
+        self.synchronize_if_needed(should_profile)?;
+        profile.loss = loss_start.elapsed();
 
+        let backward_start = Instant::now();
         let grads = total.backward()?;
+        self.synchronize_if_needed(should_profile)?;
+        profile.backward = backward_start.elapsed();
+
+        let optimizer_start = Instant::now();
         self.apply_gradients(gaussians, &grads)?;
+        self.synchronize_if_needed(should_profile)?;
+        profile.optimizer = optimizer_start.elapsed();
+        profile.total = total_start.elapsed();
         self.loss_history.push(loss_value);
 
-        Ok(loss_value)
+        Ok((
+            loss_value,
+            if should_profile { Some(profile) } else { None },
+        ))
     }
 
     fn apply_gradients(
@@ -325,23 +396,34 @@ impl MetalTrainer {
         &self,
         gaussians: &TrainableGaussians,
         camera: &DiffCamera,
-    ) -> candle_core::Result<RenderedFrame> {
+        should_profile: bool,
+    ) -> candle_core::Result<(RenderedFrame, MetalRenderProfile)> {
         if gaussians.len() == 0 {
-            return Ok(RenderedFrame {
-                color: Tensor::zeros((self.pixel_count, 3), DType::F32, &self.device)?,
-                depth: Tensor::zeros((self.pixel_count,), DType::F32, &self.device)?,
-            });
+            return Ok((
+                RenderedFrame {
+                    color: Tensor::zeros((self.pixel_count, 3), DType::F32, &self.device)?,
+                    depth: Tensor::zeros((self.pixel_count,), DType::F32, &self.device)?,
+                },
+                MetalRenderProfile::default(),
+            ));
         }
 
-        let projected = self.project_gaussians(gaussians, camera)?;
-        self.rasterize(&projected)
+        let (projected, mut profile) = self.project_gaussians(gaussians, camera, should_profile)?;
+        let raster_start = Instant::now();
+        let rendered = self.rasterize(&projected)?;
+        self.synchronize_if_needed(should_profile)?;
+        profile.rasterization = raster_start.elapsed();
+        Ok((rendered, profile))
     }
 
     fn project_gaussians(
         &self,
         gaussians: &TrainableGaussians,
         camera: &DiffCamera,
-    ) -> candle_core::Result<ProjectedGaussians> {
+        should_profile: bool,
+    ) -> candle_core::Result<(ProjectedGaussians, MetalRenderProfile)> {
+        let mut profile = MetalRenderProfile::default();
+        let projection_start = Instant::now();
         let pos = gaussians.positions();
         let scales = gaussians.scales()?;
         let opacity = gaussians.opacities()?;
@@ -394,13 +476,15 @@ impl MetalTrainer {
         let valid_threshold = Tensor::full(1e-4f32, (gaussians.len(),), &self.device)?;
         let valid = z.ge(&valid_threshold)?.to_dtype(DType::F32)?;
         let opacity = opacity.broadcast_mul(&valid)?;
+        self.synchronize_if_needed(should_profile)?;
+        profile.projection = projection_start.elapsed();
 
+        let sort_start = Instant::now();
         let sort_idx = z
             .reshape((1, gaussians.len()))?
             .arg_sort_last_dim(true)?
             .squeeze(0)?;
-
-        Ok(ProjectedGaussians {
+        let projected = ProjectedGaussians {
             u: u.index_select(&sort_idx, 0)?,
             v: v.index_select(&sort_idx, 0)?,
             sigma_x: sx.index_select(&sort_idx, 0)?,
@@ -408,7 +492,11 @@ impl MetalTrainer {
             depth: z.index_select(&sort_idx, 0)?,
             opacity: opacity.index_select(&sort_idx, 0)?,
             colors: gaussians.colors().index_select(&sort_idx, 0)?,
-        })
+        };
+        self.synchronize_if_needed(should_profile)?;
+        profile.sorting = sort_start.elapsed();
+
+        Ok((projected, profile))
     }
 
     fn rasterize(&self, projected: &ProjectedGaussians) -> candle_core::Result<RenderedFrame> {
@@ -501,6 +589,13 @@ impl MetalTrainer {
         let tail_trans = inclusive.get_on_dim(0, len - 1)?.exp()?;
         Ok((chunk_color, chunk_depth, chunk_alpha, tail_trans))
     }
+
+    fn synchronize_if_needed(&self, should_profile: bool) -> candle_core::Result<()> {
+        if should_profile {
+            self.device.synchronize()?;
+        }
+        Ok(())
+    }
 }
 
 pub fn train(
@@ -580,6 +675,14 @@ fn estimate_peak_bytes(num_gaussians: usize, pixel_count: usize) -> u64 {
 
 fn bytes_to_gib(bytes: u64) -> f64 {
     bytes as f64 / 1024f64 / 1024f64 / 1024f64
+}
+
+fn duration_ms(duration: Duration) -> f64 {
+    duration.as_secs_f64() * 1000.0
+}
+
+fn should_profile_iteration(profile_steps: bool, profile_interval: usize, iter: usize) -> bool {
+    profile_steps && (iter < 5 || iter % profile_interval.max(1) == 0)
 }
 
 fn adam_step_var(
@@ -781,5 +884,14 @@ mod tests {
         let large = estimate_peak_bytes(57_474, 4_800);
         assert!(large > small);
         assert!(bytes_to_gib(large) > 10.0);
+    }
+
+    #[test]
+    fn profile_schedule_honors_interval() {
+        assert!(should_profile_iteration(true, 25, 0));
+        assert!(should_profile_iteration(true, 25, 4));
+        assert!(!should_profile_iteration(true, 25, 5));
+        assert!(should_profile_iteration(true, 25, 25));
+        assert!(!should_profile_iteration(false, 25, 25));
     }
 }

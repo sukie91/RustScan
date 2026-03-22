@@ -74,6 +74,14 @@ enum Commands {
         #[arg(long, default_value = "32")]
         metal_gaussian_chunk_size: usize,
 
+        /// Emit per-step timing breakdowns for the Metal backend
+        #[arg(long, default_value_t = false)]
+        metal_profile_steps: bool,
+
+        /// Log the Metal timing breakdown every N steps when profiling is enabled
+        #[arg(long, default_value = "25")]
+        metal_profile_interval: usize,
+
         /// Log level (trace, debug, info, warn, error)
         #[arg(long, default_value = "info")]
         log_level: String,
@@ -110,6 +118,8 @@ fn main() -> anyhow::Result<()> {
             frame_stride,
             metal_render_scale,
             metal_gaussian_chunk_size,
+            metal_profile_steps,
+            metal_profile_interval,
             log_level,
         } => {
             // Initialize logging
@@ -135,6 +145,8 @@ fn main() -> anyhow::Result<()> {
             config.sampling_step = sampling_step;
             config.metal_render_scale = metal_render_scale;
             config.metal_gaussian_chunk_size = metal_gaussian_chunk_size;
+            config.metal_profile_steps = metal_profile_steps;
+            config.metal_profile_interval = metal_profile_interval;
 
             // Train
             #[cfg(feature = "gpu")]

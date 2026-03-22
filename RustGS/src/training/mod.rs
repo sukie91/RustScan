@@ -132,6 +132,10 @@ pub struct TrainingConfig {
     pub metal_render_scale: f32,
     /// Number of Gaussians processed per GPU chunk in the Metal backend.
     pub metal_gaussian_chunk_size: usize,
+    /// Emit per-step timing breakdowns for the Metal backend.
+    pub metal_profile_steps: bool,
+    /// Log the Metal timing breakdown every N steps when profiling is enabled.
+    pub metal_profile_interval: usize,
 }
 
 impl Default for TrainingConfig {
@@ -153,6 +157,8 @@ impl Default for TrainingConfig {
             use_synthetic_depth: true,
             metal_render_scale: 0.25,
             metal_gaussian_chunk_size: 32,
+            metal_profile_steps: false,
+            metal_profile_interval: 25,
         }
     }
 }
