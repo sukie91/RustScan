@@ -19,8 +19,22 @@ use super::data_loading::{
 use super::TrainingConfig;
 
 const DEFAULT_METAL_MAX_INITIAL_GAUSSIANS: usize = 4_096;
-const METAL_BYTES_PER_GAUSSIAN_PIXEL: u64 = 320;
-const METAL_MEMORY_GUARD_BYTES: u64 = 24 * 1024 * 1024 * 1024;
+const MIB: u64 = 1024 * 1024;
+const GIB: u64 = 1024 * 1024 * 1024;
+const DEFAULT_METAL_MEMORY_BUDGET_BYTES: u64 = 24 * GIB;
+const METAL_SYSTEM_MEMORY_BUDGET_NUMERATOR: u64 = 13;
+const METAL_SYSTEM_MEMORY_BUDGET_DENOMINATOR: u64 = 20;
+const METAL_WARN_BUDGET_NUMERATOR: u64 = 85;
+const METAL_WARN_BUDGET_DENOMINATOR: u64 = 100;
+const METAL_ESTIMATE_SAFETY_NUMERATOR: u64 = 15;
+const METAL_ESTIMATE_SAFETY_DENOMINATOR: u64 = 100;
+const METAL_ESTIMATE_MIN_SAFETY_BYTES: u64 = 256 * MIB;
+const METAL_FRAME_BYTES_PER_PIXEL: u64 = 16;
+const METAL_PIXEL_STATE_BYTES_PER_PIXEL: u64 = 40;
+const METAL_GAUSSIAN_STATE_BYTES: u64 = 168;
+const METAL_PROJECTED_BYTES_PER_GAUSSIAN: u64 = 64;
+const METAL_CHUNK_WORKSPACE_BYTES_PER_GAUSSIAN_PIXEL: u64 = 64;
+const METAL_RETAINED_GRAPH_BYTES_PER_GAUSSIAN_PIXEL: u64 = 224;
 
 struct MetalTrainingFrame {
     camera: DiffCamera,
@@ -98,6 +112,109 @@ pub struct MetalTrainer {
 
 struct MetalTrainingStats {
     final_loss: f32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MetalMemoryEstimate {
+    gaussian_state_bytes: u64,
+    frame_bytes: u64,
+    pixel_state_bytes: u64,
+    projection_bytes: u64,
+    chunk_workspace_bytes: u64,
+    retained_graph_bytes: u64,
+    safety_margin_bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MetalMemoryBudget {
+    safe_bytes: u64,
+    physical_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MetalMemoryDecision {
+    Allow,
+    Warn,
+    Block,
+}
+
+impl MetalMemoryEstimate {
+    fn subtotal_bytes(&self) -> u64 {
+        self.gaussian_state_bytes
+            .saturating_add(self.frame_bytes)
+            .saturating_add(self.pixel_state_bytes)
+            .saturating_add(self.projection_bytes)
+            .saturating_add(self.chunk_workspace_bytes)
+            .saturating_add(self.retained_graph_bytes)
+    }
+
+    fn total_bytes(&self) -> u64 {
+        self.subtotal_bytes()
+            .saturating_add(self.safety_margin_bytes)
+    }
+
+    fn persistent_bytes(&self) -> u64 {
+        self.gaussian_state_bytes
+            .saturating_add(self.pixel_state_bytes)
+            .saturating_add(self.projection_bytes)
+    }
+
+    fn top_components_summary(&self, count: usize) -> String {
+        let mut components = vec![
+            ("graph", self.retained_graph_bytes),
+            ("chunk", self.chunk_workspace_bytes),
+            ("frames", self.frame_bytes),
+            ("persistent", self.persistent_bytes()),
+            ("safety", self.safety_margin_bytes),
+        ];
+        components.retain(|(_, bytes)| *bytes > 0);
+        components.sort_by(|lhs, rhs| rhs.1.cmp(&lhs.1));
+        components
+            .into_iter()
+            .take(count)
+            .map(|(label, bytes)| format!("{label}≈{}", format_memory(bytes)))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    fn recommendations(&self) -> Vec<&'static str> {
+        let total = self.total_bytes().max(1);
+        let mut recommendations = Vec::new();
+        if self.retained_graph_bytes.saturating_mul(100) >= total.saturating_mul(45) {
+            recommendations.push("lower --max-initial-gaussians or increase --sampling-step");
+        }
+        if self
+            .frame_bytes
+            .saturating_add(self.pixel_state_bytes)
+            .saturating_mul(100)
+            >= total.saturating_mul(20)
+        {
+            recommendations.push("lower --metal-render-scale");
+        }
+        if self.chunk_workspace_bytes.saturating_mul(100) >= total.saturating_mul(10) {
+            recommendations.push("lower --metal-gaussian-chunk-size");
+        }
+        if recommendations.is_empty() {
+            recommendations.push("lower --max-initial-gaussians or --metal-render-scale");
+        }
+        recommendations
+    }
+}
+
+impl MetalMemoryBudget {
+    fn describe(&self) -> String {
+        match self.physical_bytes {
+            Some(physical_bytes) => format!(
+                "{:.1} GiB safe budget on {:.1} GiB system memory",
+                bytes_to_gib(self.safe_bytes),
+                bytes_to_gib(physical_bytes)
+            ),
+            None => format!(
+                "{:.1} GiB safe budget (system memory unavailable)",
+                bytes_to_gib(self.safe_bytes)
+            ),
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -620,20 +737,55 @@ pub fn train(
         config,
         device,
     )?;
-    let estimated_peak = estimate_peak_bytes(gaussians.len(), trainer.pixel_count);
-    log::info!(
-        "MetalTrainer preflight | gaussians={} | pixels={} | estimated_peak_memory≈{:.1} GiB",
+    let memory_budget = detect_metal_memory_budget();
+    let estimated_peak = estimate_peak_memory(
         gaussians.len(),
         trainer.pixel_count,
-        bytes_to_gib(estimated_peak)
+        loaded.cameras.len(),
+        trainer.chunk_size,
     );
-    if estimated_peak > METAL_MEMORY_GUARD_BYTES
-        && std::env::var_os("RUSTGS_SKIP_METAL_MEMORY_GUARD").is_none()
-    {
-        return Err(TrainingError::TrainingFailed(format!(
-            "metal backend is estimated to need about {:.1} GiB for a single training step, which is likely to be OOM-killed. Try lowering --metal-render-scale, setting --max-initial-gaussians 4096 or lower, or increasing --sampling-step. Set RUSTGS_SKIP_METAL_MEMORY_GUARD=1 to bypass this guard.",
-            bytes_to_gib(estimated_peak)
-        )));
+    log::info!(
+        "MetalTrainer preflight | gaussians={} | frames={} | pixels={} | chunk_size={} | estimated_peak≈{:.1} GiB | budget={} | dominant={}",
+        gaussians.len(),
+        loaded.cameras.len(),
+        trainer.pixel_count,
+        trainer.chunk_size,
+        bytes_to_gib(estimated_peak.total_bytes()),
+        memory_budget.describe(),
+        estimated_peak.top_components_summary(3),
+    );
+    let skip_memory_guard = std::env::var_os("RUSTGS_SKIP_METAL_MEMORY_GUARD").is_some();
+    match assess_memory_estimate(&estimated_peak, &memory_budget) {
+        MetalMemoryDecision::Allow => {
+            let headroom = memory_budget
+                .safe_bytes
+                .saturating_sub(estimated_peak.total_bytes());
+            log::info!(
+                "MetalTrainer preflight passed with {:.1} GiB headroom",
+                bytes_to_gib(headroom)
+            );
+        }
+        MetalMemoryDecision::Warn => {
+            log::warn!(
+                "MetalTrainer preflight is close to the safe memory budget; recommendations: {}",
+                estimated_peak.recommendations().join("; ")
+            );
+        }
+        MetalMemoryDecision::Block if skip_memory_guard => {
+            log::warn!(
+                "MetalTrainer preflight exceeds the safe memory budget but RUSTGS_SKIP_METAL_MEMORY_GUARD=1 is set; continuing anyway. Recommendations: {}",
+                estimated_peak.recommendations().join("; ")
+            );
+        }
+        MetalMemoryDecision::Block => {
+            return Err(TrainingError::TrainingFailed(format!(
+                "metal backend is estimated to need about {:.1} GiB for a single training step, above the safe budget of {}. Dominant terms: {}. Recommendations: {}. Set RUSTGS_SKIP_METAL_MEMORY_GUARD=1 to bypass this guard.",
+                bytes_to_gib(estimated_peak.total_bytes()),
+                memory_budget.describe(),
+                estimated_peak.top_components_summary(3),
+                estimated_peak.recommendations().join("; ")
+            )));
+        }
     }
     let frames = trainer.prepare_frames(&loaded)?;
     let stats = trainer.train(&mut gaussians, &frames, config.iterations)?;
@@ -667,14 +819,122 @@ fn effective_metal_config(config: &TrainingConfig) -> TrainingConfig {
     effective
 }
 
-fn estimate_peak_bytes(num_gaussians: usize, pixel_count: usize) -> u64 {
-    (num_gaussians as u64)
-        .saturating_mul(pixel_count as u64)
-        .saturating_mul(METAL_BYTES_PER_GAUSSIAN_PIXEL)
+fn estimate_peak_memory(
+    num_gaussians: usize,
+    pixel_count: usize,
+    frame_count: usize,
+    chunk_size: usize,
+) -> MetalMemoryEstimate {
+    let num_gaussians = num_gaussians as u64;
+    let pixel_count = pixel_count as u64;
+    let frame_count = frame_count as u64;
+    let chunk_size = chunk_size.max(1) as u64;
+    let gaussian_state_bytes = num_gaussians.saturating_mul(METAL_GAUSSIAN_STATE_BYTES);
+    let frame_bytes = frame_count
+        .saturating_mul(pixel_count)
+        .saturating_mul(METAL_FRAME_BYTES_PER_PIXEL);
+    let pixel_state_bytes = pixel_count.saturating_mul(METAL_PIXEL_STATE_BYTES_PER_PIXEL);
+    let projection_bytes = num_gaussians.saturating_mul(METAL_PROJECTED_BYTES_PER_GAUSSIAN);
+    let chunk_workspace_bytes = chunk_size
+        .saturating_mul(pixel_count)
+        .saturating_mul(METAL_CHUNK_WORKSPACE_BYTES_PER_GAUSSIAN_PIXEL);
+    let retained_graph_bytes = num_gaussians
+        .saturating_mul(pixel_count)
+        .saturating_mul(METAL_RETAINED_GRAPH_BYTES_PER_GAUSSIAN_PIXEL);
+    let subtotal = gaussian_state_bytes
+        .saturating_add(frame_bytes)
+        .saturating_add(pixel_state_bytes)
+        .saturating_add(projection_bytes)
+        .saturating_add(chunk_workspace_bytes)
+        .saturating_add(retained_graph_bytes);
+    let safety_margin_bytes = apply_ratio(
+        subtotal,
+        METAL_ESTIMATE_SAFETY_NUMERATOR,
+        METAL_ESTIMATE_SAFETY_DENOMINATOR,
+    )
+    .max(METAL_ESTIMATE_MIN_SAFETY_BYTES);
+
+    MetalMemoryEstimate {
+        gaussian_state_bytes,
+        frame_bytes,
+        pixel_state_bytes,
+        projection_bytes,
+        chunk_workspace_bytes,
+        retained_graph_bytes,
+        safety_margin_bytes,
+    }
+}
+
+fn assess_memory_estimate(
+    estimate: &MetalMemoryEstimate,
+    budget: &MetalMemoryBudget,
+) -> MetalMemoryDecision {
+    let total = estimate.total_bytes();
+    if total > budget.safe_bytes {
+        return MetalMemoryDecision::Block;
+    }
+    if total.saturating_mul(METAL_WARN_BUDGET_DENOMINATOR)
+        >= budget
+            .safe_bytes
+            .saturating_mul(METAL_WARN_BUDGET_NUMERATOR)
+    {
+        return MetalMemoryDecision::Warn;
+    }
+    MetalMemoryDecision::Allow
+}
+
+fn detect_metal_memory_budget() -> MetalMemoryBudget {
+    let physical_bytes = detect_physical_memory_bytes();
+    let safe_bytes = physical_bytes
+        .map(|bytes| {
+            apply_ratio(
+                bytes,
+                METAL_SYSTEM_MEMORY_BUDGET_NUMERATOR,
+                METAL_SYSTEM_MEMORY_BUDGET_DENOMINATOR,
+            )
+        })
+        .map(|bytes| bytes.min(DEFAULT_METAL_MEMORY_BUDGET_BYTES))
+        .unwrap_or(DEFAULT_METAL_MEMORY_BUDGET_BYTES);
+
+    MetalMemoryBudget {
+        safe_bytes,
+        physical_bytes,
+    }
+}
+
+fn detect_physical_memory_bytes() -> Option<u64> {
+    #[allow(unsafe_code)]
+    unsafe {
+        let pages = libc::sysconf(libc::_SC_PHYS_PAGES);
+        let page_size = libc::sysconf(libc::_SC_PAGESIZE);
+        if pages <= 0 || page_size <= 0 {
+            return None;
+        }
+        Some(((pages as u128).saturating_mul(page_size as u128)).min(u64::MAX as u128) as u64)
+    }
+}
+
+fn apply_ratio(bytes: u64, numerator: u64, denominator: u64) -> u64 {
+    if denominator == 0 {
+        return bytes;
+    }
+    ((bytes as u128)
+        .saturating_mul(numerator as u128)
+        .checked_div(denominator as u128)
+        .unwrap_or(u128::MAX))
+    .min(u64::MAX as u128) as u64
 }
 
 fn bytes_to_gib(bytes: u64) -> f64 {
     bytes as f64 / 1024f64 / 1024f64 / 1024f64
+}
+
+fn format_memory(bytes: u64) -> String {
+    if bytes >= GIB {
+        format!("{:.1} GiB", bytes_to_gib(bytes))
+    } else {
+        format!("{:.0} MiB", bytes as f64 / 1024f64 / 1024f64)
+    }
 }
 
 fn duration_ms(duration: Duration) -> f64 {
@@ -880,10 +1140,57 @@ mod tests {
 
     #[test]
     fn peak_estimate_scales_with_problem_size() {
-        let small = estimate_peak_bytes(4_096, 4_800);
-        let large = estimate_peak_bytes(57_474, 4_800);
-        assert!(large > small);
-        assert!(bytes_to_gib(large) > 10.0);
+        let small = estimate_peak_memory(4_096, 4_800, 5, 32);
+        let large = estimate_peak_memory(57_474, 4_800, 5, 32);
+        assert!(large.total_bytes() > small.total_bytes());
+        assert!(bytes_to_gib(large.total_bytes()) > 10.0);
+    }
+
+    #[test]
+    fn peak_estimate_accounts_for_frames_and_chunk_size() {
+        let baseline = estimate_peak_memory(4_096, 4_800, 5, 32);
+        let more_frames = estimate_peak_memory(4_096, 4_800, 25, 32);
+        let larger_chunk = estimate_peak_memory(4_096, 4_800, 5, 128);
+        assert!(more_frames.total_bytes() > baseline.total_bytes());
+        assert!(larger_chunk.total_bytes() > baseline.total_bytes());
+    }
+
+    #[test]
+    fn detected_budget_prefers_fraction_of_system_memory() {
+        let physical = 16 * GIB;
+        let safe = apply_ratio(
+            physical,
+            METAL_SYSTEM_MEMORY_BUDGET_NUMERATOR,
+            METAL_SYSTEM_MEMORY_BUDGET_DENOMINATOR,
+        )
+        .min(DEFAULT_METAL_MEMORY_BUDGET_BYTES);
+        assert!((bytes_to_gib(safe) - 10.4).abs() < 0.05);
+    }
+
+    #[test]
+    fn preflight_warns_when_close_to_budget() {
+        let estimate = estimate_peak_memory(8_000, 4_800, 5, 32);
+        let budget = MetalMemoryBudget {
+            safe_bytes: estimate.total_bytes().saturating_add(512 * MIB),
+            physical_bytes: Some(16 * GIB),
+        };
+        assert_eq!(
+            assess_memory_estimate(&estimate, &budget),
+            MetalMemoryDecision::Warn
+        );
+    }
+
+    #[test]
+    fn preflight_blocks_when_estimate_exceeds_budget() {
+        let estimate = estimate_peak_memory(57_474, 4_800, 1, 32);
+        let budget = MetalMemoryBudget {
+            safe_bytes: 16 * GIB,
+            physical_bytes: Some(24 * GIB),
+        };
+        assert_eq!(
+            assess_memory_estimate(&estimate, &budget),
+            MetalMemoryDecision::Block
+        );
     }
 
     #[test]

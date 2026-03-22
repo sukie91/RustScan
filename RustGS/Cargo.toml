@@ -23,6 +23,7 @@ thiserror = { workspace = true }
 kiddo = "5.2.1"
 image = "0.25"
 log = "0.4"
+libc = "0.2"
 
 # CLI dependencies
 clap = { version = "4", features = ["derive"], optional = true }

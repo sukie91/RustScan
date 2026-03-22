@@ -4781,6 +4781,7 @@ dependencies = [
  "glam",
  "image",
  "kiddo",
+ "libc",
  "log",
  "rayon",
  "rustscan-types",
