@@ -1,15 +1,14 @@
 //! Metal-native 3DGS training backend.
 //!
-//! This path keeps projection, rasterization, loss computation, backward, and
-//! optimizer updates on the Metal device by expressing the renderer as Candle
-//! tensor ops. It is intentionally lower resolution than the legacy hybrid
-//! path so we can keep the whole step on GPU without CPU tile rasterization.
+//! This path keeps projection, rasterization, loss computation, and optimizer
+//! updates on the Metal device, while replacing the generic autograd hot path
+//! with a specialized analytical backward pass.
 
 use std::time::{Duration, Instant};
 
-use candle_core::backprop::GradStore;
 use candle_core::{DType, Device, Tensor, Var};
 
+use crate::diff::analytical_backward::{self, ForwardIntermediate, GaussianRenderRecord};
 use crate::diff::diff_splat::{DiffCamera, TrainableGaussians};
 use crate::{GaussianMap, TrainingDataset, TrainingError};
 
@@ -48,15 +47,22 @@ struct MetalTrainingFrame {
     camera: DiffCamera,
     target_color: Tensor,
     target_depth: Tensor,
+    target_color_cpu: Vec<f32>,
+    target_depth_cpu: Vec<f32>,
 }
 
 struct ProjectedGaussians {
+    source_indices: Tensor,
     u: Tensor,
     v: Tensor,
     sigma_x: Tensor,
     sigma_y: Tensor,
+    raw_sigma_x: Tensor,
+    raw_sigma_y: Tensor,
     depth: Tensor,
     opacity: Tensor,
+    opacity_logits: Tensor,
+    scale3d: Tensor,
     colors: Tensor,
     min_x: Tensor,
     max_x: Tensor,
@@ -68,6 +74,12 @@ struct RenderedFrame {
     color: Tensor,
     depth: Tensor,
     alpha: Tensor,
+}
+
+struct CpuRenderedFrame {
+    color: Vec<f32>,
+    depth: Vec<f32>,
+    alpha: Vec<f32>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -443,6 +455,8 @@ impl MetalTrainer {
                     (self.pixel_count,),
                     &self.device,
                 )?,
+                target_color_cpu,
+                target_depth_cpu,
             });
         }
         Ok(frames)
@@ -518,7 +532,8 @@ impl MetalTrainer {
     ) -> candle_core::Result<MetalStepOutcome> {
         self.iteration += 1;
         let total_start = Instant::now();
-        let (rendered, render_profile) = self.render(gaussians, &frame.camera, should_profile)?;
+        let (rendered, projected, render_profile) =
+            self.render(gaussians, &frame.camera, should_profile)?;
         let mut profile = MetalStepProfile::from_render(render_profile);
 
         let loss_start = Instant::now();
@@ -530,12 +545,23 @@ impl MetalTrainer {
         profile.loss = loss_start.elapsed();
 
         let backward_start = Instant::now();
-        let grads = total.backward()?;
-        self.synchronize_if_needed(should_profile)?;
+        let intermediate = self.build_forward_intermediate(&projected, &rendered)?;
+        let analytical_grads = analytical_backward::backward_weighted_l1(
+            &intermediate,
+            &frame.target_color_cpu,
+            &frame.target_depth_cpu,
+            gaussians.len(),
+            frame.camera.fx,
+            frame.camera.fy,
+            frame.camera.cx,
+            frame.camera.cy,
+            1.0 / frame.target_color_cpu.len().max(1) as f32,
+            0.1 / frame.target_depth_cpu.len().max(1) as f32,
+        );
         profile.backward = backward_start.elapsed();
 
         let optimizer_start = Instant::now();
-        self.apply_gradients(gaussians, &grads)?;
+        self.apply_analytical_gradients(gaussians, &analytical_grads)?;
         self.synchronize_if_needed(should_profile)?;
         profile.optimizer = optimizer_start.elapsed();
         profile.total = total_start.elapsed();
@@ -543,87 +569,72 @@ impl MetalTrainer {
 
         Ok(MetalStepOutcome {
             loss: loss_value,
-            visible_gaussians: render_profile.visible_gaussians,
-            total_gaussians: render_profile.total_gaussians,
+            visible_gaussians: profile.visible_gaussians,
+            total_gaussians: profile.total_gaussians,
             profile: if should_profile { Some(profile) } else { None },
         })
     }
 
-    fn apply_gradients(
+    fn apply_analytical_gradients(
         &mut self,
         gaussians: &mut TrainableGaussians,
-        grads: &GradStore,
+        grads: &analytical_backward::AnalyticalGradients,
     ) -> candle_core::Result<()> {
         let adam = self
             .adam
             .as_mut()
             .ok_or_else(|| candle_core::Error::Msg("adam state not initialized".into()))?;
 
-        if let Some(grad) = grads.get(gaussians.positions()) {
-            adam_step_var(
-                &gaussians.positions,
-                grad,
-                &mut adam.m_pos,
-                &mut adam.v_pos,
-                self.lr_pos,
-                self.beta1,
-                self.beta2,
-                self.eps,
-                self.iteration,
-            )?;
-        }
-        if let Some(grad) = grads.get(gaussians.scales.as_tensor()) {
-            adam_step_var(
-                &gaussians.scales,
-                grad,
-                &mut adam.m_scale,
-                &mut adam.v_scale,
-                self.lr_scale,
-                self.beta1,
-                self.beta2,
-                self.eps,
-                self.iteration,
-            )?;
-        }
-        if let Some(grad) = grads.get(gaussians.rotations.as_tensor()) {
-            adam_step_var(
-                &gaussians.rotations,
-                grad,
-                &mut adam.m_rot,
-                &mut adam.v_rot,
-                self.lr_rot,
-                self.beta1,
-                self.beta2,
-                self.eps,
-                self.iteration,
-            )?;
-        }
-        if let Some(grad) = grads.get(gaussians.opacities.as_tensor()) {
-            adam_step_var(
-                &gaussians.opacities,
-                grad,
-                &mut adam.m_op,
-                &mut adam.v_op,
-                self.lr_opacity,
-                self.beta1,
-                self.beta2,
-                self.eps,
-                self.iteration,
-            )?;
-        }
-        if let Some(grad) = grads.get(gaussians.colors()) {
-            adam_step_var(
-                &gaussians.colors,
-                grad,
-                &mut adam.m_color,
-                &mut adam.v_color,
-                self.lr_color,
-                self.beta1,
-                self.beta2,
-                self.eps,
-                self.iteration,
-            )?;
-        }
+        let n = gaussians.len();
+        let pos_grad = Tensor::from_slice(&grads.positions, (n, 3), &self.device)?;
+        let scale_grad = Tensor::from_slice(&grads.log_scales, (n, 3), &self.device)?;
+        let opacity_grad = Tensor::from_slice(&grads.opacity_logits, (n,), &self.device)?;
+        let color_grad = Tensor::from_slice(&grads.colors, (n, 3), &self.device)?;
+
+        adam_step_var(
+            &gaussians.positions,
+            &pos_grad,
+            &mut adam.m_pos,
+            &mut adam.v_pos,
+            self.lr_pos,
+            self.beta1,
+            self.beta2,
+            self.eps,
+            self.iteration,
+        )?;
+        adam_step_var(
+            &gaussians.scales,
+            &scale_grad,
+            &mut adam.m_scale,
+            &mut adam.v_scale,
+            self.lr_scale,
+            self.beta1,
+            self.beta2,
+            self.eps,
+            self.iteration,
+        )?;
+        adam_step_var(
+            &gaussians.opacities,
+            &opacity_grad,
+            &mut adam.m_op,
+            &mut adam.v_op,
+            self.lr_opacity,
+            self.beta1,
+            self.beta2,
+            self.eps,
+            self.iteration,
+        )?;
+        adam_step_var(
+            &gaussians.colors,
+            &color_grad,
+            &mut adam.m_color,
+            &mut adam.v_color,
+            self.lr_color,
+            self.beta1,
+            self.beta2,
+            self.eps,
+            self.iteration,
+        )?;
 
         normalize_rotations(&gaussians.rotations)?;
         Ok(())
@@ -634,13 +645,31 @@ impl MetalTrainer {
         gaussians: &TrainableGaussians,
         camera: &DiffCamera,
         should_profile: bool,
-    ) -> candle_core::Result<(RenderedFrame, MetalRenderProfile)> {
+    ) -> candle_core::Result<(RenderedFrame, ProjectedGaussians, MetalRenderProfile)> {
         if gaussians.len() == 0 {
             return Ok((
                 RenderedFrame {
                     color: Tensor::zeros((self.pixel_count, 3), DType::F32, &self.device)?,
                     depth: Tensor::zeros((self.pixel_count,), DType::F32, &self.device)?,
                     alpha: Tensor::zeros((self.pixel_count,), DType::F32, &self.device)?,
+                },
+                ProjectedGaussians {
+                    source_indices: Tensor::zeros((0,), DType::U32, &self.device)?,
+                    u: Tensor::zeros((0,), DType::F32, &self.device)?,
+                    v: Tensor::zeros((0,), DType::F32, &self.device)?,
+                    sigma_x: Tensor::zeros((0,), DType::F32, &self.device)?,
+                    sigma_y: Tensor::zeros((0,), DType::F32, &self.device)?,
+                    raw_sigma_x: Tensor::zeros((0,), DType::F32, &self.device)?,
+                    raw_sigma_y: Tensor::zeros((0,), DType::F32, &self.device)?,
+                    depth: Tensor::zeros((0,), DType::F32, &self.device)?,
+                    opacity: Tensor::zeros((0,), DType::F32, &self.device)?,
+                    opacity_logits: Tensor::zeros((0,), DType::F32, &self.device)?,
+                    scale3d: Tensor::zeros((0, 3), DType::F32, &self.device)?,
+                    colors: Tensor::zeros((0, 3), DType::F32, &self.device)?,
+                    min_x: Tensor::zeros((0,), DType::F32, &self.device)?,
+                    max_x: Tensor::zeros((0,), DType::F32, &self.device)?,
+                    min_y: Tensor::zeros((0,), DType::F32, &self.device)?,
+                    max_y: Tensor::zeros((0,), DType::F32, &self.device)?,
                 },
                 MetalRenderProfile::default(),
             ));
@@ -674,7 +703,7 @@ impl MetalTrainer {
             profile.native_forward =
                 Some(self.profile_native_forward(&projected, &tile_bins, &rendered)?);
         }
-        Ok((rendered, profile))
+        Ok((rendered, projected, profile))
     }
 
     fn project_gaussians(
@@ -686,9 +715,11 @@ impl MetalTrainer {
         let mut profile = MetalRenderProfile::default();
         profile.total_gaussians = gaussians.len();
         let projection_start = Instant::now();
-        let pos = gaussians.positions();
-        let scales = gaussians.scales()?;
-        let opacity = gaussians.opacities()?;
+        let pos = gaussians.positions().detach();
+        let scales = gaussians.scales.as_tensor().detach().exp()?;
+        let opacity_logits = gaussians.opacities.as_tensor().detach();
+        let opacity = sigmoid_tensor(&opacity_logits)?;
+        let colors = gaussians.colors().detach();
 
         let px = pos.narrow(1, 0, 1)?.squeeze(1)?;
         let py = pos.narrow(1, 1, 1)?.squeeze(1)?;
@@ -722,18 +753,18 @@ impl MetalTrainer {
             .broadcast_div(&z_safe)?
             .broadcast_add(&cy)?;
 
-        let sx = scales
+        let raw_sx = scales
             .narrow(1, 0, 1)?
             .squeeze(1)?
             .broadcast_mul(&fx)?
-            .broadcast_div(&z_safe)?
-            .clamp(0.5, 256.0)?;
-        let sy = scales
+            .broadcast_div(&z_safe)?;
+        let raw_sy = scales
             .narrow(1, 1, 1)?
             .squeeze(1)?
             .broadcast_mul(&fy)?
-            .broadcast_div(&z_safe)?
-            .clamp(0.5, 256.0)?;
+            .broadcast_div(&z_safe)?;
+        let sx = raw_sx.clamp(0.5, 256.0)?;
+        let sy = raw_sy.clamp(0.5, 256.0)?;
 
         let valid = z.ge(1e-4f64)?.to_dtype(DType::F32)?;
         let support_x = sx.affine(3.0, 0.0)?;
@@ -786,13 +817,18 @@ impl MetalTrainer {
             .squeeze(0)?;
         let visible_idx = sort_idx.narrow(0, 0, profile.visible_gaussians)?;
         let projected = ProjectedGaussians {
+            source_indices: visible_idx.clone(),
             u: u.index_select(&visible_idx, 0)?,
             v: v.index_select(&visible_idx, 0)?,
             sigma_x: sx.index_select(&visible_idx, 0)?,
             sigma_y: sy.index_select(&visible_idx, 0)?,
+            raw_sigma_x: raw_sx.index_select(&visible_idx, 0)?,
+            raw_sigma_y: raw_sy.index_select(&visible_idx, 0)?,
             depth: z.index_select(&visible_idx, 0)?,
             opacity: opacity.index_select(&visible_idx, 0)?,
-            colors: gaussians.colors().index_select(&visible_idx, 0)?,
+            opacity_logits: opacity_logits.index_select(&visible_idx, 0)?,
+            scale3d: scales.index_select(&visible_idx, 0)?,
+            colors: colors.index_select(&visible_idx, 0)?,
             min_x: min_x.index_select(&visible_idx, 0)?,
             max_x: max_x.index_select(&visible_idx, 0)?,
             min_y: min_y.index_select(&visible_idx, 0)?,
@@ -998,6 +1034,77 @@ impl MetalTrainer {
             color_max_abs,
             depth_max_abs,
             alpha_max_abs,
+        })
+    }
+
+    fn build_forward_intermediate(
+        &self,
+        projected: &ProjectedGaussians,
+        rendered: &RenderedFrame,
+    ) -> candle_core::Result<ForwardIntermediate> {
+        let source_indices = projected.source_indices.to_vec1::<u32>()?;
+        let u = projected.u.to_vec1::<f32>()?;
+        let v = projected.v.to_vec1::<f32>()?;
+        let sigma_x = projected.sigma_x.to_vec1::<f32>()?;
+        let sigma_y = projected.sigma_y.to_vec1::<f32>()?;
+        let raw_sigma_x = projected.raw_sigma_x.to_vec1::<f32>()?;
+        let raw_sigma_y = projected.raw_sigma_y.to_vec1::<f32>()?;
+        let depth = projected.depth.to_vec1::<f32>()?;
+        let opacity = projected.opacity.to_vec1::<f32>()?;
+        let opacity_logits = projected.opacity_logits.to_vec1::<f32>()?;
+        let colors = projected.colors.to_vec2::<f32>()?;
+        let scale3d = projected.scale3d.to_vec2::<f32>()?;
+        let min_x = projected.min_x.to_vec1::<f32>()?;
+        let max_x = projected.max_x.to_vec1::<f32>()?;
+        let min_y = projected.min_y.to_vec1::<f32>()?;
+        let max_y = projected.max_y.to_vec1::<f32>()?;
+
+        let cpu_rendered = CpuRenderedFrame {
+            color: rendered.color.flatten_all()?.to_vec1::<f32>()?,
+            depth: rendered.depth.to_vec1::<f32>()?,
+            alpha: rendered.alpha.to_vec1::<f32>()?,
+        };
+
+        let mut records = Vec::with_capacity(source_indices.len());
+        for idx in 0..source_indices.len() {
+            let rgb = if colors[idx].len() >= 3 {
+                [colors[idx][0], colors[idx][1], colors[idx][2]]
+            } else {
+                [0.0, 0.0, 0.0]
+            };
+            let scale = if scale3d[idx].len() >= 3 {
+                [scale3d[idx][0], scale3d[idx][1], scale3d[idx][2]]
+            } else {
+                [0.0, 0.0, 0.0]
+            };
+            records.push(GaussianRenderRecord {
+                gaussian_idx: source_indices[idx] as usize,
+                u: u[idx],
+                v: v[idx],
+                sigma_x: sigma_x[idx],
+                sigma_y: sigma_y[idx],
+                z: depth[idx],
+                base_alpha: opacity[idx].clamp(0.0, 1.0),
+                color: rgb,
+                min_x: min_x[idx].floor().max(0.0) as usize,
+                max_x: max_x[idx].ceil().max(0.0) as usize,
+                min_y: min_y[idx].floor().max(0.0) as usize,
+                max_y: max_y[idx].ceil().max(0.0) as usize,
+                raw_scale_2d_x: raw_sigma_x[idx],
+                raw_scale_2d_y: raw_sigma_y[idx],
+                raw_opacity: opacity[idx],
+                scale_3d: scale,
+                opacity_logit: opacity_logits[idx],
+            });
+        }
+
+        Ok(ForwardIntermediate {
+            records,
+            rendered_color: cpu_rendered.color,
+            alpha_acc: cpu_rendered.alpha,
+            rendered_depth: cpu_rendered.depth,
+            width: self.render_width,
+            height: self.render_height,
         })
     }
 
@@ -1358,6 +1465,13 @@ fn normalize_rotations(rotations: &Var) -> candle_core::Result<()> {
     Ok(())
 }
 
+fn sigmoid_tensor(tensor: &Tensor) -> candle_core::Result<Tensor> {
+    let neg = tensor.neg()?;
+    let exp_neg = neg.exp()?;
+    let one = Tensor::ones_like(tensor)?;
+    one.broadcast_div(&one.broadcast_add(&exp_neg)?)
+}
+
 fn scale_camera(
     src: &DiffCamera,
     width: usize,
@@ -1578,12 +1692,18 @@ mod tests {
         };
         let trainer = MetalTrainer::new(32, 16, &trainer_config, device.clone()).unwrap();
         let projected = ProjectedGaussians {
+            source_indices: Tensor::from_slice(&[0u32, 1], 2, &device).unwrap(),
             u: Tensor::from_slice(&[8.0f32, 18.0], 2, &device).unwrap(),
             v: Tensor::from_slice(&[8.0f32, 8.0], 2, &device).unwrap(),
             sigma_x: Tensor::from_slice(&[2.0f32, 2.0], 2, &device).unwrap(),
             sigma_y: Tensor::from_slice(&[2.0f32, 2.0], 2, &device).unwrap(),
+            raw_sigma_x: Tensor::from_slice(&[2.0f32, 2.0], 2, &device).unwrap(),
+            raw_sigma_y: Tensor::from_slice(&[2.0f32, 2.0], 2, &device).unwrap(),
             depth: Tensor::from_slice(&[1.0f32, 2.0], 2, &device).unwrap(),
             opacity: Tensor::from_slice(&[0.5f32, 0.5], 2, &device).unwrap(),
+            opacity_logits: Tensor::from_slice(&[0.0f32, 0.0], 2, &device).unwrap(),
+            scale3d: Tensor::from_slice(&[1.0f32, 1.0, 1.0, 1.0, 1.0, 1.0], (2, 3), &device)
+                .unwrap(),
             colors: Tensor::from_slice(&[1.0f32, 0.0, 0.0, 0.0, 1.0, 0.0], (2, 3), &device)
                 .unwrap(),
             min_x: Tensor::from_slice(&[2.0f32, 14.0], 2, &device).unwrap(),
@@ -1624,12 +1744,18 @@ mod tests {
         .unwrap();
         trainer.runtime.stage_camera(&camera).unwrap();
         let projected = ProjectedGaussians {
+            source_indices: Tensor::from_slice(&[0u32, 1], 2, &device).unwrap(),
             u: Tensor::from_slice(&[8.0f32, 10.0], 2, &device).unwrap(),
             v: Tensor::from_slice(&[8.0f32, 8.5], 2, &device).unwrap(),
             sigma_x: Tensor::from_slice(&[2.0f32, 2.5], 2, &device).unwrap(),
             sigma_y: Tensor::from_slice(&[2.0f32, 2.5], 2, &device).unwrap(),
+            raw_sigma_x: Tensor::from_slice(&[2.0f32, 2.5], 2, &device).unwrap(),
+            raw_sigma_y: Tensor::from_slice(&[2.0f32, 2.5], 2, &device).unwrap(),
             depth: Tensor::from_slice(&[1.0f32, 2.0], 2, &device).unwrap(),
             opacity: Tensor::from_slice(&[0.6f32, 0.4], 2, &device).unwrap(),
+            opacity_logits: Tensor::from_slice(&[0.0f32, 0.0], 2, &device).unwrap(),
+            scale3d: Tensor::from_slice(&[1.0f32, 1.0, 1.0, 1.0, 1.0, 1.0], (2, 3), &device)
+                .unwrap(),
             colors: Tensor::from_slice(&[1.0f32, 0.0, 0.0, 0.0, 1.0, 0.0], (2, 3), &device)
                 .unwrap(),
             min_x: Tensor::from_slice(&[2.0f32, 3.0], 2, &device).unwrap(),

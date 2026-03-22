@@ -72,6 +72,8 @@ pub struct AnalyticalGradients {
     pub colors: Vec<f32>,
 }
 
+const DEPTH_NORMALIZATION_EPS: f32 = 1e-6;
+
 #[inline]
 fn sigmoid(x: f32) -> f32 {
     1.0 / (1.0 + (-x).exp())
@@ -95,12 +97,52 @@ pub fn backward(
     cx: f32,
     cy: f32,
 ) -> AnalyticalGradients {
+    backward_weighted_l1(
+        intermediate,
+        target_color,
+        &[],
+        n_gaussians,
+        fx,
+        fy,
+        cx,
+        cy,
+        1.0,
+        0.0,
+    )
+}
+
+/// Compute analytical gradients for weighted mean-L1 color and depth losses.
+pub fn backward_weighted_l1(
+    intermediate: &ForwardIntermediate,
+    target_color: &[f32],
+    target_depth: &[f32],
+    n_gaussians: usize,
+    fx: f32,
+    fy: f32,
+    cx: f32,
+    cy: f32,
+    color_grad_scale: f32,
+    depth_grad_scale: f32,
+) -> AnalyticalGradients {
     use rayon::prelude::*;
 
     let w = intermediate.width;
     let h = intermediate.height;
 
-    // Precompute dL/dC_p from L1 loss: sign(rendered - target)
+    assert_eq!(
+        intermediate.rendered_color.len(),
+        target_color.len(),
+        "color target length mismatch"
+    );
+    if depth_grad_scale != 0.0 {
+        assert_eq!(
+            intermediate.rendered_depth.len(),
+            target_depth.len(),
+            "depth target length mismatch"
+        );
+    }
+
+    // Precompute dL/dC_p from weighted mean-L1 loss.
     let dl_dc: Vec<f32> = intermediate
         .rendered_color
         .iter()
@@ -108,14 +150,34 @@ pub fn backward(
         .map(|(&r, &t)| {
             let diff = r - t;
             if diff > 0.0 {
-                1.0
+                color_grad_scale
             } else if diff < 0.0 {
-                -1.0
+                -color_grad_scale
             } else {
                 0.0
             }
         })
         .collect();
+
+    let dl_dd: Vec<f32> = if depth_grad_scale == 0.0 {
+        vec![0.0; intermediate.rendered_depth.len()]
+    } else {
+        intermediate
+            .rendered_depth
+            .iter()
+            .zip(target_depth.iter())
+            .map(|(&r, &t)| {
+                let diff = r - t;
+                if diff > 0.0 {
+                    depth_grad_scale
+                } else if diff < 0.0 {
+                    -depth_grad_scale
+                } else {
+                    0.0
+                }
+            })
+            .collect()
+    };
 
     // Split rows into chunks for parallel processing.
     // Each chunk processes all records with its own per-pixel running state.
@@ -138,6 +200,7 @@ pub fn backward(
             let chunk_pixel_count = w * row_range.len();
             let mut running_s = vec![0.0f32; chunk_pixel_count * 3];
             let mut running_alpha = vec![0.0f32; chunk_pixel_count];
+            let mut running_depth_num = vec![0.0f32; chunk_pixel_count];
 
             let row_offset = row_range.start;
 
@@ -159,6 +222,7 @@ pub fn backward(
                 let mut dl_dsigma_x = 0.0f32;
                 let mut dl_dsigma_y = 0.0f32;
                 let mut dl_dbase_alpha = 0.0f32;
+                let mut dl_dz = 0.0f32;
 
                 // Clamp y range to this chunk
                 let chunk_min_y = rec.min_y.max(row_offset);
@@ -187,6 +251,11 @@ pub fn backward(
                             continue;
                         }
 
+                        let final_alpha = intermediate.alpha_acc[global_pidx];
+                        let depth_denom = final_alpha + DEPTH_NORMALIZATION_EPS;
+                        let final_depth = intermediate.rendered_depth[global_pidx];
+                        let final_depth_num = final_depth * depth_denom;
+
                         let c3_global = global_pidx * 3;
                         let c3_local = local_pidx * 3;
 
@@ -212,6 +281,21 @@ pub fn backward(
                                 * dl_dc[c3_global + 1]
                             + (transmittance * rec.color[2] - r_i[2] * inv_one_minus_alpha)
                                 * dl_dc[c3_global + 2];
+                        let tail_alpha = final_alpha - running_alpha[local_pidx] - contribution;
+                        let tail_depth_num =
+                            final_depth_num - running_depth_num[local_pidx] - contribution * rec.z;
+                        let ddepth_dalpha = if dl_dd[global_pidx] == 0.0 {
+                            0.0
+                        } else {
+                            let dnum_dalpha =
+                                transmittance * rec.z - tail_depth_num * inv_one_minus_alpha;
+                            let dalpha_dalpha =
+                                transmittance - tail_alpha * inv_one_minus_alpha;
+                            (dnum_dalpha * depth_denom - final_depth_num * dalpha_dalpha)
+                                / (depth_denom * depth_denom)
+                        };
+                        let dl_dalpha_total = dl_dalpha + dl_dd[global_pidx] * ddepth_dalpha;
+                        let dl_dz_direct = dl_dd[global_pidx] * contribution / depth_denom;
 
                         // dL/dc_i = T_i · α_i · dL/dC_p
                         let gi = idx * 3;
@@ -224,15 +308,17 @@ pub fn backward(
                         running_s[c3_local + 1] += contribution * rec.color[1];
                         running_s[c3_local + 2] += contribution * rec.color[2];
                         running_alpha[local_pidx] += contribution;
+                        running_depth_num[local_pidx] += contribution * rec.z;
 
                         // Chain through alpha clamp
                         if alpha_raw <= 0.0 || alpha_raw >= 0.99 {
+                            dl_dz += dl_dz_direct;
                             continue;
                         }
 
-                        dl_dbase_alpha += dl_dalpha * kernel;
+                        dl_dbase_alpha += dl_dalpha_total * kernel;
 
-                        let dl_dkernel = dl_dalpha * rec.base_alpha;
+                        let dl_dkernel = dl_dalpha_total * rec.base_alpha;
                         let dk_ddx = kernel * (-dx);
                         let dk_ddy = kernel * (-dy);
 
@@ -245,6 +331,7 @@ pub fn backward(
                         if sy_clamp_pass {
                             dl_dsigma_y += dl_dkernel * dk_ddy * (-dy / rec.sigma_y);
                         }
+                        dl_dz += dl_dz_direct;
                     }
                 }
 
@@ -254,11 +341,11 @@ pub fn backward(
 
                 grad_pos[gi] += dl_du * fx * inv_z;
                 grad_pos[gi + 1] += dl_dv * fy * inv_z;
-                let dl_dz = dl_du * (-(rec.u - cx) * inv_z)
+                let dl_dz_projected = dl_du * (-(rec.u - cx) * inv_z)
                     + dl_dv * (-(rec.v - cy) * inv_z)
                     + dl_dsigma_x * (-rec.raw_scale_2d_x * inv_z)
                     + dl_dsigma_y * (-rec.raw_scale_2d_y * inv_z);
-                grad_pos[gi + 2] += dl_dz;
+                grad_pos[gi + 2] += dl_dz + dl_dz_projected;
 
                 let dl_dscale3d_x = if sx_clamp_pass {
                     dl_dsigma_x * fx * inv_z
@@ -513,6 +600,106 @@ mod tests {
             rel_err < 0.05,
             "analytical={} vs fd={}, rel_err={}",
             grads.colors[0],
+            fd_grad,
+            rel_err
+        );
+    }
+
+    #[test]
+    fn test_weighted_depth_gradient_matches_finite_diff() {
+        let w = 4usize;
+        let h = 4usize;
+        let pixel_count = w * h;
+        let opacity_logit = 0.5f32;
+        let sig = sigmoid(opacity_logit);
+        let base_alpha = sig.clamp(0.0, 1.0);
+        let scale_3d = 1.2f32;
+        let cx = 2.0f32;
+        let cy = 2.0f32;
+        let target_depth = vec![1.5f32; pixel_count];
+        let target_color = vec![0.0f32; pixel_count * 3];
+
+        let build_intermediate = |z: f32| -> ForwardIntermediate {
+            let sigma = scale_3d / z;
+            let rendered_color = vec![0.0f32; pixel_count * 3];
+            let mut alpha_acc = vec![0.0f32; pixel_count];
+            let mut rendered_depth = vec![0.0f32; pixel_count];
+            for py in 0..h {
+                for px in 0..w {
+                    let dx = (px as f32 + 0.5 - cx) / sigma;
+                    let dy = (py as f32 + 0.5 - cy) / sigma;
+                    let kernel = (-0.5 * (dx * dx + dy * dy)).exp();
+                    let alpha = (base_alpha * kernel).clamp(0.0, 0.99);
+                    let pidx = py * w + px;
+                    let contribution = (1.0 - alpha_acc[pidx]) * alpha;
+                    alpha_acc[pidx] += contribution;
+                    rendered_depth[pidx] += contribution * z;
+                }
+            }
+            for (depth, alpha) in rendered_depth.iter_mut().zip(alpha_acc.iter()) {
+                *depth /= alpha + DEPTH_NORMALIZATION_EPS;
+            }
+            ForwardIntermediate {
+                records: vec![GaussianRenderRecord {
+                    gaussian_idx: 0,
+                    u: cx,
+                    v: cy,
+                    sigma_x: sigma,
+                    sigma_y: sigma,
+                    z,
+                    base_alpha,
+                    color: [0.0, 0.0, 0.0],
+                    min_x: 0,
+                    max_x: w - 1,
+                    min_y: 0,
+                    max_y: h - 1,
+                    raw_scale_2d_x: sigma,
+                    raw_scale_2d_y: sigma,
+                    raw_opacity: sig,
+                    scale_3d: [scale_3d, scale_3d, scale_3d],
+                    opacity_logit,
+                }],
+                rendered_color,
+                alpha_acc,
+                rendered_depth,
+                width: w,
+                height: h,
+            }
+        };
+
+        let render_loss = |z: f32| -> f32 {
+            let inter = build_intermediate(z);
+            inter
+                .rendered_depth
+                .iter()
+                .zip(target_depth.iter())
+                .map(|(rendered, target)| (rendered - target).abs())
+                .sum::<f32>()
+                / pixel_count as f32
+                * 0.1
+        };
+
+        let inter = build_intermediate(2.0);
+        let grads = backward_weighted_l1(
+            &inter,
+            &target_color,
+            &target_depth,
+            1,
+            1.0,
+            1.0,
+            cx,
+            cy,
+            0.0,
+            0.1 / pixel_count as f32,
+        );
+
+        let eps = 1e-3f32;
+        let fd_grad = (render_loss(2.0 + eps) - render_loss(2.0 - eps)) / (2.0 * eps);
+        let rel_err = (grads.positions[2] - fd_grad).abs() / (fd_grad.abs() + 1e-8);
+        assert!(
+            rel_err < 0.1,
+            "analytical={} vs fd={}, rel_err={}",
+            grads.positions[2],
             fd_grad,
             rel_err
         );
