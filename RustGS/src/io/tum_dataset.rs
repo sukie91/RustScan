@@ -19,6 +19,14 @@ pub struct TumRgbdConfig {
     pub pose_tolerance_seconds: f64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FrameSelectionSummary {
+    total_rgb_frames: usize,
+    considered_rgb_frames: usize,
+    frame_stride: usize,
+    selected_rgb_frames: usize,
+}
+
 impl Default for TumRgbdConfig {
     fn default() -> Self {
         Self {
@@ -83,19 +91,15 @@ pub fn load_tum_rgbd_dataset(
     let intrinsics = load_intrinsics(&root, width, height);
     let mut dataset = TrainingDataset::new(intrinsics).with_depth_scale(config.depth_scale);
 
-    let limit = if config.max_frames > 0 {
-        config.max_frames.min(rgb_entries.len())
-    } else {
-        rgb_entries.len()
-    };
-    let stride = config.frame_stride.max(1);
+    let selection =
+        summarize_frame_selection(rgb_entries.len(), config.max_frames, config.frame_stride);
 
     let mut skipped_pose = 0usize;
     let mut matched_depth = 0usize;
     for (frame_idx, (timestamp, image_path)) in rgb_entries
         .into_iter()
-        .take(limit)
-        .step_by(stride)
+        .take(selection.considered_rgb_frames)
+        .step_by(selection.frame_stride)
         .enumerate()
     {
         let Some(pose) = find_closest_pose(&ground_truth, timestamp, config.pose_tolerance_seconds)
@@ -122,8 +126,12 @@ pub fn load_tum_rgbd_dataset(
     }
 
     log::info!(
-        "Loaded TUM RGB-D dataset {} | frames={} | depth_pairs={} | skipped_without_pose={} | resolution={}x{}",
+        "Loaded TUM RGB-D dataset {} | rgb_total={} | considered_rgb={} | frame_stride={} | selected_rgb={} | frames={} | depth_pairs={} | skipped_without_pose={} | resolution={}x{}",
         root.display(),
+        selection.total_rgb_frames,
+        selection.considered_rgb_frames,
+        selection.frame_stride,
+        selection.selected_rgb_frames,
         dataset.poses.len(),
         matched_depth,
         skipped_pose,
@@ -132,6 +140,31 @@ pub fn load_tum_rgbd_dataset(
     );
 
     Ok(dataset)
+}
+
+fn summarize_frame_selection(
+    total_rgb_frames: usize,
+    max_frames: usize,
+    frame_stride: usize,
+) -> FrameSelectionSummary {
+    let considered_rgb_frames = if max_frames > 0 {
+        max_frames.min(total_rgb_frames)
+    } else {
+        total_rgb_frames
+    };
+    let frame_stride = frame_stride.max(1);
+    let selected_rgb_frames = if considered_rgb_frames == 0 {
+        0
+    } else {
+        considered_rgb_frames.div_ceil(frame_stride)
+    };
+
+    FrameSelectionSummary {
+        total_rgb_frames,
+        considered_rgb_frames,
+        frame_stride,
+        selected_rgb_frames,
+    }
 }
 
 fn resolve_tum_root(input: &Path) -> Result<PathBuf, TrainingError> {
@@ -354,32 +387,38 @@ mod tests {
     use tempfile::tempdir;
 
     fn write_test_dataset(root: &Path) {
+        write_test_dataset_with_frame_count(root, 2);
+    }
+
+    fn write_test_dataset_with_frame_count(root: &Path, frame_count: usize) {
         std::fs::create_dir_all(root.join("rgb")).unwrap();
         std::fs::create_dir_all(root.join("depth")).unwrap();
 
         let rgb = RgbImage::from_pixel(2, 2, Rgb([10, 20, 30]));
-        rgb.save(root.join("rgb").join("1.0.png")).unwrap();
-        rgb.save(root.join("rgb").join("2.0.png")).unwrap();
-
         let depth: ImageBuffer<Luma<u16>, Vec<u16>> = ImageBuffer::from_pixel(2, 2, Luma([5000]));
-        depth.save(root.join("depth").join("1.0.png")).unwrap();
-        depth.save(root.join("depth").join("2.0.png")).unwrap();
+        let mut rgb_lines = String::from("# timestamp filename\n");
+        let mut depth_lines = String::from("# timestamp filename\n");
+        let mut groundtruth_lines = String::from("# timestamp tx ty tz qx qy qz qw\n");
 
-        std::fs::write(
-            root.join("rgb.txt"),
-            "# timestamp filename\n1.0 rgb/1.0.png\n2.0 rgb/2.0.png\n",
-        )
-        .unwrap();
-        std::fs::write(
-            root.join("depth.txt"),
-            "# timestamp filename\n1.0 depth/1.0.png\n2.0 depth/2.0.png\n",
-        )
-        .unwrap();
-        std::fs::write(
-            root.join("groundtruth.txt"),
-            "# timestamp tx ty tz qx qy qz qw\n1.0 0 0 0 0 0 0 1\n2.0 1 2 3 0 0 0 1\n",
-        )
-        .unwrap();
+        for idx in 1..=frame_count {
+            let timestamp = format!("{idx}.0");
+            let rgb_name = format!("rgb/{timestamp}.png");
+            let depth_name = format!("depth/{timestamp}.png");
+            rgb.save(root.join(&rgb_name)).unwrap();
+            depth.save(root.join(&depth_name)).unwrap();
+            rgb_lines.push_str(&format!("{timestamp} {rgb_name}\n"));
+            depth_lines.push_str(&format!("{timestamp} {depth_name}\n"));
+            groundtruth_lines.push_str(&format!(
+                "{timestamp} {} {} {} 0 0 0 1\n",
+                idx - 1,
+                idx,
+                idx + 1
+            ));
+        }
+
+        std::fs::write(root.join("rgb.txt"), rgb_lines).unwrap();
+        std::fs::write(root.join("depth.txt"), depth_lines).unwrap();
+        std::fs::write(root.join("groundtruth.txt"), groundtruth_lines).unwrap();
     }
 
     #[test]
@@ -407,5 +446,44 @@ mod tests {
         let dataset = load_tum_rgbd_dataset(&tum_root, &TumRgbdConfig::default()).unwrap();
         assert_eq!(dataset.poses.len(), 2);
         assert_eq!(dataset.depth_scale, 5000.0);
+    }
+
+    #[test]
+    fn test_frame_selection_summary_applies_max_frames_before_stride() {
+        let summary = summarize_frame_selection(30, 25, 5);
+        assert_eq!(
+            summary,
+            FrameSelectionSummary {
+                total_rgb_frames: 30,
+                considered_rgb_frames: 25,
+                frame_stride: 5,
+                selected_rgb_frames: 5,
+            }
+        );
+    }
+
+    #[test]
+    fn test_load_tum_rgbd_dataset_uses_stride_within_considered_prefix() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("rgbd_dataset_freiburg1_xyz");
+        write_test_dataset_with_frame_count(&root, 30);
+
+        let dataset = load_tum_rgbd_dataset(
+            &root,
+            &TumRgbdConfig {
+                max_frames: 25,
+                frame_stride: 5,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(dataset.poses.len(), 5);
+        let timestamps = dataset
+            .poses
+            .iter()
+            .map(|pose| pose.timestamp)
+            .collect::<Vec<_>>();
+        assert_eq!(timestamps, vec![1.0, 6.0, 11.0, 16.0, 21.0]);
     }
 }

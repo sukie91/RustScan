@@ -58,11 +58,11 @@ enum Commands {
         #[arg(long, default_value = "0")]
         sampling_step: usize,
 
-        /// Maximum number of input frames to consider (0 = all)
+        /// Maximum number of input RGB frames to consider before applying --frame-stride (0 = all)
         #[arg(long, default_value = "0")]
         max_frames: usize,
 
-        /// Keep every Nth frame within the considered prefix
+        /// Keep every Nth frame within the considered prefix, e.g. 25 frames with stride 5 yields 5 training frames
         #[arg(long, default_value = "1")]
         frame_stride: usize,
 
@@ -211,6 +211,13 @@ fn load_training_input(
     max_frames: usize,
     frame_stride: usize,
 ) -> anyhow::Result<rustscan_types::SlamOutput> {
+    if !input.is_dir() && (max_frames > 0 || frame_stride > 1) {
+        log::warn!(
+            "--max-frames and --frame-stride only apply to TUM RGB-D dataset directories; ignoring them for {:?}",
+            input
+        );
+    }
+
     let dataset = rustgs::load_training_dataset(
         input,
         &rustgs::TumRgbdConfig {
