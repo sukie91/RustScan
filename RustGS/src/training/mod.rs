@@ -30,6 +30,9 @@ pub mod metal_trainer;
 mod metal_runtime;
 
 #[cfg(feature = "gpu")]
+mod metal_loss;
+
+#[cfg(feature = "gpu")]
 pub mod autodiff;
 
 #[cfg(feature = "gpu")]

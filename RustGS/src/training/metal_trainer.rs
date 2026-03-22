@@ -16,6 +16,7 @@ use crate::{GaussianMap, TrainingDataset, TrainingError};
 use super::data_loading::{
     load_training_data, map_from_trainable, trainable_from_map, LoadedTrainingData,
 };
+use super::metal_loss::mean_abs_diff;
 use super::metal_runtime::{
     ChunkPixelWindow, MetalBufferSlot, MetalProjectedGaussian, MetalRuntime,
     MetalTileDispatchRecord, METAL_TILE_SIZE,
@@ -521,8 +522,8 @@ impl MetalTrainer {
         let mut profile = MetalStepProfile::from_render(render_profile);
 
         let loss_start = Instant::now();
-        let color_loss = rendered.color.sub(&frame.target_color)?.abs()?.mean_all()?;
-        let depth_loss = rendered.depth.sub(&frame.target_depth)?.abs()?.mean_all()?;
+        let color_loss = mean_abs_diff(&rendered.color, &frame.target_color)?;
+        let depth_loss = mean_abs_diff(&rendered.depth, &frame.target_depth)?;
         let total = color_loss.broadcast_add(&depth_loss.affine(0.1, 0.0)?)?;
         let loss_value = total.to_vec0::<f32>()?;
         self.synchronize_if_needed(should_profile)?;
