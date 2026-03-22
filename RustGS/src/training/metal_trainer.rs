@@ -586,10 +586,18 @@ impl MetalTrainer {
             .ok_or_else(|| candle_core::Error::Msg("adam state not initialized".into()))?;
 
         let n = gaussians.len();
-        let pos_grad = Tensor::from_slice(&grads.positions, (n, 3), &self.device)?;
-        let scale_grad = Tensor::from_slice(&grads.log_scales, (n, 3), &self.device)?;
-        let opacity_grad = Tensor::from_slice(&grads.opacity_logits, (n,), &self.device)?;
-        let color_grad = Tensor::from_slice(&grads.colors, (n, 3), &self.device)?;
+        let pos_grad =
+            self.runtime
+                .stage_tensor_from_slice(MetalBufferSlot::GradPositions, &grads.positions, (n, 3))?;
+        let scale_grad =
+            self.runtime
+                .stage_tensor_from_slice(MetalBufferSlot::GradScales, &grads.log_scales, (n, 3))?;
+        let opacity_grad =
+            self.runtime
+                .stage_tensor_from_slice(MetalBufferSlot::GradOpacity, &grads.opacity_logits, (n,))?;
+        let color_grad =
+            self.runtime
+                .stage_tensor_from_slice(MetalBufferSlot::GradColors, &grads.colors, (n, 3))?;
 
         adam_step_var(
             &gaussians.positions,

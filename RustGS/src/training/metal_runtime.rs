@@ -228,6 +228,10 @@ pub(crate) enum MetalBufferSlot {
     TileMetadata,
     TileIndices,
     ProjectedGaussians,
+    GradPositions,
+    GradScales,
+    GradOpacity,
+    GradColors,
     OutputColor,
     OutputDepth,
     OutputAlpha,
@@ -240,6 +244,10 @@ impl MetalBufferSlot {
             Self::TileMetadata => "tile_metadata",
             Self::TileIndices => "tile_indices",
             Self::ProjectedGaussians => "projected_gaussians",
+            Self::GradPositions => "grad_positions",
+            Self::GradScales => "grad_scales",
+            Self::GradOpacity => "grad_opacity",
+            Self::GradColors => "grad_colors",
             Self::OutputColor => "output_color",
             Self::OutputDepth => "output_depth",
             Self::OutputAlpha => "output_alpha",
@@ -424,6 +432,28 @@ impl MetalRuntime {
             gaussian_capacity
                 .saturating_mul(4)
                 .saturating_mul(size_of::<u32>()),
+        )?;
+        self.ensure_buffer(
+            MetalBufferSlot::GradPositions,
+            gaussian_capacity
+                .saturating_mul(3)
+                .saturating_mul(size_of::<f32>()),
+        )?;
+        self.ensure_buffer(
+            MetalBufferSlot::GradScales,
+            gaussian_capacity
+                .saturating_mul(3)
+                .saturating_mul(size_of::<f32>()),
+        )?;
+        self.ensure_buffer(
+            MetalBufferSlot::GradOpacity,
+            gaussian_capacity.saturating_mul(size_of::<f32>()),
+        )?;
+        self.ensure_buffer(
+            MetalBufferSlot::GradColors,
+            gaussian_capacity
+                .saturating_mul(3)
+                .saturating_mul(size_of::<f32>()),
         )?;
         Ok(())
     }
@@ -674,6 +704,16 @@ impl MetalRuntime {
         Ok(())
     }
 
+    pub(crate) fn stage_tensor_from_slice<T: candle_core::WithDType + Copy, S: Into<Shape>>(
+        &mut self,
+        slot: MetalBufferSlot,
+        values: &[T],
+        shape: S,
+    ) -> candle_core::Result<Tensor> {
+        self.write_slice(slot, values)?;
+        self.tensor_from_buffer(slot, values.len(), T::DTYPE, shape)
+    }
+
     #[cfg(test)]
     pub(crate) fn read_u32_buffer(
         &self,
@@ -870,12 +910,12 @@ mod tests {
         let mut runtime = MetalRuntime::new(32, 16, Device::Cpu).unwrap();
         runtime.reserve_core_buffers(64).unwrap();
         let initial = runtime.stats();
-        assert_eq!(initial.buffer_allocations, 3);
+        assert_eq!(initial.buffer_allocations, 7);
 
         runtime.reserve_core_buffers(32).unwrap();
         let reused = runtime.stats();
         assert_eq!(reused.buffer_allocations, initial.buffer_allocations);
-        assert!(reused.buffer_reuses >= 3);
+        assert!(reused.buffer_reuses >= 7);
     }
 
     #[test]
