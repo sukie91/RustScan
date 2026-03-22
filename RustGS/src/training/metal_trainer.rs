@@ -114,6 +114,13 @@ struct MetalTrainingStats {
     final_loss: f32,
 }
 
+struct MetalStepOutcome {
+    loss: f32,
+    visible_gaussians: usize,
+    total_gaussians: usize,
+    profile: Option<MetalStepProfile>,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct MetalMemoryEstimate {
     gaussian_state_bytes: u64,
@@ -222,6 +229,8 @@ struct MetalRenderProfile {
     projection: Duration,
     sorting: Duration,
     rasterization: Duration,
+    visible_gaussians: usize,
+    total_gaussians: usize,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -233,6 +242,8 @@ struct MetalStepProfile {
     backward: Duration,
     optimizer: Duration,
     total: Duration,
+    visible_gaussians: usize,
+    total_gaussians: usize,
 }
 
 impl MetalStepProfile {
@@ -241,15 +252,19 @@ impl MetalStepProfile {
             projection: render.projection,
             sorting: render.sorting,
             rasterization: render.rasterization,
+            visible_gaussians: render.visible_gaussians,
+            total_gaussians: render.total_gaussians,
             ..Default::default()
         }
     }
 
     fn log(&self, iter: usize, max_iterations: usize) {
         log::info!(
-            "Metal profile iter {:5}/{:5} | total={:.2}ms | project={:.2}ms | sort={:.2}ms | raster={:.2}ms | loss={:.2}ms | backward={:.2}ms | optimizer={:.2}ms",
+            "Metal profile iter {:5}/{:5} | visible={:5}/{:5} | total={:.2}ms | project={:.2}ms | sort={:.2}ms | raster={:.2}ms | loss={:.2}ms | backward={:.2}ms | optimizer={:.2}ms",
             iter,
             max_iterations,
+            self.visible_gaussians,
+            self.total_gaussians,
             duration_ms(self.total),
             duration_ms(self.projection),
             duration_ms(self.sorting),
@@ -368,21 +383,22 @@ impl MetalTrainer {
             let should_profile =
                 should_profile_iteration(self.profile_steps, self.profile_interval, iter);
             let step_start = Instant::now();
-            let (loss, profile) =
-                self.training_step(gaussians, &frames[frame_idx], should_profile)?;
+            let outcome = self.training_step(gaussians, &frames[frame_idx], should_profile)?;
             if should_log {
                 log::info!(
-                    "Metal iter {:5}/{:5} | frame {:3}/{:3} | loss {:.6} | step_time={:.2}s | elapsed={:.2}s",
+                    "Metal iter {:5}/{:5} | frame {:3}/{:3} | visible {:5}/{:5} | loss {:.6} | step_time={:.2}s | elapsed={:.2}s",
                     iter,
                     max_iterations,
                     frame_idx + 1,
                     frames.len(),
-                    loss,
+                    outcome.visible_gaussians,
+                    outcome.total_gaussians,
+                    outcome.loss,
                     step_start.elapsed().as_secs_f64(),
                     train_start.elapsed().as_secs_f64()
                 );
             }
-            if let Some(profile) = profile {
+            if let Some(profile) = outcome.profile {
                 profile.log(iter, max_iterations);
             }
         }
@@ -397,7 +413,7 @@ impl MetalTrainer {
         gaussians: &mut TrainableGaussians,
         frame: &MetalTrainingFrame,
         should_profile: bool,
-    ) -> candle_core::Result<(f32, Option<MetalStepProfile>)> {
+    ) -> candle_core::Result<MetalStepOutcome> {
         self.iteration += 1;
         let total_start = Instant::now();
         let (rendered, render_profile) = self.render(gaussians, &frame.camera, should_profile)?;
@@ -423,10 +439,12 @@ impl MetalTrainer {
         profile.total = total_start.elapsed();
         self.loss_history.push(loss_value);
 
-        Ok((
-            loss_value,
-            if should_profile { Some(profile) } else { None },
-        ))
+        Ok(MetalStepOutcome {
+            loss: loss_value,
+            visible_gaussians: render_profile.visible_gaussians,
+            total_gaussians: render_profile.total_gaussians,
+            profile: if should_profile { Some(profile) } else { None },
+        })
     }
 
     fn apply_gradients(
@@ -540,6 +558,7 @@ impl MetalTrainer {
         should_profile: bool,
     ) -> candle_core::Result<(ProjectedGaussians, MetalRenderProfile)> {
         let mut profile = MetalRenderProfile::default();
+        profile.total_gaussians = gaussians.len();
         let projection_start = Instant::now();
         let pos = gaussians.positions();
         let scales = gaussians.scales()?;
@@ -590,25 +609,52 @@ impl MetalTrainer {
             .broadcast_div(&z_safe)?
             .clamp(0.5, 256.0)?;
 
-        let valid_threshold = Tensor::full(1e-4f32, (gaussians.len(),), &self.device)?;
-        let valid = z.ge(&valid_threshold)?.to_dtype(DType::F32)?;
-        let opacity = opacity.broadcast_mul(&valid)?;
+        let valid = z.ge(1e-4f64)?.to_dtype(DType::F32)?;
+        let support_x = sx.affine(3.0, 0.0)?;
+        let support_y = sy.affine(3.0, 0.0)?;
+        let left_ok = u
+            .broadcast_add(&support_x)?
+            .ge(0.0f64)?
+            .to_dtype(DType::F32)?;
+        let right_ok = u
+            .broadcast_sub(&support_x)?
+            .le(camera.width as f64)?
+            .to_dtype(DType::F32)?;
+        let top_ok = v
+            .broadcast_add(&support_y)?
+            .ge(0.0f64)?
+            .to_dtype(DType::F32)?;
+        let bottom_ok = v
+            .broadcast_sub(&support_y)?
+            .le(camera.height as f64)?
+            .to_dtype(DType::F32)?;
+        let visible = valid
+            .broadcast_mul(&left_ok)?
+            .broadcast_mul(&right_ok)?
+            .broadcast_mul(&top_ok)?
+            .broadcast_mul(&bottom_ok)?;
+        let opacity = opacity.broadcast_mul(&visible)?;
+        profile.visible_gaussians = visible.sum_all()?.to_vec0::<f32>()?.round() as usize;
+        let visible_mask = visible.ge(0.5f64)?;
         self.synchronize_if_needed(should_profile)?;
         profile.projection = projection_start.elapsed();
 
         let sort_start = Instant::now();
-        let sort_idx = z
+        let culled_depth = Tensor::full(f32::MAX, (gaussians.len(),), &self.device)?;
+        let visible_depth = visible_mask.where_cond(&z, &culled_depth)?;
+        let sort_idx = visible_depth
             .reshape((1, gaussians.len()))?
             .arg_sort_last_dim(true)?
             .squeeze(0)?;
+        let visible_idx = sort_idx.narrow(0, 0, profile.visible_gaussians)?;
         let projected = ProjectedGaussians {
-            u: u.index_select(&sort_idx, 0)?,
-            v: v.index_select(&sort_idx, 0)?,
-            sigma_x: sx.index_select(&sort_idx, 0)?,
-            sigma_y: sy.index_select(&sort_idx, 0)?,
-            depth: z.index_select(&sort_idx, 0)?,
-            opacity: opacity.index_select(&sort_idx, 0)?,
-            colors: gaussians.colors().index_select(&sort_idx, 0)?,
+            u: u.index_select(&visible_idx, 0)?,
+            v: v.index_select(&visible_idx, 0)?,
+            sigma_x: sx.index_select(&visible_idx, 0)?,
+            sigma_y: sy.index_select(&visible_idx, 0)?,
+            depth: z.index_select(&visible_idx, 0)?,
+            opacity: opacity.index_select(&visible_idx, 0)?,
+            colors: gaussians.colors().index_select(&visible_idx, 0)?,
         };
         self.synchronize_if_needed(should_profile)?;
         profile.sorting = sort_start.elapsed();
@@ -1191,6 +1237,18 @@ mod tests {
             assess_memory_estimate(&estimate, &budget),
             MetalMemoryDecision::Block
         );
+    }
+
+    #[test]
+    fn profile_tracks_visible_gaussians() {
+        let render = MetalRenderProfile {
+            visible_gaussians: 12,
+            total_gaussians: 40,
+            ..Default::default()
+        };
+        let profile = MetalStepProfile::from_render(render);
+        assert_eq!(profile.visible_gaussians, 12);
+        assert_eq!(profile.total_gaussians, 40);
     }
 
     #[test]
