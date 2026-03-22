@@ -220,6 +220,15 @@ fn build_initial_map_from_frames(
         config.sampling_step.max(1)
     };
 
+    log::info!(
+        "Initializing gaussians from {} frames | resolution={}x{} | frame_budget={} | sampling_step={}",
+        frames.len(),
+        width,
+        height,
+        frame_budget,
+        sampling_step
+    );
+
     for frame in frames {
         let rotation = glam::Mat3::from_cols(
             glam::Vec3::new(
@@ -288,6 +297,7 @@ fn build_initial_map_from_frames(
     }
 
     map.update_states();
+    log::info!("Initialized {} gaussians from training frames", map.len());
     Ok(map)
 }
 
@@ -485,7 +495,7 @@ mod tests {
         bytes.extend_from_slice(&2.5f32.to_le_bytes());
         fs::write(&path, bytes).unwrap();
 
-        let loaded = load_depth_image(&path, 2, 1).unwrap();
+        let loaded = load_depth_image(&path, 2, 1, 1.0).unwrap();
         assert_eq!(loaded, vec![1.25, 2.5]);
     }
 

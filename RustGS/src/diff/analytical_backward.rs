@@ -5,6 +5,10 @@
 //!   C_p = Σ_i T_i · α_i · c_i,  where T_i = Π_{j<i}(1 - α_j)
 //!
 //! This yields ~100x speedup: 1 forward + 1 backward vs ~160 forward passes.
+//!
+//! The backward pass is parallelized across pixel row-chunks using rayon.
+//! Each chunk processes all records with its own per-pixel running state,
+//! and gradient contributions are accumulated across chunks.
 
 /// Per-Gaussian data recorded during forward pass for backward computation.
 #[derive(Debug, Clone)]
@@ -49,6 +53,8 @@ pub struct ForwardIntermediate {
     pub rendered_color: Vec<f32>,
     /// Per-pixel accumulated alpha [H*W]
     pub alpha_acc: Vec<f32>,
+    /// Rendered depth [H*W] (normalized by alpha)
+    pub rendered_depth: Vec<f32>,
     pub width: usize,
     pub height: usize,
 }
@@ -76,6 +82,10 @@ fn sigmoid(x: f32) -> f32 {
 /// Processes Gaussians front-to-back, maintaining running transmittance and
 /// accumulated color per pixel. For each Gaussian, computes exact gradients
 /// through the alpha blending, Gaussian kernel, projection, and parameterization.
+///
+/// Parallelized across pixel row-chunks: each chunk processes all records
+/// independently with its own per-pixel running state. Gradient contributions
+/// are accumulated across chunks.
 pub fn backward(
     intermediate: &ForwardIntermediate,
     target_color: &[f32],
@@ -85,158 +95,216 @@ pub fn backward(
     cx: f32,
     cy: f32,
 ) -> AnalyticalGradients {
-    let w = intermediate.width;
-    let pixel_count = w * intermediate.height;
+    use rayon::prelude::*;
 
+    let w = intermediate.width;
+    let h = intermediate.height;
+
+    // Precompute dL/dC_p from L1 loss: sign(rendered - target)
+    let dl_dc: Vec<f32> = intermediate
+        .rendered_color
+        .iter()
+        .zip(target_color.iter())
+        .map(|(&r, &t)| {
+            let diff = r - t;
+            if diff > 0.0 {
+                1.0
+            } else if diff < 0.0 {
+                -1.0
+            } else {
+                0.0
+            }
+        })
+        .collect();
+
+    // Split rows into chunks for parallel processing.
+    // Each chunk processes all records with its own per-pixel running state.
+    // Using 32-row chunks reduces temporary gradient allocations by ~8x vs 4-row chunks
+    // while still providing good parallelism (e.g. 15 chunks for 480 rows).
+    let row_chunks: Vec<std::ops::Range<usize>> = (0..h)
+        .step_by(32)
+        .map(|start| start..(start + 32).min(h))
+        .collect();
+
+    // Process row chunks in parallel
+    let chunk_results: Vec<(Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>)> = row_chunks
+        .par_iter()
+        .map(|row_range| {
+            let mut grad_pos = vec![0.0f32; n_gaussians * 3];
+            let mut grad_log_scale = vec![0.0f32; n_gaussians * 3];
+            let mut grad_logit = vec![0.0f32; n_gaussians];
+            let mut grad_color = vec![0.0f32; n_gaussians * 3];
+
+            let chunk_pixel_count = w * row_range.len();
+            let mut running_s = vec![0.0f32; chunk_pixel_count * 3];
+            let mut running_alpha = vec![0.0f32; chunk_pixel_count];
+
+            let row_offset = row_range.start;
+
+            for rec in &intermediate.records {
+                let idx = rec.gaussian_idx;
+                let z = rec.z;
+                if z <= 1e-6 {
+                    continue;
+                }
+
+                let sig = sigmoid(rec.opacity_logit);
+                let sig_deriv = sig * (1.0 - sig);
+                let opacity_clamp_pass = rec.raw_opacity >= 0.0 && rec.raw_opacity <= 1.0;
+                let sx_clamp_pass = rec.raw_scale_2d_x.abs() >= 0.5;
+                let sy_clamp_pass = rec.raw_scale_2d_y.abs() >= 0.5;
+
+                let mut dl_du = 0.0f32;
+                let mut dl_dv = 0.0f32;
+                let mut dl_dsigma_x = 0.0f32;
+                let mut dl_dsigma_y = 0.0f32;
+                let mut dl_dbase_alpha = 0.0f32;
+
+                // Clamp y range to this chunk
+                let chunk_min_y = rec.min_y.max(row_offset);
+                let chunk_max_y = rec.max_y.min(row_range.end - 1);
+                if chunk_min_y > chunk_max_y {
+                    continue;
+                }
+
+                for py in chunk_min_y..=chunk_max_y {
+                    let local_py = py - row_offset;
+                    for px in rec.min_x..=rec.max_x {
+                        let local_pidx = local_py * w + px;
+                        let global_pidx = py * w + px;
+                        let dx = (px as f32 + 0.5 - rec.u) / rec.sigma_x;
+                        let dy = (py as f32 + 0.5 - rec.v) / rec.sigma_y;
+                        let kernel = (-0.5 * (dx * dx + dy * dy)).exp();
+                        let alpha_raw = rec.base_alpha * kernel;
+                        let alpha = alpha_raw.clamp(0.0, 0.99);
+                        if alpha <= 1e-6 {
+                            continue;
+                        }
+
+                        let transmittance = 1.0 - running_alpha[local_pidx];
+                        let contribution = transmittance * alpha;
+                        if contribution <= 1e-8 {
+                            continue;
+                        }
+
+                        let c3_global = global_pidx * 3;
+                        let c3_local = local_pidx * 3;
+
+                        // r_i = remaining color after this Gaussian
+                        let r_i = [
+                            intermediate.rendered_color[c3_global]
+                                - running_s[c3_local]
+                                - contribution * rec.color[0],
+                            intermediate.rendered_color[c3_global + 1]
+                                - running_s[c3_local + 1]
+                                - contribution * rec.color[1],
+                            intermediate.rendered_color[c3_global + 2]
+                                - running_s[c3_local + 2]
+                                - contribution * rec.color[2],
+                        ];
+
+                        // dC/dα_i = T_i · c_i - R_i / (1 - α_i)
+                        let inv_one_minus_alpha = 1.0 / (1.0 - alpha).max(1e-6);
+                        let dl_dalpha = (transmittance * rec.color[0]
+                            - r_i[0] * inv_one_minus_alpha)
+                            * dl_dc[c3_global]
+                            + (transmittance * rec.color[1] - r_i[1] * inv_one_minus_alpha)
+                                * dl_dc[c3_global + 1]
+                            + (transmittance * rec.color[2] - r_i[2] * inv_one_minus_alpha)
+                                * dl_dc[c3_global + 2];
+
+                        // dL/dc_i = T_i · α_i · dL/dC_p
+                        let gi = idx * 3;
+                        grad_color[gi] += contribution * dl_dc[c3_global];
+                        grad_color[gi + 1] += contribution * dl_dc[c3_global + 1];
+                        grad_color[gi + 2] += contribution * dl_dc[c3_global + 2];
+
+                        // Update running state
+                        running_s[c3_local] += contribution * rec.color[0];
+                        running_s[c3_local + 1] += contribution * rec.color[1];
+                        running_s[c3_local + 2] += contribution * rec.color[2];
+                        running_alpha[local_pidx] += contribution;
+
+                        // Chain through alpha clamp
+                        if alpha_raw <= 0.0 || alpha_raw >= 0.99 {
+                            continue;
+                        }
+
+                        dl_dbase_alpha += dl_dalpha * kernel;
+
+                        let dl_dkernel = dl_dalpha * rec.base_alpha;
+                        let dk_ddx = kernel * (-dx);
+                        let dk_ddy = kernel * (-dy);
+
+                        dl_du += dl_dkernel * dk_ddx * (-1.0 / rec.sigma_x);
+                        dl_dv += dl_dkernel * dk_ddy * (-1.0 / rec.sigma_y);
+
+                        if sx_clamp_pass {
+                            dl_dsigma_x += dl_dkernel * dk_ddx * (-dx / rec.sigma_x);
+                        }
+                        if sy_clamp_pass {
+                            dl_dsigma_y += dl_dkernel * dk_ddy * (-dy / rec.sigma_y);
+                        }
+                    }
+                }
+
+                // 2D → 3D chain rule
+                let inv_z = 1.0 / z;
+                let gi = idx * 3;
+
+                grad_pos[gi] += dl_du * fx * inv_z;
+                grad_pos[gi + 1] += dl_dv * fy * inv_z;
+                let dl_dz = dl_du * (-(rec.u - cx) * inv_z)
+                    + dl_dv * (-(rec.v - cy) * inv_z)
+                    + dl_dsigma_x * (-rec.raw_scale_2d_x * inv_z)
+                    + dl_dsigma_y * (-rec.raw_scale_2d_y * inv_z);
+                grad_pos[gi + 2] += dl_dz;
+
+                let dl_dscale3d_x = if sx_clamp_pass {
+                    dl_dsigma_x * fx * inv_z
+                } else {
+                    0.0
+                };
+                let dl_dscale3d_y = if sy_clamp_pass {
+                    dl_dsigma_y * fy * inv_z
+                } else {
+                    0.0
+                };
+                grad_log_scale[gi] += dl_dscale3d_x * rec.scale_3d[0];
+                grad_log_scale[gi + 1] += dl_dscale3d_y * rec.scale_3d[1];
+
+                if opacity_clamp_pass {
+                    grad_logit[idx] += dl_dbase_alpha * sig_deriv;
+                }
+            }
+
+            (grad_pos, grad_log_scale, grad_logit, grad_color)
+        })
+        .collect();
+
+    // Accumulate gradients from all row chunks in parallel
     let mut grad_pos = vec![0.0f32; n_gaussians * 3];
     let mut grad_log_scale = vec![0.0f32; n_gaussians * 3];
     let mut grad_logit = vec![0.0f32; n_gaussians];
     let mut grad_color = vec![0.0f32; n_gaussians * 3];
 
-    // dL/dC_p from L1 loss: sign(rendered - target)
-    let mut dl_dc = vec![0.0f32; pixel_count * 3];
-    for i in 0..pixel_count * 3 {
-        let diff = intermediate.rendered_color[i] - target_color[i];
-        dl_dc[i] = if diff > 0.0 {
-            1.0
-        } else if diff < 0.0 {
-            -1.0
-        } else {
-            0.0
-        };
-    }
-
-    // Per-pixel running state (front-to-back)
-    let mut running_s = vec![0.0f32; pixel_count * 3];
-    let mut running_alpha = vec![0.0f32; pixel_count];
-
-    for rec in &intermediate.records {
-        let idx = rec.gaussian_idx;
-        let z = rec.z;
-        if z <= 1e-6 {
-            continue;
-        }
-
-        let sig = sigmoid(rec.opacity_logit);
-        let sig_deriv = sig * (1.0 - sig);
-        let opacity_clamp_pass = rec.raw_opacity >= 0.0 && rec.raw_opacity <= 1.0;
-        let sx_clamp_pass = rec.raw_scale_2d_x.abs() >= 0.5;
-        let sy_clamp_pass = rec.raw_scale_2d_y.abs() >= 0.5;
-
-        let mut dl_du = 0.0f32;
-        let mut dl_dv = 0.0f32;
-        let mut dl_dsigma_x = 0.0f32;
-        let mut dl_dsigma_y = 0.0f32;
-        let mut dl_dbase_alpha = 0.0f32;
-
-        for py in rec.min_y..=rec.max_y {
-            for px in rec.min_x..=rec.max_x {
-                let pidx = py * w + px;
-                let dx = (px as f32 + 0.5 - rec.u) / rec.sigma_x;
-                let dy = (py as f32 + 0.5 - rec.v) / rec.sigma_y;
-                let kernel = (-0.5 * (dx * dx + dy * dy)).exp();
-                let alpha_raw = rec.base_alpha * kernel;
-                let alpha = alpha_raw.clamp(0.0, 0.99);
-                if alpha <= 1e-6 {
-                    continue;
-                }
-
-                let transmittance = 1.0 - running_alpha[pidx];
-                let contribution = transmittance * alpha;
-                if contribution <= 1e-8 {
-                    continue;
-                }
-
-                let c3 = pidx * 3;
-
-                // S_i = running_S + contribution * c_i
-                let r_i = [
-                    intermediate.rendered_color[c3] - running_s[c3] - contribution * rec.color[0],
-                    intermediate.rendered_color[c3 + 1]
-                        - running_s[c3 + 1]
-                        - contribution * rec.color[1],
-                    intermediate.rendered_color[c3 + 2]
-                        - running_s[c3 + 2]
-                        - contribution * rec.color[2],
-                ];
-
-                // dC/dα_i = T_i · c_i - R_i / (1 - α_i)
-                let inv_one_minus_alpha = 1.0 / (1.0 - alpha).max(1e-6);
-                let dl_dalpha = (transmittance * rec.color[0] - r_i[0] * inv_one_minus_alpha)
-                    * dl_dc[c3]
-                    + (transmittance * rec.color[1] - r_i[1] * inv_one_minus_alpha) * dl_dc[c3 + 1]
-                    + (transmittance * rec.color[2] - r_i[2] * inv_one_minus_alpha) * dl_dc[c3 + 2];
-
-                // dL/dc_i = T_i · α_i · dL/dC_p
-                let gi = idx * 3;
-                grad_color[gi] += contribution * dl_dc[c3];
-                grad_color[gi + 1] += contribution * dl_dc[c3 + 1];
-                grad_color[gi + 2] += contribution * dl_dc[c3 + 2];
-
-                // Update running state inline
-                running_s[c3] += contribution * rec.color[0];
-                running_s[c3 + 1] += contribution * rec.color[1];
-                running_s[c3 + 2] += contribution * rec.color[2];
-                running_alpha[pidx] += contribution;
-
-                // Chain through alpha clamp
-                if alpha_raw <= 0.0 || alpha_raw >= 0.99 {
-                    continue;
-                }
-
-                dl_dbase_alpha += dl_dalpha * kernel;
-
-                let dl_dkernel = dl_dalpha * rec.base_alpha;
-                let dk_ddx = kernel * (-dx);
-                let dk_ddy = kernel * (-dy);
-
-                dl_du += dl_dkernel * dk_ddx * (-1.0 / rec.sigma_x);
-                dl_dv += dl_dkernel * dk_ddy * (-1.0 / rec.sigma_y);
-
-                if sx_clamp_pass {
-                    dl_dsigma_x += dl_dkernel * dk_ddx * (-dx / rec.sigma_x);
-                }
-                if sy_clamp_pass {
-                    dl_dsigma_y += dl_dkernel * dk_ddy * (-dy / rec.sigma_y);
-                }
-            }
-        }
-
-        // 2D → 3D chain rule
-        let inv_z = 1.0 / z;
-        let gi = idx * 3;
-
-        // dL/dX = dL/du · du/dX = dL/du · fx/Z
-        grad_pos[gi] += dl_du * fx * inv_z;
-        // dL/dY = dL/dv · dv/dY = dL/dv · fy/Z
-        grad_pos[gi + 1] += dl_dv * fy * inv_z;
-        // dL/dZ = dL/du·(-(u-cx)/Z) + dL/dv·(-(v-cy)/Z)
-        //       + dL/dσx·(-σx_raw/Z) + dL/dσy·(-σy_raw/Z)
-        let dl_dz = dl_du * (-(rec.u - cx) * inv_z)
-            + dl_dv * (-(rec.v - cy) * inv_z)
-            + dl_dsigma_x * (-rec.raw_scale_2d_x * inv_z)
-            + dl_dsigma_y * (-rec.raw_scale_2d_y * inv_z);
-        grad_pos[gi + 2] += dl_dz;
-
-        // Scale: σ_2d = scale_3d · f / Z
-        let dl_dscale3d_x = if sx_clamp_pass {
-            dl_dsigma_x * fx * inv_z
-        } else {
-            0.0
-        };
-        let dl_dscale3d_y = if sy_clamp_pass {
-            dl_dsigma_y * fy * inv_z
-        } else {
-            0.0
-        };
-        // log_scale chain: scale_3d = exp(log_scale) => d/d_log_scale = scale_3d
-        grad_log_scale[gi] += dl_dscale3d_x * rec.scale_3d[0];
-        grad_log_scale[gi + 1] += dl_dscale3d_y * rec.scale_3d[1];
-
-        // Opacity: base_alpha = clamp(sigmoid(logit), 0, 1)
-        if opacity_clamp_pass {
-            grad_logit[idx] += dl_dbase_alpha * sig_deriv;
-        }
+    for (cp, cs, co, cc) in &chunk_results {
+        grad_pos
+            .iter_mut()
+            .zip(cp.iter())
+            .for_each(|(a, b)| *a += b);
+        grad_log_scale
+            .iter_mut()
+            .zip(cs.iter())
+            .for_each(|(a, b)| *a += b);
+        grad_logit
+            .iter_mut()
+            .zip(co.iter())
+            .for_each(|(a, b)| *a += b);
+        grad_color
+            .iter_mut()
+            .zip(cc.iter())
+            .for_each(|(a, b)| *a += b);
     }
 
     AnalyticalGradients {
@@ -309,6 +377,7 @@ mod tests {
             records: vec![rec],
             rendered_color: rendered,
             alpha_acc,
+            rendered_depth: vec![0.0; w * h],
             width: w,
             height: h,
         };
@@ -378,6 +447,7 @@ mod tests {
             records: vec![],
             rendered_color: vec![0.0; 4 * 4 * 3],
             alpha_acc: vec![0.0; 4 * 4],
+            rendered_depth: vec![0.0; 4 * 4],
             width: 4,
             height: 4,
         };

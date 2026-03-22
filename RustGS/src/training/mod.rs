@@ -4,6 +4,7 @@
 //! - `trainer` - Basic CPU trainer with finite-difference gradients
 //! - `complete_trainer` - Full trainer with LR scheduler and SSIM loss
 //! - `gpu_trainer` - GPU-optimized trainer with minimal CPU-GPU transfer
+//! - `metal_trainer` - Metal-native training loop that keeps render/loss/backward on GPU
 //! - `autodiff` - True autodiff using Candle's Var and backward()
 //! - `autodiff_trainer` - Autodiff trainer using candle-core 0.9.x API
 //! - `training_pipeline` - Training utilities, densify/prune, loss functions
@@ -21,6 +22,9 @@ pub mod complete_trainer;
 
 #[cfg(feature = "gpu")]
 pub mod gpu_trainer;
+
+#[cfg(feature = "gpu")]
+pub mod metal_trainer;
 
 #[cfg(feature = "gpu")]
 pub mod autodiff;
@@ -50,6 +54,9 @@ pub use gpu_trainer::{
 };
 
 #[cfg(feature = "gpu")]
+pub use metal_trainer::MetalTrainer;
+
+#[cfg(feature = "gpu")]
 pub use autodiff::{TrueAutodiffTrainer, VarCamera, VarGaussian, VarOutput, VarRenderer};
 
 #[cfg(feature = "gpu")]
@@ -66,9 +73,35 @@ use std::time::Instant;
 #[cfg(feature = "gpu")]
 use data_loading::{load_training_data, map_from_trainable, trainable_from_map};
 
+/// Training backend selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrainingBackend {
+    /// Existing mixed GPU projection + CPU rasterization/backward path.
+    LegacyHybrid,
+    /// Metal-native training path that keeps render/loss/backward/optimizer on GPU.
+    Metal,
+}
+
+impl Default for TrainingBackend {
+    fn default() -> Self {
+        Self::LegacyHybrid
+    }
+}
+
+impl std::fmt::Display for TrainingBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::LegacyHybrid => write!(f, "legacy-hybrid"),
+            Self::Metal => write!(f, "metal"),
+        }
+    }
+}
+
 /// Legacy training configuration (kept for API compatibility).
 #[derive(Debug, Clone)]
 pub struct TrainingConfig {
+    /// Training backend implementation to use.
+    pub backend: TrainingBackend,
     /// Number of training iterations
     pub iterations: usize,
     /// Learning rate for positions
@@ -95,11 +128,16 @@ pub struct TrainingConfig {
     pub max_depth: f32,
     /// Generate synthetic depth from image luminance when depth is unavailable
     pub use_synthetic_depth: bool,
+    /// Render scale used by the Metal backend (relative to input resolution).
+    pub metal_render_scale: f32,
+    /// Number of Gaussians processed per GPU chunk in the Metal backend.
+    pub metal_gaussian_chunk_size: usize,
 }
 
 impl Default for TrainingConfig {
     fn default() -> Self {
         Self {
+            backend: TrainingBackend::default(),
             iterations: 30000,
             lr_position: 0.00016,
             lr_scale: 0.005,
@@ -113,6 +151,8 @@ impl Default for TrainingConfig {
             min_depth: 0.01,
             max_depth: 10.0,
             use_synthetic_depth: true,
+            metal_render_scale: 0.25,
+            metal_gaussian_chunk_size: 32,
         }
     }
 }
@@ -133,6 +173,17 @@ pub struct TrainingResult {
 /// This is a convenience function that uses CompleteTrainer internally.
 #[cfg(feature = "gpu")]
 pub fn train(
+    dataset: &TrainingDataset,
+    config: &TrainingConfig,
+) -> Result<GaussianMap, TrainingError> {
+    match config.backend {
+        TrainingBackend::LegacyHybrid => train_legacy(dataset, config),
+        TrainingBackend::Metal => metal_trainer::train(dataset, config),
+    }
+}
+
+#[cfg(feature = "gpu")]
+fn train_legacy(
     dataset: &TrainingDataset,
     config: &TrainingConfig,
 ) -> Result<GaussianMap, TrainingError> {

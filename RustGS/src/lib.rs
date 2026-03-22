@@ -55,7 +55,7 @@ pub use crate::render::{
 };
 
 // Re-export training types
-pub use crate::training::{TrainingConfig, TrainingResult};
+pub use crate::training::{TrainingBackend, TrainingConfig, TrainingResult};
 
 // Re-export IO types
 pub use crate::io::scene_io::{load_scene_ply, save_scene_ply, SceneIoError, SceneMetadata};
@@ -80,6 +80,11 @@ pub(crate) fn preferred_device() -> Device {
             Device::Cpu
         }
     }
+}
+
+#[cfg(feature = "gpu")]
+pub(crate) fn require_metal_device() -> Result<Device, TrainingError> {
+    try_metal_device().map_err(TrainingError::Gpu)
 }
 
 #[cfg(feature = "gpu")]

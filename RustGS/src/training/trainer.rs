@@ -517,7 +517,7 @@ impl Trainer {
     }
 
     fn estimate_gradients(
-        &self,
+        &mut self,
         camera: &DiffCamera,
         observed_color: &[f32],
         observed_depth: &[f32],
@@ -668,7 +668,7 @@ impl Trainer {
     }
 
     fn evaluate_loss(
-        &self,
+        &mut self,
         positions: &[f32],
         scales: &[f32],
         rotations: &[f32],
