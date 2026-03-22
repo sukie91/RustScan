@@ -16,10 +16,13 @@ use crate::{GaussianMap, TrainingDataset, TrainingError};
 use super::data_loading::{
     load_training_data, map_from_trainable, trainable_from_map, LoadedTrainingData,
 };
+use super::metal_runtime::{ChunkPixelWindow, MetalBufferSlot, MetalRuntime, METAL_TILE_SIZE};
 use super::TrainingConfig;
 
+#[cfg(test)]
+use super::metal_runtime::ScreenRect;
+
 const DEFAULT_METAL_MAX_INITIAL_GAUSSIANS: usize = 4_096;
-const METAL_TILE_SIZE: usize = 16;
 const MIB: u64 = 1024 * 1024;
 const GIB: u64 = 1024 * 1024 * 1024;
 const DEFAULT_METAL_MEMORY_BUDGET_BYTES: u64 = 24 * GIB;
@@ -63,24 +66,8 @@ struct RenderedFrame {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct ScreenRect {
-    min_x: usize,
-    max_x: usize,
-    min_y: usize,
-    max_y: usize,
-}
-
-struct ChunkPixelWindow {
-    pixel_x: Tensor,
-    pixel_y: Tensor,
-    indices: Tensor,
-    pixel_count: usize,
-}
-
-#[derive(Debug, Clone, Copy)]
 struct TileMetadata {
     tile_idx: usize,
-    rect: ScreenRect,
     gaussian_count: usize,
 }
 
@@ -144,6 +131,7 @@ pub struct MetalTrainer {
     eps: f32,
     profile_steps: bool,
     profile_interval: usize,
+    runtime: MetalRuntime,
     adam: Option<MetalAdamState>,
     iteration: usize,
     loss_history: Vec<f32>,
@@ -337,6 +325,7 @@ impl MetalTrainer {
         let (render_width, render_height) =
             scaled_dimensions(input_width, input_height, config.metal_render_scale);
         let pixel_count = render_width * render_height;
+        let runtime = MetalRuntime::new(render_width, render_height, device.clone())?;
 
         Ok(Self {
             device,
@@ -354,6 +343,7 @@ impl MetalTrainer {
             eps: 1e-8,
             profile_steps: config.metal_profile_steps,
             profile_interval: config.metal_profile_interval.max(1),
+            runtime,
             adam: None,
             iteration: 0,
             loss_history: Vec::new(),
@@ -414,14 +404,24 @@ impl MetalTrainer {
             candle_core::bail!("metal backend received zero training frames");
         }
         self.adam = Some(MetalAdamState::new(gaussians)?);
+        self.runtime.reserve_core_buffers(gaussians.len())?;
+        if self.device.is_metal() {
+            self.runtime
+                .dispatch_fill_u32(MetalBufferSlot::TileIndices, 0, 1)?;
+        }
+        let runtime_stats = self.runtime.stats();
 
         log::info!(
-            "MetalTrainer running at {}x{} | chunk_size={} | frames={} | initial_gaussians={}",
+            "MetalTrainer running at {}x{} | chunk_size={} | frames={} | initial_gaussians={} | tiles={} | runtime_buffers={} | pipeline_warmups={} | tile_index_capacity={}B",
             self.render_width,
             self.render_height,
             self.chunk_size,
             frames.len(),
-            gaussians.len()
+            gaussians.len(),
+            runtime_stats.tile_windows,
+            runtime_stats.buffer_allocations,
+            runtime_stats.pipeline_compilations,
+            self.runtime.buffer_capacity(MetalBufferSlot::TileIndices),
         );
 
         let train_start = Instant::now();
@@ -576,7 +576,7 @@ impl MetalTrainer {
     }
 
     fn render(
-        &self,
+        &mut self,
         gaussians: &TrainableGaussians,
         camera: &DiffCamera,
         should_profile: bool,
@@ -589,6 +589,21 @@ impl MetalTrainer {
                 },
                 MetalRenderProfile::default(),
             ));
+        }
+
+        self.runtime.stage_camera(camera)?;
+        if should_profile && self.device.is_metal() {
+            let gaussian_bindings = self.runtime.bind_gaussians(gaussians)?;
+            let _ = (
+                gaussian_bindings.positions.byte_offset(),
+                gaussian_bindings.positions.element_count(),
+                gaussian_bindings.positions.dtype(),
+                gaussian_bindings.positions.buffer()?,
+                gaussian_bindings.scales.byte_offset(),
+                gaussian_bindings.rotations.byte_offset(),
+                gaussian_bindings.opacities.byte_offset(),
+                gaussian_bindings.colors.byte_offset(),
+            );
         }
 
         let (projected, mut profile) = self.project_gaussians(gaussians, camera, should_profile)?;
@@ -730,13 +745,15 @@ impl MetalTrainer {
     }
 
     fn rasterize(
-        &self,
+        &mut self,
         projected: &ProjectedGaussians,
     ) -> candle_core::Result<(RenderedFrame, TileBinningStats)> {
         let mut color_acc = Tensor::zeros((self.pixel_count, 3), DType::F32, &self.device)?;
         let mut depth_acc = Tensor::zeros((self.pixel_count,), DType::F32, &self.device)?;
         let mut alpha_acc = Tensor::zeros((self.pixel_count,), DType::F32, &self.device)?;
         let tile_bins = self.build_tile_bins(projected)?;
+        self.runtime
+            .reserve_tile_index_capacity(tile_bins.total_assignments)?;
         let tile_stats = TileBinningStats {
             active_tiles: tile_bins.metadata.len(),
             tile_gaussian_refs: tile_bins.total_assignments,
@@ -750,7 +767,7 @@ impl MetalTrainer {
             }
 
             let tile_index_tensor = Tensor::from_slice(indices, indices.len(), &self.device)?;
-            let window = self.build_chunk_pixel_window(tile.rect)?;
+            let window = self.runtime.tile_window(tile.tile_idx)?;
             let mut tile_color_acc =
                 Tensor::zeros((window.pixel_count, 3), DType::F32, &self.device)?;
             let mut tile_depth_acc =
@@ -827,8 +844,7 @@ impl MetalTrainer {
 
     fn build_tile_bins(&self, projected: &ProjectedGaussians) -> candle_core::Result<TileBins> {
         let total = projected.depth.dim(0)?;
-        let num_tiles_x = self.render_width.div_ceil(METAL_TILE_SIZE);
-        let num_tiles_y = self.render_height.div_ceil(METAL_TILE_SIZE);
+        let (num_tiles_x, num_tiles_y) = self.runtime.tile_grid();
         let tile_count = num_tiles_x * num_tiles_y;
         let mut gaussian_indices = vec![Vec::new(); tile_count];
 
@@ -868,18 +884,10 @@ impl MetalTrainer {
             max_gaussians_per_tile = max_gaussians_per_tile.max(indices.len());
             let tile_y = tile_idx / num_tiles_x;
             let tile_x = tile_idx % num_tiles_x;
-            let px_start = tile_x * METAL_TILE_SIZE;
-            let py_start = tile_y * METAL_TILE_SIZE;
-            let px_end = (px_start + METAL_TILE_SIZE).min(self.render_width);
-            let py_end = (py_start + METAL_TILE_SIZE).min(self.render_height);
+            let _px_start = tile_x * METAL_TILE_SIZE;
+            let _py_start = tile_y * METAL_TILE_SIZE;
             metadata.push(TileMetadata {
                 tile_idx,
-                rect: ScreenRect {
-                    min_x: px_start,
-                    max_x: px_end.saturating_sub(1),
-                    min_y: py_start,
-                    max_y: py_end.saturating_sub(1),
-                },
                 gaussian_count: indices.len(),
             });
         }
@@ -889,30 +897,6 @@ impl MetalTrainer {
             gaussian_indices,
             total_assignments,
             max_gaussians_per_tile,
-        })
-    }
-
-    fn build_chunk_pixel_window(&self, rect: ScreenRect) -> candle_core::Result<ChunkPixelWindow> {
-        let width = rect.max_x - rect.min_x + 1;
-        let height = rect.max_y - rect.min_y + 1;
-        let mut xs = Vec::with_capacity(width * height);
-        let mut ys = Vec::with_capacity(width * height);
-        let mut indices = Vec::with_capacity(width * height);
-
-        for y in rect.min_y..=rect.max_y {
-            for x in rect.min_x..=rect.max_x {
-                xs.push(x as f32 + 0.5);
-                ys.push(y as f32 + 0.5);
-                indices.push((y * self.render_width + x) as u32);
-            }
-        }
-
-        let pixel_count = indices.len();
-        Ok(ChunkPixelWindow {
-            pixel_x: Tensor::from_slice(&xs, (1, pixel_count), &self.device)?,
-            pixel_y: Tensor::from_slice(&ys, (1, pixel_count), &self.device)?,
-            indices: Tensor::from_slice(&indices, pixel_count, &self.device)?,
-            pixel_count,
         })
     }
 

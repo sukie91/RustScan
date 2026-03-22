@@ -27,6 +27,9 @@ pub mod gpu_trainer;
 pub mod metal_trainer;
 
 #[cfg(feature = "gpu")]
+mod metal_runtime;
+
+#[cfg(feature = "gpu")]
 pub mod autodiff;
 
 #[cfg(feature = "gpu")]
