@@ -19,6 +19,7 @@ use super::data_loading::{
 use super::TrainingConfig;
 
 const DEFAULT_METAL_MAX_INITIAL_GAUSSIANS: usize = 4_096;
+const METAL_TILE_SIZE: usize = 16;
 const MIB: u64 = 1024 * 1024;
 const GIB: u64 = 1024 * 1024 * 1024;
 const DEFAULT_METAL_MEMORY_BUDGET_BYTES: u64 = 24 * GIB;
@@ -74,6 +75,27 @@ struct ChunkPixelWindow {
     pixel_y: Tensor,
     indices: Tensor,
     pixel_count: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TileMetadata {
+    tile_idx: usize,
+    rect: ScreenRect,
+    gaussian_count: usize,
+}
+
+struct TileBins {
+    metadata: Vec<TileMetadata>,
+    gaussian_indices: Vec<Vec<u32>>,
+    total_assignments: usize,
+    max_gaussians_per_tile: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct TileBinningStats {
+    active_tiles: usize,
+    tile_gaussian_refs: usize,
+    max_gaussians_per_tile: usize,
 }
 
 struct MetalAdamState {
@@ -248,6 +270,9 @@ struct MetalRenderProfile {
     rasterization: Duration,
     visible_gaussians: usize,
     total_gaussians: usize,
+    active_tiles: usize,
+    tile_gaussian_refs: usize,
+    max_gaussians_per_tile: usize,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -261,6 +286,9 @@ struct MetalStepProfile {
     total: Duration,
     visible_gaussians: usize,
     total_gaussians: usize,
+    active_tiles: usize,
+    tile_gaussian_refs: usize,
+    max_gaussians_per_tile: usize,
 }
 
 impl MetalStepProfile {
@@ -271,17 +299,23 @@ impl MetalStepProfile {
             rasterization: render.rasterization,
             visible_gaussians: render.visible_gaussians,
             total_gaussians: render.total_gaussians,
+            active_tiles: render.active_tiles,
+            tile_gaussian_refs: render.tile_gaussian_refs,
+            max_gaussians_per_tile: render.max_gaussians_per_tile,
             ..Default::default()
         }
     }
 
     fn log(&self, iter: usize, max_iterations: usize) {
         log::info!(
-            "Metal profile iter {:5}/{:5} | visible={:5}/{:5} | total={:.2}ms | project={:.2}ms | sort={:.2}ms | raster={:.2}ms | loss={:.2}ms | backward={:.2}ms | optimizer={:.2}ms",
+            "Metal profile iter {:5}/{:5} | visible={:5}/{:5} | tiles={:4} | tile_refs={:5} | max_tile={:4} | total={:.2}ms | project={:.2}ms | sort={:.2}ms | raster={:.2}ms | loss={:.2}ms | backward={:.2}ms | optimizer={:.2}ms",
             iter,
             max_iterations,
             self.visible_gaussians,
             self.total_gaussians,
+            self.active_tiles,
+            self.tile_gaussian_refs,
+            self.max_gaussians_per_tile,
             duration_ms(self.total),
             duration_ms(self.projection),
             duration_ms(self.sorting),
@@ -559,9 +593,12 @@ impl MetalTrainer {
 
         let (projected, mut profile) = self.project_gaussians(gaussians, camera, should_profile)?;
         let raster_start = Instant::now();
-        let rendered = self.rasterize(&projected)?;
+        let (rendered, tile_stats) = self.rasterize(&projected)?;
         self.synchronize_if_needed(should_profile)?;
         profile.rasterization = raster_start.elapsed();
+        profile.active_tiles = tile_stats.active_tiles;
+        profile.tile_gaussian_refs = tile_stats.tile_gaussian_refs;
+        profile.max_gaussians_per_tile = tile_stats.max_gaussians_per_tile;
         Ok((rendered, profile))
     }
 
@@ -692,66 +729,75 @@ impl MetalTrainer {
         Ok((projected, profile))
     }
 
-    fn rasterize(&self, projected: &ProjectedGaussians) -> candle_core::Result<RenderedFrame> {
+    fn rasterize(
+        &self,
+        projected: &ProjectedGaussians,
+    ) -> candle_core::Result<(RenderedFrame, TileBinningStats)> {
         let mut color_acc = Tensor::zeros((self.pixel_count, 3), DType::F32, &self.device)?;
         let mut depth_acc = Tensor::zeros((self.pixel_count,), DType::F32, &self.device)?;
         let mut alpha_acc = Tensor::zeros((self.pixel_count,), DType::F32, &self.device)?;
-        let mut trans = Tensor::ones((self.pixel_count,), DType::F32, &self.device)?;
+        let tile_bins = self.build_tile_bins(projected)?;
+        let tile_stats = TileBinningStats {
+            active_tiles: tile_bins.metadata.len(),
+            tile_gaussian_refs: tile_bins.total_assignments,
+            max_gaussians_per_tile: tile_bins.max_gaussians_per_tile,
+        };
 
-        let total = projected.depth.dim(0)?;
-        for start in (0..total).step_by(self.chunk_size) {
-            let len = (total - start).min(self.chunk_size);
-            let Some(rect) = self.chunk_screen_rect(
-                &projected.min_x.narrow(0, start, len)?,
-                &projected.max_x.narrow(0, start, len)?,
-                &projected.min_y.narrow(0, start, len)?,
-                &projected.max_y.narrow(0, start, len)?,
-            )?
-            else {
+        for tile in &tile_bins.metadata {
+            let indices = &tile_bins.gaussian_indices[tile.tile_idx];
+            if indices.is_empty() {
                 continue;
-            };
-            let window = self.build_chunk_pixel_window(rect)?;
-            let alpha = self.chunk_alpha(
-                &window,
-                &projected.u.narrow(0, start, len)?,
-                &projected.v.narrow(0, start, len)?,
-                &projected.sigma_x.narrow(0, start, len)?,
-                &projected.sigma_y.narrow(0, start, len)?,
-                &projected.opacity.narrow(0, start, len)?,
-            )?;
-            let (chunk_color, chunk_depth, chunk_alpha, tail_trans) = self.integrate_chunk(
-                &alpha,
-                &projected.colors.narrow(0, start, len)?,
-                &projected.depth.narrow(0, start, len)?,
-            )?;
-            let trans_local = trans.index_select(&window.indices, 0)?;
-            let trans_local_col = trans_local.reshape((window.pixel_count, 1))?;
+            }
 
-            color_acc = color_acc.index_add(
-                &window.indices,
-                &chunk_color.broadcast_mul(&trans_local_col)?,
-                0,
-            )?;
-            depth_acc = depth_acc.index_add(
-                &window.indices,
-                &chunk_depth.broadcast_mul(&trans_local)?,
-                0,
-            )?;
-            alpha_acc = alpha_acc.index_add(
-                &window.indices,
-                &chunk_alpha.broadcast_mul(&trans_local)?,
-                0,
-            )?;
-            let updated_trans_local = trans_local.broadcast_mul(&tail_trans)?;
-            let delta = updated_trans_local.sub(&trans_local)?;
-            trans = trans.index_add(&window.indices, &delta, 0)?;
+            let tile_index_tensor = Tensor::from_slice(indices, indices.len(), &self.device)?;
+            let window = self.build_chunk_pixel_window(tile.rect)?;
+            let mut tile_color_acc =
+                Tensor::zeros((window.pixel_count, 3), DType::F32, &self.device)?;
+            let mut tile_depth_acc =
+                Tensor::zeros((window.pixel_count,), DType::F32, &self.device)?;
+            let mut tile_alpha_acc =
+                Tensor::zeros((window.pixel_count,), DType::F32, &self.device)?;
+            let mut tile_trans = Tensor::ones((window.pixel_count,), DType::F32, &self.device)?;
+
+            for start in (0..tile.gaussian_count).step_by(self.chunk_size) {
+                let len = (tile.gaussian_count - start).min(self.chunk_size);
+                let chunk_indices = tile_index_tensor.narrow(0, start, len)?;
+                let alpha = self.chunk_alpha(
+                    &window,
+                    &projected.u.index_select(&chunk_indices, 0)?,
+                    &projected.v.index_select(&chunk_indices, 0)?,
+                    &projected.sigma_x.index_select(&chunk_indices, 0)?,
+                    &projected.sigma_y.index_select(&chunk_indices, 0)?,
+                    &projected.opacity.index_select(&chunk_indices, 0)?,
+                )?;
+                let (chunk_color, chunk_depth, chunk_alpha, tail_trans) = self.integrate_chunk(
+                    &alpha,
+                    &projected.colors.index_select(&chunk_indices, 0)?,
+                    &projected.depth.index_select(&chunk_indices, 0)?,
+                )?;
+                let tile_trans_col = tile_trans.reshape((window.pixel_count, 1))?;
+                tile_color_acc =
+                    tile_color_acc.broadcast_add(&chunk_color.broadcast_mul(&tile_trans_col)?)?;
+                tile_depth_acc =
+                    tile_depth_acc.broadcast_add(&chunk_depth.broadcast_mul(&tile_trans)?)?;
+                tile_alpha_acc =
+                    tile_alpha_acc.broadcast_add(&chunk_alpha.broadcast_mul(&tile_trans)?)?;
+                tile_trans = tile_trans.broadcast_mul(&tail_trans)?;
+            }
+
+            color_acc = color_acc.index_add(&window.indices, &tile_color_acc, 0)?;
+            depth_acc = depth_acc.index_add(&window.indices, &tile_depth_acc, 0)?;
+            alpha_acc = alpha_acc.index_add(&window.indices, &tile_alpha_acc, 0)?;
         }
 
         let denom = alpha_acc.broadcast_add(&Tensor::new(1e-6f32, &self.device)?)?;
-        Ok(RenderedFrame {
-            color: color_acc.clamp(0.0, 1.0)?,
-            depth: depth_acc.broadcast_div(&denom)?,
-        })
+        Ok((
+            RenderedFrame {
+                color: color_acc.clamp(0.0, 1.0)?,
+                depth: depth_acc.broadcast_div(&denom)?,
+            },
+            tile_stats,
+        ))
     }
 
     fn chunk_alpha(
@@ -779,48 +825,71 @@ impl MetalTrainer {
             .clamp(0.0, 0.99)
     }
 
-    fn chunk_screen_rect(
-        &self,
-        min_x: &Tensor,
-        max_x: &Tensor,
-        min_y: &Tensor,
-        max_y: &Tensor,
-    ) -> candle_core::Result<Option<ScreenRect>> {
-        let min_x_values = min_x.to_vec1::<f32>()?;
-        let max_x_values = max_x.to_vec1::<f32>()?;
-        let min_y_values = min_y.to_vec1::<f32>()?;
-        let max_y_values = max_y.to_vec1::<f32>()?;
-        if min_x_values.is_empty() {
-            return Ok(None);
+    fn build_tile_bins(&self, projected: &ProjectedGaussians) -> candle_core::Result<TileBins> {
+        let total = projected.depth.dim(0)?;
+        let num_tiles_x = self.render_width.div_ceil(METAL_TILE_SIZE);
+        let num_tiles_y = self.render_height.div_ceil(METAL_TILE_SIZE);
+        let tile_count = num_tiles_x * num_tiles_y;
+        let mut gaussian_indices = vec![Vec::new(); tile_count];
+
+        let min_x_values = projected.min_x.to_vec1::<f32>()?;
+        let max_x_values = projected.max_x.to_vec1::<f32>()?;
+        let min_y_values = projected.min_y.to_vec1::<f32>()?;
+        let max_y_values = projected.max_y.to_vec1::<f32>()?;
+        let mut total_assignments = 0usize;
+        let max_x_bound = self.render_width.saturating_sub(1);
+        let max_y_bound = self.render_height.saturating_sub(1);
+
+        for idx in 0..total {
+            let g_min_x = min_x_values[idx].floor().max(0.0) as usize;
+            let g_max_x = max_x_values[idx].ceil().max(0.0) as usize;
+            let g_min_y = min_y_values[idx].floor().max(0.0) as usize;
+            let g_max_y = max_y_values[idx].ceil().max(0.0) as usize;
+
+            let tile_x_min = g_min_x.min(max_x_bound) / METAL_TILE_SIZE;
+            let tile_x_max = g_max_x.min(max_x_bound) / METAL_TILE_SIZE;
+            let tile_y_min = g_min_y.min(max_y_bound) / METAL_TILE_SIZE;
+            let tile_y_max = g_max_y.min(max_y_bound) / METAL_TILE_SIZE;
+
+            for ty in tile_y_min..=tile_y_max.min(num_tiles_y.saturating_sub(1)) {
+                for tx in tile_x_min..=tile_x_max.min(num_tiles_x.saturating_sub(1)) {
+                    gaussian_indices[ty * num_tiles_x + tx].push(idx as u32);
+                    total_assignments += 1;
+                }
+            }
         }
 
-        let min_x = min_x_values
-            .into_iter()
-            .fold(self.render_width.saturating_sub(1), |acc, value| {
-                acc.min(value.floor().max(0.0) as usize)
+        let mut metadata = Vec::new();
+        let mut max_gaussians_per_tile = 0usize;
+        for (tile_idx, indices) in gaussian_indices.iter().enumerate() {
+            if indices.is_empty() {
+                continue;
+            }
+            max_gaussians_per_tile = max_gaussians_per_tile.max(indices.len());
+            let tile_y = tile_idx / num_tiles_x;
+            let tile_x = tile_idx % num_tiles_x;
+            let px_start = tile_x * METAL_TILE_SIZE;
+            let py_start = tile_y * METAL_TILE_SIZE;
+            let px_end = (px_start + METAL_TILE_SIZE).min(self.render_width);
+            let py_end = (py_start + METAL_TILE_SIZE).min(self.render_height);
+            metadata.push(TileMetadata {
+                tile_idx,
+                rect: ScreenRect {
+                    min_x: px_start,
+                    max_x: px_end.saturating_sub(1),
+                    min_y: py_start,
+                    max_y: py_end.saturating_sub(1),
+                },
+                gaussian_count: indices.len(),
             });
-        let max_x = max_x_values
-            .into_iter()
-            .fold(0usize, |acc, value| acc.max(value.ceil().max(0.0) as usize));
-        let min_y = min_y_values
-            .into_iter()
-            .fold(self.render_height.saturating_sub(1), |acc, value| {
-                acc.min(value.floor().max(0.0) as usize)
-            });
-        let max_y = max_y_values
-            .into_iter()
-            .fold(0usize, |acc, value| acc.max(value.ceil().max(0.0) as usize));
-
-        if min_x > max_x || min_y > max_y {
-            return Ok(None);
         }
 
-        Ok(Some(ScreenRect {
-            min_x: min_x.min(self.render_width.saturating_sub(1)),
-            max_x: max_x.min(self.render_width.saturating_sub(1)),
-            min_y: min_y.min(self.render_height.saturating_sub(1)),
-            max_y: max_y.min(self.render_height.saturating_sub(1)),
-        }))
+        Ok(TileBins {
+            metadata,
+            gaussian_indices,
+            total_assignments,
+            max_gaussians_per_tile,
+        })
     }
 
     fn build_chunk_pixel_window(&self, rect: ScreenRect) -> candle_core::Result<ChunkPixelWindow> {
@@ -1366,6 +1435,37 @@ mod tests {
         };
         assert_eq!(rect.max_x - rect.min_x + 1, 4);
         assert_eq!(rect.max_y - rect.min_y + 1, 2);
+    }
+
+    #[test]
+    fn tile_bins_only_include_overlapping_gaussians() {
+        let device = Device::Cpu;
+        let trainer_config = TrainingConfig {
+            metal_render_scale: 1.0,
+            ..TrainingConfig::default()
+        };
+        let trainer = MetalTrainer::new(32, 16, &trainer_config, device.clone()).unwrap();
+        let projected = ProjectedGaussians {
+            u: Tensor::from_slice(&[8.0f32, 18.0], 2, &device).unwrap(),
+            v: Tensor::from_slice(&[8.0f32, 8.0], 2, &device).unwrap(),
+            sigma_x: Tensor::from_slice(&[2.0f32, 2.0], 2, &device).unwrap(),
+            sigma_y: Tensor::from_slice(&[2.0f32, 2.0], 2, &device).unwrap(),
+            depth: Tensor::from_slice(&[1.0f32, 2.0], 2, &device).unwrap(),
+            opacity: Tensor::from_slice(&[0.5f32, 0.5], 2, &device).unwrap(),
+            colors: Tensor::from_slice(&[1.0f32, 0.0, 0.0, 0.0, 1.0, 0.0], (2, 3), &device)
+                .unwrap(),
+            min_x: Tensor::from_slice(&[2.0f32, 14.0], 2, &device).unwrap(),
+            max_x: Tensor::from_slice(&[15.0f32, 18.0], 2, &device).unwrap(),
+            min_y: Tensor::from_slice(&[1.0f32, 1.0], 2, &device).unwrap(),
+            max_y: Tensor::from_slice(&[14.0f32, 14.0], 2, &device).unwrap(),
+        };
+
+        let bins = trainer.build_tile_bins(&projected).unwrap();
+        assert_eq!(bins.metadata.len(), 2);
+        assert_eq!(bins.total_assignments, 3);
+        assert_eq!(bins.max_gaussians_per_tile, 2);
+        assert_eq!(bins.gaussian_indices[0], vec![0, 1]);
+        assert_eq!(bins.gaussian_indices[1], vec![1]);
     }
 
     #[test]
