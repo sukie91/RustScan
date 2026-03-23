@@ -124,27 +124,64 @@ pub fn backward_weighted_l1(
     color_grad_scale: f32,
     depth_grad_scale: f32,
 ) -> AnalyticalGradients {
+    backward_weighted_l1_from_buffers(
+        &intermediate.records,
+        &intermediate.rendered_color,
+        &intermediate.alpha_acc,
+        &intermediate.rendered_depth,
+        intermediate.width,
+        intermediate.height,
+        target_color,
+        target_depth,
+        n_gaussians,
+        fx,
+        fy,
+        cx,
+        cy,
+        color_grad_scale,
+        depth_grad_scale,
+    )
+}
+
+/// Compute analytical gradients from raw forward buffers without building a
+/// `ForwardIntermediate` wrapper. This is used by the Metal trainer's hot path.
+pub fn backward_weighted_l1_from_buffers(
+    records: &[GaussianRenderRecord],
+    rendered_color: &[f32],
+    alpha_acc: &[f32],
+    rendered_depth: &[f32],
+    width: usize,
+    height: usize,
+    target_color: &[f32],
+    target_depth: &[f32],
+    n_gaussians: usize,
+    fx: f32,
+    fy: f32,
+    cx: f32,
+    cy: f32,
+    color_grad_scale: f32,
+    depth_grad_scale: f32,
+) -> AnalyticalGradients {
     use rayon::prelude::*;
 
-    let w = intermediate.width;
-    let h = intermediate.height;
+    let w = width;
+    let h = height;
 
     assert_eq!(
-        intermediate.rendered_color.len(),
+        rendered_color.len(),
         target_color.len(),
         "color target length mismatch"
     );
     if depth_grad_scale != 0.0 {
         assert_eq!(
-            intermediate.rendered_depth.len(),
+            rendered_depth.len(),
             target_depth.len(),
             "depth target length mismatch"
         );
     }
 
     // Precompute dL/dC_p from weighted mean-L1 loss.
-    let dl_dc: Vec<f32> = intermediate
-        .rendered_color
+    let dl_dc: Vec<f32> = rendered_color
         .iter()
         .zip(target_color.iter())
         .map(|(&r, &t)| {
@@ -160,10 +197,9 @@ pub fn backward_weighted_l1(
         .collect();
 
     let dl_dd: Vec<f32> = if depth_grad_scale == 0.0 {
-        vec![0.0; intermediate.rendered_depth.len()]
+        vec![0.0; rendered_depth.len()]
     } else {
-        intermediate
-            .rendered_depth
+        rendered_depth
             .iter()
             .zip(target_depth.iter())
             .map(|(&r, &t)| {
@@ -204,7 +240,7 @@ pub fn backward_weighted_l1(
 
             let row_offset = row_range.start;
 
-            for rec in &intermediate.records {
+            for rec in records {
                 let idx = rec.gaussian_idx;
                 let z = rec.z;
                 if z <= 1e-6 {
@@ -251,9 +287,9 @@ pub fn backward_weighted_l1(
                             continue;
                         }
 
-                        let final_alpha = intermediate.alpha_acc[global_pidx];
+                        let final_alpha = alpha_acc[global_pidx];
                         let depth_denom = final_alpha + DEPTH_NORMALIZATION_EPS;
-                        let final_depth = intermediate.rendered_depth[global_pidx];
+                        let final_depth = rendered_depth[global_pidx];
                         let final_depth_num = final_depth * depth_denom;
 
                         let c3_global = global_pidx * 3;
@@ -261,13 +297,13 @@ pub fn backward_weighted_l1(
 
                         // r_i = remaining color after this Gaussian
                         let r_i = [
-                            intermediate.rendered_color[c3_global]
+                            rendered_color[c3_global]
                                 - running_s[c3_local]
                                 - contribution * rec.color[0],
-                            intermediate.rendered_color[c3_global + 1]
+                            rendered_color[c3_global + 1]
                                 - running_s[c3_local + 1]
                                 - contribution * rec.color[1],
-                            intermediate.rendered_color[c3_global + 2]
+                            rendered_color[c3_global + 2]
                                 - running_s[c3_local + 2]
                                 - contribution * rec.color[2],
                         ];

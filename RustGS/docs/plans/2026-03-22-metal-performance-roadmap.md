@@ -1,5 +1,49 @@
 # Metal Performance Roadmap
 
+## Status Snapshot: 2026-03-23
+
+- Done:
+  - step-level Metal profiling with visible/tile/native-forward breakdowns
+  - calibrated Metal memory guardrails, safer default budget handling, and preflight auto-clamping for oversized initial Gaussian budgets
+  - rotation-aware projection in both the Metal trainer and `diff_splat`
+  - native Metal forward enabled by default with tensor fallback switch
+  - runtime-managed packed tile metadata/index assembly
+  - independent densify/prune scheduling with topology warmup/logging guardrails
+- Partially done:
+  - visible-set handling now prefers runtime buffer reads and avoids repeated Candle `to_vec*` round-trips in the normal Metal path, but full device-side sort/compaction is still an optimization target
+  - backward is now isolated in `metal_backward.rs`, stages gradients directly onto device tensors, and removes trainer-side `ForwardIntermediate` construction from the hot path; fully dedicated Metal backward kernels remain a future optimization
+- Remaining long-range roadmap work:
+  - fully kernelized Metal backward math
+  - GPU-side visible sort/compaction
+  - higher-quality loss terms such as SSIM on the native path
+
+## Smoke Commands
+
+Minimum regression smoke test after Metal changes:
+
+```bash
+cargo test -p rustgs metal_trainer -- --nocapture
+```
+
+Full package regression pass used for this phase:
+
+```bash
+cargo test -p rustgs -- --nocapture
+```
+
+Recommended real-scene profiling command:
+
+```bash
+cargo run -p rustgs --features gpu -- train \
+  --input <tum_dataset_dir> \
+  --output /tmp/rustgs-metal-smoke.ply \
+  --iterations 50 \
+  --max-initial-gaussians 4096 \
+  --metal-render-scale 0.25 \
+  --metal-profile-steps \
+  --metal-profile-interval 10
+```
+
 ## Goal
 
 Turn the current Metal training backend from a "can run on 16 GB Macs" baseline

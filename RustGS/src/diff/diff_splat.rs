@@ -6,6 +6,7 @@
 
 use crate::diff::analytical_backward::{ForwardIntermediate, GaussianRenderRecord};
 use candle_core::{DType, Device, Tensor, Var};
+use glam::{Mat3, Quat, Vec3};
 use rayon::prelude::*;
 
 /// Tile size for parallel rasterization (16x16 matches GPU warp-friendly sizing)
@@ -327,7 +328,7 @@ impl DiffSplatRenderer {
         &self,
         positions: &Tensor,  // [N, 3]
         scales: &Tensor,     // [N, 3]
-        _rotations: &Tensor, // [N, 4]
+        rotations: &Tensor, // [N, 4]
         camera: &DiffCamera,
     ) -> candle_core::Result<ProjectedGaussiansTensor> {
         // Metal-backed matmul on views has been unstable for this [N, 3] x [3, 3]
@@ -363,19 +364,37 @@ impl DiffSplatRenderer {
         let y_fy = y.broadcast_mul(&fy)?;
         let v = y_fy.broadcast_div(&z_clamped)?.broadcast_add(&cy)?;
 
-        // Compute 2D covariance (simplified)
-        let scale_x = scales.narrow(1, 0, 1)?.squeeze(1)?;
-        let scale_y = scales.narrow(1, 1, 1)?.squeeze(1)?;
+        let x_values = x.to_vec1::<f32>()?;
+        let y_values = y.to_vec1::<f32>()?;
+        let z_values = z.to_vec1::<f32>()?;
+        let scale_values = scales.to_vec2::<f32>()?;
+        let rotation_values = rotations.to_vec2::<f32>()?;
+        let mut scale_2d_x = Vec::with_capacity(z_values.len());
+        let mut scale_2d_y = Vec::with_capacity(z_values.len());
 
-        // Approximate 2D scale as projected 3D scale
-        let scale_2d_x = scale_x.broadcast_mul(&fx)?.broadcast_div(&z_clamped)?;
-        let scale_2d_y = scale_y.broadcast_mul(&fy)?.broadcast_div(&z_clamped)?;
+        for idx in 0..z_values.len() {
+            let scale = vec3_from_row(scale_values.get(idx).map(Vec::as_slice).unwrap_or(&[]));
+            let rotation =
+                quaternion_from_row(rotation_values.get(idx).map(Vec::as_slice).unwrap_or(&[]));
+            let (sigma_x, sigma_y) = projected_axis_aligned_sigmas(
+                x_values.get(idx).copied().unwrap_or(0.0),
+                y_values.get(idx).copied().unwrap_or(0.0),
+                z_values.get(idx).copied().unwrap_or(0.0),
+                scale,
+                rotation,
+                &camera.rotation,
+                camera.fx,
+                camera.fy,
+            );
+            scale_2d_x.push(sigma_x.clamp(0.5, 256.0));
+            scale_2d_y.push(sigma_y.clamp(0.5, 256.0));
+        }
 
         Ok(ProjectedGaussiansTensor {
             u,
             v,
-            scale_x: scale_2d_x,
-            scale_y: scale_2d_y,
+            scale_x: Tensor::from_slice(&scale_2d_x, scale_2d_x.len(), &self.device)?,
+            scale_y: Tensor::from_slice(&scale_2d_y, scale_2d_y.len(), &self.device)?,
             z: z.clone(),
         })
     }
@@ -975,6 +994,68 @@ struct ProjectedGaussiansCpu {
 
 // Helper functions
 
+fn vec3_from_row(row: &[f32]) -> [f32; 3] {
+    [
+        row.first().copied().unwrap_or(0.01),
+        row.get(1).copied().unwrap_or(0.01),
+        row.get(2).copied().unwrap_or(0.01),
+    ]
+}
+
+fn quaternion_from_row(row: &[f32]) -> [f32; 4] {
+    [
+        row.first().copied().unwrap_or(1.0),
+        row.get(1).copied().unwrap_or(0.0),
+        row.get(2).copied().unwrap_or(0.0),
+        row.get(3).copied().unwrap_or(0.0),
+    ]
+}
+
+fn mat3_from_row_major(rotation: &[[f32; 3]; 3]) -> Mat3 {
+    Mat3::from_cols(
+        Vec3::new(rotation[0][0], rotation[1][0], rotation[2][0]),
+        Vec3::new(rotation[0][1], rotation[1][1], rotation[2][1]),
+        Vec3::new(rotation[0][2], rotation[1][2], rotation[2][2]),
+    )
+}
+
+fn quat_from_wxyz(rotation: [f32; 4]) -> Quat {
+    let length_sq = rotation.iter().map(|value| value * value).sum::<f32>();
+    if !length_sq.is_finite() || length_sq <= 1e-12 {
+        return Quat::IDENTITY;
+    }
+    Quat::from_xyzw(rotation[1], rotation[2], rotation[3], rotation[0]).normalize()
+}
+
+fn projected_axis_aligned_sigmas(
+    x: f32,
+    y: f32,
+    z: f32,
+    scale: [f32; 3],
+    rotation: [f32; 4],
+    camera_rotation: &[[f32; 3]; 3],
+    fx: f32,
+    fy: f32,
+) -> (f32, f32) {
+    let inv_z = 1.0 / z.max(1e-4);
+    let object_rotation = Mat3::from_quat(quat_from_wxyz(rotation));
+    let scale_cov = Mat3::from_diagonal(Vec3::new(
+        scale[0] * scale[0],
+        scale[1] * scale[1],
+        scale[2] * scale[2],
+    ));
+    let covariance_world = object_rotation * scale_cov * object_rotation.transpose();
+    let camera_rotation = mat3_from_row_major(camera_rotation);
+    let covariance_camera = camera_rotation * covariance_world * camera_rotation.transpose();
+
+    let projection_row_x = Vec3::new(fx * inv_z, 0.0, -fx * x * inv_z * inv_z);
+    let projection_row_y = Vec3::new(0.0, fy * inv_z, -fy * y * inv_z * inv_z);
+    let covariance_x = projection_row_x.dot(covariance_camera * projection_row_x);
+    let covariance_y = projection_row_y.dot(covariance_camera * projection_row_y);
+
+    (covariance_x.max(1e-6).sqrt(), covariance_y.max(1e-6).sqrt())
+}
+
 fn tensor_to_vec(tensor: &Tensor) -> candle_core::Result<Vec<f32>> {
     let dims = tensor.dims();
     match dims.len() {
@@ -1250,5 +1331,71 @@ mod tests {
         assert!((u - 35.0).abs() < 1e-4, "unexpected projected u: {u}");
         assert!((v - 40.0).abs() < 1e-4, "unexpected projected v: {v}");
         assert!((z - 6.0).abs() < 1e-4, "unexpected projected depth: {z}");
+    }
+
+    #[test]
+    fn projected_footprint_changes_with_rotation() {
+        let device = Device::Cpu;
+        let renderer = DiffSplatRenderer::with_device(64, 64, device.clone());
+        let camera = DiffCamera::new(
+            64.0,
+            64.0,
+            32.0,
+            32.0,
+            64,
+            64,
+            &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            &[0.0, 0.0, 0.0],
+            &device,
+        )
+        .unwrap();
+
+        let identity = TrainableGaussians::new(
+            &[0.0, 0.0, 2.0],
+            &[0.4f32.ln(), 0.05f32.ln(), 0.05f32.ln()],
+            &[1.0, 0.0, 0.0, 0.0],
+            &[0.0],
+            &[1.0, 0.0, 0.0],
+            &device,
+        )
+        .unwrap();
+        let rotated = TrainableGaussians::new(
+            &[0.0, 0.0, 2.0],
+            &[0.4f32.ln(), 0.05f32.ln(), 0.05f32.ln()],
+            &[std::f32::consts::FRAC_1_SQRT_2, 0.0, 0.0, std::f32::consts::FRAC_1_SQRT_2],
+            &[0.0],
+            &[1.0, 0.0, 0.0],
+            &device,
+        )
+        .unwrap();
+
+        let identity_projected = renderer
+            .project_gaussians(
+                identity.positions(),
+                &identity.scales().unwrap(),
+                &identity.rotations().unwrap(),
+                &camera,
+            )
+            .unwrap();
+        let rotated_projected = renderer
+            .project_gaussians(
+                rotated.positions(),
+                &rotated.scales().unwrap(),
+                &rotated.rotations().unwrap(),
+                &camera,
+            )
+            .unwrap();
+
+        let identity_sigma_x = identity_projected.scale_x.to_vec1::<f32>().unwrap()[0];
+        let identity_sigma_y = identity_projected.scale_y.to_vec1::<f32>().unwrap()[0];
+        let rotated_sigma_x = rotated_projected.scale_x.to_vec1::<f32>().unwrap()[0];
+        let rotated_sigma_y = rotated_projected.scale_y.to_vec1::<f32>().unwrap()[0];
+
+        assert!(identity_sigma_x > identity_sigma_y * 5.0);
+        assert!(rotated_sigma_y > rotated_sigma_x * 5.0);
+        assert!(
+            (identity_sigma_x - rotated_sigma_x).abs() > 1.0
+                || (identity_sigma_y - rotated_sigma_y).abs() > 1.0
+        );
     }
 }

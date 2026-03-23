@@ -33,6 +33,9 @@ mod metal_runtime;
 mod metal_loss;
 
 #[cfg(feature = "gpu")]
+mod metal_backward;
+
+#[cfg(feature = "gpu")]
 pub mod autodiff;
 
 #[cfg(feature = "gpu")]
@@ -116,6 +119,12 @@ pub struct TrainingConfig {
     pub lr_color: f32,
     /// Densification interval
     pub densify_interval: usize,
+    /// Pruning interval for Metal topology updates.
+    pub prune_interval: usize,
+    /// Delay topology updates until after this many training iterations.
+    pub topology_warmup: usize,
+    /// Emit topology scheduling/throughput logs every N scheduled checks.
+    pub topology_log_interval: usize,
     /// Pruning threshold
     pub prune_threshold: f32,
     /// Maximum number of Gaussians created during initialization
@@ -136,6 +145,8 @@ pub struct TrainingConfig {
     pub metal_profile_steps: bool,
     /// Log the Metal timing breakdown every N steps when profiling is enabled.
     pub metal_profile_interval: usize,
+    /// Use the native Metal forward rasterizer during normal training.
+    pub metal_use_native_forward: bool,
 }
 
 impl Default for TrainingConfig {
@@ -149,6 +160,9 @@ impl Default for TrainingConfig {
             lr_opacity: 0.05,
             lr_color: 0.0025,
             densify_interval: 100,
+            prune_interval: 100,
+            topology_warmup: 100,
+            topology_log_interval: 500,
             prune_threshold: 0.005,
             max_initial_gaussians: 100_000,
             sampling_step: 0,
@@ -159,6 +173,7 @@ impl Default for TrainingConfig {
             metal_gaussian_chunk_size: 32,
             metal_profile_steps: false,
             metal_profile_interval: 25,
+            metal_use_native_forward: true,
         }
     }
 }
@@ -193,5 +208,7 @@ mod tests {
     fn default_training_backend_is_metal() {
         assert_eq!(TrainingBackend::default(), TrainingBackend::Metal);
         assert_eq!(TrainingConfig::default().backend, TrainingBackend::Metal);
+        assert!(TrainingConfig::default().metal_use_native_forward);
+        assert_eq!(TrainingConfig::default().prune_interval, 100);
     }
 }

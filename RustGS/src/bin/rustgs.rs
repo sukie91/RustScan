@@ -62,6 +62,22 @@ enum Commands {
         #[arg(long, default_value = "25")]
         metal_profile_interval: usize,
 
+        /// Run prune scheduling every N iterations
+        #[arg(long, default_value = "100")]
+        prune_interval: usize,
+
+        /// Delay densify/prune topology work until after this many iterations
+        #[arg(long, default_value = "100")]
+        topology_warmup: usize,
+
+        /// Log topology scheduling/throughput diagnostics every N checks
+        #[arg(long, default_value = "500")]
+        topology_log_interval: usize,
+
+        /// Use the tensor fallback instead of the native Metal forward rasterizer
+        #[arg(long, default_value_t = false)]
+        metal_disable_native_forward: bool,
+
         /// Log level (trace, debug, info, warn, error)
         #[arg(long, default_value = "info")]
         log_level: String,
@@ -99,6 +115,10 @@ fn main() -> anyhow::Result<()> {
             metal_gaussian_chunk_size,
             metal_profile_steps,
             metal_profile_interval,
+            prune_interval,
+            topology_warmup,
+            topology_log_interval,
+            metal_disable_native_forward,
             log_level,
         } => {
             // Initialize logging
@@ -125,6 +145,10 @@ fn main() -> anyhow::Result<()> {
             config.metal_gaussian_chunk_size = metal_gaussian_chunk_size;
             config.metal_profile_steps = metal_profile_steps;
             config.metal_profile_interval = metal_profile_interval;
+            config.prune_interval = prune_interval;
+            config.topology_warmup = topology_warmup;
+            config.topology_log_interval = topology_log_interval;
+            config.metal_use_native_forward = !metal_disable_native_forward;
 
             // Train
             #[cfg(feature = "gpu")]

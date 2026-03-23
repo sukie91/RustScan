@@ -162,6 +162,63 @@ impl MetalTileDispatchRecord {
             ..Default::default()
         }
     }
+
+    pub(crate) fn start(&self) -> usize {
+        self.start as usize
+    }
+
+    pub(crate) fn count(&self) -> usize {
+        self.count as usize
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct MetalTileBins {
+    records: Vec<MetalTileDispatchRecord>,
+    active_tiles: Vec<usize>,
+    packed_indices: Vec<u32>,
+    total_assignments: usize,
+    max_gaussians_per_tile: usize,
+}
+
+impl MetalTileBins {
+    pub(crate) fn active_tiles(&self) -> &[usize] {
+        &self.active_tiles
+    }
+
+    pub(crate) fn active_tile_count(&self) -> usize {
+        self.active_tiles.len()
+    }
+
+    pub(crate) fn total_assignments(&self) -> usize {
+        self.total_assignments
+    }
+
+    pub(crate) fn max_gaussians_per_tile(&self) -> usize {
+        self.max_gaussians_per_tile
+    }
+
+    pub(crate) fn packed_indices(&self) -> &[u32] {
+        &self.packed_indices
+    }
+
+    pub(crate) fn records(&self) -> &[MetalTileDispatchRecord] {
+        &self.records
+    }
+
+    pub(crate) fn record(&self, tile_idx: usize) -> Option<MetalTileDispatchRecord> {
+        self.records.get(tile_idx).copied()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn indices_for_tile(&self, tile_idx: usize) -> &[u32] {
+        let Some(record) = self.records.get(tile_idx) else {
+            return &[];
+        };
+        let start = record.start();
+        let end = start.saturating_add(record.count());
+        self.packed_indices.get(start..end).unwrap_or(&[])
+    }
 }
 
 #[repr(C)]
@@ -225,10 +282,14 @@ pub(crate) struct NativeForwardProfile {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum MetalBufferSlot {
     CameraUniforms,
+    VisibleIndices,
+    TileCounts,
+    TileOffsets,
     TileMetadata,
     TileIndices,
     ProjectedGaussians,
     GradPositions,
+    GradRotations,
     GradScales,
     GradOpacity,
     GradColors,
@@ -241,10 +302,14 @@ impl MetalBufferSlot {
     fn label(self) -> &'static str {
         match self {
             Self::CameraUniforms => "camera_uniforms",
+            Self::VisibleIndices => "visible_indices",
+            Self::TileCounts => "tile_counts",
+            Self::TileOffsets => "tile_offsets",
             Self::TileMetadata => "tile_metadata",
             Self::TileIndices => "tile_indices",
             Self::ProjectedGaussians => "projected_gaussians",
             Self::GradPositions => "grad_positions",
+            Self::GradRotations => "grad_rotations",
             Self::GradScales => "grad_scales",
             Self::GradOpacity => "grad_opacity",
             Self::GradColors => "grad_colors",
@@ -398,6 +463,7 @@ impl MetalRuntime {
             .ok_or_else(|| candle_core::Error::Msg(format!("invalid tile index {tile_idx}")))
     }
 
+    #[cfg(test)]
     pub(crate) fn tile_grid(&self) -> (usize, usize) {
         (self.num_tiles_x, self.num_tiles_y)
     }
@@ -422,6 +488,18 @@ impl MetalRuntime {
             size_of::<MetalCameraUniform>(),
         )?;
         self.ensure_buffer(
+            MetalBufferSlot::VisibleIndices,
+            gaussian_capacity.saturating_mul(size_of::<u32>()),
+        )?;
+        self.ensure_buffer(
+            MetalBufferSlot::TileCounts,
+            self.tile_windows.len().saturating_mul(size_of::<u32>()),
+        )?;
+        self.ensure_buffer(
+            MetalBufferSlot::TileOffsets,
+            self.tile_windows.len().saturating_mul(size_of::<u32>()),
+        )?;
+        self.ensure_buffer(
             MetalBufferSlot::TileMetadata,
             self.tile_windows
                 .len()
@@ -437,6 +515,12 @@ impl MetalRuntime {
             MetalBufferSlot::GradPositions,
             gaussian_capacity
                 .saturating_mul(3)
+                .saturating_mul(size_of::<f32>()),
+        )?;
+        self.ensure_buffer(
+            MetalBufferSlot::GradRotations,
+            gaussian_capacity
+                .saturating_mul(4)
                 .saturating_mul(size_of::<f32>()),
         )?;
         self.ensure_buffer(
@@ -456,16 +540,6 @@ impl MetalRuntime {
                 .saturating_mul(size_of::<f32>()),
         )?;
         Ok(())
-    }
-
-    pub(crate) fn reserve_tile_index_capacity(
-        &mut self,
-        tile_refs: usize,
-    ) -> candle_core::Result<()> {
-        self.ensure_buffer(
-            MetalBufferSlot::TileIndices,
-            tile_refs.saturating_mul(size_of::<u32>()),
-        )
     }
 
     pub(crate) fn stage_camera(&mut self, camera: &DiffCamera) -> candle_core::Result<()> {
@@ -516,6 +590,77 @@ impl MetalRuntime {
         })
     }
 
+    pub(crate) fn build_tile_bins(
+        &self,
+        min_x_values: &[f32],
+        max_x_values: &[f32],
+        min_y_values: &[f32],
+        max_y_values: &[f32],
+    ) -> candle_core::Result<MetalTileBins> {
+        let total = min_x_values.len();
+        if max_x_values.len() != total || min_y_values.len() != total || max_y_values.len() != total
+        {
+            candle_core::bail!("tile binning expects matching bound lengths");
+        }
+
+        let tile_count = self.num_tiles_x.saturating_mul(self.num_tiles_y);
+        let mut tile_counts = vec![0usize; tile_count];
+        let mut total_assignments = 0usize;
+
+        for idx in 0..total {
+            let tile_x_min = (min_x_values[idx].floor().max(0.0) as usize) / METAL_TILE_SIZE;
+            let tile_x_max = (max_x_values[idx].ceil().max(0.0) as usize) / METAL_TILE_SIZE;
+            let tile_y_min = (min_y_values[idx].floor().max(0.0) as usize) / METAL_TILE_SIZE;
+            let tile_y_max = (max_y_values[idx].ceil().max(0.0) as usize) / METAL_TILE_SIZE;
+
+            for ty in tile_y_min..=tile_y_max.min(self.num_tiles_y.saturating_sub(1)) {
+                for tx in tile_x_min..=tile_x_max.min(self.num_tiles_x.saturating_sub(1)) {
+                    tile_counts[ty * self.num_tiles_x + tx] += 1;
+                    total_assignments += 1;
+                }
+            }
+        }
+
+        let mut records = Vec::with_capacity(tile_count);
+        let mut active_tiles = Vec::new();
+        let mut max_gaussians_per_tile = 0usize;
+        let mut start = 0usize;
+        for (tile_idx, count) in tile_counts.iter().copied().enumerate() {
+            records.push(MetalTileDispatchRecord::new(start as u32, count as u32));
+            if count > 0 {
+                active_tiles.push(tile_idx);
+                max_gaussians_per_tile = max_gaussians_per_tile.max(count);
+            }
+            start += count;
+        }
+
+        let mut packed_indices = vec![0u32; total_assignments];
+        let mut write_offsets: Vec<usize> = records.iter().map(|record| record.start()).collect();
+        for idx in 0..total {
+            let tile_x_min = (min_x_values[idx].floor().max(0.0) as usize) / METAL_TILE_SIZE;
+            let tile_x_max = (max_x_values[idx].ceil().max(0.0) as usize) / METAL_TILE_SIZE;
+            let tile_y_min = (min_y_values[idx].floor().max(0.0) as usize) / METAL_TILE_SIZE;
+            let tile_y_max = (max_y_values[idx].ceil().max(0.0) as usize) / METAL_TILE_SIZE;
+
+            for ty in tile_y_min..=tile_y_max.min(self.num_tiles_y.saturating_sub(1)) {
+                for tx in tile_x_min..=tile_x_max.min(self.num_tiles_x.saturating_sub(1)) {
+                    let tile_idx = ty * self.num_tiles_x + tx;
+                    let write_idx = write_offsets[tile_idx];
+                    packed_indices[write_idx] = idx as u32;
+                    write_offsets[tile_idx] += 1;
+                }
+            }
+        }
+
+        Ok(MetalTileBins {
+            records,
+            active_tiles,
+            packed_indices,
+            total_assignments,
+            max_gaussians_per_tile,
+        })
+    }
+
     pub(crate) fn reserve_forward_buffers(
         &mut self,
         gaussian_count: usize,
@@ -556,15 +701,14 @@ impl MetalRuntime {
     pub(crate) fn rasterize_forward(
         &mut self,
         gaussians: &[MetalProjectedGaussian],
-        tile_records: &[MetalTileDispatchRecord],
-        tile_indices: &[u32],
+        tile_bins: &MetalTileBins,
         render_width: usize,
         render_height: usize,
     ) -> candle_core::Result<(NativeForwardFrame, NativeForwardProfile)> {
         let total_start = std::time::Instant::now();
         let pixel_count = render_width.saturating_mul(render_height);
         let setup_start = std::time::Instant::now();
-        self.reserve_forward_buffers(gaussians.len(), tile_indices.len(), pixel_count)?;
+        self.reserve_forward_buffers(gaussians.len(), tile_bins.total_assignments(), pixel_count)?;
         let pipeline = self.ensure_pipeline(MetalKernel::TileForward)?.clone();
         let color_buffer = self
             .buffer_handle(MetalBufferSlot::OutputColor)?
@@ -594,8 +738,8 @@ impl MetalRuntime {
 
         let staging_start = std::time::Instant::now();
         self.write_slice(MetalBufferSlot::ProjectedGaussians, gaussians)?;
-        self.write_slice(MetalBufferSlot::TileMetadata, tile_records)?;
-        self.write_slice(MetalBufferSlot::TileIndices, tile_indices)?;
+        self.write_slice(MetalBufferSlot::TileMetadata, tile_bins.records())?;
+        self.write_slice(MetalBufferSlot::TileIndices, tile_bins.packed_indices())?;
         let staging = staging_start.elapsed();
 
         let kernel_start = std::time::Instant::now();
@@ -710,8 +854,44 @@ impl MetalRuntime {
         values: &[T],
         shape: S,
     ) -> candle_core::Result<Tensor> {
+        let shape = shape.into();
+        if !self.device.is_metal() {
+            return Tensor::from_slice(values, shape, &self.device);
+        }
         self.write_slice(slot, values)?;
         self.tensor_from_buffer(slot, values.len(), T::DTYPE, shape)
+    }
+
+    pub(crate) fn read_tensor_flat<T: candle_core::WithDType + Copy>(
+        &self,
+        tensor: &Tensor,
+    ) -> candle_core::Result<Vec<T>> {
+        let element_count: usize = tensor.elem_count();
+        if !self.device.is_metal() {
+            return tensor.flatten_all()?.to_vec1::<T>();
+        }
+
+        let view = self.bind_tensor(tensor)?;
+        if view.dtype() != T::DTYPE {
+            candle_core::bail!(
+                "tensor dtype mismatch for runtime read: expected {:?}, got {:?}",
+                T::DTYPE,
+                view.dtype()
+            );
+        }
+        if view.element_count() != element_count {
+            candle_core::bail!(
+                "tensor element count mismatch for runtime read: expected {element_count}, got {}",
+                view.element_count()
+            );
+        }
+
+        self.device.synchronize()?;
+        let buffer = view.buffer()?;
+        let byte_offset = view.byte_offset();
+        let ptr = unsafe { (buffer.contents() as *const u8).add(byte_offset) }.cast::<T>();
+        let values = unsafe { std::slice::from_raw_parts(ptr, element_count) };
+        Ok(values.to_vec())
     }
 
     #[cfg(test)]
@@ -910,12 +1090,12 @@ mod tests {
         let mut runtime = MetalRuntime::new(32, 16, Device::Cpu).unwrap();
         runtime.reserve_core_buffers(64).unwrap();
         let initial = runtime.stats();
-        assert_eq!(initial.buffer_allocations, 7);
+        assert_eq!(initial.buffer_allocations, 11);
 
         runtime.reserve_core_buffers(32).unwrap();
         let reused = runtime.stats();
         assert_eq!(reused.buffer_allocations, initial.buffer_allocations);
-        assert!(reused.buffer_reuses >= 7);
+        assert!(reused.buffer_reuses >= 11);
     }
 
     #[test]
@@ -932,5 +1112,29 @@ mod tests {
             .read_u32_buffer(MetalBufferSlot::TileIndices, 8)
             .unwrap();
         assert_eq!(values, vec![7; 8]);
+    }
+
+    #[test]
+    fn tile_bins_pack_indices_by_tile() {
+        let runtime = MetalRuntime::new(32, 16, Device::Cpu).unwrap();
+        let bins = runtime
+            .build_tile_bins(&[2.0f32, 14.0], &[15.0f32, 18.0], &[1.0f32, 1.0], &[14.0f32, 14.0])
+            .unwrap();
+
+        assert_eq!(bins.active_tile_count(), 2);
+        assert_eq!(bins.total_assignments(), 3);
+        assert_eq!(bins.max_gaussians_per_tile(), 2);
+        assert_eq!(bins.packed_indices(), &[0, 1, 1]);
+        assert_eq!(bins.indices_for_tile(0), &[0, 1]);
+        assert_eq!(bins.indices_for_tile(1), &[1]);
+    }
+
+    #[test]
+    fn stage_tensor_from_slice_falls_back_to_cpu_tensor() {
+        let mut runtime = MetalRuntime::new(16, 16, Device::Cpu).unwrap();
+        let tensor = runtime
+            .stage_tensor_from_slice(MetalBufferSlot::TileIndices, &[1u32, 2, 3], 3)
+            .unwrap();
+        assert_eq!(tensor.to_vec1::<u32>().unwrap(), vec![1, 2, 3]);
     }
 }

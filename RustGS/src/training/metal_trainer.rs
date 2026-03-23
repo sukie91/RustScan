@@ -8,18 +8,20 @@ use std::cmp::Ordering;
 use std::time::{Duration, Instant};
 
 use candle_core::{DType, Device, Tensor, Var};
+use glam::{Mat3, Quat, Vec3};
 
-use crate::diff::analytical_backward::{self, ForwardIntermediate, GaussianRenderRecord};
+use crate::diff::analytical_backward;
 use crate::diff::diff_splat::{DiffCamera, TrainableGaussians};
 use crate::{GaussianMap, TrainingDataset, TrainingError};
 
 use super::data_loading::{
     load_training_data, map_from_trainable, trainable_from_map, LoadedTrainingData,
 };
+use super::metal_backward::MetalBackwardGrads;
 use super::metal_loss::mean_abs_diff;
 use super::metal_runtime::{
-    ChunkPixelWindow, MetalBufferSlot, MetalProjectedGaussian, MetalRuntime,
-    MetalTileDispatchRecord, METAL_TILE_SIZE,
+    ChunkPixelWindow, MetalBufferSlot, MetalProjectedGaussian, MetalRuntime, MetalTileBins,
+    NativeForwardProfile,
 };
 use super::training_pipeline::TrainingConfig as TopologyConfig;
 use super::TrainingConfig;
@@ -70,18 +72,47 @@ struct ProjectedGaussians {
     max_x: Tensor,
     min_y: Tensor,
     max_y: Tensor,
+    cpu_records: Vec<CpuProjectedGaussian>,
+    native_cache: Vec<MetalProjectedGaussian>,
+    staging_source: ProjectionStagingSource,
 }
 
-struct RenderedFrame {
-    color: Tensor,
-    depth: Tensor,
-    alpha: Tensor,
+pub(crate) struct RenderedFrame {
+    pub(crate) color: Tensor,
+    pub(crate) depth: Tensor,
+    pub(crate) alpha: Tensor,
 }
 
-struct CpuRenderedFrame {
-    color: Vec<f32>,
-    depth: Vec<f32>,
-    alpha: Vec<f32>,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProjectionStagingSource {
+    TensorReadback,
+    RuntimeBufferRead,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CpuProjectedGaussian {
+    pub(crate) source_idx: u32,
+    pub(crate) u: f32,
+    pub(crate) v: f32,
+    pub(crate) sigma_x: f32,
+    pub(crate) sigma_y: f32,
+    pub(crate) raw_sigma_x: f32,
+    pub(crate) raw_sigma_y: f32,
+    pub(crate) depth: f32,
+    pub(crate) opacity: f32,
+    pub(crate) opacity_logit: f32,
+    pub(crate) scale3d: [f32; 3],
+    pub(crate) color: [f32; 3],
+    pub(crate) min_x: f32,
+    pub(crate) max_x: f32,
+    pub(crate) min_y: f32,
+    pub(crate) max_y: f32,
+}
+
+impl ProjectedGaussians {
+    fn cpu_records(&self) -> &[CpuProjectedGaussian] {
+        &self.cpu_records
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -156,19 +187,6 @@ impl GaussianParameterSnapshot {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-struct TileMetadata {
-    tile_idx: usize,
-    gaussian_count: usize,
-}
-
-struct TileBins {
-    metadata: Vec<TileMetadata>,
-    gaussian_indices: Vec<Vec<u32>>,
-    total_assignments: usize,
-    max_gaussians_per_tile: usize,
-}
-
 #[derive(Debug, Clone, Copy, Default)]
 struct TileBinningStats {
     active_tiles: usize,
@@ -198,8 +216,6 @@ struct MetalAdamState {
     v_pos: Tensor,
     m_scale: Tensor,
     v_scale: Tensor,
-    m_rot: Tensor,
-    v_rot: Tensor,
     m_op: Tensor,
     v_op: Tensor,
     m_color: Tensor,
@@ -213,8 +229,6 @@ impl MetalAdamState {
             v_pos: gaussians.positions().zeros_like()?,
             m_scale: gaussians.scales.as_tensor().zeros_like()?,
             v_scale: gaussians.scales.as_tensor().zeros_like()?,
-            m_rot: gaussians.rotations.as_tensor().zeros_like()?,
-            v_rot: gaussians.rotations.as_tensor().zeros_like()?,
             m_op: gaussians.opacities.as_tensor().zeros_like()?,
             v_op: gaussians.opacities.as_tensor().zeros_like()?,
             m_color: gaussians.colors().zeros_like()?,
@@ -230,11 +244,13 @@ pub struct MetalTrainer {
     pixel_count: usize,
     chunk_size: usize,
     densify_interval: usize,
+    prune_interval: usize,
+    topology_warmup: usize,
+    topology_log_interval: usize,
     prune_threshold: f32,
     max_gaussian_budget: usize,
     lr_pos: f32,
     lr_scale: f32,
-    lr_rot: f32,
     lr_opacity: f32,
     lr_color: f32,
     beta1: f32,
@@ -242,11 +258,13 @@ pub struct MetalTrainer {
     eps: f32,
     profile_steps: bool,
     profile_interval: usize,
+    use_native_forward: bool,
     runtime: MetalRuntime,
     adam: Option<MetalAdamState>,
     gaussian_stats: Vec<MetalGaussianStats>,
     iteration: usize,
     loss_history: Vec<f32>,
+    last_step_duration: Option<Duration>,
 }
 
 struct MetalTrainingStats {
@@ -484,6 +502,9 @@ impl MetalTrainer {
             max_x: Tensor::zeros((0,), DType::F32, &self.device)?,
             min_y: Tensor::zeros((0,), DType::F32, &self.device)?,
             max_y: Tensor::zeros((0,), DType::F32, &self.device)?,
+            cpu_records: Vec::new(),
+            native_cache: Vec::new(),
+            staging_source: ProjectionStagingSource::TensorReadback,
         })
     }
 
@@ -534,9 +555,12 @@ impl MetalTrainer {
             stats.grad_accum = (stats.grad_accum + grad_mag).min(10.0);
         }
 
-        let visible_sources = projected.source_indices.to_vec1::<u32>()?;
         let visibility_bonus = loss_value.max(0.01);
-        for source_idx in visible_sources {
+        for source_idx in projected
+            .cpu_records()
+            .iter()
+            .map(|record| record.source_idx)
+        {
             if let Some(stats) = self.gaussian_stats.get_mut(source_idx as usize) {
                 stats.grad_accum = (stats.grad_accum + visibility_bonus).min(10.0);
             }
@@ -785,16 +809,6 @@ impl MetalTrainer {
             (row_count, 3),
             &self.device,
         )?;
-        let m_rot = Tensor::from_slice(
-            &gather_rows(&flatten_rows(old_state.m_rot.to_vec2::<f32>()?), 4, origins),
-            (row_count, 4),
-            &self.device,
-        )?;
-        let v_rot = Tensor::from_slice(
-            &gather_rows(&flatten_rows(old_state.v_rot.to_vec2::<f32>()?), 4, origins),
-            (row_count, 4),
-            &self.device,
-        )?;
         let m_op = Tensor::from_slice(
             &gather_rows(&old_state.m_op.to_vec1::<f32>()?, 1, origins),
             row_count,
@@ -821,8 +835,6 @@ impl MetalTrainer {
             v_pos,
             m_scale,
             v_scale,
-            m_rot,
-            v_rot,
             m_op,
             v_op,
             m_color,
@@ -830,19 +842,34 @@ impl MetalTrainer {
         })
     }
 
+    fn should_densify_at(&self, iteration: usize) -> bool {
+        self.densify_interval > 0
+            && iteration > self.topology_warmup
+            && iteration % self.densify_interval == 0
+    }
+
+    fn should_prune_at(&self, iteration: usize) -> bool {
+        self.prune_interval > 0
+            && iteration > self.topology_warmup
+            && iteration % self.prune_interval == 0
+    }
+
+    fn should_log_topology_at(&self, iteration: usize) -> bool {
+        iteration % self.topology_log_interval == 0
+    }
+
     fn maybe_apply_topology_updates(
         &mut self,
         gaussians: &mut TrainableGaussians,
         frame_count: usize,
     ) -> candle_core::Result<()> {
-        if self.densify_interval == 0
-            || self.iteration == 0
-            || self.iteration % self.densify_interval != 0
-            || gaussians.len() == 0
-        {
+        let should_densify = self.should_densify_at(self.iteration);
+        let should_prune = self.should_prune_at(self.iteration);
+        if (!should_densify && !should_prune) || gaussians.len() == 0 {
             return Ok(());
         }
 
+        let topology_start = Instant::now();
         let old_len = gaussians.len();
         let requested_cap = self.max_gaussian_budget.max(old_len);
         let max_gaussians = self.max_topology_gaussians(requested_cap, old_len, frame_count);
@@ -903,24 +930,61 @@ impl MetalTrainer {
             stats.iter().map(|stat| stat.grad_accum).sum::<f32>() / stats.len() as f32
         };
 
-        let added = self.densify_snapshot(&mut snapshot, &mut stats, &mut origins, max_gaussians);
-        let pruned = self.prune_snapshot(&mut snapshot, &mut stats, &mut origins);
+        let added = if should_densify {
+            self.densify_snapshot(&mut snapshot, &mut stats, &mut origins, max_gaussians)
+        } else {
+            0
+        };
+        let pruned = if should_prune {
+            self.prune_snapshot(&mut snapshot, &mut stats, &mut origins)
+        } else {
+            0
+        };
+        let topology_duration = topology_start.elapsed();
+        let topology_ms = duration_ms(topology_duration);
+        let topology_ratio = self
+            .last_step_duration
+            .map(|step| {
+                let step_ms = duration_ms(step);
+                if step_ms > 0.0 {
+                    topology_ms / step_ms
+                } else {
+                    0.0
+                }
+            })
+            .unwrap_or(0.0);
+        let guardrail_triggered = topology_ms >= 50.0 || topology_ratio >= 0.35;
 
         if added == 0 && pruned == 0 {
-            log::info!(
-                "Metal topology check at iter {} made no changes | gaussians={} | budget_cap={} | max_grad_accum={:.6} | mean_grad_accum={:.6} | active_grad_stats={} | small_scale_stats={} | opacity_ready_stats={} | clone_candidates={} | split_candidates={} | prune_candidates={}",
-                self.iteration,
-                old_len,
-                max_gaussians,
-                max_grad,
-                mean_grad,
-                active_grad_stats,
-                small_scale_stats,
-                opacity_ready_stats,
-                clone_candidates,
-                split_candidates,
-                prune_candidates,
-            );
+            if self.should_log_topology_at(self.iteration) || guardrail_triggered {
+                log::info!(
+                    "Metal topology check at iter {} made no changes | densify={} | prune={} | gaussians={} | budget_cap={} | topology={:.2}ms | step_share={:.0}% | max_grad_accum={:.6} | mean_grad_accum={:.6} | active_grad_stats={} | small_scale_stats={} | opacity_ready_stats={} | clone_candidates={} | split_candidates={} | prune_candidates={}",
+                    self.iteration,
+                    should_densify,
+                    should_prune,
+                    old_len,
+                    max_gaussians,
+                    topology_ms,
+                    topology_ratio * 100.0,
+                    max_grad,
+                    mean_grad,
+                    active_grad_stats,
+                    small_scale_stats,
+                    opacity_ready_stats,
+                    clone_candidates,
+                    split_candidates,
+                    prune_candidates,
+                );
+            }
+            if guardrail_triggered {
+                log::warn!(
+                    "Metal topology guardrail triggered at iter {} | topology={:.2}ms | previous_step={:.2}ms | share={:.0}% | consider increasing --topology-warmup, --densify-interval, or --prune-interval",
+                    self.iteration,
+                    topology_ms,
+                    self.last_step_duration.map(duration_ms).unwrap_or(0.0),
+                    topology_ratio * 100.0,
+                );
+            }
             return Ok(());
         }
 
@@ -943,13 +1007,17 @@ impl MetalTrainer {
         self.runtime.reserve_core_buffers(gaussians.len())?;
 
         log::info!(
-            "Metal topology update at iter {} | added {} | pruned {} | gaussians {} -> {} | budget_cap={} | active_grad_stats={} | small_scale_stats={} | opacity_ready_stats={} | clone_candidates={} | split_candidates={} | prune_candidates={} | max_grad_accum={:.6} | mean_grad_accum={:.6}",
+            "Metal topology update at iter {} | densify={} | prune={} | added {} | pruned {} | gaussians {} -> {} | budget_cap={} | topology={:.2}ms | step_share={:.0}% | active_grad_stats={} | small_scale_stats={} | opacity_ready_stats={} | clone_candidates={} | split_candidates={} | prune_candidates={} | max_grad_accum={:.6} | mean_grad_accum={:.6}",
             self.iteration,
+            should_densify,
+            should_prune,
             added,
             pruned,
             old_len,
             gaussians.len(),
             max_gaussians,
+            topology_ms,
+            topology_ratio * 100.0,
             active_grad_stats,
             small_scale_stats,
             opacity_ready_stats,
@@ -959,6 +1027,17 @@ impl MetalTrainer {
             max_grad,
             mean_grad,
         );
+        if guardrail_triggered {
+            log::warn!(
+                "Metal topology guardrail triggered at iter {} | topology={:.2}ms | previous_step={:.2}ms | share={:.0}% | added={} | pruned={}",
+                self.iteration,
+                topology_ms,
+                self.last_step_duration.map(duration_ms).unwrap_or(0.0),
+                topology_ratio * 100.0,
+                added,
+                pruned,
+            );
+        }
         Ok(())
     }
 
@@ -972,6 +1051,7 @@ impl MetalTrainer {
             scaled_dimensions(input_width, input_height, config.metal_render_scale);
         let pixel_count = render_width * render_height;
         let runtime = MetalRuntime::new(render_width, render_height, device.clone())?;
+        let use_native_forward = config.metal_use_native_forward && device.is_metal();
 
         Ok(Self {
             device,
@@ -980,11 +1060,13 @@ impl MetalTrainer {
             pixel_count,
             chunk_size: config.metal_gaussian_chunk_size.max(1),
             densify_interval: config.densify_interval,
+            prune_interval: config.prune_interval,
+            topology_warmup: config.topology_warmup,
+            topology_log_interval: config.topology_log_interval.max(1),
             prune_threshold: config.prune_threshold,
             max_gaussian_budget: config.max_initial_gaussians.max(1),
             lr_pos: config.lr_position,
             lr_scale: config.lr_scale,
-            lr_rot: config.lr_rotation,
             lr_opacity: config.lr_opacity,
             lr_color: config.lr_color,
             beta1: 0.9,
@@ -992,11 +1074,13 @@ impl MetalTrainer {
             eps: 1e-8,
             profile_steps: config.metal_profile_steps,
             profile_interval: config.metal_profile_interval.max(1),
+            use_native_forward,
             runtime,
             adam: None,
             gaussian_stats: Vec::new(),
             iteration: 0,
             loss_history: Vec::new(),
+            last_step_duration: None,
         })
     }
 
@@ -1065,10 +1149,15 @@ impl MetalTrainer {
         let runtime_stats = self.runtime.stats();
 
         log::info!(
-            "MetalTrainer running at {}x{} | chunk_size={} | frames={} | initial_gaussians={} | tiles={} | runtime_buffers={} | pipeline_warmups={} | tile_index_capacity={}B",
+            "MetalTrainer running at {}x{} | chunk_size={} | native_forward={} | topology(densify={} prune={} warmup={} log={}) | frames={} | initial_gaussians={} | tiles={} | runtime_buffers={} | pipeline_warmups={} | tile_index_capacity={}B",
             self.render_width,
             self.render_height,
             self.chunk_size,
+            self.use_native_forward,
+            self.densify_interval,
+            self.prune_interval,
+            self.topology_warmup,
+            self.topology_log_interval,
             frames.len(),
             gaussians.len(),
             runtime_stats.tile_windows,
@@ -1131,27 +1220,25 @@ impl MetalTrainer {
         profile.loss = loss_start.elapsed();
 
         let backward_start = Instant::now();
-        let intermediate = self.build_forward_intermediate(&projected, &rendered)?;
-        let analytical_grads = analytical_backward::backward_weighted_l1(
-            &intermediate,
+        let backward = super::metal_backward::backward_weighted_l1(
+            &mut self.runtime,
+            &self.device,
+            projected.cpu_records(),
+            &rendered,
             &frame.target_color_cpu,
             &frame.target_depth_cpu,
             gaussians.len(),
-            frame.camera.fx,
-            frame.camera.fy,
-            frame.camera.cx,
-            frame.camera.cy,
-            1.0 / frame.target_color_cpu.len().max(1) as f32,
-            0.1 / frame.target_depth_cpu.len().max(1) as f32,
-        );
+            &frame.camera,
+        )?;
         profile.backward = backward_start.elapsed();
 
         let optimizer_start = Instant::now();
-        self.apply_analytical_gradients(gaussians, &analytical_grads)?;
-        self.update_gaussian_stats(&analytical_grads, &projected, loss_value, gaussians.len())?;
+        self.apply_backward_grads(gaussians, &backward.grads)?;
+        self.update_gaussian_stats(&backward.reference, &projected, loss_value, gaussians.len())?;
         self.synchronize_if_needed(should_profile)?;
         profile.optimizer = optimizer_start.elapsed();
         profile.total = total_start.elapsed();
+        self.last_step_duration = Some(profile.total);
         self.loss_history.push(loss_value);
 
         Ok(MetalStepOutcome {
@@ -1162,33 +1249,21 @@ impl MetalTrainer {
         })
     }
 
-    fn apply_analytical_gradients(
+    fn apply_backward_grads(
         &mut self,
         gaussians: &mut TrainableGaussians,
-        grads: &analytical_backward::AnalyticalGradients,
+        grads: &MetalBackwardGrads,
     ) -> candle_core::Result<()> {
         let adam = self
             .adam
             .as_mut()
             .ok_or_else(|| candle_core::Error::Msg("adam state not initialized".into()))?;
 
-        let n = gaussians.len();
-        let pos_grad =
-            self.runtime
-                .stage_tensor_from_slice(MetalBufferSlot::GradPositions, &grads.positions, (n, 3))?;
-        let scale_grad =
-            self.runtime
-                .stage_tensor_from_slice(MetalBufferSlot::GradScales, &grads.log_scales, (n, 3))?;
-        let opacity_grad =
-            self.runtime
-                .stage_tensor_from_slice(MetalBufferSlot::GradOpacity, &grads.opacity_logits, (n,))?;
-        let color_grad =
-            self.runtime
-                .stage_tensor_from_slice(MetalBufferSlot::GradColors, &grads.colors, (n, 3))?;
-
+        // Rotations remain frozen until the backward path propagates
+        // rotation-aware projection gradients.
         adam_step_var(
             &gaussians.positions,
-            &pos_grad,
+            &grads.positions,
             &mut adam.m_pos,
             &mut adam.v_pos,
             self.lr_pos,
@@ -1199,7 +1274,7 @@ impl MetalTrainer {
         )?;
         adam_step_var(
             &gaussians.scales,
-            &scale_grad,
+            &grads.log_scales,
             &mut adam.m_scale,
             &mut adam.v_scale,
             self.lr_scale,
@@ -1210,7 +1285,7 @@ impl MetalTrainer {
         )?;
         adam_step_var(
             &gaussians.opacities,
-            &opacity_grad,
+            &grads.opacity_logits,
             &mut adam.m_op,
             &mut adam.v_op,
             self.lr_opacity,
@@ -1221,7 +1296,7 @@ impl MetalTrainer {
         )?;
         adam_step_var(
             &gaussians.colors,
-            &color_grad,
+            &grads.colors,
             &mut adam.m_color,
             &mut adam.v_color,
             self.lr_color,
@@ -1231,7 +1306,6 @@ impl MetalTrainer {
             self.iteration,
         )?;
 
-        normalize_rotations(&gaussians.rotations)?;
         Ok(())
     }
 
@@ -1271,15 +1345,26 @@ impl MetalTrainer {
         let (projected, mut profile) = self.project_gaussians(gaussians, camera, should_profile)?;
         let raster_start = Instant::now();
         let tile_bins = self.build_tile_bins(&projected)?;
-        let (rendered, tile_stats) = self.rasterize(&projected, &tile_bins)?;
+        let (rendered, tile_stats, native_profile) = if self.use_native_forward {
+            let (rendered, tile_stats, native_profile) =
+                self.rasterize_native(&projected, &tile_bins)?;
+            (rendered, tile_stats, Some(native_profile))
+        } else {
+            let (rendered, tile_stats) = self.rasterize(&projected, &tile_bins)?;
+            (rendered, tile_stats, None)
+        };
         self.synchronize_if_needed(should_profile)?;
         profile.rasterization = raster_start.elapsed();
         profile.active_tiles = tile_stats.active_tiles;
         profile.tile_gaussian_refs = tile_stats.tile_gaussian_refs;
         profile.max_gaussians_per_tile = tile_stats.max_gaussians_per_tile;
         if should_profile && self.device.is_metal() {
-            profile.native_forward =
-                Some(self.profile_native_forward(&projected, &tile_bins, &rendered)?);
+            profile.native_forward = if let Some(native_profile) = native_profile {
+                let (baseline, _) = self.rasterize(&projected, &tile_bins)?;
+                Some(self.build_native_parity_profile(&baseline, &rendered, native_profile)?)
+            } else {
+                Some(self.profile_native_forward(&projected, &tile_bins, &rendered)?)
+            };
         }
         Ok((rendered, projected, profile))
     }
@@ -1296,8 +1381,8 @@ impl MetalTrainer {
         let pos = gaussians.positions().detach();
         let scales = gaussians.scales.as_tensor().detach().exp()?;
         let opacity_logits = gaussians.opacities.as_tensor().detach();
-        let opacity = sigmoid_tensor(&opacity_logits)?;
         let colors = gaussians.colors().detach();
+        let rotations = gaussians.rotations()?.detach();
 
         let px = pos.narrow(1, 0, 1)?.squeeze(1)?;
         let py = pos.narrow(1, 1, 1)?.squeeze(1)?;
@@ -1316,72 +1401,86 @@ impl MetalTrainer {
             .broadcast_add(&py.affine(camera.rotation[2][1] as f64, 0.0)?)?
             .broadcast_add(&pz.affine(camera.rotation[2][2] as f64, 0.0)?)?;
 
-        let z_safe = z.clamp(1e-4, f32::MAX)?;
-        let fx = Tensor::new(camera.fx, &self.device)?;
-        let fy = Tensor::new(camera.fy, &self.device)?;
-        let cx = Tensor::new(camera.cx, &self.device)?;
-        let cy = Tensor::new(camera.cy, &self.device)?;
+        let staging_source = if self.device.is_metal() {
+            ProjectionStagingSource::RuntimeBufferRead
+        } else {
+            ProjectionStagingSource::TensorReadback
+        };
+        let x_values = self.runtime.read_tensor_flat::<f32>(&x)?;
+        let y_values = self.runtime.read_tensor_flat::<f32>(&y)?;
+        let z_values = self.runtime.read_tensor_flat::<f32>(&z)?;
+        let scale_values = self.runtime.read_tensor_flat::<f32>(&scales)?;
+        let rotation_values = self.runtime.read_tensor_flat::<f32>(&rotations)?;
+        let opacity_logit_values = self.runtime.read_tensor_flat::<f32>(&opacity_logits)?;
+        let color_values = self.runtime.read_tensor_flat::<f32>(&colors)?;
+        let max_x_bound = camera.width.saturating_sub(1) as f32;
+        let max_y_bound = camera.height.saturating_sub(1) as f32;
 
-        let u = x
-            .broadcast_mul(&fx)?
-            .broadcast_div(&z_safe)?
-            .broadcast_add(&cx)?;
-        let v = y
-            .broadcast_mul(&fy)?
-            .broadcast_div(&z_safe)?
-            .broadcast_add(&cy)?;
+        let mut projected_cpu = Vec::with_capacity(gaussians.len());
+        for idx in 0..gaussians.len() {
+            let z_value = x_values
+                .get(idx)
+                .zip(y_values.get(idx))
+                .zip(z_values.get(idx))
+                .map(|((_, _), z)| *z)
+                .unwrap_or(0.0);
+            if !z_value.is_finite() || z_value < 1e-4 {
+                continue;
+            }
+            let x_value = x_values[idx];
+            let y_value = y_values[idx];
+            let scale3d = row_to_vec3(row_slice(&scale_values, 3, idx));
+            let rotation = row_to_quaternion(row_slice(&rotation_values, 4, idx));
+            let u_value = camera.fx * x_value / z_value + camera.cx;
+            let v_value = camera.fy * y_value / z_value + camera.cy;
+            let (raw_sigma_x, raw_sigma_y) = projected_axis_aligned_sigmas(
+                x_value,
+                y_value,
+                z_value,
+                scale3d,
+                rotation,
+                &camera.rotation,
+                camera.fx,
+                camera.fy,
+            );
+            if !raw_sigma_x.is_finite() || !raw_sigma_y.is_finite() {
+                continue;
+            }
+            let sigma_x = raw_sigma_x.clamp(0.5, 256.0);
+            let sigma_y = raw_sigma_y.clamp(0.5, 256.0);
+            let support_x = sigma_x * 3.0;
+            let support_y = sigma_y * 3.0;
+            if u_value + support_x < 0.0
+                || u_value - support_x > camera.width as f32
+                || v_value + support_y < 0.0
+                || v_value - support_y > camera.height as f32
+            {
+                continue;
+            }
 
-        let raw_sx = scales
-            .narrow(1, 0, 1)?
-            .squeeze(1)?
-            .broadcast_mul(&fx)?
-            .broadcast_div(&z_safe)?;
-        let raw_sy = scales
-            .narrow(1, 1, 1)?
-            .squeeze(1)?
-            .broadcast_mul(&fy)?
-            .broadcast_div(&z_safe)?;
-        let sx = raw_sx.clamp(0.5, 256.0)?;
-        let sy = raw_sy.clamp(0.5, 256.0)?;
+            let opacity_logit = opacity_logit_values.get(idx).copied().unwrap_or(0.0);
+            let color = row_to_vec3(row_slice(&color_values, 3, idx));
+            projected_cpu.push(CpuProjectedGaussian {
+                source_idx: idx as u32,
+                u: u_value,
+                v: v_value,
+                sigma_x,
+                sigma_y,
+                raw_sigma_x,
+                raw_sigma_y,
+                depth: z_value,
+                opacity: sigmoid_scalar(opacity_logit),
+                opacity_logit,
+                scale3d,
+                color,
+                min_x: (u_value - support_x).clamp(0.0, max_x_bound),
+                max_x: (u_value + support_x).clamp(0.0, max_x_bound),
+                min_y: (v_value - support_y).clamp(0.0, max_y_bound),
+                max_y: (v_value + support_y).clamp(0.0, max_y_bound),
+            });
+        }
 
-        let valid = z.ge(1e-4f64)?.to_dtype(DType::F32)?;
-        let support_x = sx.affine(3.0, 0.0)?;
-        let support_y = sy.affine(3.0, 0.0)?;
-        let min_x = u
-            .broadcast_sub(&support_x)?
-            .clamp(0.0f64, (camera.width.saturating_sub(1)) as f64)?;
-        let max_x = u
-            .broadcast_add(&support_x)?
-            .clamp(0.0f64, (camera.width.saturating_sub(1)) as f64)?;
-        let min_y = v
-            .broadcast_sub(&support_y)?
-            .clamp(0.0f64, (camera.height.saturating_sub(1)) as f64)?;
-        let max_y = v
-            .broadcast_add(&support_y)?
-            .clamp(0.0f64, (camera.height.saturating_sub(1)) as f64)?;
-        let left_ok = u
-            .broadcast_add(&support_x)?
-            .ge(0.0f64)?
-            .to_dtype(DType::F32)?;
-        let right_ok = u
-            .broadcast_sub(&support_x)?
-            .le(camera.width as f64)?
-            .to_dtype(DType::F32)?;
-        let top_ok = v
-            .broadcast_add(&support_y)?
-            .ge(0.0f64)?
-            .to_dtype(DType::F32)?;
-        let bottom_ok = v
-            .broadcast_sub(&support_y)?
-            .le(camera.height as f64)?
-            .to_dtype(DType::F32)?;
-        let visible = valid
-            .broadcast_mul(&left_ok)?
-            .broadcast_mul(&right_ok)?
-            .broadcast_mul(&top_ok)?
-            .broadcast_mul(&bottom_ok)?;
-        let opacity = opacity.broadcast_mul(&visible)?;
-        profile.visible_gaussians = visible.sum_all()?.to_vec0::<f32>()?.round() as usize;
+        profile.visible_gaussians = projected_cpu.len();
         self.synchronize_if_needed(should_profile)?;
         profile.projection = projection_start.elapsed();
 
@@ -1390,40 +1489,63 @@ impl MetalTrainer {
         }
 
         let sort_start = Instant::now();
-        // Candle's Metal arg-sort path has been observed to duplicate the first
-        // visible index here, which collapses training statistics onto a single
-        // Gaussian. Build and sort the visible set on CPU, then upload it back.
-        let visible_values = visible.to_vec1::<f32>()?;
-        let depth_values = z.to_vec1::<f32>()?;
-        let mut visible_indices = Vec::with_capacity(profile.visible_gaussians);
-        for (idx, visible_value) in visible_values.iter().enumerate() {
-            if *visible_value >= 0.5 {
-                visible_indices.push(idx as u32);
-            }
-        }
-        visible_indices.sort_unstable_by(|lhs, rhs| {
-            depth_values[*lhs as usize]
-                .partial_cmp(&depth_values[*rhs as usize])
+        projected_cpu.sort_unstable_by(|lhs, rhs| {
+            lhs.depth
+                .partial_cmp(&rhs.depth)
                 .unwrap_or(Ordering::Equal)
         });
-        let visible_idx = Tensor::from_slice(&visible_indices, visible_indices.len(), &self.device)?;
+        let source_indices: Vec<u32> = projected_cpu.iter().map(|g| g.source_idx).collect();
+        let u: Vec<f32> = projected_cpu.iter().map(|g| g.u).collect();
+        let v: Vec<f32> = projected_cpu.iter().map(|g| g.v).collect();
+        let sigma_x: Vec<f32> = projected_cpu.iter().map(|g| g.sigma_x).collect();
+        let sigma_y: Vec<f32> = projected_cpu.iter().map(|g| g.sigma_y).collect();
+        let raw_sigma_x: Vec<f32> = projected_cpu.iter().map(|g| g.raw_sigma_x).collect();
+        let raw_sigma_y: Vec<f32> = projected_cpu.iter().map(|g| g.raw_sigma_y).collect();
+        let depth: Vec<f32> = projected_cpu.iter().map(|g| g.depth).collect();
+        let opacity: Vec<f32> = projected_cpu.iter().map(|g| g.opacity).collect();
+        let opacity_logits: Vec<f32> = projected_cpu.iter().map(|g| g.opacity_logit).collect();
+        let scale3d: Vec<f32> = projected_cpu.iter().flat_map(|g| g.scale3d).collect();
+        let colors: Vec<f32> = projected_cpu.iter().flat_map(|g| g.color).collect();
+        let min_x: Vec<f32> = projected_cpu.iter().map(|g| g.min_x).collect();
+        let max_x: Vec<f32> = projected_cpu.iter().map(|g| g.max_x).collect();
+        let min_y: Vec<f32> = projected_cpu.iter().map(|g| g.min_y).collect();
+        let max_y: Vec<f32> = projected_cpu.iter().map(|g| g.max_y).collect();
+        let native_cache = projected_cpu
+            .iter()
+            .map(|g| {
+                MetalProjectedGaussian::new(
+                    g.u,
+                    g.v,
+                    g.sigma_x,
+                    g.sigma_y,
+                    g.depth,
+                    g.opacity,
+                    g.color[0],
+                    g.color[1],
+                    g.color[2],
+                )
+            })
+            .collect();
         let projected = ProjectedGaussians {
-            source_indices: visible_idx.clone(),
-            u: u.index_select(&visible_idx, 0)?,
-            v: v.index_select(&visible_idx, 0)?,
-            sigma_x: sx.index_select(&visible_idx, 0)?,
-            sigma_y: sy.index_select(&visible_idx, 0)?,
-            raw_sigma_x: raw_sx.index_select(&visible_idx, 0)?,
-            raw_sigma_y: raw_sy.index_select(&visible_idx, 0)?,
-            depth: z.index_select(&visible_idx, 0)?,
-            opacity: opacity.index_select(&visible_idx, 0)?,
-            opacity_logits: opacity_logits.index_select(&visible_idx, 0)?,
-            scale3d: scales.index_select(&visible_idx, 0)?,
-            colors: colors.index_select(&visible_idx, 0)?,
-            min_x: min_x.index_select(&visible_idx, 0)?,
-            max_x: max_x.index_select(&visible_idx, 0)?,
-            min_y: min_y.index_select(&visible_idx, 0)?,
-            max_y: max_y.index_select(&visible_idx, 0)?,
+            source_indices: Tensor::from_slice(&source_indices, source_indices.len(), &self.device)?,
+            u: Tensor::from_slice(&u, u.len(), &self.device)?,
+            v: Tensor::from_slice(&v, v.len(), &self.device)?,
+            sigma_x: Tensor::from_slice(&sigma_x, sigma_x.len(), &self.device)?,
+            sigma_y: Tensor::from_slice(&sigma_y, sigma_y.len(), &self.device)?,
+            raw_sigma_x: Tensor::from_slice(&raw_sigma_x, raw_sigma_x.len(), &self.device)?,
+            raw_sigma_y: Tensor::from_slice(&raw_sigma_y, raw_sigma_y.len(), &self.device)?,
+            depth: Tensor::from_slice(&depth, depth.len(), &self.device)?,
+            opacity: Tensor::from_slice(&opacity, opacity.len(), &self.device)?,
+            opacity_logits: Tensor::from_slice(&opacity_logits, opacity_logits.len(), &self.device)?,
+            scale3d: Tensor::from_slice(&scale3d, (source_indices.len(), 3), &self.device)?,
+            colors: Tensor::from_slice(&colors, (source_indices.len(), 3), &self.device)?,
+            min_x: Tensor::from_slice(&min_x, min_x.len(), &self.device)?,
+            max_x: Tensor::from_slice(&max_x, max_x.len(), &self.device)?,
+            min_y: Tensor::from_slice(&min_y, min_y.len(), &self.device)?,
+            max_y: Tensor::from_slice(&max_y, max_y.len(), &self.device)?,
+            cpu_records: projected_cpu,
+            native_cache,
+            staging_source,
         };
         self.synchronize_if_needed(should_profile)?;
         profile.sorting = sort_start.elapsed();
@@ -1434,27 +1556,27 @@ impl MetalTrainer {
     fn rasterize(
         &mut self,
         projected: &ProjectedGaussians,
-        tile_bins: &TileBins,
+        tile_bins: &MetalTileBins,
     ) -> candle_core::Result<(RenderedFrame, TileBinningStats)> {
         let mut color_acc = Tensor::zeros((self.pixel_count, 3), DType::F32, &self.device)?;
         let mut depth_acc = Tensor::zeros((self.pixel_count,), DType::F32, &self.device)?;
         let mut alpha_acc = Tensor::zeros((self.pixel_count,), DType::F32, &self.device)?;
-        self.runtime
-            .reserve_tile_index_capacity(tile_bins.total_assignments)?;
-        let tile_stats = TileBinningStats {
-            active_tiles: tile_bins.metadata.len(),
-            tile_gaussian_refs: tile_bins.total_assignments,
-            max_gaussians_per_tile: tile_bins.max_gaussians_per_tile,
+        let tile_stats = self.tile_binning_stats(tile_bins);
+        let tile_index_tensor = if tile_bins.total_assignments() == 0 {
+            Tensor::zeros((0,), DType::U32, &self.device)?
+        } else {
+            Tensor::from_slice(tile_bins.packed_indices(), tile_bins.total_assignments(), &self.device)?
         };
 
-        for tile in &tile_bins.metadata {
-            let indices = &tile_bins.gaussian_indices[tile.tile_idx];
-            if indices.is_empty() {
+        for &tile_idx in tile_bins.active_tiles() {
+            let Some(record) = tile_bins.record(tile_idx) else {
+                continue;
+            };
+            if record.count() == 0 {
                 continue;
             }
 
-            let tile_index_tensor = Tensor::from_slice(indices, indices.len(), &self.device)?;
-            let window = self.runtime.tile_window(tile.tile_idx)?;
+            let window = self.runtime.tile_window(tile_idx)?;
             let mut tile_color_acc =
                 Tensor::zeros((window.pixel_count, 3), DType::F32, &self.device)?;
             let mut tile_depth_acc =
@@ -1463,9 +1585,9 @@ impl MetalTrainer {
                 Tensor::zeros((window.pixel_count,), DType::F32, &self.device)?;
             let mut tile_trans = Tensor::ones((window.pixel_count,), DType::F32, &self.device)?;
 
-            for start in (0..tile.gaussian_count).step_by(self.chunk_size) {
-                let len = (tile.gaussian_count - start).min(self.chunk_size);
-                let chunk_indices = tile_index_tensor.narrow(0, start, len)?;
+            for start in (0..record.count()).step_by(self.chunk_size) {
+                let len = (record.count() - start).min(self.chunk_size);
+                let chunk_indices = tile_index_tensor.narrow(0, record.start() + start, len)?;
                 let alpha = self.chunk_alpha(
                     &window,
                     &projected.u.index_select(&chunk_indices, 0)?,
@@ -1505,6 +1627,30 @@ impl MetalTrainer {
         ))
     }
 
+    fn rasterize_native(
+        &mut self,
+        projected: &ProjectedGaussians,
+        tile_bins: &MetalTileBins,
+    ) -> candle_core::Result<(RenderedFrame, TileBinningStats, NativeForwardProfile)> {
+        let packed_gaussians = self.pack_projected_gaussians(projected)?;
+        let (native_frame, native_profile) = self.runtime.rasterize_forward(
+            &packed_gaussians,
+            tile_bins,
+            self.render_width,
+            self.render_height,
+        )?;
+        let tile_stats = self.tile_binning_stats(tile_bins);
+        Ok((
+            RenderedFrame {
+                color: native_frame.color,
+                depth: native_frame.depth,
+                alpha: native_frame.alpha,
+            },
+            tile_stats,
+            native_profile,
+        ))
+    }
+
     fn chunk_alpha(
         &self,
         window: &ChunkPixelWindow,
@@ -1530,90 +1676,60 @@ impl MetalTrainer {
             .clamp(0.0, 0.99)
     }
 
-    fn build_tile_bins(&self, projected: &ProjectedGaussians) -> candle_core::Result<TileBins> {
-        let total = projected.depth.dim(0)?;
-        let (num_tiles_x, num_tiles_y) = self.runtime.tile_grid();
-        let tile_count = num_tiles_x * num_tiles_y;
-        let mut gaussian_indices = vec![Vec::new(); tile_count];
-
-        let min_x_values = projected.min_x.to_vec1::<f32>()?;
-        let max_x_values = projected.max_x.to_vec1::<f32>()?;
-        let min_y_values = projected.min_y.to_vec1::<f32>()?;
-        let max_y_values = projected.max_y.to_vec1::<f32>()?;
-        let mut total_assignments = 0usize;
-        let max_x_bound = self.render_width.saturating_sub(1);
-        let max_y_bound = self.render_height.saturating_sub(1);
-
-        for idx in 0..total {
-            let g_min_x = min_x_values[idx].floor().max(0.0) as usize;
-            let g_max_x = max_x_values[idx].ceil().max(0.0) as usize;
-            let g_min_y = min_y_values[idx].floor().max(0.0) as usize;
-            let g_max_y = max_y_values[idx].ceil().max(0.0) as usize;
-
-            let tile_x_min = g_min_x.min(max_x_bound) / METAL_TILE_SIZE;
-            let tile_x_max = g_max_x.min(max_x_bound) / METAL_TILE_SIZE;
-            let tile_y_min = g_min_y.min(max_y_bound) / METAL_TILE_SIZE;
-            let tile_y_max = g_max_y.min(max_y_bound) / METAL_TILE_SIZE;
-
-            for ty in tile_y_min..=tile_y_max.min(num_tiles_y.saturating_sub(1)) {
-                for tx in tile_x_min..=tile_x_max.min(num_tiles_x.saturating_sub(1)) {
-                    gaussian_indices[ty * num_tiles_x + tx].push(idx as u32);
-                    total_assignments += 1;
-                }
-            }
-        }
-
-        let mut metadata = Vec::new();
-        let mut max_gaussians_per_tile = 0usize;
-        for (tile_idx, indices) in gaussian_indices.iter().enumerate() {
-            if indices.is_empty() {
-                continue;
-            }
-            max_gaussians_per_tile = max_gaussians_per_tile.max(indices.len());
-            metadata.push(TileMetadata {
-                tile_idx,
-                gaussian_count: indices.len(),
-            });
-        }
-
-        Ok(TileBins {
-            metadata,
-            gaussian_indices,
-            total_assignments,
-            max_gaussians_per_tile,
-        })
+    fn build_tile_bins(&self, projected: &ProjectedGaussians) -> candle_core::Result<MetalTileBins> {
+        let min_x_values: Vec<f32> = projected.cpu_records().iter().map(|record| record.min_x).collect();
+        let max_x_values: Vec<f32> = projected.cpu_records().iter().map(|record| record.max_x).collect();
+        let min_y_values: Vec<f32> = projected.cpu_records().iter().map(|record| record.min_y).collect();
+        let max_y_values: Vec<f32> = projected.cpu_records().iter().map(|record| record.max_y).collect();
+        self.runtime
+            .build_tile_bins(&min_x_values, &max_x_values, &min_y_values, &max_y_values)
     }
 
     fn profile_native_forward(
         &mut self,
         projected: &ProjectedGaussians,
-        tile_bins: &TileBins,
+        tile_bins: &MetalTileBins,
         baseline: &RenderedFrame,
     ) -> candle_core::Result<NativeParityProfile> {
         let packed_gaussians = self.pack_projected_gaussians(projected)?;
-        let (tile_records, tile_indices) = self.pack_native_tile_data(tile_bins);
         let (native_frame, native_profile) = self.runtime.rasterize_forward(
             &packed_gaussians,
-            &tile_records,
-            &tile_indices,
+            tile_bins,
             self.render_width,
             self.render_height,
         )?;
+        self.build_native_parity_profile(
+            baseline,
+            &RenderedFrame {
+                color: native_frame.color,
+                depth: native_frame.depth,
+                alpha: native_frame.alpha,
+            },
+            native_profile,
+        )
+    }
+
+    fn build_native_parity_profile(
+        &self,
+        baseline: &RenderedFrame,
+        native: &RenderedFrame,
+        native_profile: NativeForwardProfile,
+    ) -> candle_core::Result<NativeParityProfile> {
         let color_max_abs = baseline
             .color
-            .sub(&native_frame.color)?
+            .sub(&native.color)?
             .abs()?
             .max_all()?
             .to_vec0::<f32>()?;
         let depth_max_abs = baseline
             .depth
-            .sub(&native_frame.depth)?
+            .sub(&native.depth)?
             .abs()?
             .max_all()?
             .to_vec0::<f32>()?;
         let alpha_max_abs = baseline
             .alpha
-            .sub(&native_frame.alpha)?
+            .sub(&native.alpha)?
             .abs()?
             .max_all()?
             .to_vec0::<f32>()?;
@@ -1628,81 +1744,17 @@ impl MetalTrainer {
         })
     }
 
-    fn build_forward_intermediate(
-        &self,
-        projected: &ProjectedGaussians,
-        rendered: &RenderedFrame,
-    ) -> candle_core::Result<ForwardIntermediate> {
-        let source_indices = projected.source_indices.to_vec1::<u32>()?;
-        let u = projected.u.to_vec1::<f32>()?;
-        let v = projected.v.to_vec1::<f32>()?;
-        let sigma_x = projected.sigma_x.to_vec1::<f32>()?;
-        let sigma_y = projected.sigma_y.to_vec1::<f32>()?;
-        let raw_sigma_x = projected.raw_sigma_x.to_vec1::<f32>()?;
-        let raw_sigma_y = projected.raw_sigma_y.to_vec1::<f32>()?;
-        let depth = projected.depth.to_vec1::<f32>()?;
-        let opacity = projected.opacity.to_vec1::<f32>()?;
-        let opacity_logits = projected.opacity_logits.to_vec1::<f32>()?;
-        let colors = projected.colors.to_vec2::<f32>()?;
-        let scale3d = projected.scale3d.to_vec2::<f32>()?;
-        let min_x = projected.min_x.to_vec1::<f32>()?;
-        let max_x = projected.max_x.to_vec1::<f32>()?;
-        let min_y = projected.min_y.to_vec1::<f32>()?;
-        let max_y = projected.max_y.to_vec1::<f32>()?;
-
-        let cpu_rendered = CpuRenderedFrame {
-            color: rendered.color.flatten_all()?.to_vec1::<f32>()?,
-            depth: rendered.depth.to_vec1::<f32>()?,
-            alpha: rendered.alpha.to_vec1::<f32>()?,
-        };
-
-        let mut records = Vec::with_capacity(source_indices.len());
-        for idx in 0..source_indices.len() {
-            let rgb = if colors[idx].len() >= 3 {
-                [colors[idx][0], colors[idx][1], colors[idx][2]]
-            } else {
-                [0.0, 0.0, 0.0]
-            };
-            let scale = if scale3d[idx].len() >= 3 {
-                [scale3d[idx][0], scale3d[idx][1], scale3d[idx][2]]
-            } else {
-                [0.0, 0.0, 0.0]
-            };
-            records.push(GaussianRenderRecord {
-                gaussian_idx: source_indices[idx] as usize,
-                u: u[idx],
-                v: v[idx],
-                sigma_x: sigma_x[idx],
-                sigma_y: sigma_y[idx],
-                z: depth[idx],
-                base_alpha: opacity[idx].clamp(0.0, 1.0),
-                color: rgb,
-                min_x: min_x[idx].floor().max(0.0) as usize,
-                max_x: max_x[idx].ceil().max(0.0) as usize,
-                min_y: min_y[idx].floor().max(0.0) as usize,
-                max_y: max_y[idx].ceil().max(0.0) as usize,
-                raw_scale_2d_x: raw_sigma_x[idx],
-                raw_scale_2d_y: raw_sigma_y[idx],
-                raw_opacity: opacity[idx],
-                scale_3d: scale,
-                opacity_logit: opacity_logits[idx],
-            });
-        }
-
-        Ok(ForwardIntermediate {
-            records,
-            rendered_color: cpu_rendered.color,
-            alpha_acc: cpu_rendered.alpha,
-            rendered_depth: cpu_rendered.depth,
-            width: self.render_width,
-            height: self.render_height,
-        })
-    }
-
     fn pack_projected_gaussians(
         &self,
         projected: &ProjectedGaussians,
     ) -> candle_core::Result<Vec<MetalProjectedGaussian>> {
+        if matches!(
+            projected.staging_source,
+            ProjectionStagingSource::RuntimeBufferRead
+        ) && !projected.native_cache.is_empty()
+        {
+            return Ok(projected.native_cache.clone());
+        }
         let u = projected.u.to_vec1::<f32>()?;
         let v = projected.v.to_vec1::<f32>()?;
         let sigma_x = projected.sigma_x.to_vec1::<f32>()?;
@@ -1728,22 +1780,12 @@ impl MetalTrainer {
         Ok(packed)
     }
 
-    fn pack_native_tile_data(
-        &self,
-        tile_bins: &TileBins,
-    ) -> (Vec<MetalTileDispatchRecord>, Vec<u32>) {
-        let mut records = Vec::with_capacity(tile_bins.gaussian_indices.len());
-        let mut indices = Vec::with_capacity(tile_bins.total_assignments);
-        let mut start = 0usize;
-        for gaussian_indices in &tile_bins.gaussian_indices {
-            records.push(MetalTileDispatchRecord::new(
-                start as u32,
-                gaussian_indices.len() as u32,
-            ));
-            indices.extend_from_slice(gaussian_indices);
-            start += gaussian_indices.len();
+    fn tile_binning_stats(&self, tile_bins: &MetalTileBins) -> TileBinningStats {
+        TileBinningStats {
+            active_tiles: tile_bins.active_tile_count(),
+            tile_gaussian_refs: tile_bins.total_assignments(),
+            max_gaussians_per_tile: tile_bins.max_gaussians_per_tile(),
         }
-        (records, indices)
     }
 
     fn integrate_chunk(
@@ -1790,11 +1832,10 @@ pub fn train(
 ) -> Result<GaussianMap, TrainingError> {
     let start = Instant::now();
     let device = crate::require_metal_device()?;
-    let effective_config = effective_metal_config(config);
-    let loaded = load_training_data(dataset, &effective_config, &device)?;
-    let mut gaussians = trainable_from_map(&loaded.initial_map, &device)?;
+    let mut effective_config = effective_metal_config(config);
+    let mut loaded = load_training_data(dataset, &effective_config, &device)?;
 
-    if gaussians.len() == 0 {
+    if loaded.initial_map.is_empty() {
         return Err(TrainingError::InvalidInput(
             "training initialization produced zero Gaussians".to_string(),
         ));
@@ -1807,23 +1848,60 @@ pub fn train(
         device,
     )?;
     let memory_budget = detect_metal_memory_budget();
-    let estimated_peak = estimate_peak_memory(
-        gaussians.len(),
-        trainer.pixel_count,
-        loaded.cameras.len(),
-        trainer.chunk_size,
-    );
+    let frame_count = loaded.cameras.len();
     log::info!(
         "MetalTrainer preflight | gaussians={} | frames={} | pixels={} | chunk_size={} | estimated_peak≈{:.1} GiB | budget={} | dominant={}",
-        gaussians.len(),
-        loaded.cameras.len(),
+        loaded.initial_map.len(),
+        frame_count,
         trainer.pixel_count,
         trainer.chunk_size,
-        bytes_to_gib(estimated_peak.total_bytes()),
+        bytes_to_gib(
+            estimate_peak_memory(
+                loaded.initial_map.len(),
+                trainer.pixel_count,
+                frame_count,
+                trainer.chunk_size,
+            )
+            .total_bytes()
+        ),
         memory_budget.describe(),
-        estimated_peak.top_components_summary(3),
+        estimate_peak_memory(
+            loaded.initial_map.len(),
+            trainer.pixel_count,
+            frame_count,
+            trainer.chunk_size,
+        )
+        .top_components_summary(3),
     );
     let skip_memory_guard = std::env::var_os("RUSTGS_SKIP_METAL_MEMORY_GUARD").is_some();
+    let affordable_cap = affordable_initial_gaussian_cap(
+        effective_config.max_initial_gaussians.max(loaded.initial_map.len()),
+        trainer.pixel_count,
+        frame_count,
+        trainer.chunk_size,
+        &memory_budget,
+    );
+    if !skip_memory_guard && affordable_cap > 0 && loaded.initial_map.len() > affordable_cap {
+        log::warn!(
+            "MetalTrainer preflight lowered initial_gaussians from {} to {} for this run to fit the safe memory budget. Set RUSTGS_SKIP_METAL_MEMORY_GUARD=1 to keep the larger initialization.",
+            loaded.initial_map.len(),
+            affordable_cap,
+        );
+        loaded.initial_map.gaussians_mut().truncate(affordable_cap);
+        loaded.initial_map.update_states();
+        effective_config.max_initial_gaussians = affordable_cap;
+    }
+    trainer.max_gaussian_budget = if skip_memory_guard {
+        effective_config.max_initial_gaussians.max(loaded.initial_map.len())
+    } else {
+        affordable_cap.max(loaded.initial_map.len())
+    };
+    let estimated_peak = estimate_peak_memory(
+        loaded.initial_map.len(),
+        trainer.pixel_count,
+        frame_count,
+        trainer.chunk_size,
+    );
     match assess_memory_estimate(&estimated_peak, &memory_budget) {
         MetalMemoryDecision::Allow => {
             let headroom = memory_budget
@@ -1856,6 +1934,13 @@ pub fn train(
             )));
         }
     }
+    let mut gaussians = trainable_from_map(&loaded.initial_map, &trainer.device)?;
+
+    if gaussians.len() == 0 {
+        return Err(TrainingError::InvalidInput(
+            "training initialization produced zero Gaussians".to_string(),
+        ));
+    }
     let frames = trainer.prepare_frames(&loaded)?;
     let stats = trainer.train(&mut gaussians, &frames, config.iterations)?;
     let trained_map = map_from_trainable(&gaussians)?;
@@ -1885,7 +1970,47 @@ fn effective_metal_config(config: &TrainingConfig) -> TrainingConfig {
             effective.max_initial_gaussians
         );
     }
+    if effective.lr_rotation != 0.0 {
+        log::warn!(
+            "Metal backend currently freezes Gaussian rotations because the backward path does not propagate rotation-aware projection gradients yet; overriding lr_rotation from {} to 0.0 for this run.",
+            effective.lr_rotation
+        );
+        effective.lr_rotation = 0.0;
+    }
     effective
+}
+
+fn affordable_initial_gaussian_cap(
+    requested_cap: usize,
+    pixel_count: usize,
+    frame_count: usize,
+    chunk_size: usize,
+    memory_budget: &MetalMemoryBudget,
+) -> usize {
+    let requested_cap = requested_cap.max(1);
+    if assess_memory_estimate(
+        &estimate_peak_memory(requested_cap, pixel_count, frame_count, chunk_size),
+        memory_budget,
+    ) != MetalMemoryDecision::Block
+    {
+        return requested_cap;
+    }
+
+    let mut low = 0usize;
+    let mut high = requested_cap;
+    while low < high {
+        let mid = low + (high - low + 1) / 2;
+        let decision = assess_memory_estimate(
+            &estimate_peak_memory(mid, pixel_count, frame_count, chunk_size),
+            memory_budget,
+        );
+        if decision == MetalMemoryDecision::Block {
+            high = mid - 1;
+        } else {
+            low = mid;
+        }
+    }
+    low
 }
 
 fn estimate_peak_memory(
@@ -2044,20 +2169,14 @@ fn adam_step_var(
     Ok(())
 }
 
-fn normalize_rotations(rotations: &Var) -> candle_core::Result<()> {
-    let rot = rotations.as_tensor();
-    let norm = rot
-        .sqr()?
-        .sum(1)?
-        .sqrt()?
-        .clamp(1e-6, f32::MAX)?
-        .unsqueeze(1)?;
-    rotations.set(&rot.broadcast_div(&norm)?)?;
-    Ok(())
-}
-
 fn flatten_rows(rows: Vec<Vec<f32>>) -> Vec<f32> {
     rows.into_iter().flatten().collect()
+}
+
+fn row_slice(values: &[f32], width: usize, idx: usize) -> &[f32] {
+    let start = idx.saturating_mul(width);
+    let end = start.saturating_add(width);
+    values.get(start..end).unwrap_or(&[])
 }
 
 fn gather_rows(source: &[f32], row_width: usize, origins: &[Option<usize>]) -> Vec<f32> {
@@ -2082,11 +2201,66 @@ fn sigmoid_scalar(value: f32) -> f32 {
     1.0 / (1.0 + (-value).exp())
 }
 
-fn sigmoid_tensor(tensor: &Tensor) -> candle_core::Result<Tensor> {
-    let neg = tensor.neg()?;
-    let exp_neg = neg.exp()?;
-    let one = Tensor::ones_like(tensor)?;
-    one.broadcast_div(&one.broadcast_add(&exp_neg)?)
+fn row_to_vec3(row: &[f32]) -> [f32; 3] {
+    [
+        row.first().copied().unwrap_or(0.0),
+        row.get(1).copied().unwrap_or(0.0),
+        row.get(2).copied().unwrap_or(0.0),
+    ]
+}
+
+fn row_to_quaternion(row: &[f32]) -> [f32; 4] {
+    [
+        row.first().copied().unwrap_or(1.0),
+        row.get(1).copied().unwrap_or(0.0),
+        row.get(2).copied().unwrap_or(0.0),
+        row.get(3).copied().unwrap_or(0.0),
+    ]
+}
+
+fn mat3_from_row_major(rotation: &[[f32; 3]; 3]) -> Mat3 {
+    Mat3::from_cols(
+        Vec3::new(rotation[0][0], rotation[1][0], rotation[2][0]),
+        Vec3::new(rotation[0][1], rotation[1][1], rotation[2][1]),
+        Vec3::new(rotation[0][2], rotation[1][2], rotation[2][2]),
+    )
+}
+
+fn quat_from_wxyz(rotation: [f32; 4]) -> Quat {
+    let length_sq = rotation.iter().map(|value| value * value).sum::<f32>();
+    if !length_sq.is_finite() || length_sq <= 1e-12 {
+        return Quat::IDENTITY;
+    }
+    Quat::from_xyzw(rotation[1], rotation[2], rotation[3], rotation[0]).normalize()
+}
+
+fn projected_axis_aligned_sigmas(
+    x: f32,
+    y: f32,
+    z: f32,
+    scale: [f32; 3],
+    rotation: [f32; 4],
+    camera_rotation: &[[f32; 3]; 3],
+    fx: f32,
+    fy: f32,
+) -> (f32, f32) {
+    let inv_z = 1.0 / z.max(1e-4);
+    let object_rotation = Mat3::from_quat(quat_from_wxyz(rotation));
+    let scale_cov = Mat3::from_diagonal(Vec3::new(
+        scale[0] * scale[0],
+        scale[1] * scale[1],
+        scale[2] * scale[2],
+    ));
+    let covariance_world = object_rotation * scale_cov * object_rotation.transpose();
+    let camera_rotation = mat3_from_row_major(camera_rotation);
+    let covariance_camera = camera_rotation * covariance_world * camera_rotation.transpose();
+
+    let projection_row_x = Vec3::new(fx * inv_z, 0.0, -fx * x * inv_z * inv_z);
+    let projection_row_y = Vec3::new(0.0, fy * inv_z, -fy * y * inv_z * inv_z);
+    let covariance_x = projection_row_x.dot(covariance_camera * projection_row_x);
+    let covariance_y = projection_row_y.dot(covariance_camera * projection_row_y);
+
+    (covariance_x.max(1e-6).sqrt(), covariance_y.max(1e-6).sqrt())
 }
 
 fn scale_camera(
@@ -2215,6 +2389,113 @@ mod tests {
             effective.max_initial_gaussians,
             DEFAULT_METAL_MAX_INITIAL_GAUSSIANS
         );
+        assert_eq!(effective.lr_rotation, 0.0);
+    }
+
+    #[test]
+    fn metal_config_freezes_rotation_learning_until_projection_supports_it() {
+        let effective = effective_metal_config(&TrainingConfig {
+            lr_rotation: 0.25,
+            ..TrainingConfig::default()
+        });
+        assert_eq!(effective.lr_rotation, 0.0);
+    }
+
+    #[test]
+    fn trainer_disables_native_forward_on_cpu() {
+        let trainer = MetalTrainer::new(32, 16, &TrainingConfig::default(), Device::Cpu).unwrap();
+        assert!(!trainer.use_native_forward);
+    }
+
+    #[test]
+    fn trainer_respects_explicit_native_forward_disable() {
+        let config = TrainingConfig {
+            metal_use_native_forward: false,
+            ..TrainingConfig::default()
+        };
+        let trainer = MetalTrainer::new(32, 16, &config, Device::Cpu).unwrap();
+        assert!(!trainer.use_native_forward);
+    }
+
+    #[test]
+    fn projected_axis_aligned_sigmas_change_with_rotation() {
+        let camera_rotation = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        let identity = projected_axis_aligned_sigmas(
+            0.0,
+            0.0,
+            2.0,
+            [0.4, 0.05, 0.05],
+            [1.0, 0.0, 0.0, 0.0],
+            &camera_rotation,
+            64.0,
+            64.0,
+        );
+        let rotated = projected_axis_aligned_sigmas(
+            0.0,
+            0.0,
+            2.0,
+            [0.4, 0.05, 0.05],
+            [std::f32::consts::FRAC_1_SQRT_2, 0.0, 0.0, std::f32::consts::FRAC_1_SQRT_2],
+            &camera_rotation,
+            64.0,
+            64.0,
+        );
+
+        assert!(identity.0 > identity.1 * 5.0, "{identity:?}");
+        assert!(rotated.1 > rotated.0 * 5.0, "{rotated:?}");
+        assert!((identity.0 - rotated.0).abs() > 1.0, "{identity:?} vs {rotated:?}");
+    }
+
+    #[test]
+    fn project_gaussians_uses_rotation_aware_footprints() {
+        let device = Device::Cpu;
+        let trainer_config = TrainingConfig {
+            metal_render_scale: 1.0,
+            ..TrainingConfig::default()
+        };
+        let trainer = MetalTrainer::new(64, 64, &trainer_config, device.clone()).unwrap();
+        let camera = DiffCamera::new(
+            64.0,
+            64.0,
+            32.0,
+            32.0,
+            64,
+            64,
+            &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            &[0.0, 0.0, 0.0],
+            &device,
+        )
+        .unwrap();
+
+        let identity = TrainableGaussians::new(
+            &[0.0, 0.0, 2.0],
+            &[0.4f32.ln(), 0.05f32.ln(), 0.05f32.ln()],
+            &[1.0, 0.0, 0.0, 0.0],
+            &[0.0],
+            &[1.0, 0.0, 0.0],
+            &device,
+        )
+        .unwrap();
+        let rotated = TrainableGaussians::new(
+            &[0.0, 0.0, 2.0],
+            &[0.4f32.ln(), 0.05f32.ln(), 0.05f32.ln()],
+            &[std::f32::consts::FRAC_1_SQRT_2, 0.0, 0.0, std::f32::consts::FRAC_1_SQRT_2],
+            &[0.0],
+            &[1.0, 0.0, 0.0],
+            &device,
+        )
+        .unwrap();
+
+        let (identity_projected, _) = trainer.project_gaussians(&identity, &camera, false).unwrap();
+        let (rotated_projected, _) = trainer.project_gaussians(&rotated, &camera, false).unwrap();
+        let identity_sigma_x = identity_projected.sigma_x.to_vec1::<f32>().unwrap()[0];
+        let identity_sigma_y = identity_projected.sigma_y.to_vec1::<f32>().unwrap()[0];
+        let rotated_sigma_x = rotated_projected.sigma_x.to_vec1::<f32>().unwrap()[0];
+        let rotated_sigma_y = rotated_projected.sigma_y.to_vec1::<f32>().unwrap()[0];
+
+        assert!(identity_sigma_x > identity_sigma_y * 5.0);
+        assert!(rotated_sigma_y > rotated_sigma_x * 5.0);
+        assert!((identity_sigma_x - rotated_sigma_x).abs() > 1.0);
     }
 
     #[test]
@@ -2273,6 +2554,25 @@ mod tests {
     }
 
     #[test]
+    fn affordable_initial_gaussian_cap_finds_non_blocking_limit() {
+        let budget = MetalMemoryBudget {
+            safe_bytes: 16 * GIB,
+            physical_bytes: Some(24 * GIB),
+        };
+        let cap = affordable_initial_gaussian_cap(57_474, 4_800, 1, 32, &budget);
+        assert!(cap > 0);
+        assert!(cap < 57_474);
+        assert_ne!(
+            assess_memory_estimate(&estimate_peak_memory(cap, 4_800, 1, 32), &budget),
+            MetalMemoryDecision::Block
+        );
+        assert_eq!(
+            assess_memory_estimate(&estimate_peak_memory(cap + 1, 4_800, 1, 32), &budget),
+            MetalMemoryDecision::Block
+        );
+    }
+
+    #[test]
     fn profile_tracks_visible_gaussians() {
         let render = MetalRenderProfile {
             visible_gaussians: 12,
@@ -2304,6 +2604,60 @@ mod tests {
             ..TrainingConfig::default()
         };
         let trainer = MetalTrainer::new(32, 16, &trainer_config, device.clone()).unwrap();
+        let cpu_records = vec![
+            CpuProjectedGaussian {
+                source_idx: 0,
+                u: 8.0,
+                v: 8.0,
+                sigma_x: 2.0,
+                sigma_y: 2.0,
+                raw_sigma_x: 2.0,
+                raw_sigma_y: 2.0,
+                depth: 1.0,
+                opacity: 0.5,
+                opacity_logit: 0.0,
+                scale3d: [1.0, 1.0, 1.0],
+                color: [1.0, 0.0, 0.0],
+                min_x: 2.0,
+                max_x: 15.0,
+                min_y: 1.0,
+                max_y: 14.0,
+            },
+            CpuProjectedGaussian {
+                source_idx: 1,
+                u: 18.0,
+                v: 8.0,
+                sigma_x: 2.0,
+                sigma_y: 2.0,
+                raw_sigma_x: 2.0,
+                raw_sigma_y: 2.0,
+                depth: 2.0,
+                opacity: 0.5,
+                opacity_logit: 0.0,
+                scale3d: [1.0, 1.0, 1.0],
+                color: [0.0, 1.0, 0.0],
+                min_x: 14.0,
+                max_x: 18.0,
+                min_y: 1.0,
+                max_y: 14.0,
+            },
+        ];
+        let native_cache = cpu_records
+            .iter()
+            .map(|record| {
+                MetalProjectedGaussian::new(
+                    record.u,
+                    record.v,
+                    record.sigma_x,
+                    record.sigma_y,
+                    record.depth,
+                    record.opacity,
+                    record.color[0],
+                    record.color[1],
+                    record.color[2],
+                )
+            })
+            .collect();
         let projected = ProjectedGaussians {
             source_indices: Tensor::from_slice(&[0u32, 1], 2, &device).unwrap(),
             u: Tensor::from_slice(&[8.0f32, 18.0], 2, &device).unwrap(),
@@ -2323,14 +2677,17 @@ mod tests {
             max_x: Tensor::from_slice(&[15.0f32, 18.0], 2, &device).unwrap(),
             min_y: Tensor::from_slice(&[1.0f32, 1.0], 2, &device).unwrap(),
             max_y: Tensor::from_slice(&[14.0f32, 14.0], 2, &device).unwrap(),
+            cpu_records,
+            native_cache,
+            staging_source: ProjectionStagingSource::TensorReadback,
         };
 
         let bins = trainer.build_tile_bins(&projected).unwrap();
-        assert_eq!(bins.metadata.len(), 2);
-        assert_eq!(bins.total_assignments, 3);
-        assert_eq!(bins.max_gaussians_per_tile, 2);
-        assert_eq!(bins.gaussian_indices[0], vec![0, 1]);
-        assert_eq!(bins.gaussian_indices[1], vec![1]);
+        assert_eq!(bins.active_tile_count(), 2);
+        assert_eq!(bins.total_assignments(), 3);
+        assert_eq!(bins.max_gaussians_per_tile(), 2);
+        assert_eq!(bins.indices_for_tile(0), &[0, 1]);
+        assert_eq!(bins.indices_for_tile(1), &[1]);
     }
 
     #[test]
@@ -2356,6 +2713,60 @@ mod tests {
         )
         .unwrap();
         trainer.runtime.stage_camera(&camera).unwrap();
+        let cpu_records = vec![
+            CpuProjectedGaussian {
+                source_idx: 0,
+                u: 8.0,
+                v: 8.0,
+                sigma_x: 2.0,
+                sigma_y: 2.0,
+                raw_sigma_x: 2.0,
+                raw_sigma_y: 2.0,
+                depth: 1.0,
+                opacity: 0.6,
+                opacity_logit: 0.0,
+                scale3d: [1.0, 1.0, 1.0],
+                color: [1.0, 0.0, 0.0],
+                min_x: 2.0,
+                max_x: 14.0,
+                min_y: 2.0,
+                max_y: 14.0,
+            },
+            CpuProjectedGaussian {
+                source_idx: 1,
+                u: 10.0,
+                v: 8.5,
+                sigma_x: 2.5,
+                sigma_y: 2.5,
+                raw_sigma_x: 2.5,
+                raw_sigma_y: 2.5,
+                depth: 2.0,
+                opacity: 0.4,
+                opacity_logit: 0.0,
+                scale3d: [1.0, 1.0, 1.0],
+                color: [0.0, 1.0, 0.0],
+                min_x: 3.0,
+                max_x: 17.0,
+                min_y: 2.0,
+                max_y: 15.0,
+            },
+        ];
+        let native_cache = cpu_records
+            .iter()
+            .map(|record| {
+                MetalProjectedGaussian::new(
+                    record.u,
+                    record.v,
+                    record.sigma_x,
+                    record.sigma_y,
+                    record.depth,
+                    record.opacity,
+                    record.color[0],
+                    record.color[1],
+                    record.color[2],
+                )
+            })
+            .collect();
         let projected = ProjectedGaussians {
             source_indices: Tensor::from_slice(&[0u32, 1], 2, &device).unwrap(),
             u: Tensor::from_slice(&[8.0f32, 10.0], 2, &device).unwrap(),
@@ -2375,6 +2786,9 @@ mod tests {
             max_x: Tensor::from_slice(&[14.0f32, 17.0], 2, &device).unwrap(),
             min_y: Tensor::from_slice(&[2.0f32, 2.0], 2, &device).unwrap(),
             max_y: Tensor::from_slice(&[14.0f32, 15.0], 2, &device).unwrap(),
+            cpu_records,
+            native_cache,
+            staging_source: ProjectionStagingSource::TensorReadback,
         };
 
         let tile_bins = trainer.build_tile_bins(&projected).unwrap();
@@ -2398,6 +2812,166 @@ mod tests {
             "alpha diff={}",
             parity.alpha_max_abs
         );
+    }
+
+    #[test]
+    fn metal_visible_set_stays_on_device() {
+        let Ok(device) = Device::new_metal(0) else {
+            return;
+        };
+        let trainer_config = TrainingConfig {
+            metal_render_scale: 1.0,
+            ..TrainingConfig::default()
+        };
+        let trainer = MetalTrainer::new(32, 16, &trainer_config, device.clone()).unwrap();
+        let camera = DiffCamera::new(
+            1.0,
+            1.0,
+            16.0,
+            8.0,
+            32,
+            16,
+            &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            &[0.0, 0.0, 0.0],
+            &device,
+        )
+        .unwrap();
+        let gaussians = TrainableGaussians::new(
+            &[0.0, 0.0, 2.0, 1.0, 0.0, 3.0],
+            &[0.1f32.ln(), 0.1f32.ln(), 0.1f32.ln(), 0.1f32.ln(), 0.1f32.ln(), 0.1f32.ln()],
+            &[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+            &[0.0, 0.0],
+            &[1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            &device,
+        )
+        .unwrap();
+
+        let (projected, _) = trainer.project_gaussians(&gaussians, &camera, false).unwrap();
+
+        assert!(matches!(
+            projected.staging_source,
+            ProjectionStagingSource::RuntimeBufferRead
+        ));
+        assert_eq!(projected.cpu_records.len(), 2);
+        assert_eq!(projected.native_cache.len(), 2);
+    }
+
+    #[test]
+    fn metal_backward_matches_cpu_reference_on_tiny_scene() {
+        let device = Device::Cpu;
+        let trainer_config = TrainingConfig {
+            metal_render_scale: 1.0,
+            ..TrainingConfig::default()
+        };
+        let mut trainer = MetalTrainer::new(32, 16, &trainer_config, device.clone()).unwrap();
+        let camera = DiffCamera::new(
+            1.0,
+            1.0,
+            16.0,
+            8.0,
+            32,
+            16,
+            &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            &[0.0, 0.0, 0.0],
+            &device,
+        )
+        .unwrap();
+        let gaussians = TrainableGaussians::new(
+            &[0.0, 0.0, 2.0, 0.5, 0.0, 2.5],
+            &[
+                0.2f32.ln(),
+                0.2f32.ln(),
+                0.2f32.ln(),
+                0.15f32.ln(),
+                0.15f32.ln(),
+                0.15f32.ln(),
+            ],
+            &[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+            &[0.2, -0.1],
+            &[1.0, 0.2, 0.1, 0.1, 0.8, 0.2],
+            &device,
+        )
+        .unwrap();
+        let (rendered, projected, _) = trainer.render(&gaussians, &camera, false).unwrap();
+        let target_color = vec![0.05f32; 32 * 16 * 3];
+        let target_depth = vec![1.8f32; 32 * 16];
+
+        let gpu_like = crate::training::metal_backward::backward_weighted_l1(
+            &mut trainer.runtime,
+            &device,
+            projected.cpu_records(),
+            &rendered,
+            &target_color,
+            &target_depth,
+            gaussians.len(),
+            &camera,
+        )
+        .unwrap();
+        let intermediate = crate::training::metal_backward::build_forward_intermediate(
+            &trainer.runtime,
+            projected.cpu_records(),
+            &rendered,
+            camera.width,
+            camera.height,
+        )
+        .unwrap();
+        let reference = analytical_backward::backward_weighted_l1(
+            &intermediate,
+            &target_color,
+            &target_depth,
+            gaussians.len(),
+            camera.fx,
+            camera.fy,
+            camera.cx,
+            camera.cy,
+            1.0 / target_color.len() as f32,
+            0.1 / target_depth.len() as f32,
+        );
+
+        let positions = gpu_like.grads.positions.to_vec2::<f32>().unwrap();
+        let log_scales = gpu_like.grads.log_scales.to_vec2::<f32>().unwrap();
+        let opacity = gpu_like.grads.opacity_logits.to_vec1::<f32>().unwrap();
+        let colors = gpu_like.grads.colors.to_vec2::<f32>().unwrap();
+        let max_abs_diff = positions
+            .into_iter()
+            .flatten()
+            .chain(log_scales.into_iter().flatten())
+            .chain(opacity.into_iter())
+            .chain(colors.into_iter().flatten())
+            .zip(
+                reference
+                    .positions
+                    .iter()
+                    .copied()
+                    .chain(reference.log_scales.iter().copied())
+                    .chain(reference.opacity_logits.iter().copied())
+                    .chain(reference.colors.iter().copied()),
+            )
+            .map(|(lhs, rhs)| (lhs - rhs).abs())
+            .fold(0.0f32, f32::max);
+
+        assert!(max_abs_diff < 1e-4, "max_abs_diff={max_abs_diff}");
+    }
+
+    #[test]
+    fn prune_interval_is_independent_from_densify_interval() {
+        let trainer = MetalTrainer::new(
+            32,
+            16,
+            &TrainingConfig {
+                densify_interval: 128,
+                prune_interval: 200,
+                topology_warmup: 0,
+                ..TrainingConfig::default()
+            },
+            Device::Cpu,
+        )
+        .unwrap();
+
+        assert!(trainer.should_prune_at(200));
+        assert!(!trainer.should_densify_at(200));
+        assert!(trainer.should_densify_at(128));
+        assert!(!trainer.should_prune_at(128));
     }
 
     #[test]
@@ -2510,6 +3084,8 @@ mod tests {
         let device = Device::Cpu;
         let trainer_config = TrainingConfig {
             densify_interval: 1,
+            prune_interval: 1,
+            topology_warmup: 0,
             prune_threshold: 0.05,
             max_initial_gaussians: 4,
             metal_render_scale: 1.0,
