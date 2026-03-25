@@ -1688,6 +1688,14 @@ impl MetalTrainer {
         } else {
             projected_cpu.iter().map(|g| g.source_idx).collect()
         };
+
+        let effective_count =
+            if matches!(staging_source, ProjectionStagingSource::RuntimeBufferRead) {
+                profile.visible_gaussians
+            } else {
+                source_indices.len()
+            };
+
         let u: Vec<f32> = projected_cpu.iter().map(|g| g.u).collect();
         let v: Vec<f32> = projected_cpu.iter().map(|g| g.v).collect();
         let sigma_x: Vec<f32> = projected_cpu.iter().map(|g| g.sigma_x).collect();
@@ -1704,83 +1712,85 @@ impl MetalTrainer {
         let min_y: Vec<f32> = projected_cpu.iter().map(|g| g.min_y).collect();
         let max_y: Vec<f32> = projected_cpu.iter().map(|g| g.max_y).collect();
         let projected = ProjectedGaussians {
-            source_indices: Tensor::from_slice(
-                &source_indices,
-                source_indices.len(),
-                &self.device,
-            )?,
+            source_indices: if effective_count == 0 {
+                Tensor::zeros((0,), DType::U32, &self.device)?
+            } else if source_indices.is_empty() {
+                Tensor::zeros((effective_count,), DType::U32, &self.device)?
+            } else {
+                Tensor::from_slice(&source_indices, source_indices.len(), &self.device)?
+            },
             u: if u.is_empty() {
-                Tensor::zeros((0,), DType::F32, &self.device)?
+                Tensor::zeros((effective_count,), DType::F32, &self.device)?
             } else {
                 Tensor::from_slice(&u, u.len(), &self.device)?
             },
             v: if v.is_empty() {
-                Tensor::zeros((0,), DType::F32, &self.device)?
+                Tensor::zeros((effective_count,), DType::F32, &self.device)?
             } else {
                 Tensor::from_slice(&v, v.len(), &self.device)?
             },
             sigma_x: if sigma_x.is_empty() {
-                Tensor::zeros((0,), DType::F32, &self.device)?
+                Tensor::zeros((effective_count,), DType::F32, &self.device)?
             } else {
                 Tensor::from_slice(&sigma_x, sigma_x.len(), &self.device)?
             },
             sigma_y: if sigma_y.is_empty() {
-                Tensor::zeros((0,), DType::F32, &self.device)?
+                Tensor::zeros((effective_count,), DType::F32, &self.device)?
             } else {
                 Tensor::from_slice(&sigma_y, sigma_y.len(), &self.device)?
             },
             raw_sigma_x: if raw_sigma_x.is_empty() {
-                Tensor::zeros((0,), DType::F32, &self.device)?
+                Tensor::zeros((effective_count,), DType::F32, &self.device)?
             } else {
                 Tensor::from_slice(&raw_sigma_x, raw_sigma_x.len(), &self.device)?
             },
             raw_sigma_y: if raw_sigma_y.is_empty() {
-                Tensor::zeros((0,), DType::F32, &self.device)?
+                Tensor::zeros((effective_count,), DType::F32, &self.device)?
             } else {
                 Tensor::from_slice(&raw_sigma_y, raw_sigma_y.len(), &self.device)?
             },
             depth: if depth.is_empty() {
-                Tensor::zeros((0,), DType::F32, &self.device)?
+                Tensor::zeros((effective_count,), DType::F32, &self.device)?
             } else {
                 Tensor::from_slice(&depth, depth.len(), &self.device)?
             },
             opacity: if opacity.is_empty() {
-                Tensor::zeros((0,), DType::F32, &self.device)?
+                Tensor::zeros((effective_count,), DType::F32, &self.device)?
             } else {
                 Tensor::from_slice(&opacity, opacity.len(), &self.device)?
             },
             opacity_logits: if opacity_logits.is_empty() {
-                Tensor::zeros((0,), DType::F32, &self.device)?
+                Tensor::zeros((effective_count,), DType::F32, &self.device)?
             } else {
                 Tensor::from_slice(&opacity_logits, opacity_logits.len(), &self.device)?
             },
             scale3d: if scale3d.is_empty() {
-                Tensor::zeros((0, 3), DType::F32, &self.device)?
+                Tensor::zeros((effective_count, 3), DType::F32, &self.device)?
             } else {
-                Tensor::from_slice(&scale3d, (source_indices.len(), 3), &self.device)?
+                Tensor::from_slice(&scale3d, (effective_count, 3), &self.device)?
             },
             colors: if colors.is_empty() {
-                Tensor::zeros((0, 3), DType::F32, &self.device)?
+                Tensor::zeros((effective_count, 3), DType::F32, &self.device)?
             } else {
-                Tensor::from_slice(&colors, (source_indices.len(), 3), &self.device)?
+                Tensor::from_slice(&colors, (effective_count, 3), &self.device)?
             },
             min_x: if min_x.is_empty() {
-                Tensor::zeros((0,), DType::F32, &self.device)?
+                Tensor::zeros((effective_count,), DType::F32, &self.device)?
             } else {
                 Tensor::from_slice(&min_x, min_x.len(), &self.device)?
             },
             max_x: if max_x.is_empty() {
-                Tensor::zeros((0,), DType::F32, &self.device)?
+                Tensor::zeros((effective_count,), DType::F32, &self.device)?
             } else {
                 Tensor::from_slice(&max_x, max_x.len(), &self.device)?
             },
             min_y: if min_y.is_empty() {
-                Tensor::zeros((0,), DType::F32, &self.device)?
+                Tensor::zeros((effective_count,), DType::F32, &self.device)?
             } else {
                 Tensor::from_slice(&min_y, min_y.len(), &self.device)?
             },
             max_y: if max_y.is_empty() {
-                Tensor::zeros((0,), DType::F32, &self.device)?
+                Tensor::zeros((effective_count,), DType::F32, &self.device)?
             } else {
                 Tensor::from_slice(&max_y, max_y.len(), &self.device)?
             },

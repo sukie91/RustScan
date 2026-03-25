@@ -31,9 +31,8 @@ pub(crate) fn backward_weighted_l1(
     n_gaussians: usize,
     camera: &DiffCamera,
 ) -> candle_core::Result<MetalBackwardPass> {
-    // Dispatch Metal backward kernel
     let (frame, _profile) =
-        runtime.rasterize_backward(visible_count, tile_bins, camera.width, camera.height)?;
+        runtime.rasterize_backward(n_gaussians, tile_bins, camera.width, camera.height)?;
 
     let grad_magnitude_tensor = runtime.compute_grad_magnitudes(n_gaussians)?;
     let grad_magnitudes = runtime.read_tensor_flat::<f32>(&grad_magnitude_tensor)?;

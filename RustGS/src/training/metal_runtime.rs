@@ -313,9 +313,11 @@ kernel void tile_backward(
         const float dl_dz_direct = dd_depth * contrib / depth_denom;
 
         // Color gradient: dL/dc_i = T_i * alpha_i * dL/dC_p
-        atomic_fetch_add_explicit(&grad_colors[gidx * 3 + 0], contrib * dc_r, memory_order_relaxed);
-        atomic_fetch_add_explicit(&grad_colors[gidx * 3 + 1], contrib * dc_g, memory_order_relaxed);
-        atomic_fetch_add_explicit(&grad_colors[gidx * 3 + 2], contrib * dc_b, memory_order_relaxed);
+        // Use source_idx to write to the correct position in the full gradient buffer
+        const uint src_idx = g.source_idx;
+        atomic_fetch_add_explicit(&grad_colors[src_idx * 3 + 0], contrib * dc_r, memory_order_relaxed);
+        atomic_fetch_add_explicit(&grad_colors[src_idx * 3 + 1], contrib * dc_g, memory_order_relaxed);
+        atomic_fetch_add_explicit(&grad_colors[src_idx * 3 + 2], contrib * dc_b, memory_order_relaxed);
 
         // Update running state
         running_s_r += contrib * g.color_r;
@@ -364,18 +366,18 @@ kernel void tile_backward(
         // 2D -> 3D chain rule
         const float inv_z = 1.0f / max(g.depth, 1e-6f);
 
-        atomic_fetch_add_explicit(&grad_positions[gidx * 3 + 0], dl_du * camera.fx * inv_z, memory_order_relaxed);
-        atomic_fetch_add_explicit(&grad_positions[gidx * 3 + 1], dl_dv * camera.fy * inv_z, memory_order_relaxed);
+        atomic_fetch_add_explicit(&grad_positions[src_idx * 3 + 0], dl_du * camera.fx * inv_z, memory_order_relaxed);
+        atomic_fetch_add_explicit(&grad_positions[src_idx * 3 + 1], dl_dv * camera.fy * inv_z, memory_order_relaxed);
         const float dl_dz_projected = dl_du * (-(g.u - camera.cx) * inv_z)
                                     + dl_dv * (-(g.v - camera.cy) * inv_z);
-        atomic_fetch_add_explicit(&grad_positions[gidx * 3 + 2], dl_dz + dl_dz_projected, memory_order_relaxed);
+        atomic_fetch_add_explicit(&grad_positions[src_idx * 3 + 2], dl_dz + dl_dz_projected, memory_order_relaxed);
 
         // Scale gradient: propagate through sigma_x and sigma_y back to 3D log-scales.
         // sigma_x² ≈ s_x²*(fx/z)² + s_z²*(fx*|x_cam|/z²)²  (dominant terms, identity rot)
         // d(sigma_x)/d(s_x)*s_x = s_x²*(fx/z)²/sigma_x  → dL/d(log_sx)
         // d(sigma_x)/d(s_z)*s_z = var_x_from_z/sigma_x   → accumulates into dL/d(log_sz)
         if (abs(g.sigma_x) >= 0.5f) {
-            atomic_fetch_add_explicit(&grad_log_scales[gidx * 3 + 0], dl_dsigma_x * camera.fx * inv_z, memory_order_relaxed);
+            atomic_fetch_add_explicit(&grad_log_scales[src_idx * 3 + 0], dl_dsigma_x * camera.fx * inv_z, memory_order_relaxed);
             const float raw_sx = g.raw_sigma_x;
             const float sx3 = g.scale_x;
             const float sz3 = g.scale_z;
@@ -383,11 +385,11 @@ kernel void tile_backward(
                 const float contrib_x = sx3 * camera.fx * inv_z;
                 const float var_from_z = max(raw_sx * raw_sx - contrib_x * contrib_x, 0.0f);
                 const float d_rawsx_d_sz = var_from_z / (raw_sx * sz3);
-                atomic_fetch_add_explicit(&grad_log_scales[gidx * 3 + 2], dl_dsigma_x * d_rawsx_d_sz * sz3, memory_order_relaxed);
+                atomic_fetch_add_explicit(&grad_log_scales[src_idx * 3 + 2], dl_dsigma_x * d_rawsx_d_sz * sz3, memory_order_relaxed);
             }
         }
         if (abs(g.sigma_y) >= 0.5f) {
-            atomic_fetch_add_explicit(&grad_log_scales[gidx * 3 + 1], dl_dsigma_y * camera.fy * inv_z, memory_order_relaxed);
+            atomic_fetch_add_explicit(&grad_log_scales[src_idx * 3 + 1], dl_dsigma_y * camera.fy * inv_z, memory_order_relaxed);
             const float raw_sy = g.raw_sigma_y;
             const float sy3 = g.scale_y;
             const float sz3 = g.scale_z;
@@ -395,7 +397,7 @@ kernel void tile_backward(
                 const float contrib_y = sy3 * camera.fy * inv_z;
                 const float var_from_z = max(raw_sy * raw_sy - contrib_y * contrib_y, 0.0f);
                 const float d_rawsy_d_sz = var_from_z / (raw_sy * sz3);
-                atomic_fetch_add_explicit(&grad_log_scales[gidx * 3 + 2], dl_dsigma_y * d_rawsy_d_sz * sz3, memory_order_relaxed);
+                atomic_fetch_add_explicit(&grad_log_scales[src_idx * 3 + 2], dl_dsigma_y * d_rawsy_d_sz * sz3, memory_order_relaxed);
             }
         }
 
@@ -403,7 +405,7 @@ kernel void tile_backward(
         // sigmoid_derivative = opacity * (1 - opacity)
         const float sig_deriv = g.opacity * (1.0f - g.opacity);
         if (g.opacity >= 0.0f && g.opacity <= 1.0f) {
-            atomic_fetch_add_explicit(&grad_opacity_logits[gidx], dl_dbase_alpha * sig_deriv, memory_order_relaxed);
+            atomic_fetch_add_explicit(&grad_opacity_logits[src_idx], dl_dbase_alpha * sig_deriv, memory_order_relaxed);
         }
     }
 }
