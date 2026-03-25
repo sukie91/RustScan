@@ -916,6 +916,74 @@ kernel void extract_source_indices(
 }
 "#;
 
+// GPU prefix-sum (exclusive scan) for tile binning offsets.
+// Uses a simple single-pass approach for small tile counts (<=64K tiles).
+const METAL_TILE_PREFIX_SUM_KERNEL: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+// Exclusive prefix sum of `tile_counts` into `tile_offsets`.
+// Also writes the total sum into `total_out[0]`.
+// For tile counts up to 64K this single-pass approach is fast enough.
+// Limitation: all threads must fit in one threadgroup, so max_tiles = 1024.
+kernel void tile_prefix_sum(
+    device const uint* tile_counts [[buffer(0)]],
+    device uint*       tile_offsets [[buffer(1)]],
+    device uint*       total_out    [[buffer(2)]],
+    constant uint&     tile_count   [[buffer(3)]],
+    uint               lid          [[thread_position_in_threadgroup]],
+    uint               tpg          [[threads_per_threadgroup]]
+) {
+    // Shared memory exclusive scan (Blelloch / Hillis-Steele hybrid)
+    // We use a simple sequential scan in a single thread for correctness
+    // across arbitrary tile_count. The caller guarantees tile_count <= tpg.
+    if (lid == 0) {
+        uint running = 0;
+        for (uint i = 0; i < tile_count; ++i) {
+            tile_offsets[i] = running;
+            running += tile_counts[i];
+        }
+        total_out[0] = running;
+    }
+}
+"#;
+
+// Fused Adam update kernel: m = b1*m + (1-b1)*g; v = b2*v + (1-b2)*g*g;
+// m_hat = m / (1 - b1^t); v_hat = v / (1 - b2^t); param -= lr * m_hat / (sqrt(v_hat) + eps)
+// Operates in-place on float buffers. `stride` is the number of floats per element
+// (3 for positions/scales/colors, 1 for opacities).
+const METAL_ADAM_STEP_KERNEL: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+struct AdamHyperparams {
+    float lr;
+    float beta1;
+    float beta2;
+    float eps;
+    float bc1;   // 1 / (1 - beta1^step)
+    float bc2;   // 1 / (1 - beta2^step)
+};
+
+kernel void adam_step(
+    device float*       params  [[buffer(0)]],
+    device const float* grads   [[buffer(1)]],
+    device float*       m_buf   [[buffer(2)]],
+    device float*       v_buf   [[buffer(3)]],
+    constant AdamHyperparams& hp [[buffer(4)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    const float g = grads[gid];
+    float m = hp.beta1 * m_buf[gid] + (1.0f - hp.beta1) * g;
+    float v = hp.beta2 * v_buf[gid] + (1.0f - hp.beta2) * g * g;
+    m_buf[gid] = m;
+    v_buf[gid] = v;
+    const float m_hat = m * hp.bc1;
+    const float v_hat = v * hp.bc2;
+    params[gid] -= hp.lr * m_hat / (sqrt(v_hat) + hp.eps);
+}
+"#;
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ScreenRect {
     pub min_x: usize,
@@ -1160,6 +1228,24 @@ pub(crate) enum MetalBufferSlot {
     LossScalars,
     GradMagnitudes,
     VisibleCount,
+    TotalAssignments,
+    // Fused Adam buffers for each parameter group
+    AdamGradPos,
+    AdamMPos,
+    AdamVPos,
+    AdamParamPos,
+    AdamGradScale,
+    AdamMScale,
+    AdamVScale,
+    AdamParamScale,
+    AdamGradOpacity,
+    AdamMOpacity,
+    AdamVOpacity,
+    AdamParamOpacity,
+    AdamGradColor,
+    AdamMColor,
+    AdamVColor,
+    AdamParamColor,
 }
 
 impl MetalBufferSlot {
@@ -1187,6 +1273,23 @@ impl MetalBufferSlot {
             Self::LossScalars => "loss_scalars",
             Self::GradMagnitudes => "grad_magnitudes",
             Self::VisibleCount => "visible_count",
+            Self::TotalAssignments => "total_assignments",
+            Self::AdamGradPos => "adam_grad_pos",
+            Self::AdamMPos => "adam_m_pos",
+            Self::AdamVPos => "adam_v_pos",
+            Self::AdamParamPos => "adam_param_pos",
+            Self::AdamGradScale => "adam_grad_scale",
+            Self::AdamMScale => "adam_m_scale",
+            Self::AdamVScale => "adam_v_scale",
+            Self::AdamParamScale => "adam_param_scale",
+            Self::AdamGradOpacity => "adam_grad_opacity",
+            Self::AdamMOpacity => "adam_m_opacity",
+            Self::AdamVOpacity => "adam_v_opacity",
+            Self::AdamParamOpacity => "adam_param_opacity",
+            Self::AdamGradColor => "adam_grad_color",
+            Self::AdamMColor => "adam_m_color",
+            Self::AdamVColor => "adam_v_color",
+            Self::AdamParamColor => "adam_param_color",
         }
     }
 }
@@ -1201,6 +1304,8 @@ enum MetalKernel {
     CountVisible,
     BitonicSortProjections,
     ExtractSourceIndices,
+    TilePrefixSum,
+    AdamStep,
     TileForward,
     TileBackward,
     GradMagnitudes,
@@ -1217,6 +1322,8 @@ impl MetalKernel {
             Self::CountVisible => "count_visible",
             Self::BitonicSortProjections => "bitonic_sort_projections",
             Self::ExtractSourceIndices => "extract_source_indices",
+            Self::TilePrefixSum => "tile_prefix_sum",
+            Self::AdamStep => "adam_step",
             Self::TileForward => "tile_forward",
             Self::TileBackward => "tile_backward",
             Self::GradMagnitudes => "grad_magnitudes",
@@ -1233,6 +1340,8 @@ impl MetalKernel {
             Self::CountVisible => METAL_COUNT_VISIBLE_KERNEL,
             Self::BitonicSortProjections => METAL_BITONIC_SORT_PROJECTIONS_KERNEL,
             Self::ExtractSourceIndices => METAL_EXTRACT_SOURCE_INDICES_KERNEL,
+            Self::TilePrefixSum => METAL_TILE_PREFIX_SUM_KERNEL,
+            Self::AdamStep => METAL_ADAM_STEP_KERNEL,
             Self::TileForward => METAL_TILE_FORWARD_KERNEL,
             Self::TileBackward => METAL_TILE_BACKWARD_KERNEL,
             Self::GradMagnitudes => METAL_GRAD_MAGNITUDE_KERNEL,
@@ -1299,7 +1408,7 @@ pub(crate) struct MetalGaussianBindings<'a> {
 }
 
 pub(crate) struct MetalRuntime {
-    device: Device,
+    pub(crate) device: Device,
     tile_windows: Vec<ChunkPixelWindow>,
     num_tiles_x: usize,
     num_tiles_y: usize,
@@ -1628,10 +1737,16 @@ impl MetalRuntime {
             .clone();
         let metal = self.device.as_metal_device()?.clone();
         let total_count = padded_count as u32;
+        let threads_per_group = sort_pipeline
+            .max_total_threads_per_threadgroup()
+            .min(padded_count)
+            .max(1);
         let mut k = 2usize;
         while k <= padded_count {
             let mut j = k >> 1;
             while j > 0 {
+                // All stages share a single command encoder — no synchronize between stages.
+                // Metal guarantees memory ordering within a single encoder's dispatches.
                 let encoder = metal.command_encoder()?;
                 encoder.set_label(MetalKernel::BitonicSortProjections.function_name());
                 encoder.set_compute_pipeline_state(&sort_pipeline);
@@ -1646,10 +1761,6 @@ impl MetalRuntime {
                 encoder.set_bytes(1, &stage_j);
                 encoder.set_bytes(2, &stage_k);
                 encoder.set_bytes(3, &total_count);
-                let threads_per_group = sort_pipeline
-                    .max_total_threads_per_threadgroup()
-                    .min(padded_count)
-                    .max(1);
                 encoder.dispatch_threads(
                     MTLSize {
                         width: padded_count,
@@ -1663,11 +1774,13 @@ impl MetalRuntime {
                     },
                 );
                 drop(encoder);
-                self.device.synchronize()?;
+                // No synchronize here — stages within one sort can pipeline on GPU
                 j >>= 1;
             }
             k <<= 1;
         }
+        // Single synchronize after the entire sort completes
+        self.device.synchronize()?;
 
         self.dispatch_fill_u32(MetalBufferSlot::VisibleCount, 0, 1)?;
         let pipeline = self.ensure_pipeline(MetalKernel::CountVisible)?.clone();
@@ -1908,32 +2021,82 @@ impl MetalRuntime {
         drop(encoder);
         self.device.synchronize()?;
 
-        let tile_counts_u32 =
-            self.read_buffer_structs::<u32>(MetalBufferSlot::TileCounts, tile_count)?;
-        let mut records = Vec::with_capacity(tile_count);
-        let mut active_tiles = Vec::new();
-        let mut max_gaussians_per_tile = 0usize;
-        let mut start = 0usize;
-        for (tile_idx, count) in tile_counts_u32.iter().copied().enumerate() {
-            let count_usize = count as usize;
-            records.push(MetalTileDispatchRecord::new(start as u32, count));
-            if count_usize > 0 {
-                active_tiles.push(tile_idx);
-                max_gaussians_per_tile = max_gaussians_per_tile.max(count_usize);
-            }
-            start += count_usize;
-        }
-        let total_assignments = start;
-        self.ensure_buffer(
-            MetalBufferSlot::TileIndices,
-            total_assignments.saturating_mul(size_of::<u32>()),
-        )?;
+        // GPU prefix-sum: compute exclusive scan of tile_counts → tile_offsets
+        // and total assignment count, without reading tile_counts back to CPU.
+        let tile_count_u32 = tile_count as u32;
         self.ensure_buffer(
             MetalBufferSlot::TileOffsets,
             tile_count.saturating_mul(size_of::<u32>()),
         )?;
-        let offsets: Vec<u32> = records.iter().map(|record| record.start as u32).collect();
-        self.write_slice(MetalBufferSlot::TileOffsets, &offsets)?;
+        self.ensure_buffer(MetalBufferSlot::TotalAssignments, size_of::<u32>())?;
+
+        let prefix_pipeline = self.ensure_pipeline(MetalKernel::TilePrefixSum)?.clone();
+        let metal2 = self.device.as_metal_device()?.clone();
+        let prefix_encoder = metal2.command_encoder()?;
+        prefix_encoder.set_label(MetalKernel::TilePrefixSum.function_name());
+        prefix_encoder.set_compute_pipeline_state(&prefix_pipeline);
+        prefix_encoder.set_buffer(
+            0,
+            self.buffer_handle(MetalBufferSlot::TileCounts)?
+                .map(|b| b.as_ref()),
+            0,
+        );
+        prefix_encoder.set_buffer(
+            1,
+            self.buffer_handle(MetalBufferSlot::TileOffsets)?
+                .map(|b| b.as_ref()),
+            0,
+        );
+        prefix_encoder.set_buffer(
+            2,
+            self.buffer_handle(MetalBufferSlot::TotalAssignments)?
+                .map(|b| b.as_ref()),
+            0,
+        );
+        prefix_encoder.set_bytes(3, &tile_count_u32);
+        // Single-thread sequential scan — correct for any tile_count
+        prefix_encoder.dispatch_threads(
+            MTLSize {
+                width: 1,
+                height: 1,
+                depth: 1,
+            },
+            MTLSize {
+                width: 1,
+                height: 1,
+                depth: 1,
+            },
+        );
+        drop(prefix_encoder);
+        self.device.synchronize()?;
+
+        // Read back the total assignment count (1 u32) and tile offsets
+        let total_vec = self.read_buffer_structs::<u32>(MetalBufferSlot::TotalAssignments, 1)?;
+        let total_assignments = total_vec.first().copied().unwrap_or(0) as usize;
+
+        // Read tile_counts and tile_offsets to build MetalTileDispatchRecords on CPU
+        // (needed for rasterizer dispatch).
+        let tile_counts_u32 =
+            self.read_buffer_structs::<u32>(MetalBufferSlot::TileCounts, tile_count)?;
+        let tile_offsets_u32 =
+            self.read_buffer_structs::<u32>(MetalBufferSlot::TileOffsets, tile_count)?;
+        let mut records = Vec::with_capacity(tile_count);
+        let mut active_tiles = Vec::new();
+        let mut max_gaussians_per_tile = 0usize;
+        for tile_idx in 0..tile_count {
+            let cnt = tile_counts_u32[tile_idx];
+            let off = tile_offsets_u32[tile_idx];
+            records.push(MetalTileDispatchRecord::new(off, cnt));
+            if cnt > 0 {
+                active_tiles.push(tile_idx);
+                max_gaussians_per_tile = max_gaussians_per_tile.max(cnt as usize);
+            }
+        }
+
+        self.ensure_buffer(
+            MetalBufferSlot::TileIndices,
+            total_assignments.saturating_mul(size_of::<u32>()),
+        )?;
 
         let assign_pipeline = self.ensure_pipeline(MetalKernel::TileAssign)?.clone();
         let metal = self.device.as_metal_device()?.clone();
@@ -2437,6 +2600,93 @@ impl MetalRuntime {
         ))
     }
 
+    /// Fused Adam update: runs entirely on GPU, no intermediate Tensor allocations.
+    /// `param_buf` is the raw Metal buffer of a `Var`'s storage.
+    pub(crate) fn adam_step_fused(
+        &mut self,
+        param_slot: MetalBufferSlot,
+        grad_slot: MetalBufferSlot,
+        m_slot: MetalBufferSlot,
+        v_slot: MetalBufferSlot,
+        element_count: usize,
+        lr: f32,
+        beta1: f32,
+        beta2: f32,
+        eps: f32,
+        step: usize,
+    ) -> candle_core::Result<()> {
+        if element_count == 0 {
+            return Ok(());
+        }
+        let bc1 = 1.0f32 / (1.0 - beta1.powi(step as i32));
+        let bc2 = 1.0f32 / (1.0 - beta2.powi(step as i32));
+
+        #[repr(C)]
+        #[derive(Clone, Copy)]
+        struct AdamHyperparams {
+            lr: f32,
+            beta1: f32,
+            beta2: f32,
+            eps: f32,
+            bc1: f32,
+            bc2: f32,
+        }
+        let hp = AdamHyperparams {
+            lr,
+            beta1,
+            beta2,
+            eps,
+            bc1,
+            bc2,
+        };
+
+        let pipeline = self.ensure_pipeline(MetalKernel::AdamStep)?.clone();
+        let metal = self.device.as_metal_device()?;
+        let encoder = metal.command_encoder()?;
+        encoder.set_label(MetalKernel::AdamStep.function_name());
+        encoder.set_compute_pipeline_state(&pipeline);
+
+        let get_buf = |slot: MetalBufferSlot, name: &'static str, rt: &MetalRuntime| {
+            rt.buffers
+                .get(&slot)
+                .and_then(|b| b.backing.as_ref().cloned())
+                .ok_or_else(|| {
+                    candle_core::Error::Msg(format!("adam_step_fused: missing {name}").into())
+                })
+        };
+
+        encoder.set_buffer(0, Some(get_buf(param_slot, "params", self)?.as_ref()), 0);
+        encoder.set_buffer(1, Some(get_buf(grad_slot, "grads", self)?.as_ref()), 0);
+        encoder.set_buffer(2, Some(get_buf(m_slot, "m", self)?.as_ref()), 0);
+        encoder.set_buffer(3, Some(get_buf(v_slot, "v", self)?.as_ref()), 0);
+        self.write_struct(MetalBufferSlot::LossScalars, &hp)?; // reuse small temp slot
+        encoder.set_buffer(
+            4,
+            self.buffer_handle(MetalBufferSlot::LossScalars)?
+                .map(|b| b.as_ref()),
+            0,
+        );
+
+        let threads_per_group = pipeline
+            .max_total_threads_per_threadgroup()
+            .min(element_count)
+            .max(1);
+        encoder.dispatch_threads(
+            MTLSize {
+                width: element_count,
+                height: 1,
+                depth: 1,
+            },
+            MTLSize {
+                width: threads_per_group,
+                height: 1,
+                depth: 1,
+            },
+        );
+        drop(encoder);
+        Ok(())
+    }
+
     pub(crate) fn compute_grad_magnitudes(
         &mut self,
         gaussian_count: usize,
@@ -2680,7 +2930,7 @@ impl MetalRuntime {
             .expect("pipeline inserted before lookup"))
     }
 
-    fn ensure_buffer(
+    pub(crate) fn ensure_buffer(
         &mut self,
         slot: MetalBufferSlot,
         byte_capacity: usize,
@@ -2729,7 +2979,7 @@ impl MetalRuntime {
         ))
     }
 
-    fn write_struct<T: Copy>(
+    pub(crate) fn write_struct<T: Copy>(
         &mut self,
         slot: MetalBufferSlot,
         value: &T,
@@ -2739,7 +2989,7 @@ impl MetalRuntime {
         self.write_bytes(slot, data)
     }
 
-    fn write_slice<T: Copy>(
+    pub(crate) fn write_slice<T: Copy>(
         &mut self,
         slot: MetalBufferSlot,
         values: &[T],

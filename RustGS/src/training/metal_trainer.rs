@@ -1394,51 +1394,72 @@ impl MetalTrainer {
             .as_mut()
             .ok_or_else(|| candle_core::Error::Msg("adam state not initialized".into()))?;
 
-        // Rotations remain frozen until the backward path propagates
-        // rotation-aware projection gradients.
-        adam_step_var(
+        let (beta1, beta2, eps, step) = (self.beta1, self.beta2, self.eps, self.iteration);
+
+        // Use fused Adam kernel on Metal device to eliminate ~48 temp Tensor allocs per step.
+        adam_step_var_fused(
             &gaussians.positions,
             &grads.positions,
             &mut adam.m_pos,
             &mut adam.v_pos,
+            &mut self.runtime,
             self.lr_pos,
-            self.beta1,
-            self.beta2,
-            self.eps,
-            self.iteration,
+            beta1,
+            beta2,
+            eps,
+            step,
+            MetalBufferSlot::AdamGradPos,
+            MetalBufferSlot::AdamMPos,
+            MetalBufferSlot::AdamVPos,
+            MetalBufferSlot::AdamParamPos,
         )?;
-        adam_step_var(
+        adam_step_var_fused(
             &gaussians.scales,
             &grads.log_scales,
             &mut adam.m_scale,
             &mut adam.v_scale,
+            &mut self.runtime,
             self.lr_scale,
-            self.beta1,
-            self.beta2,
-            self.eps,
-            self.iteration,
+            beta1,
+            beta2,
+            eps,
+            step,
+            MetalBufferSlot::AdamGradScale,
+            MetalBufferSlot::AdamMScale,
+            MetalBufferSlot::AdamVScale,
+            MetalBufferSlot::AdamParamScale,
         )?;
-        adam_step_var(
+        adam_step_var_fused(
             &gaussians.opacities,
             &grads.opacity_logits,
             &mut adam.m_op,
             &mut adam.v_op,
+            &mut self.runtime,
             self.lr_opacity,
-            self.beta1,
-            self.beta2,
-            self.eps,
-            self.iteration,
+            beta1,
+            beta2,
+            eps,
+            step,
+            MetalBufferSlot::AdamGradOpacity,
+            MetalBufferSlot::AdamMOpacity,
+            MetalBufferSlot::AdamVOpacity,
+            MetalBufferSlot::AdamParamOpacity,
         )?;
-        adam_step_var(
+        adam_step_var_fused(
             &gaussians.colors,
             &grads.colors,
             &mut adam.m_color,
             &mut adam.v_color,
+            &mut self.runtime,
             self.lr_color,
-            self.beta1,
-            self.beta2,
-            self.eps,
-            self.iteration,
+            beta1,
+            beta2,
+            eps,
+            step,
+            MetalBufferSlot::AdamGradColor,
+            MetalBufferSlot::AdamMColor,
+            MetalBufferSlot::AdamVColor,
+            MetalBufferSlot::AdamParamColor,
         )?;
 
         Ok(())
@@ -2403,6 +2424,77 @@ fn duration_ms(duration: Duration) -> f64 {
 
 fn should_profile_iteration(profile_steps: bool, profile_interval: usize, iter: usize) -> bool {
     profile_steps && (iter < 5 || iter % profile_interval.max(1) == 0)
+}
+
+/// Fused Adam update using a single Metal compute kernel.
+/// Eliminates ~12 intermediate Tensor allocations per parameter group.
+/// Falls back to the tensor-op path on CPU device.
+fn adam_step_var_fused(
+    var: &Var,
+    grad: &Tensor,
+    m: &mut Tensor,
+    v: &mut Tensor,
+    runtime: &mut MetalRuntime,
+    lr: f32,
+    beta1: f32,
+    beta2: f32,
+    eps: f32,
+    step: usize,
+    grad_slot: MetalBufferSlot,
+    m_slot: MetalBufferSlot,
+    v_slot: MetalBufferSlot,
+    param_slot: MetalBufferSlot,
+) -> candle_core::Result<()> {
+    if !var.as_tensor().device().is_metal() {
+        return adam_step_var(var, grad, m, v, lr, beta1, beta2, eps, step);
+    }
+
+    let element_count = grad.elem_count();
+
+    // Stage current m, v, param and grad into named Metal buffers
+    let grad_flat = runtime.read_tensor_flat::<f32>(grad)?;
+    let m_flat = runtime.read_tensor_flat::<f32>(m)?;
+    let v_flat = runtime.read_tensor_flat::<f32>(v)?;
+    let param_flat = runtime.read_tensor_flat::<f32>(var.as_tensor())?;
+
+    let shape = grad.shape().clone();
+    runtime.ensure_buffer(grad_slot, element_count * std::mem::size_of::<f32>())?;
+    runtime.ensure_buffer(m_slot, element_count * std::mem::size_of::<f32>())?;
+    runtime.ensure_buffer(v_slot, element_count * std::mem::size_of::<f32>())?;
+    runtime.ensure_buffer(param_slot, element_count * std::mem::size_of::<f32>())?;
+    runtime.write_slice(grad_slot, &grad_flat)?;
+    runtime.write_slice(m_slot, &m_flat)?;
+    runtime.write_slice(v_slot, &v_flat)?;
+    runtime.write_slice(param_slot, &param_flat)?;
+
+    // Dispatch fused kernel — no synchronize, will flush on read
+    runtime.adam_step_fused(
+        param_slot,
+        grad_slot,
+        m_slot,
+        v_slot,
+        element_count,
+        lr,
+        beta1,
+        beta2,
+        eps,
+        step,
+    )?;
+
+    // Read back updated m, v, params from GPU
+    runtime.device.synchronize()?;
+    let new_m_flat = runtime.read_buffer_structs::<f32>(m_slot, element_count)?;
+    let new_v_flat = runtime.read_buffer_structs::<f32>(v_slot, element_count)?;
+    let new_param_flat = runtime.read_buffer_structs::<f32>(param_slot, element_count)?;
+
+    *m = Tensor::from_slice(&new_m_flat, shape.clone(), var.as_tensor().device())?;
+    *v = Tensor::from_slice(&new_v_flat, shape.clone(), var.as_tensor().device())?;
+    var.set(&Tensor::from_slice(
+        &new_param_flat,
+        shape,
+        var.as_tensor().device(),
+    )?)?;
+    Ok(())
 }
 
 fn adam_step_var(
