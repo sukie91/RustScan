@@ -26,17 +26,11 @@ pub(crate) fn backward_weighted_l1(
     device: &Device,
     visible_count: usize,
     tile_bins: &MetalTileBins,
-    target_color: &[f32],
-    target_depth: &[f32],
+    _target_color: &[f32],
+    _target_depth: &[f32],
     n_gaussians: usize,
     camera: &DiffCamera,
 ) -> candle_core::Result<MetalBackwardPass> {
-    let color_scale = 1.0 / target_color.len().max(1) as f32;
-    let depth_scale = 0.1 / target_depth.len().max(1) as f32;
-
-    // Upload targets to GPU
-    runtime.write_target_data(target_color, target_depth, color_scale, depth_scale)?;
-
     // Dispatch Metal backward kernel
     let (frame, _profile) =
         runtime.rasterize_backward(visible_count, tile_bins, camera.width, camera.height)?;

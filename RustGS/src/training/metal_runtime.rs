@@ -318,6 +318,12 @@ kernel void tile_backward(
         running_alpha += contrib;
         running_depth_num += contrib * g.depth;
 
+        // Early termination: once accumulated alpha is nearly 1 all subsequent
+        // Gaussian contributions will be negligible (T_i → 0).
+        if ((1.0f - running_alpha) <= 1e-4f) {
+            break;
+        }
+
         // Skip gradients if alpha is clamped
         if (alpha_raw <= 0.0f || alpha_raw >= 0.99f) {
             // Still need to update running state (done above), just skip gradient contribution
@@ -358,12 +364,33 @@ kernel void tile_backward(
                                     + dl_dv * (-(g.v - camera.cy) * inv_z);
         atomic_fetch_add_explicit(&grad_positions[gidx * 3 + 2], dl_dz + dl_dz_projected, memory_order_relaxed);
 
-        // Scale gradient
+        // Scale gradient: propagate through sigma_x and sigma_y back to 3D log-scales.
+        // sigma_x² ≈ s_x²*(fx/z)² + s_z²*(fx*|x_cam|/z²)²  (dominant terms, identity rot)
+        // d(sigma_x)/d(s_x)*s_x = s_x²*(fx/z)²/sigma_x  → dL/d(log_sx)
+        // d(sigma_x)/d(s_z)*s_z = var_x_from_z/sigma_x   → accumulates into dL/d(log_sz)
         if (abs(g.sigma_x) >= 0.5f) {
             atomic_fetch_add_explicit(&grad_log_scales[gidx * 3 + 0], dl_dsigma_x * camera.fx * inv_z, memory_order_relaxed);
+            const float raw_sx = g.raw_sigma_x;
+            const float sx3 = g.scale_x;
+            const float sz3 = g.scale_z;
+            if (raw_sx > 1e-6f && sx3 > 1e-6f && sz3 > 1e-6f) {
+                const float contrib_x = sx3 * camera.fx * inv_z;
+                const float var_from_z = max(raw_sx * raw_sx - contrib_x * contrib_x, 0.0f);
+                const float d_rawsx_d_sz = var_from_z / (raw_sx * sz3);
+                atomic_fetch_add_explicit(&grad_log_scales[gidx * 3 + 2], dl_dsigma_x * d_rawsx_d_sz * sz3, memory_order_relaxed);
+            }
         }
         if (abs(g.sigma_y) >= 0.5f) {
             atomic_fetch_add_explicit(&grad_log_scales[gidx * 3 + 1], dl_dsigma_y * camera.fy * inv_z, memory_order_relaxed);
+            const float raw_sy = g.raw_sigma_y;
+            const float sy3 = g.scale_y;
+            const float sz3 = g.scale_z;
+            if (raw_sy > 1e-6f && sy3 > 1e-6f && sz3 > 1e-6f) {
+                const float contrib_y = sy3 * camera.fy * inv_z;
+                const float var_from_z = max(raw_sy * raw_sy - contrib_y * contrib_y, 0.0f);
+                const float d_rawsy_d_sz = var_from_z / (raw_sy * sz3);
+                atomic_fetch_add_explicit(&grad_log_scales[gidx * 3 + 2], dl_dsigma_y * d_rawsy_d_sz * sz3, memory_order_relaxed);
+            }
         }
 
         // Opacity gradient: dL/dlogit = dL/dbase_alpha * sigmoid_derivative(logit)

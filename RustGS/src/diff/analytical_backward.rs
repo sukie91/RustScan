@@ -325,8 +325,7 @@ pub fn backward_weighted_l1_from_buffers(
                         } else {
                             let dnum_dalpha =
                                 transmittance * rec.z - tail_depth_num * inv_one_minus_alpha;
-                            let dalpha_dalpha =
-                                transmittance - tail_alpha * inv_one_minus_alpha;
+                            let dalpha_dalpha = transmittance - tail_alpha * inv_one_minus_alpha;
                             (dnum_dalpha * depth_denom - final_depth_num * dalpha_dalpha)
                                 / (depth_denom * depth_denom)
                         };
@@ -383,6 +382,67 @@ pub fn backward_weighted_l1_from_buffers(
                     + dl_dsigma_y * (-rec.raw_scale_2d_y * inv_z);
                 grad_pos[gi + 2] += dl_dz + dl_dz_projected;
 
+                // ── Chain rule: dL/d(log_scale_k) = dL/d(scale_k) * scale_k
+                //
+                // sigma_x² = Jx · Cworld · Jx^T  where Cworld = R diag(s²) R^T
+                // d(sigma_x²)/d(s_k²) = (Jx · R[:,k])²   (k = x,y,z)
+                // d(sigma_x)/d(s_k)   = s_k * (Jx · R[:,k])² / sigma_x
+                // d(sigma_x)/d(log_scale_k) = d(sigma_x)/d(s_k) * s_k
+                //                           = s_k² * (Jx · R[:,k])² / sigma_x
+                //
+                // We precomputed Jx = projection_row_x = (fx/z, 0, -fx*x/z²)
+                // and camera_rotation R_cam, so in camera space:
+                //   R_total[:,k] = R_cam * R_object[:,k]
+                // Jx · R_total[:,k] is the x-component of the projected k-th axis.
+                //
+                // Below we use the raw 2D sigmas stored in the record, which equal
+                // the per-axis camera-space projection magnitudes scaled by s_k.
+
+                // d(sigma_x²)/d(s_k²) = (sigma_x_hat_k)² where sigma_x_hat_k is
+                // the contribution of scale axis k to sigma_x per unit scale.
+                // Equivalently, d(sigma_x)/d(s_k) * s_k = s_k² * ... / sigma_x.
+                //
+                // For the axis-aligned approximation currently used, sigma_x only
+                // depends on scale_x along the camera-x direction and on scale_z
+                // along the depth direction (and similarly for sigma_y). The full
+                // covariance product contributes all three axes; we propagate
+                // through the full chain analytically below.
+                //
+                // raw_scale_2d_x = sqrt(Jx · Cworld · Jx^T)   (before clamp)
+                // For s_k, d(raw_scale_2d_x)/d(s_k) = s_k * proj_k_x² / raw_scale_2d_x
+                // where proj_k_x = Jx · (R_cam * R_object)[:,k].
+                //
+                // We can recover proj_k_x from the forward data:
+                // raw_scale_2d_x² = s_x²*proj_x_x² + s_y²*proj_y_x² + s_z²*proj_z_x²
+                //
+                // Without storing individual axis projections we use the simplified
+                // single-axis approximation already present in the forward pass:
+                //   sigma_x ≈ |s_x| * fx/z   and  sigma_z_contribution_x ≈ |s_z| * fx*|x|/z²
+                //
+                // The correct full gradient requires per-axis projection components.
+                // We derive them from the stored raw_scale_2d values:
+                //   raw_scale_2d_x² ≈ s_x² * (fx/z)² + s_z² * (fx*x/z²)²  (dominant terms)
+                //
+                // d(raw_sigma_x)/d(s_x) = s_x * (fx/z)²  / raw_sigma_x
+                // d(raw_sigma_x)/d(s_z) = s_z * (fx*x/z²)² / raw_sigma_x
+                // d(raw_sigma_y)/d(s_y) = s_y * (fy/z)²  / raw_sigma_y
+                // d(raw_sigma_y)/d(s_z) = s_z * (fy*y/z²)² / raw_sigma_y
+                //
+                // Noting that (fx/z) = raw_sigma_x / s_x when rotation=identity and
+                // there is only one dominant term, we compute the z contribution
+                // as the remaining variance in raw_sigma_x after removing the x term:
+                //   var_x_from_z = raw_sigma_x² - s_x² * (fx/z)²
+                //   d(raw_sigma_x)/d(s_z) ≈ var_x_from_z / (raw_sigma_x * s_z)  if s_z ≠ 0
+                //
+                // This is the correct per-axis gradient when the object rotation is
+                // identity. For the general case the full Jacobian is stored in
+                // the GPU projection kernel and applied there. Here in the CPU path
+                // we propagate the z gradient through the same simplified model.
+
+                let raw_sx = rec.raw_scale_2d_x;
+                let raw_sy = rec.raw_scale_2d_y;
+                let s3 = rec.scale_3d;
+
                 let dl_dscale3d_x = if sx_clamp_pass {
                     dl_dsigma_x * fx * inv_z
                 } else {
@@ -393,8 +453,37 @@ pub fn backward_weighted_l1_from_buffers(
                 } else {
                     0.0
                 };
-                grad_log_scale[gi] += dl_dscale3d_x * rec.scale_3d[0];
-                grad_log_scale[gi + 1] += dl_dscale3d_y * rec.scale_3d[1];
+
+                // scale_z gradient from its contribution to both sigma_x and sigma_y
+                // via the depth-direction projection terms.
+                let dl_dscale3d_z = {
+                    let mut contrib = 0.0f32;
+                    // contribution through sigma_x
+                    if sx_clamp_pass && raw_sx > 1e-6 && s3[0] > 1e-6 {
+                        let var_x_from_x = (s3[0] * fx * inv_z) * (s3[0] * fx * inv_z);
+                        let var_x_from_z = (raw_sx * raw_sx - var_x_from_x).max(0.0);
+                        if s3[2] > 1e-6 {
+                            let d_raw_sx_d_sz = var_x_from_z / (raw_sx * s3[2]);
+                            // d(sigma_x)/d(s_z) * clamp_pass already in dl_dsigma_x
+                            // d(sigma_x)/d(log_scale_z) = d(sigma_x)/d(s_z) * s_z
+                            contrib += dl_dsigma_x * d_raw_sx_d_sz * s3[2];
+                        }
+                    }
+                    // contribution through sigma_y
+                    if sy_clamp_pass && raw_sy > 1e-6 && s3[1] > 1e-6 {
+                        let var_y_from_y = (s3[1] * fy * inv_z) * (s3[1] * fy * inv_z);
+                        let var_y_from_z = (raw_sy * raw_sy - var_y_from_y).max(0.0);
+                        if s3[2] > 1e-6 {
+                            let d_raw_sy_d_sz = var_y_from_z / (raw_sy * s3[2]);
+                            contrib += dl_dsigma_y * d_raw_sy_d_sz * s3[2];
+                        }
+                    }
+                    contrib
+                };
+
+                grad_log_scale[gi] += dl_dscale3d_x * s3[0];
+                grad_log_scale[gi + 1] += dl_dscale3d_y * s3[1];
+                grad_log_scale[gi + 2] += dl_dscale3d_z;
 
                 if opacity_clamp_pass {
                     grad_logit[idx] += dl_dbase_alpha * sig_deriv;

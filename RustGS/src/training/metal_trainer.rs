@@ -19,8 +19,8 @@ use super::data_loading::{
 use super::metal_backward::MetalBackwardGrads;
 use super::metal_loss::mean_abs_diff;
 use super::metal_runtime::{
-    ChunkPixelWindow, MetalBufferSlot, MetalProjectedGaussian, MetalProjectionRecord, MetalRuntime,
-    MetalTileBins, NativeForwardProfile,
+    ChunkPixelWindow, MetalBufferSlot, MetalProjectionRecord, MetalRuntime, MetalTileBins,
+    NativeForwardProfile,
 };
 use super::training_pipeline::TrainingConfig as TopologyConfig;
 use super::TrainingConfig;
@@ -52,6 +52,26 @@ struct MetalTrainingFrame {
     target_depth: Tensor,
     target_color_cpu: Vec<f32>,
     target_depth_cpu: Vec<f32>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TopologyCandidateInfo {
+    max_scale: f32,
+    opacity: f32,
+    grad_accum: f32,
+}
+
+#[derive(Debug, Default)]
+struct TopologyAnalysis {
+    infos: Vec<TopologyCandidateInfo>,
+    clone_candidates: usize,
+    split_candidates: usize,
+    prune_candidates: usize,
+    active_grad_stats: usize,
+    small_scale_stats: usize,
+    opacity_ready_stats: usize,
+    max_grad: f32,
+    mean_grad: f32,
 }
 
 struct ProjectedGaussians {
@@ -269,6 +289,7 @@ pub struct MetalTrainer {
     iteration: usize,
     loss_history: Vec<f32>,
     last_step_duration: Option<Duration>,
+    cached_target_frame_idx: Option<usize>,
 }
 
 struct MetalTrainingStats {
@@ -598,11 +619,84 @@ impl MetalTrainer {
         low
     }
 
+    fn analyze_topology_candidates(
+        &self,
+        gaussians: &TrainableGaussians,
+        stats: &[MetalGaussianStats],
+    ) -> candle_core::Result<TopologyAnalysis> {
+        let defaults = TopologyConfig::default();
+        let clone_opacity_threshold = self.prune_threshold;
+        let log_scales = gaussians.scales.as_tensor().to_vec2::<f32>()?;
+        let opacity_logits = gaussians.opacities.as_tensor().to_vec1::<f32>()?;
+        let mut analysis = TopologyAnalysis {
+            infos: Vec::with_capacity(opacity_logits.len()),
+            ..TopologyAnalysis::default()
+        };
+        let mut grad_sum = 0.0f32;
+
+        for idx in 0..opacity_logits.len() {
+            let scale_row = log_scales.get(idx);
+            let sx = scale_row
+                .and_then(|row| row.first())
+                .copied()
+                .unwrap_or(0.0)
+                .exp();
+            let sy = scale_row
+                .and_then(|row| row.get(1))
+                .copied()
+                .unwrap_or(0.0)
+                .exp();
+            let sz = scale_row
+                .and_then(|row| row.get(2))
+                .copied()
+                .unwrap_or(0.0)
+                .exp();
+            let max_scale = sx.max(sy).max(sz);
+            let opacity = sigmoid_scalar(opacity_logits[idx]);
+            let grad_accum = stats.get(idx).copied().unwrap_or_default().grad_accum;
+            analysis.infos.push(TopologyCandidateInfo {
+                max_scale,
+                opacity,
+                grad_accum,
+            });
+            if grad_accum > defaults.densify_grad_threshold {
+                analysis.active_grad_stats += 1;
+            }
+            if max_scale < 0.1 {
+                analysis.small_scale_stats += 1;
+            }
+            if opacity > clone_opacity_threshold {
+                analysis.opacity_ready_stats += 1;
+            }
+            if grad_accum.is_finite() {
+                analysis.max_grad = analysis.max_grad.max(grad_accum);
+                grad_sum += grad_accum;
+            }
+            if grad_accum > defaults.densify_grad_threshold && opacity > clone_opacity_threshold {
+                if max_scale < 0.1 {
+                    analysis.clone_candidates += 1;
+                }
+                if max_scale > 0.3 {
+                    analysis.split_candidates += 1;
+                }
+            }
+            if opacity < self.prune_threshold || max_scale > defaults.prune_scale_threshold {
+                analysis.prune_candidates += 1;
+            }
+        }
+
+        if !analysis.infos.is_empty() {
+            analysis.mean_grad = grad_sum / analysis.infos.len() as f32;
+        }
+        Ok(analysis)
+    }
+
     fn densify_snapshot(
         &self,
         snapshot: &mut GaussianParameterSnapshot,
         stats: &mut Vec<MetalGaussianStats>,
         origins: &mut Vec<Option<usize>>,
+        infos: &[TopologyCandidateInfo],
         max_gaussians: usize,
     ) -> usize {
         if snapshot.len() >= max_gaussians {
@@ -617,10 +711,14 @@ impl MetalTrainer {
         let mut split_candidates = Vec::new();
 
         for idx in 0..original_len {
-            let opacity = snapshot.opacity(idx);
-            let scale = snapshot.scale(idx);
-            let max_scale = scale[0].max(scale[1]).max(scale[2]);
-            let grad_accum = stats.get(idx).copied().unwrap_or_default().grad_accum;
+            let info = infos.get(idx).copied().unwrap_or(TopologyCandidateInfo {
+                max_scale: 0.0,
+                opacity: 0.0,
+                grad_accum: 0.0,
+            });
+            let opacity = info.opacity;
+            let max_scale = info.max_scale;
+            let grad_accum = info.grad_accum;
             if !grad_accum.is_finite() || !opacity.is_finite() {
                 continue;
             }
@@ -712,6 +810,7 @@ impl MetalTrainer {
         snapshot: &mut GaussianParameterSnapshot,
         stats: &mut Vec<MetalGaussianStats>,
         origins: &mut Vec<Option<usize>>,
+        infos: &[TopologyCandidateInfo],
     ) -> usize {
         if snapshot.len() <= 1 {
             return 0;
@@ -726,9 +825,16 @@ impl MetalTrainer {
             let position = snapshot.position(idx);
             let rotation = snapshot.rotation(idx);
             let color = snapshot.color(idx);
-            let opacity = snapshot.opacity(idx);
-            let scale = snapshot.scale(idx);
-            let max_scale = scale[0].max(scale[1]).max(scale[2]);
+            let info = infos.get(idx).copied().unwrap_or_else(|| {
+                let scale = snapshot.scale(idx);
+                TopologyCandidateInfo {
+                    max_scale: scale[0].max(scale[1]).max(scale[2]),
+                    opacity: sigmoid_scalar(snapshot.opacity_logits[idx]),
+                    grad_accum: stats.get(idx).copied().unwrap_or_default().grad_accum,
+                }
+            });
+            let opacity = info.opacity;
+            let max_scale = info.max_scale;
             let valid = opacity.is_finite()
                 && opacity >= self.prune_threshold
                 && max_scale.is_finite()
@@ -895,71 +1001,54 @@ impl MetalTrainer {
         let old_len = gaussians.len();
         let requested_cap = self.max_gaussian_budget.max(old_len);
         let max_gaussians = self.max_topology_gaussians(requested_cap, old_len, frame_count);
-        let mut snapshot = self.export_snapshot(gaussians)?;
         let mut stats = self.gaussian_stats.clone();
-        if stats.len() != snapshot.len() {
-            stats.resize(snapshot.len(), MetalGaussianStats::default());
+        if stats.len() != old_len {
+            stats.resize(old_len, MetalGaussianStats::default());
         }
+
+        let analysis = self.analyze_topology_candidates(gaussians, &stats)?;
+
+        if analysis.clone_candidates == 0
+            && analysis.split_candidates == 0
+            && analysis.prune_candidates == 0
+        {
+            if self.should_log_topology_at(self.iteration) {
+                log::info!(
+                    "Metal topology check at iter {} found no eligible candidates | densify={} | prune={} | gaussians={} | budget_cap={} | max_grad_accum={:.6} | mean_grad_accum={:.6} | active_grad_stats={} | small_scale_stats={} | opacity_ready_stats={} | clone_candidates={} | split_candidates={} | prune_candidates={}",
+                    self.iteration,
+                    should_densify,
+                    should_prune,
+                    old_len,
+                    max_gaussians,
+                    analysis.max_grad,
+                    analysis.mean_grad,
+                    analysis.active_grad_stats,
+                    analysis.small_scale_stats,
+                    analysis.opacity_ready_stats,
+                    analysis.clone_candidates,
+                    analysis.split_candidates,
+                    analysis.prune_candidates,
+                );
+            }
+            return Ok(());
+        }
+
+        let mut snapshot = self.export_snapshot(gaussians)?;
         let mut origins: Vec<Option<usize>> = (0..snapshot.len()).map(Some).collect();
 
-        let defaults = TopologyConfig::default();
-        let clone_opacity_threshold = self.prune_threshold;
-        let clone_candidates = (0..snapshot.len())
-            .filter(|&idx| {
-                let scale = snapshot.scale(idx);
-                let grad_accum = stats.get(idx).copied().unwrap_or_default().grad_accum;
-                scale[0].max(scale[1]).max(scale[2]) < 0.1
-                    && snapshot.opacity(idx) > clone_opacity_threshold
-                    && grad_accum > defaults.densify_grad_threshold
-            })
-            .count();
-        let split_candidates = (0..snapshot.len())
-            .filter(|&idx| {
-                let scale = snapshot.scale(idx);
-                let grad_accum = stats.get(idx).copied().unwrap_or_default().grad_accum;
-                scale[0].max(scale[1]).max(scale[2]) > 0.3
-                    && snapshot.opacity(idx) > self.prune_threshold
-                    && grad_accum > defaults.densify_grad_threshold
-            })
-            .count();
-        let prune_candidates = (0..snapshot.len())
-            .filter(|&idx| {
-                let scale = snapshot.scale(idx);
-                let max_scale = scale[0].max(scale[1]).max(scale[2]);
-                snapshot.opacity(idx) < self.prune_threshold
-                    || max_scale > defaults.prune_scale_threshold
-            })
-            .count();
-        let active_grad_stats = stats
-            .iter()
-            .filter(|stat| stat.grad_accum > defaults.densify_grad_threshold)
-            .count();
-        let small_scale_stats = (0..snapshot.len())
-            .filter(|&idx| {
-                let scale = snapshot.scale(idx);
-                scale[0].max(scale[1]).max(scale[2]) < 0.1
-            })
-            .count();
-        let opacity_ready_stats = (0..snapshot.len())
-            .filter(|&idx| snapshot.opacity(idx) > clone_opacity_threshold)
-            .count();
-        let max_grad = stats
-            .iter()
-            .map(|stat| stat.grad_accum)
-            .fold(0.0f32, f32::max);
-        let mean_grad = if stats.is_empty() {
-            0.0
-        } else {
-            stats.iter().map(|stat| stat.grad_accum).sum::<f32>() / stats.len() as f32
-        };
-
         let added = if should_densify {
-            self.densify_snapshot(&mut snapshot, &mut stats, &mut origins, max_gaussians)
+            self.densify_snapshot(
+                &mut snapshot,
+                &mut stats,
+                &mut origins,
+                &analysis.infos,
+                max_gaussians,
+            )
         } else {
             0
         };
         let pruned = if should_prune {
-            self.prune_snapshot(&mut snapshot, &mut stats, &mut origins)
+            self.prune_snapshot(&mut snapshot, &mut stats, &mut origins, &analysis.infos)
         } else {
             0
         };
@@ -989,14 +1078,14 @@ impl MetalTrainer {
                     max_gaussians,
                     topology_ms,
                     topology_ratio * 100.0,
-                    max_grad,
-                    mean_grad,
-                    active_grad_stats,
-                    small_scale_stats,
-                    opacity_ready_stats,
-                    clone_candidates,
-                    split_candidates,
-                    prune_candidates,
+                    analysis.max_grad,
+                    analysis.mean_grad,
+                    analysis.active_grad_stats,
+                    analysis.small_scale_stats,
+                    analysis.opacity_ready_stats,
+                    analysis.clone_candidates,
+                    analysis.split_candidates,
+                    analysis.prune_candidates,
                 );
             }
             if guardrail_triggered {
@@ -1041,14 +1130,14 @@ impl MetalTrainer {
             max_gaussians,
             topology_ms,
             topology_ratio * 100.0,
-            active_grad_stats,
-            small_scale_stats,
-            opacity_ready_stats,
-            clone_candidates,
-            split_candidates,
-            prune_candidates,
-            max_grad,
-            mean_grad,
+            analysis.active_grad_stats,
+            analysis.small_scale_stats,
+            analysis.opacity_ready_stats,
+            analysis.clone_candidates,
+            analysis.split_candidates,
+            analysis.prune_candidates,
+            analysis.max_grad,
+            analysis.mean_grad,
         );
         if guardrail_triggered {
             log::warn!(
@@ -1104,6 +1193,7 @@ impl MetalTrainer {
             iteration: 0,
             loss_history: Vec::new(),
             last_step_duration: None,
+            cached_target_frame_idx: None,
         })
     }
 
@@ -1196,7 +1286,8 @@ impl MetalTrainer {
             let should_profile =
                 should_profile_iteration(self.profile_steps, self.profile_interval, iter);
             let step_start = Instant::now();
-            let outcome = self.training_step(gaussians, &frames[frame_idx], should_profile)?;
+            let outcome =
+                self.training_step(gaussians, &frames[frame_idx], frame_idx, should_profile)?;
             self.maybe_apply_topology_updates(gaussians, frames.len())?;
             if should_log {
                 log::info!(
@@ -1226,6 +1317,7 @@ impl MetalTrainer {
         &mut self,
         gaussians: &mut TrainableGaussians,
         frame: &MetalTrainingFrame,
+        frame_idx: usize,
         should_profile: bool,
     ) -> candle_core::Result<MetalStepOutcome> {
         self.iteration += 1;
@@ -1249,6 +1341,15 @@ impl MetalTrainer {
         profile.loss = loss_start.elapsed();
 
         let backward_start = Instant::now();
+        if self.cached_target_frame_idx != Some(frame_idx) {
+            self.runtime.write_target_data(
+                &frame.target_color_cpu,
+                &frame.target_depth_cpu,
+                1.0 / frame.target_color_cpu.len().max(1) as f32,
+                0.1 / frame.target_depth_cpu.len().max(1) as f32,
+            )?;
+            self.cached_target_frame_idx = Some(frame_idx);
+        }
         let backward = super::metal_backward::backward_weighted_l1(
             &mut self.runtime,
             &self.device,
@@ -2807,7 +2908,7 @@ mod tests {
             ..TrainingConfig::default()
         };
         let mut trainer = MetalTrainer::new(32, 16, &trainer_config, device.clone()).unwrap();
-        let cpu_records = vec![
+        let _cpu_records = vec![
             CpuProjectedGaussian {
                 source_idx: 0,
                 u: 8.0,
@@ -2901,7 +3002,7 @@ mod tests {
         )
         .unwrap();
         trainer.runtime.stage_camera(&camera).unwrap();
-        let cpu_records = vec![
+        let _cpu_records = vec![
             CpuProjectedGaussian {
                 source_idx: 0,
                 u: 8.0,
