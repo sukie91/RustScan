@@ -64,23 +64,26 @@ struct TileRecord {
 };
 
 struct ProjectedGaussian {
-    uint source_idx;
-    uint visible;
+    // Hot fields: read every pixel×Gaussian (forward inner loop) — 9 floats = 36 bytes
     float u;
     float v;
     float sigma_x;
     float sigma_y;
-    float raw_sigma_x;
-    float raw_sigma_y;
     float depth;
     float opacity;
+    float color_r;
+    float color_g;
+    float color_b;
+    // Warm fields: used by backward kernel — 9 floats
+    float raw_sigma_x;
+    float raw_sigma_y;
     float opacity_logit;
     float scale_x;
     float scale_y;
     float scale_z;
-    float color_r;
-    float color_g;
-    float color_b;
+    // Cold fields: index/count/tile-binning — 2 uint + 4 floats
+    uint source_idx;
+    uint visible;
     float min_x;
     float max_x;
     float min_y;
@@ -173,23 +176,26 @@ struct BwdTileRecord {
 };
 
 struct BwdProjectedGaussian {
-    uint source_idx;
-    uint visible;
+    // Hot fields: read every pixel×Gaussian — 9 floats = 36 bytes
     float u;
     float v;
     float sigma_x;
     float sigma_y;
-    float raw_sigma_x;
-    float raw_sigma_y;
     float depth;
     float opacity;
+    float color_r;
+    float color_g;
+    float color_b;
+    // Warm fields: used by backward kernel — 9 floats
+    float raw_sigma_x;
+    float raw_sigma_y;
     float opacity_logit;
     float scale_x;
     float scale_y;
     float scale_z;
-    float color_r;
-    float color_g;
-    float color_b;
+    // Cold fields: index/count/tile-binning
+    uint source_idx;
+    uint visible;
     float min_x;
     float max_x;
     float min_y;
@@ -464,23 +470,26 @@ struct ProjectCameraUniform {
 };
 
 struct ProjectionRecord {
-    uint source_idx;
-    uint visible;
+    // Hot fields (forward inner loop)
     float u;
     float v;
     float sigma_x;
     float sigma_y;
-    float raw_sigma_x;
-    float raw_sigma_y;
     float depth;
     float opacity;
+    float color_r;
+    float color_g;
+    float color_b;
+    // Warm fields (backward)
+    float raw_sigma_x;
+    float raw_sigma_y;
     float opacity_logit;
     float scale_x;
     float scale_y;
     float scale_z;
-    float color_r;
-    float color_g;
-    float color_b;
+    // Cold fields (index / tile binning)
+    uint source_idx;
+    uint visible;
     float min_x;
     float max_x;
     float min_y;
@@ -636,12 +645,11 @@ struct CountCameraUniform {
 };
 
 struct CountProjectedGaussian {
-    uint source_idx; uint visible;
     float u; float v; float sigma_x; float sigma_y;
-    float raw_sigma_x; float raw_sigma_y;
-    float depth; float opacity; float opacity_logit;
+    float depth; float opacity; float color_r; float color_g; float color_b;
+    float raw_sigma_x; float raw_sigma_y; float opacity_logit;
     float scale_x; float scale_y; float scale_z;
-    float color_r; float color_g; float color_b;
+    uint source_idx; uint visible;
     float min_x; float max_x; float min_y; float max_y;
 };
 
@@ -682,12 +690,11 @@ struct AssignCameraUniform {
 };
 
 struct AssignProjectedGaussian {
-    uint source_idx; uint visible;
     float u; float v; float sigma_x; float sigma_y;
-    float raw_sigma_x; float raw_sigma_y;
-    float depth; float opacity; float opacity_logit;
+    float depth; float opacity; float color_r; float color_g; float color_b;
+    float raw_sigma_x; float raw_sigma_y; float opacity_logit;
     float scale_x; float scale_y; float scale_z;
-    float color_r; float color_g; float color_b;
+    uint source_idx; uint visible;
     float min_x; float max_x; float min_y; float max_y;
 };
 
@@ -722,23 +729,23 @@ const METAL_FILL_PROJECTION_PADDING_KERNEL: &str = r#"
 using namespace metal;
 
 struct PaddingProjectionRecord {
-    uint source_idx;
-    uint visible;
     float u;
     float v;
     float sigma_x;
     float sigma_y;
-    float raw_sigma_x;
-    float raw_sigma_y;
     float depth;
     float opacity;
+    float color_r;
+    float color_g;
+    float color_b;
+    float raw_sigma_x;
+    float raw_sigma_y;
     float opacity_logit;
     float scale_x;
     float scale_y;
     float scale_z;
-    float color_r;
-    float color_g;
-    float color_b;
+    uint source_idx;
+    uint visible;
     float min_x;
     float max_x;
     float min_y;
@@ -825,23 +832,23 @@ const METAL_BITONIC_SORT_PROJECTIONS_KERNEL: &str = r#"
 using namespace metal;
 
 struct SortProjectionRecord {
-    uint source_idx;
-    uint visible;
     float u;
     float v;
     float sigma_x;
     float sigma_y;
-    float raw_sigma_x;
-    float raw_sigma_y;
     float depth;
     float opacity;
+    float color_r;
+    float color_g;
+    float color_b;
+    float raw_sigma_x;
+    float raw_sigma_y;
     float opacity_logit;
     float scale_x;
     float scale_y;
     float scale_z;
-    float color_r;
-    float color_g;
-    float color_b;
+    uint source_idx;
+    uint visible;
     float min_x;
     float max_x;
     float min_y;
@@ -882,23 +889,23 @@ const METAL_EXTRACT_SOURCE_INDICES_KERNEL: &str = r#"
 using namespace metal;
 
 struct IndexProjectionRecord {
-    uint source_idx;
-    uint visible;
     float u;
     float v;
     float sigma_x;
     float sigma_y;
-    float raw_sigma_x;
-    float raw_sigma_y;
     float depth;
     float opacity;
+    float color_r;
+    float color_g;
+    float color_b;
+    float raw_sigma_x;
+    float raw_sigma_y;
     float opacity_logit;
     float scale_x;
     float scale_y;
     float scale_z;
-    float color_r;
-    float color_g;
-    float color_b;
+    uint source_idx;
+    uint visible;
     float min_x;
     float max_x;
     float min_y;
@@ -1121,23 +1128,26 @@ pub(crate) struct MetalProjectedGaussian {
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct MetalProjectionRecord {
-    pub source_idx: u32,
-    pub visible: u32,
+    // Hot fields (forward inner loop)
     pub u: f32,
     pub v: f32,
     pub sigma_x: f32,
     pub sigma_y: f32,
-    pub raw_sigma_x: f32,
-    pub raw_sigma_y: f32,
     pub depth: f32,
     pub opacity: f32,
+    pub color_r: f32,
+    pub color_g: f32,
+    pub color_b: f32,
+    // Warm fields (backward)
+    pub raw_sigma_x: f32,
+    pub raw_sigma_y: f32,
     pub opacity_logit: f32,
     pub scale_x: f32,
     pub scale_y: f32,
     pub scale_z: f32,
-    pub color_r: f32,
-    pub color_g: f32,
-    pub color_b: f32,
+    // Cold fields (index / tile binning)
+    pub source_idx: u32,
+    pub visible: u32,
     pub min_x: f32,
     pub max_x: f32,
     pub min_y: f32,
