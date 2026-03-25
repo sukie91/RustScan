@@ -42,6 +42,18 @@ struct CameraUniform {
     uint height;
     uint tile_size;
     uint num_tiles_x;
+    float rot00;
+    float rot01;
+    float rot02;
+    float rot10;
+    float rot11;
+    float rot12;
+    float rot20;
+    float rot21;
+    float rot22;
+    float tx;
+    float ty;
+    float tz;
 };
 
 struct TileRecord {
@@ -52,18 +64,27 @@ struct TileRecord {
 };
 
 struct ProjectedGaussian {
+    uint source_idx;
+    uint visible;
     float u;
     float v;
     float sigma_x;
     float sigma_y;
+    float raw_sigma_x;
+    float raw_sigma_y;
     float depth;
     float opacity;
+    float opacity_logit;
+    float scale_x;
+    float scale_y;
+    float scale_z;
     float color_r;
     float color_g;
     float color_b;
-    float _pad0;
-    float _pad1;
-    float _pad2;
+    float min_x;
+    float max_x;
+    float min_y;
+    float max_y;
 };
 
 kernel void tile_forward(
@@ -117,6 +138,757 @@ kernel void tile_forward(
 }
 "#;
 
+const METAL_TILE_BACKWARD_KERNEL: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+struct BwdCameraUniform {
+    float fx;
+    float fy;
+    float cx;
+    float cy;
+    uint width;
+    uint height;
+    uint tile_size;
+    uint num_tiles_x;
+    float rot00;
+    float rot01;
+    float rot02;
+    float rot10;
+    float rot11;
+    float rot12;
+    float rot20;
+    float rot21;
+    float rot22;
+    float tx;
+    float ty;
+    float tz;
+};
+
+struct BwdTileRecord {
+    uint start;
+    uint count;
+    uint _pad0;
+    uint _pad1;
+};
+
+struct BwdProjectedGaussian {
+    uint source_idx;
+    uint visible;
+    float u;
+    float v;
+    float sigma_x;
+    float sigma_y;
+    float raw_sigma_x;
+    float raw_sigma_y;
+    float depth;
+    float opacity;
+    float opacity_logit;
+    float scale_x;
+    float scale_y;
+    float scale_z;
+    float color_r;
+    float color_g;
+    float color_b;
+    float min_x;
+    float max_x;
+    float min_y;
+    float max_y;
+};
+
+struct BwdLossScalars {
+    float color_scale;
+    float depth_scale;
+};
+
+kernel void tile_backward(
+    constant BwdCameraUniform& camera      [[buffer(0)]],
+    device const BwdTileRecord* tile_records [[buffer(1)]],
+    device const uint* tile_indices         [[buffer(2)]],
+    device const BwdProjectedGaussian* gaussians [[buffer(3)]],
+    device const float* rendered_color      [[buffer(4)]],
+    device const float* rendered_depth      [[buffer(5)]],
+    device const float* rendered_alpha      [[buffer(6)]],
+    device const float* target_color        [[buffer(7)]],
+    device const float* target_depth        [[buffer(8)]],
+    device atomic_float* grad_positions     [[buffer(9)]],
+    device atomic_float* grad_log_scales    [[buffer(10)]],
+    device atomic_float* grad_opacity_logits [[buffer(11)]],
+    device atomic_float* grad_colors        [[buffer(12)]],
+    constant BwdLossScalars& loss_scalars   [[buffer(13)]],
+    uint2 gid                               [[thread_position_in_grid]]
+) {
+    if (gid.x >= camera.width || gid.y >= camera.height) return;
+
+    const uint W = camera.width;
+    const uint pixel_idx = gid.y * W + gid.x;
+    const uint c3 = pixel_idx * 3;
+
+    const float px = float(gid.x) + 0.5f;
+    const float py = float(gid.y) + 0.5f;
+
+    const float final_color_r = rendered_color[c3 + 0];
+    const float final_color_g = rendered_color[c3 + 1];
+    const float final_color_b = rendered_color[c3 + 2];
+    const float final_depth = rendered_depth[pixel_idx];
+    const float final_alpha = rendered_alpha[pixel_idx];
+    const float depth_denom = final_alpha + 1e-6f;
+
+    // dL/dC_p from weighted mean-L1
+    const float dc_r = (final_color_r > target_color[c3 + 0]) ? loss_scalars.color_scale
+                      : (final_color_r < target_color[c3 + 0]) ? -loss_scalars.color_scale : 0.0f;
+    const float dc_g = (final_color_g > target_color[c3 + 1]) ? loss_scalars.color_scale
+                      : (final_color_g < target_color[c3 + 1]) ? -loss_scalars.color_scale : 0.0f;
+    const float dc_b = (final_color_b > target_color[c3 + 2]) ? loss_scalars.color_scale
+                      : (final_color_b < target_color[c3 + 2]) ? -loss_scalars.color_scale : 0.0f;
+
+    float dd_depth = 0.0f;
+    if (loss_scalars.depth_scale > 0.0f) {
+        const float depth_diff = final_depth - target_depth[pixel_idx];
+        dd_depth = (depth_diff > 0.0f) ? loss_scalars.depth_scale
+                 : (depth_diff < 0.0f) ? -loss_scalars.depth_scale : 0.0f;
+    }
+
+    // Tile binning
+    const uint tile_x = gid.x / camera.tile_size;
+    const uint tile_y = gid.y / camera.tile_size;
+    const uint tile_idx = tile_y * camera.num_tiles_x + tile_x;
+    const BwdTileRecord record = tile_records[tile_idx];
+
+    // Running state for front-to-back compositing
+    float running_s_r = 0.0f;
+    float running_s_g = 0.0f;
+    float running_s_b = 0.0f;
+    float running_alpha = 0.0f;
+    float running_depth_num = 0.0f;
+
+    for (uint i = 0; i < record.count; ++i) {
+        const uint gidx = tile_indices[record.start + i];
+        const BwdProjectedGaussian g = gaussians[gidx];
+
+        const float dx = (px - g.u) / g.sigma_x;
+        const float dy = (py - g.v) / g.sigma_y;
+        const float exponent = -0.5f * (dx * dx + dy * dy);
+        const float kernel_val = exp(exponent);
+        const float alpha_raw = kernel_val * g.opacity;
+        const float alpha = clamp(alpha_raw, 0.0f, 0.99f);
+        const float contrib = alpha * (1.0f - running_alpha);
+
+        if (contrib <= 1e-8f) {
+            continue;
+        }
+
+        // Remaining color after this gaussian: R_i = C - S_{i-1} - contrib_i * c_i
+        const float r_r = final_color_r - running_s_r - contrib * g.color_r;
+        const float r_g = final_color_g - running_s_g - contrib * g.color_g;
+        const float r_b = final_color_b - running_s_b - contrib * g.color_b;
+
+        const float transmittance = 1.0f - running_alpha;
+        const float inv_one_minus_alpha = 1.0f / max(1.0f - alpha, 1e-6f);
+
+        // dC/dalpha_i = T_i * c_i - R_i / (1 - alpha_i)
+        const float dl_dalpha_color = (transmittance * g.color_r - r_r * inv_one_minus_alpha) * dc_r
+                                    + (transmittance * g.color_g - r_g * inv_one_minus_alpha) * dc_g
+                                    + (transmittance * g.color_b - r_b * inv_one_minus_alpha) * dc_b;
+
+        // Depth gradient
+        const float tail_alpha = final_alpha - running_alpha - contrib;
+        const float tail_depth_num = final_depth * depth_denom - running_depth_num - contrib * g.depth;
+        float dl_dalpha_depth = 0.0f;
+        if (dd_depth != 0.0f) {
+            const float dnum_dalpha = transmittance * g.depth - tail_depth_num * inv_one_minus_alpha;
+            const float dalpha_dalpha = transmittance - tail_alpha * inv_one_minus_alpha;
+            const float ddepth_dalpha = (dnum_dalpha * depth_denom - final_depth * depth_denom * dalpha_dalpha)
+                                      / (depth_denom * depth_denom);
+            dl_dalpha_depth = dd_depth * ddepth_dalpha;
+        }
+
+        const float dl_dalpha_total = dl_dalpha_color + dl_dalpha_depth;
+        const float dl_dz_direct = dd_depth * contrib / depth_denom;
+
+        // Color gradient: dL/dc_i = T_i * alpha_i * dL/dC_p
+        atomic_fetch_add_explicit(&grad_colors[gidx * 3 + 0], contrib * dc_r, memory_order_relaxed);
+        atomic_fetch_add_explicit(&grad_colors[gidx * 3 + 1], contrib * dc_g, memory_order_relaxed);
+        atomic_fetch_add_explicit(&grad_colors[gidx * 3 + 2], contrib * dc_b, memory_order_relaxed);
+
+        // Update running state
+        running_s_r += contrib * g.color_r;
+        running_s_g += contrib * g.color_g;
+        running_s_b += contrib * g.color_b;
+        running_alpha += contrib;
+        running_depth_num += contrib * g.depth;
+
+        // Skip gradients if alpha is clamped
+        if (alpha_raw <= 0.0f || alpha_raw >= 0.99f) {
+            // Still need to update running state (done above), just skip gradient contribution
+            continue;
+        }
+
+        // dL/dbase_alpha = dl_dalpha_total * kernel_val
+        const float dl_dbase_alpha = dl_dalpha_total * kernel_val;
+
+        // dL/dkernel = dl_dalpha_total * opacity
+        const float dl_dkernel = dl_dalpha_total * g.opacity;
+        const float dk_ddx = kernel_val * (-dx);
+        const float dk_ddy = kernel_val * (-dy);
+
+        // Gradient w.r.t. projected position
+        const float dl_du = dl_dkernel * dk_ddx * (-1.0f / g.sigma_x);
+        const float dl_dv = dl_dkernel * dk_ddy * (-1.0f / g.sigma_y);
+
+        // Gradient w.r.t. 2D scale
+        float dl_dsigma_x = 0.0f;
+        float dl_dsigma_y = 0.0f;
+        if (abs(g.sigma_x) >= 0.5f) {
+            dl_dsigma_x = dl_dkernel * dk_ddx * (-dx / g.sigma_x);
+        }
+        if (abs(g.sigma_y) >= 0.5f) {
+            dl_dsigma_y = dl_dkernel * dk_ddy * (-dy / g.sigma_y);
+        }
+
+        // Total depth gradient
+        const float dl_dz = dl_dz_direct;
+
+        // 2D -> 3D chain rule
+        const float inv_z = 1.0f / max(g.depth, 1e-6f);
+
+        atomic_fetch_add_explicit(&grad_positions[gidx * 3 + 0], dl_du * camera.fx * inv_z, memory_order_relaxed);
+        atomic_fetch_add_explicit(&grad_positions[gidx * 3 + 1], dl_dv * camera.fy * inv_z, memory_order_relaxed);
+        const float dl_dz_projected = dl_du * (-(g.u - camera.cx) * inv_z)
+                                    + dl_dv * (-(g.v - camera.cy) * inv_z);
+        atomic_fetch_add_explicit(&grad_positions[gidx * 3 + 2], dl_dz + dl_dz_projected, memory_order_relaxed);
+
+        // Scale gradient
+        if (abs(g.sigma_x) >= 0.5f) {
+            atomic_fetch_add_explicit(&grad_log_scales[gidx * 3 + 0], dl_dsigma_x * camera.fx * inv_z, memory_order_relaxed);
+        }
+        if (abs(g.sigma_y) >= 0.5f) {
+            atomic_fetch_add_explicit(&grad_log_scales[gidx * 3 + 1], dl_dsigma_y * camera.fy * inv_z, memory_order_relaxed);
+        }
+
+        // Opacity gradient: dL/dlogit = dL/dbase_alpha * sigmoid_derivative(logit)
+        // sigmoid_derivative = opacity * (1 - opacity)
+        const float sig_deriv = g.opacity * (1.0f - g.opacity);
+        if (g.opacity >= 0.0f && g.opacity <= 1.0f) {
+            atomic_fetch_add_explicit(&grad_opacity_logits[gidx], dl_dbase_alpha * sig_deriv, memory_order_relaxed);
+        }
+    }
+}
+"#;
+
+const METAL_GRAD_MAGNITUDE_KERNEL: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void grad_magnitudes(
+    device const float* grad_positions [[buffer(0)]],
+    device const float* grad_scales [[buffer(1)]],
+    device const float* grad_opacity [[buffer(2)]],
+    device const float* grad_colors [[buffer(3)]],
+    device float* out_magnitudes [[buffer(4)]],
+    constant uint& gaussian_count [[buffer(5)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid >= gaussian_count) {
+        return;
+    }
+
+    const uint p = gid * 3;
+    float mag = 0.0f;
+    mag += abs(grad_positions[p + 0]);
+    mag += abs(grad_positions[p + 1]);
+    mag += abs(grad_positions[p + 2]);
+    mag += abs(grad_scales[p + 0]);
+    mag += abs(grad_scales[p + 1]);
+    mag += abs(grad_scales[p + 2]);
+    mag += abs(grad_opacity[gid]);
+    mag += abs(grad_colors[p + 0]);
+    mag += abs(grad_colors[p + 1]);
+    mag += abs(grad_colors[p + 2]);
+    out_magnitudes[gid] = mag;
+}
+"#;
+
+const METAL_PROJECT_GAUSSIANS_KERNEL: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+struct ProjectCameraUniform {
+    float fx;
+    float fy;
+    float cx;
+    float cy;
+    uint width;
+    uint height;
+    uint tile_size;
+    uint num_tiles_x;
+    float rot00;
+    float rot01;
+    float rot02;
+    float rot10;
+    float rot11;
+    float rot12;
+    float rot20;
+    float rot21;
+    float rot22;
+    float tx;
+    float ty;
+    float tz;
+};
+
+struct ProjectionRecord {
+    uint source_idx;
+    uint visible;
+    float u;
+    float v;
+    float sigma_x;
+    float sigma_y;
+    float raw_sigma_x;
+    float raw_sigma_y;
+    float depth;
+    float opacity;
+    float opacity_logit;
+    float scale_x;
+    float scale_y;
+    float scale_z;
+    float color_r;
+    float color_g;
+    float color_b;
+    float min_x;
+    float max_x;
+    float min_y;
+    float max_y;
+};
+
+static inline float4 quat_normalize(float4 q) {
+    float n = sqrt(max(dot(q, q), 1e-12f));
+    return q / n;
+}
+
+kernel void project_gaussians(
+    constant ProjectCameraUniform& camera [[buffer(0)]],
+    device const float* positions [[buffer(1)]],
+    device const float* log_scales [[buffer(2)]],
+    device const float* rotations [[buffer(3)]],
+    device const float* opacity_logits [[buffer(4)]],
+    device const float* colors [[buffer(5)]],
+    device ProjectionRecord* out_records [[buffer(6)]],
+    constant uint& gaussian_count [[buffer(7)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid >= gaussian_count) return;
+
+    const uint p = gid * 3;
+    const uint r = gid * 4;
+
+    const float px = positions[p + 0];
+    const float py = positions[p + 1];
+    const float pz = positions[p + 2];
+
+    const float x = camera.rot00 * px + camera.rot01 * py + camera.rot02 * pz + camera.tx;
+    const float y = camera.rot10 * px + camera.rot11 * py + camera.rot12 * pz + camera.ty;
+    const float z = camera.rot20 * px + camera.rot21 * py + camera.rot22 * pz + camera.tz;
+
+    ProjectionRecord rec;
+    rec.source_idx = gid;
+    rec.visible = 0;
+    rec.u = 0.0f; rec.v = 0.0f;
+    rec.sigma_x = 0.0f; rec.sigma_y = 0.0f;
+    rec.raw_sigma_x = 0.0f; rec.raw_sigma_y = 0.0f;
+    rec.depth = z;
+    rec.opacity_logit = opacity_logits[gid];
+    rec.opacity = 1.0f / (1.0f + exp(-rec.opacity_logit));
+    rec.scale_x = exp(log_scales[p + 0]);
+    rec.scale_y = exp(log_scales[p + 1]);
+    rec.scale_z = exp(log_scales[p + 2]);
+    rec.color_r = colors[p + 0];
+    rec.color_g = colors[p + 1];
+    rec.color_b = colors[p + 2];
+    rec.min_x = 0.0f; rec.max_x = 0.0f; rec.min_y = 0.0f; rec.max_y = 0.0f;
+
+    if (!isfinite(z) || z < 1e-4f) {
+        out_records[gid] = rec;
+        return;
+    }
+
+    const float inv_z = 1.0f / max(z, 1e-4f);
+    rec.u = camera.fx * x * inv_z + camera.cx;
+    rec.v = camera.fy * y * inv_z + camera.cy;
+
+    float4 q = quat_normalize(float4(rotations[r + 1], rotations[r + 2], rotations[r + 3], rotations[r + 0]));
+    const float qx = q.x;
+    const float qy = q.y;
+    const float qz = q.z;
+    const float qw = q.w;
+
+    const float r00 = 1.0f - 2.0f * (qy * qy + qz * qz);
+    const float r01 = 2.0f * (qx * qy - qz * qw);
+    const float r02 = 2.0f * (qx * qz + qy * qw);
+    const float r10 = 2.0f * (qx * qy + qz * qw);
+    const float r11 = 1.0f - 2.0f * (qx * qx + qz * qz);
+    const float r12 = 2.0f * (qy * qz - qx * qw);
+    const float r20 = 2.0f * (qx * qz - qy * qw);
+    const float r21 = 2.0f * (qy * qz + qx * qw);
+    const float r22 = 1.0f - 2.0f * (qx * qx + qy * qy);
+
+    const float sxx = rec.scale_x * rec.scale_x;
+    const float syy = rec.scale_y * rec.scale_y;
+    const float szz = rec.scale_z * rec.scale_z;
+
+    // covariance_world = R * diag(s^2) * R^T
+    const float cw00 = r00*r00*sxx + r01*r01*syy + r02*r02*szz;
+    const float cw01 = r00*r10*sxx + r01*r11*syy + r02*r12*szz;
+    const float cw02 = r00*r20*sxx + r01*r21*syy + r02*r22*szz;
+    const float cw11 = r10*r10*sxx + r11*r11*syy + r12*r12*szz;
+    const float cw12 = r10*r20*sxx + r11*r21*syy + r12*r22*szz;
+    const float cw22 = r20*r20*sxx + r21*r21*syy + r22*r22*szz;
+
+    // covariance_camera = C * covariance_world * C^T
+    const float c00 = camera.rot00 * cw00 + camera.rot01 * cw01 + camera.rot02 * cw02;
+    const float c01 = camera.rot00 * cw01 + camera.rot01 * cw11 + camera.rot02 * cw12;
+    const float c02 = camera.rot00 * cw02 + camera.rot01 * cw12 + camera.rot02 * cw22;
+    const float c10 = camera.rot10 * cw00 + camera.rot11 * cw01 + camera.rot12 * cw02;
+    const float c11 = camera.rot10 * cw01 + camera.rot11 * cw11 + camera.rot12 * cw12;
+    const float c12 = camera.rot10 * cw02 + camera.rot11 * cw12 + camera.rot12 * cw22;
+    const float c20 = camera.rot20 * cw00 + camera.rot21 * cw01 + camera.rot22 * cw02;
+    const float c21 = camera.rot20 * cw01 + camera.rot21 * cw11 + camera.rot22 * cw12;
+    const float c22 = camera.rot20 * cw02 + camera.rot21 * cw12 + camera.rot22 * cw22;
+
+    const float cc00 = c00 * camera.rot00 + c01 * camera.rot01 + c02 * camera.rot02;
+    const float cc02 = c00 * camera.rot20 + c01 * camera.rot21 + c02 * camera.rot22;
+    const float cc11 = c10 * camera.rot10 + c11 * camera.rot11 + c12 * camera.rot12;
+    const float cc12 = c10 * camera.rot20 + c11 * camera.rot21 + c12 * camera.rot22;
+    const float cc22 = c20 * camera.rot20 + c21 * camera.rot21 + c22 * camera.rot22;
+
+    const float3 proj_x = float3(camera.fx * inv_z, 0.0f, -camera.fx * x * inv_z * inv_z);
+    const float3 proj_y = float3(0.0f, camera.fy * inv_z, -camera.fy * y * inv_z * inv_z);
+
+    const float cov_x = proj_x.x * (cc00 * proj_x.x + cc02 * proj_x.z)
+                      + proj_x.z * (cc02 * proj_x.x + cc22 * proj_x.z);
+    const float cov_y = proj_y.y * (cc11 * proj_y.y + cc12 * proj_y.z)
+                      + proj_y.z * (cc12 * proj_y.y + cc22 * proj_y.z);
+    rec.raw_sigma_x = sqrt(max(cov_x, 1e-6f));
+    rec.raw_sigma_y = sqrt(max(cov_y, 1e-6f));
+
+    if (!isfinite(rec.raw_sigma_x) || !isfinite(rec.raw_sigma_y)) {
+        out_records[gid] = rec;
+        return;
+    }
+
+    rec.sigma_x = clamp(rec.raw_sigma_x, 0.5f, 256.0f);
+    rec.sigma_y = clamp(rec.raw_sigma_y, 0.5f, 256.0f);
+    const float support_x = rec.sigma_x * 3.0f;
+    const float support_y = rec.sigma_y * 3.0f;
+
+    if (rec.u + support_x < 0.0f || rec.u - support_x > float(camera.width)
+        || rec.v + support_y < 0.0f || rec.v - support_y > float(camera.height)) {
+        out_records[gid] = rec;
+        return;
+    }
+
+    rec.min_x = clamp(rec.u - support_x, 0.0f, float(camera.width - 1));
+    rec.max_x = clamp(rec.u + support_x, 0.0f, float(camera.width - 1));
+    rec.min_y = clamp(rec.v - support_y, 0.0f, float(camera.height - 1));
+    rec.max_y = clamp(rec.v + support_y, 0.0f, float(camera.height - 1));
+    rec.visible = 1;
+    out_records[gid] = rec;
+}
+"#;
+
+const METAL_TILE_COUNT_KERNEL: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+struct CountCameraUniform {
+    float fx; float fy; float cx; float cy;
+    uint width; uint height; uint tile_size; uint num_tiles_x;
+    float rot00; float rot01; float rot02;
+    float rot10; float rot11; float rot12;
+    float rot20; float rot21; float rot22;
+    float tx; float ty; float tz;
+};
+
+struct CountProjectedGaussian {
+    uint source_idx; uint visible;
+    float u; float v; float sigma_x; float sigma_y;
+    float raw_sigma_x; float raw_sigma_y;
+    float depth; float opacity; float opacity_logit;
+    float scale_x; float scale_y; float scale_z;
+    float color_r; float color_g; float color_b;
+    float min_x; float max_x; float min_y; float max_y;
+};
+
+kernel void tile_count(
+    constant CountCameraUniform& camera [[buffer(0)]],
+    device const CountProjectedGaussian* gaussians [[buffer(1)]],
+    device atomic_uint* tile_counts [[buffer(2)]],
+    constant uint& gaussian_count [[buffer(3)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid >= gaussian_count) return;
+    const CountProjectedGaussian g = gaussians[gid];
+    const uint max_tx = (camera.width - 1u) / camera.tile_size;
+    const uint max_ty = (camera.height - 1u) / camera.tile_size;
+    const uint tile_x_min = min((uint)floor(max(g.min_x, 0.0f)) / camera.tile_size, max_tx);
+    const uint tile_x_max = min((uint)ceil(max(g.max_x, 0.0f)) / camera.tile_size, max_tx);
+    const uint tile_y_min = min((uint)floor(max(g.min_y, 0.0f)) / camera.tile_size, max_ty);
+    const uint tile_y_max = min((uint)ceil(max(g.max_y, 0.0f)) / camera.tile_size, max_ty);
+    for (uint ty = tile_y_min; ty <= tile_y_max; ++ty) {
+        for (uint tx = tile_x_min; tx <= tile_x_max; ++tx) {
+            atomic_fetch_add_explicit(&tile_counts[ty * camera.num_tiles_x + tx], 1u, memory_order_relaxed);
+        }
+    }
+}
+"#;
+
+const METAL_TILE_ASSIGN_KERNEL: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+struct AssignCameraUniform {
+    float fx; float fy; float cx; float cy;
+    uint width; uint height; uint tile_size; uint num_tiles_x;
+    float rot00; float rot01; float rot02;
+    float rot10; float rot11; float rot12;
+    float rot20; float rot21; float rot22;
+    float tx; float ty; float tz;
+};
+
+struct AssignProjectedGaussian {
+    uint source_idx; uint visible;
+    float u; float v; float sigma_x; float sigma_y;
+    float raw_sigma_x; float raw_sigma_y;
+    float depth; float opacity; float opacity_logit;
+    float scale_x; float scale_y; float scale_z;
+    float color_r; float color_g; float color_b;
+    float min_x; float max_x; float min_y; float max_y;
+};
+
+kernel void tile_assign(
+    constant AssignCameraUniform& camera [[buffer(0)]],
+    device const AssignProjectedGaussian* gaussians [[buffer(1)]],
+    device atomic_uint* tile_offsets [[buffer(2)]],
+    device uint* tile_indices [[buffer(3)]],
+    constant uint& gaussian_count [[buffer(4)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid >= gaussian_count) return;
+    const AssignProjectedGaussian g = gaussians[gid];
+    const uint max_tx = (camera.width - 1u) / camera.tile_size;
+    const uint max_ty = (camera.height - 1u) / camera.tile_size;
+    const uint tile_x_min = min((uint)floor(max(g.min_x, 0.0f)) / camera.tile_size, max_tx);
+    const uint tile_x_max = min((uint)ceil(max(g.max_x, 0.0f)) / camera.tile_size, max_tx);
+    const uint tile_y_min = min((uint)floor(max(g.min_y, 0.0f)) / camera.tile_size, max_ty);
+    const uint tile_y_max = min((uint)ceil(max(g.max_y, 0.0f)) / camera.tile_size, max_ty);
+    for (uint ty = tile_y_min; ty <= tile_y_max; ++ty) {
+        for (uint tx = tile_x_min; tx <= tile_x_max; ++tx) {
+            const uint tile_idx = ty * camera.num_tiles_x + tx;
+            const uint write_idx = atomic_fetch_add_explicit(&tile_offsets[tile_idx], 1u, memory_order_relaxed);
+            tile_indices[write_idx] = gid;
+        }
+    }
+}
+"#;
+
+const METAL_FILL_PROJECTION_PADDING_KERNEL: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+struct PaddingProjectionRecord {
+    uint source_idx;
+    uint visible;
+    float u;
+    float v;
+    float sigma_x;
+    float sigma_y;
+    float raw_sigma_x;
+    float raw_sigma_y;
+    float depth;
+    float opacity;
+    float opacity_logit;
+    float scale_x;
+    float scale_y;
+    float scale_z;
+    float color_r;
+    float color_g;
+    float color_b;
+    float min_x;
+    float max_x;
+    float min_y;
+    float max_y;
+};
+
+kernel void fill_projection_padding(
+    device PaddingProjectionRecord* records [[buffer(0)]],
+    constant uint& start_idx [[buffer(1)]],
+    constant uint& total_count [[buffer(2)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    const uint idx = start_idx + gid;
+    if (idx >= total_count) return;
+    PaddingProjectionRecord rec;
+    rec.source_idx = 0;
+    rec.visible = 0;
+    rec.u = 0.0f;
+    rec.v = 0.0f;
+    rec.sigma_x = 0.0f;
+    rec.sigma_y = 0.0f;
+    rec.raw_sigma_x = 0.0f;
+    rec.raw_sigma_y = 0.0f;
+    rec.depth = INFINITY;
+    rec.opacity = 0.0f;
+    rec.opacity_logit = 0.0f;
+    rec.scale_x = 0.0f;
+    rec.scale_y = 0.0f;
+    rec.scale_z = 0.0f;
+    rec.color_r = 0.0f;
+    rec.color_g = 0.0f;
+    rec.color_b = 0.0f;
+    rec.min_x = 0.0f;
+    rec.max_x = 0.0f;
+    rec.min_y = 0.0f;
+    rec.max_y = 0.0f;
+    records[idx] = rec;
+}
+"#;
+
+const METAL_COUNT_VISIBLE_KERNEL: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+struct CountProjectionRecord {
+    uint source_idx;
+    uint visible;
+    float u;
+    float v;
+    float sigma_x;
+    float sigma_y;
+    float raw_sigma_x;
+    float raw_sigma_y;
+    float depth;
+    float opacity;
+    float opacity_logit;
+    float scale_x;
+    float scale_y;
+    float scale_z;
+    float color_r;
+    float color_g;
+    float color_b;
+    float min_x;
+    float max_x;
+    float min_y;
+    float max_y;
+};
+
+kernel void count_visible(
+    device const CountProjectionRecord* records [[buffer(0)]],
+    device atomic_uint* visible_count [[buffer(1)]],
+    constant uint& record_count [[buffer(2)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid >= record_count) return;
+    if (records[gid].visible != 0u) {
+        atomic_fetch_add_explicit(&visible_count[0], 1u, memory_order_relaxed);
+    }
+}
+"#;
+
+const METAL_BITONIC_SORT_PROJECTIONS_KERNEL: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+struct SortProjectionRecord {
+    uint source_idx;
+    uint visible;
+    float u;
+    float v;
+    float sigma_x;
+    float sigma_y;
+    float raw_sigma_x;
+    float raw_sigma_y;
+    float depth;
+    float opacity;
+    float opacity_logit;
+    float scale_x;
+    float scale_y;
+    float scale_z;
+    float color_r;
+    float color_g;
+    float color_b;
+    float min_x;
+    float max_x;
+    float min_y;
+    float max_y;
+};
+
+static inline bool projection_less(SortProjectionRecord a, SortProjectionRecord b) {
+    if (a.visible != b.visible) return a.visible > b.visible;
+    if (a.depth != b.depth) return a.depth < b.depth;
+    return a.source_idx < b.source_idx;
+}
+
+kernel void bitonic_sort_projections(
+    device SortProjectionRecord* records [[buffer(0)]],
+    constant uint& stage_j [[buffer(1)]],
+    constant uint& stage_k [[buffer(2)]],
+    constant uint& total_count [[buffer(3)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid >= total_count) return;
+    const uint ixj = gid ^ stage_j;
+    if (ixj <= gid || ixj >= total_count) return;
+
+    const bool ascending = ((gid & stage_k) == 0u);
+    const SortProjectionRecord a = records[gid];
+    const SortProjectionRecord b = records[ixj];
+    const bool a_less_b = projection_less(a, b);
+
+    if ((ascending && !a_less_b) || (!ascending && a_less_b)) {
+        records[gid] = b;
+        records[ixj] = a;
+    }
+}
+"#;
+
+const METAL_EXTRACT_SOURCE_INDICES_KERNEL: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+struct IndexProjectionRecord {
+    uint source_idx;
+    uint visible;
+    float u;
+    float v;
+    float sigma_x;
+    float sigma_y;
+    float raw_sigma_x;
+    float raw_sigma_y;
+    float depth;
+    float opacity;
+    float opacity_logit;
+    float scale_x;
+    float scale_y;
+    float scale_z;
+    float color_r;
+    float color_g;
+    float color_b;
+    float min_x;
+    float max_x;
+    float min_y;
+    float max_y;
+};
+
+kernel void extract_source_indices(
+    device const IndexProjectionRecord* records [[buffer(0)]],
+    device uint* out_indices [[buffer(1)]],
+    constant uint& count [[buffer(2)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid >= count) return;
+    out_indices[gid] = records[gid].source_idx;
+}
+"#;
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ScreenRect {
     pub min_x: usize,
@@ -143,6 +915,18 @@ struct MetalCameraUniform {
     height: u32,
     tile_size: u32,
     num_tiles_x: u32,
+    rot00: f32,
+    rot01: f32,
+    rot02: f32,
+    rot10: f32,
+    rot11: f32,
+    rot12: f32,
+    rot20: f32,
+    rot21: f32,
+    rot22: f32,
+    tx: f32,
+    ty: f32,
+    tz: f32,
 }
 
 #[repr(C)]
@@ -233,9 +1017,36 @@ pub(crate) struct MetalProjectedGaussian {
     pub color_r: f32,
     pub color_g: f32,
     pub color_b: f32,
-    _pad0: f32,
-    _pad1: f32,
-    _pad2: f32,
+    pub min_x: f32,
+    pub max_x: f32,
+    pub min_y: f32,
+    pub max_y: f32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct MetalProjectionRecord {
+    pub source_idx: u32,
+    pub visible: u32,
+    pub u: f32,
+    pub v: f32,
+    pub sigma_x: f32,
+    pub sigma_y: f32,
+    pub raw_sigma_x: f32,
+    pub raw_sigma_y: f32,
+    pub depth: f32,
+    pub opacity: f32,
+    pub opacity_logit: f32,
+    pub scale_x: f32,
+    pub scale_y: f32,
+    pub scale_z: f32,
+    pub color_r: f32,
+    pub color_g: f32,
+    pub color_b: f32,
+    pub min_x: f32,
+    pub max_x: f32,
+    pub min_y: f32,
+    pub max_y: f32,
 }
 
 impl MetalProjectedGaussian {
@@ -249,6 +1060,10 @@ impl MetalProjectedGaussian {
         color_r: f32,
         color_g: f32,
         color_b: f32,
+        min_x: f32,
+        max_x: f32,
+        min_y: f32,
+        max_y: f32,
     ) -> Self {
         Self {
             u,
@@ -260,7 +1075,10 @@ impl MetalProjectedGaussian {
             color_r,
             color_g,
             color_b,
-            ..Default::default()
+            min_x,
+            max_x,
+            min_y,
+            max_y,
         }
     }
 }
@@ -269,6 +1087,18 @@ pub(crate) struct NativeForwardFrame {
     pub color: Tensor,
     pub depth: Tensor,
     pub alpha: Tensor,
+}
+
+pub(crate) struct NativeBackwardFrame {
+    pub grad_positions: Tensor,
+    pub grad_log_scales: Tensor,
+    pub grad_opacity_logits: Tensor,
+    pub grad_colors: Tensor,
+}
+
+pub(crate) struct ProjectedGpuBatch {
+    pub visible_count: usize,
+    pub visible_source_indices: Vec<u32>,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -288,6 +1118,8 @@ pub(crate) enum MetalBufferSlot {
     TileMetadata,
     TileIndices,
     ProjectedGaussians,
+    ProjectionRecords,
+    VisibleSourceIndices,
     GradPositions,
     GradRotations,
     GradScales,
@@ -296,6 +1128,11 @@ pub(crate) enum MetalBufferSlot {
     OutputColor,
     OutputDepth,
     OutputAlpha,
+    TargetColor,
+    TargetDepth,
+    LossScalars,
+    GradMagnitudes,
+    VisibleCount,
 }
 
 impl MetalBufferSlot {
@@ -308,6 +1145,8 @@ impl MetalBufferSlot {
             Self::TileMetadata => "tile_metadata",
             Self::TileIndices => "tile_indices",
             Self::ProjectedGaussians => "projected_gaussians",
+            Self::ProjectionRecords => "projection_records",
+            Self::VisibleSourceIndices => "visible_source_indices",
             Self::GradPositions => "grad_positions",
             Self::GradRotations => "grad_rotations",
             Self::GradScales => "grad_scales",
@@ -316,6 +1155,11 @@ impl MetalBufferSlot {
             Self::OutputColor => "output_color",
             Self::OutputDepth => "output_depth",
             Self::OutputAlpha => "output_alpha",
+            Self::TargetColor => "target_color",
+            Self::TargetDepth => "target_depth",
+            Self::LossScalars => "loss_scalars",
+            Self::GradMagnitudes => "grad_magnitudes",
+            Self::VisibleCount => "visible_count",
         }
     }
 }
@@ -323,21 +1167,48 @@ impl MetalBufferSlot {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum MetalKernel {
     FillU32,
+    ProjectGaussians,
+    TileCount,
+    TileAssign,
+    FillProjectionPadding,
+    CountVisible,
+    BitonicSortProjections,
+    ExtractSourceIndices,
     TileForward,
+    TileBackward,
+    GradMagnitudes,
 }
 
 impl MetalKernel {
     fn function_name(self) -> &'static str {
         match self {
             Self::FillU32 => "fill_u32",
+            Self::ProjectGaussians => "project_gaussians",
+            Self::TileCount => "tile_count",
+            Self::TileAssign => "tile_assign",
+            Self::FillProjectionPadding => "fill_projection_padding",
+            Self::CountVisible => "count_visible",
+            Self::BitonicSortProjections => "bitonic_sort_projections",
+            Self::ExtractSourceIndices => "extract_source_indices",
             Self::TileForward => "tile_forward",
+            Self::TileBackward => "tile_backward",
+            Self::GradMagnitudes => "grad_magnitudes",
         }
     }
 
     fn source(self) -> &'static str {
         match self {
             Self::FillU32 => METAL_FILL_U32_KERNEL,
+            Self::ProjectGaussians => METAL_PROJECT_GAUSSIANS_KERNEL,
+            Self::TileCount => METAL_TILE_COUNT_KERNEL,
+            Self::TileAssign => METAL_TILE_ASSIGN_KERNEL,
+            Self::FillProjectionPadding => METAL_FILL_PROJECTION_PADDING_KERNEL,
+            Self::CountVisible => METAL_COUNT_VISIBLE_KERNEL,
+            Self::BitonicSortProjections => METAL_BITONIC_SORT_PROJECTIONS_KERNEL,
+            Self::ExtractSourceIndices => METAL_EXTRACT_SOURCE_INDICES_KERNEL,
             Self::TileForward => METAL_TILE_FORWARD_KERNEL,
+            Self::TileBackward => METAL_TILE_BACKWARD_KERNEL,
+            Self::GradMagnitudes => METAL_GRAD_MAGNITUDE_KERNEL,
         }
     }
 }
@@ -552,6 +1423,18 @@ impl MetalRuntime {
             height: camera.height as u32,
             tile_size: METAL_TILE_SIZE as u32,
             num_tiles_x: self.num_tiles_x as u32,
+            rot00: camera.rotation[0][0],
+            rot01: camera.rotation[0][1],
+            rot02: camera.rotation[0][2],
+            rot10: camera.rotation[1][0],
+            rot11: camera.rotation[1][1],
+            rot12: camera.rotation[1][2],
+            rot20: camera.rotation[2][0],
+            rot21: camera.rotation[2][1],
+            rot22: camera.rotation[2][2],
+            tx: camera.translation[0],
+            ty: camera.translation[1],
+            tz: camera.translation[2],
         };
         self.write_struct(MetalBufferSlot::CameraUniforms, &camera_uniform)
     }
@@ -588,6 +1471,285 @@ impl MetalRuntime {
             opacities: self.bind_tensor(gaussians.opacities.as_tensor())?,
             colors: self.bind_tensor(gaussians.colors())?,
         })
+    }
+
+    pub(crate) fn project_gaussians(
+        &mut self,
+        gaussians: &TrainableGaussians,
+        extract_visible_source_indices: bool,
+    ) -> candle_core::Result<ProjectedGpuBatch> {
+        let gaussian_count = gaussians.len();
+        if gaussian_count == 0 {
+            return Ok(ProjectedGpuBatch {
+                visible_count: 0,
+                visible_source_indices: Vec::new(),
+            });
+        }
+        let padded_count = gaussian_count.next_power_of_two();
+        self.ensure_buffer(
+            MetalBufferSlot::ProjectionRecords,
+            padded_count.saturating_mul(size_of::<MetalProjectionRecord>()),
+        )?;
+        self.ensure_buffer(MetalBufferSlot::VisibleCount, size_of::<u32>())?;
+        let pipeline = self.ensure_pipeline(MetalKernel::ProjectGaussians)?.clone();
+        let bindings = self.bind_gaussians(gaussians)?;
+        let metal = self.device.as_metal_device()?.clone();
+        let encoder = metal.command_encoder()?;
+        encoder.set_label(MetalKernel::ProjectGaussians.function_name());
+        encoder.set_compute_pipeline_state(&pipeline);
+        encoder.set_buffer(
+            0,
+            self.buffer_handle(MetalBufferSlot::CameraUniforms)?
+                .map(|buffer| buffer.as_ref()),
+            0,
+        );
+        encoder.set_buffer(
+            1,
+            Some(bindings.positions.buffer()?),
+            bindings.positions.byte_offset(),
+        );
+        encoder.set_buffer(
+            2,
+            Some(bindings.scales.buffer()?),
+            bindings.scales.byte_offset(),
+        );
+        encoder.set_buffer(
+            3,
+            Some(bindings.rotations.buffer()?),
+            bindings.rotations.byte_offset(),
+        );
+        encoder.set_buffer(
+            4,
+            Some(bindings.opacities.buffer()?),
+            bindings.opacities.byte_offset(),
+        );
+        encoder.set_buffer(
+            5,
+            Some(bindings.colors.buffer()?),
+            bindings.colors.byte_offset(),
+        );
+        encoder.set_buffer(
+            6,
+            Some(
+                self.buffer_handle(MetalBufferSlot::ProjectionRecords)?
+                    .ok_or_else(|| candle_core::Error::Msg("missing projection records".into()))?
+                    .as_ref(),
+            ),
+            0,
+        );
+        let count = gaussian_count as u32;
+        encoder.set_bytes(7, &count);
+        let threads_per_group = pipeline
+            .max_total_threads_per_threadgroup()
+            .min(gaussian_count)
+            .max(1);
+        encoder.dispatch_threads(
+            MTLSize {
+                width: gaussian_count,
+                height: 1,
+                depth: 1,
+            },
+            MTLSize {
+                width: threads_per_group,
+                height: 1,
+                depth: 1,
+            },
+        );
+        drop(encoder);
+        self.device.synchronize()?;
+
+        if padded_count > gaussian_count {
+            let pipeline = self
+                .ensure_pipeline(MetalKernel::FillProjectionPadding)?
+                .clone();
+            let encoder = metal.command_encoder()?;
+            encoder.set_label(MetalKernel::FillProjectionPadding.function_name());
+            encoder.set_compute_pipeline_state(&pipeline);
+            encoder.set_buffer(
+                0,
+                self.buffer_handle(MetalBufferSlot::ProjectionRecords)?
+                    .map(|buffer| buffer.as_ref()),
+                0,
+            );
+            let start_idx = gaussian_count as u32;
+            let total_count = padded_count as u32;
+            encoder.set_bytes(1, &start_idx);
+            encoder.set_bytes(2, &total_count);
+            let padding_count = padded_count - gaussian_count;
+            let threads_per_group = pipeline
+                .max_total_threads_per_threadgroup()
+                .min(padding_count)
+                .max(1);
+            encoder.dispatch_threads(
+                MTLSize {
+                    width: padding_count,
+                    height: 1,
+                    depth: 1,
+                },
+                MTLSize {
+                    width: threads_per_group,
+                    height: 1,
+                    depth: 1,
+                },
+            );
+            drop(encoder);
+            self.device.synchronize()?;
+        }
+
+        let sort_pipeline = self
+            .ensure_pipeline(MetalKernel::BitonicSortProjections)?
+            .clone();
+        let metal = self.device.as_metal_device()?.clone();
+        let total_count = padded_count as u32;
+        let mut k = 2usize;
+        while k <= padded_count {
+            let mut j = k >> 1;
+            while j > 0 {
+                let encoder = metal.command_encoder()?;
+                encoder.set_label(MetalKernel::BitonicSortProjections.function_name());
+                encoder.set_compute_pipeline_state(&sort_pipeline);
+                encoder.set_buffer(
+                    0,
+                    self.buffer_handle(MetalBufferSlot::ProjectionRecords)?
+                        .map(|buffer| buffer.as_ref()),
+                    0,
+                );
+                let stage_j = j as u32;
+                let stage_k = k as u32;
+                encoder.set_bytes(1, &stage_j);
+                encoder.set_bytes(2, &stage_k);
+                encoder.set_bytes(3, &total_count);
+                let threads_per_group = sort_pipeline
+                    .max_total_threads_per_threadgroup()
+                    .min(padded_count)
+                    .max(1);
+                encoder.dispatch_threads(
+                    MTLSize {
+                        width: padded_count,
+                        height: 1,
+                        depth: 1,
+                    },
+                    MTLSize {
+                        width: threads_per_group,
+                        height: 1,
+                        depth: 1,
+                    },
+                );
+                drop(encoder);
+                self.device.synchronize()?;
+                j >>= 1;
+            }
+            k <<= 1;
+        }
+
+        self.dispatch_fill_u32(MetalBufferSlot::VisibleCount, 0, 1)?;
+        let pipeline = self.ensure_pipeline(MetalKernel::CountVisible)?.clone();
+        let encoder = metal.command_encoder()?;
+        encoder.set_label(MetalKernel::CountVisible.function_name());
+        encoder.set_compute_pipeline_state(&pipeline);
+        encoder.set_buffer(
+            0,
+            self.buffer_handle(MetalBufferSlot::ProjectionRecords)?
+                .map(|buffer| buffer.as_ref()),
+            0,
+        );
+        encoder.set_buffer(
+            1,
+            self.buffer_handle(MetalBufferSlot::VisibleCount)?
+                .map(|buffer| buffer.as_ref()),
+            0,
+        );
+        let record_count = gaussian_count as u32;
+        encoder.set_bytes(2, &record_count);
+        let threads_per_group = pipeline
+            .max_total_threads_per_threadgroup()
+            .min(gaussian_count)
+            .max(1);
+        encoder.dispatch_threads(
+            MTLSize {
+                width: gaussian_count,
+                height: 1,
+                depth: 1,
+            },
+            MTLSize {
+                width: threads_per_group,
+                height: 1,
+                depth: 1,
+            },
+        );
+        drop(encoder);
+        self.device.synchronize()?;
+
+        let visible_count = self.read_buffer_structs::<u32>(MetalBufferSlot::VisibleCount, 1)?;
+        let visible_count = visible_count.first().copied().unwrap_or(0) as usize;
+        let visible_source_indices = if extract_visible_source_indices && visible_count > 0 {
+            self.ensure_buffer(
+                MetalBufferSlot::VisibleSourceIndices,
+                visible_count.saturating_mul(size_of::<u32>()),
+            )?;
+            let pipeline = self
+                .ensure_pipeline(MetalKernel::ExtractSourceIndices)?
+                .clone();
+            let encoder = metal.command_encoder()?;
+            encoder.set_label(MetalKernel::ExtractSourceIndices.function_name());
+            encoder.set_compute_pipeline_state(&pipeline);
+            encoder.set_buffer(
+                0,
+                self.buffer_handle(MetalBufferSlot::ProjectionRecords)?
+                    .map(|buffer| buffer.as_ref()),
+                0,
+            );
+            encoder.set_buffer(
+                1,
+                self.buffer_handle(MetalBufferSlot::VisibleSourceIndices)?
+                    .map(|buffer| buffer.as_ref()),
+                0,
+            );
+            let count = visible_count as u32;
+            encoder.set_bytes(2, &count);
+            let threads_per_group = pipeline
+                .max_total_threads_per_threadgroup()
+                .min(visible_count)
+                .max(1);
+            encoder.dispatch_threads(
+                MTLSize {
+                    width: visible_count,
+                    height: 1,
+                    depth: 1,
+                },
+                MTLSize {
+                    width: threads_per_group,
+                    height: 1,
+                    depth: 1,
+                },
+            );
+            drop(encoder);
+            self.device.synchronize()?;
+            self.read_buffer_structs::<u32>(MetalBufferSlot::VisibleSourceIndices, visible_count)?
+        } else {
+            Vec::new()
+        };
+        Ok(ProjectedGpuBatch {
+            visible_count,
+            visible_source_indices,
+        })
+    }
+
+    pub(crate) fn ensure_projection_record_buffer(
+        &mut self,
+        count: usize,
+    ) -> candle_core::Result<()> {
+        self.ensure_buffer(
+            MetalBufferSlot::ProjectionRecords,
+            count.saturating_mul(size_of::<MetalProjectionRecord>()),
+        )
+    }
+
+    pub(crate) fn write_projection_records(
+        &mut self,
+        records: &[MetalProjectionRecord],
+    ) -> candle_core::Result<()> {
+        self.write_slice(MetalBufferSlot::ProjectionRecords, records)
     }
 
     pub(crate) fn build_tile_bins(
@@ -661,6 +1823,151 @@ impl MetalRuntime {
         })
     }
 
+    pub(crate) fn build_tile_bins_gpu(
+        &mut self,
+        gaussian_count: usize,
+    ) -> candle_core::Result<MetalTileBins> {
+        let tile_count = self.num_tiles_x.saturating_mul(self.num_tiles_y);
+        if gaussian_count == 0 {
+            return Ok(MetalTileBins::default());
+        }
+        self.ensure_buffer(
+            MetalBufferSlot::TileCounts,
+            tile_count.saturating_mul(size_of::<u32>()),
+        )?;
+        self.dispatch_fill_u32(MetalBufferSlot::TileCounts, 0, tile_count)?;
+
+        let count_pipeline = self.ensure_pipeline(MetalKernel::TileCount)?.clone();
+        let metal = self.device.as_metal_device()?.clone();
+        let encoder = metal.command_encoder()?;
+        encoder.set_label(MetalKernel::TileCount.function_name());
+        encoder.set_compute_pipeline_state(&count_pipeline);
+        encoder.set_buffer(
+            0,
+            self.buffer_handle(MetalBufferSlot::CameraUniforms)?
+                .map(|b| b.as_ref()),
+            0,
+        );
+        encoder.set_buffer(
+            1,
+            self.buffer_handle(MetalBufferSlot::ProjectionRecords)?
+                .map(|b| b.as_ref()),
+            0,
+        );
+        encoder.set_buffer(
+            2,
+            self.buffer_handle(MetalBufferSlot::TileCounts)?
+                .map(|b| b.as_ref()),
+            0,
+        );
+        let count = gaussian_count as u32;
+        encoder.set_bytes(3, &count);
+        let threads_per_group = count_pipeline
+            .max_total_threads_per_threadgroup()
+            .min(gaussian_count)
+            .max(1);
+        encoder.dispatch_threads(
+            MTLSize {
+                width: gaussian_count,
+                height: 1,
+                depth: 1,
+            },
+            MTLSize {
+                width: threads_per_group,
+                height: 1,
+                depth: 1,
+            },
+        );
+        drop(encoder);
+        self.device.synchronize()?;
+
+        let tile_counts_u32 =
+            self.read_buffer_structs::<u32>(MetalBufferSlot::TileCounts, tile_count)?;
+        let mut records = Vec::with_capacity(tile_count);
+        let mut active_tiles = Vec::new();
+        let mut max_gaussians_per_tile = 0usize;
+        let mut start = 0usize;
+        for (tile_idx, count) in tile_counts_u32.iter().copied().enumerate() {
+            let count_usize = count as usize;
+            records.push(MetalTileDispatchRecord::new(start as u32, count));
+            if count_usize > 0 {
+                active_tiles.push(tile_idx);
+                max_gaussians_per_tile = max_gaussians_per_tile.max(count_usize);
+            }
+            start += count_usize;
+        }
+        let total_assignments = start;
+        self.ensure_buffer(
+            MetalBufferSlot::TileIndices,
+            total_assignments.saturating_mul(size_of::<u32>()),
+        )?;
+        self.ensure_buffer(
+            MetalBufferSlot::TileOffsets,
+            tile_count.saturating_mul(size_of::<u32>()),
+        )?;
+        let offsets: Vec<u32> = records.iter().map(|record| record.start as u32).collect();
+        self.write_slice(MetalBufferSlot::TileOffsets, &offsets)?;
+
+        let assign_pipeline = self.ensure_pipeline(MetalKernel::TileAssign)?.clone();
+        let metal = self.device.as_metal_device()?.clone();
+        let encoder = metal.command_encoder()?;
+        encoder.set_label(MetalKernel::TileAssign.function_name());
+        encoder.set_compute_pipeline_state(&assign_pipeline);
+        encoder.set_buffer(
+            0,
+            self.buffer_handle(MetalBufferSlot::CameraUniforms)?
+                .map(|b| b.as_ref()),
+            0,
+        );
+        encoder.set_buffer(
+            1,
+            self.buffer_handle(MetalBufferSlot::ProjectionRecords)?
+                .map(|b| b.as_ref()),
+            0,
+        );
+        encoder.set_buffer(
+            2,
+            self.buffer_handle(MetalBufferSlot::TileOffsets)?
+                .map(|b| b.as_ref()),
+            0,
+        );
+        encoder.set_buffer(
+            3,
+            self.buffer_handle(MetalBufferSlot::TileIndices)?
+                .map(|b| b.as_ref()),
+            0,
+        );
+        encoder.set_bytes(4, &count);
+        let threads_per_group = assign_pipeline
+            .max_total_threads_per_threadgroup()
+            .min(gaussian_count)
+            .max(1);
+        encoder.dispatch_threads(
+            MTLSize {
+                width: gaussian_count,
+                height: 1,
+                depth: 1,
+            },
+            MTLSize {
+                width: threads_per_group,
+                height: 1,
+                depth: 1,
+            },
+        );
+        drop(encoder);
+        self.device.synchronize()?;
+        let packed_indices =
+            self.read_buffer_structs::<u32>(MetalBufferSlot::TileIndices, total_assignments)?;
+
+        Ok(MetalTileBins {
+            records,
+            active_tiles,
+            packed_indices,
+            total_assignments,
+            max_gaussians_per_tile,
+        })
+    }
+
     pub(crate) fn reserve_forward_buffers(
         &mut self,
         gaussian_count: usize,
@@ -700,7 +2007,7 @@ impl MetalRuntime {
 
     pub(crate) fn rasterize_forward(
         &mut self,
-        gaussians: &[MetalProjectedGaussian],
+        gaussian_count: usize,
         tile_bins: &MetalTileBins,
         render_width: usize,
         render_height: usize,
@@ -708,7 +2015,7 @@ impl MetalRuntime {
         let total_start = std::time::Instant::now();
         let pixel_count = render_width.saturating_mul(render_height);
         let setup_start = std::time::Instant::now();
-        self.reserve_forward_buffers(gaussians.len(), tile_bins.total_assignments(), pixel_count)?;
+        self.reserve_forward_buffers(gaussian_count, tile_bins.total_assignments(), pixel_count)?;
         let pipeline = self.ensure_pipeline(MetalKernel::TileForward)?.clone();
         let color_buffer = self
             .buffer_handle(MetalBufferSlot::OutputColor)?
@@ -731,13 +2038,12 @@ impl MetalRuntime {
             .cloned()
             .ok_or_else(|| candle_core::Error::Msg("missing tile index buffer".into()))?;
         let gaussian_buffer = self
-            .buffer_handle(MetalBufferSlot::ProjectedGaussians)?
+            .buffer_handle(MetalBufferSlot::ProjectionRecords)?
             .cloned()
             .ok_or_else(|| candle_core::Error::Msg("missing gaussian buffer".into()))?;
         let setup = setup_start.elapsed();
 
         let staging_start = std::time::Instant::now();
-        self.write_slice(MetalBufferSlot::ProjectedGaussians, gaussians)?;
         self.write_slice(MetalBufferSlot::TileMetadata, tile_bins.records())?;
         self.write_slice(MetalBufferSlot::TileIndices, tile_bins.packed_indices())?;
         let staging = staging_start.elapsed();
@@ -802,6 +2108,395 @@ impl MetalRuntime {
                 total: total_start.elapsed(),
             },
         ))
+    }
+
+    pub(crate) fn reserve_backward_buffers(
+        &mut self,
+        gaussian_count: usize,
+        pixel_count: usize,
+    ) -> candle_core::Result<()> {
+        self.ensure_buffer(
+            MetalBufferSlot::TargetColor,
+            pixel_count
+                .saturating_mul(3)
+                .saturating_mul(size_of::<f32>()),
+        )?;
+        self.ensure_buffer(
+            MetalBufferSlot::TargetDepth,
+            pixel_count.saturating_mul(size_of::<f32>()),
+        )?;
+        self.ensure_buffer(MetalBufferSlot::LossScalars, 2 * size_of::<f32>())?;
+        self.ensure_buffer(
+            MetalBufferSlot::GradPositions,
+            gaussian_count
+                .saturating_mul(3)
+                .saturating_mul(size_of::<f32>()),
+        )?;
+        self.ensure_buffer(
+            MetalBufferSlot::GradScales,
+            gaussian_count
+                .saturating_mul(3)
+                .saturating_mul(size_of::<f32>()),
+        )?;
+        self.ensure_buffer(
+            MetalBufferSlot::GradOpacity,
+            gaussian_count.saturating_mul(size_of::<f32>()),
+        )?;
+        self.ensure_buffer(
+            MetalBufferSlot::GradColors,
+            gaussian_count
+                .saturating_mul(3)
+                .saturating_mul(size_of::<f32>()),
+        )?;
+        self.ensure_buffer(
+            MetalBufferSlot::GradMagnitudes,
+            gaussian_count.saturating_mul(size_of::<f32>()),
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn write_target_data(
+        &mut self,
+        target_color: &[f32],
+        target_depth: &[f32],
+        color_scale: f32,
+        depth_scale: f32,
+    ) -> candle_core::Result<()> {
+        self.write_slice(MetalBufferSlot::TargetColor, target_color)?;
+        self.write_slice(MetalBufferSlot::TargetDepth, target_depth)?;
+        #[repr(C)]
+        #[derive(Clone, Copy)]
+        struct LossScalars {
+            color: f32,
+            depth: f32,
+        }
+        self.write_struct(
+            MetalBufferSlot::LossScalars,
+            &LossScalars {
+                color: color_scale,
+                depth: depth_scale,
+            },
+        )
+    }
+
+    pub(crate) fn rasterize_backward(
+        &mut self,
+        gaussian_count: usize,
+        tile_bins: &MetalTileBins,
+        render_width: usize,
+        render_height: usize,
+    ) -> candle_core::Result<(NativeBackwardFrame, NativeForwardProfile)> {
+        let total_start = std::time::Instant::now();
+        let pixel_count = render_width.saturating_mul(render_height);
+
+        // Ensure all buffers exist
+        self.reserve_backward_buffers(gaussian_count, pixel_count)?;
+        self.ensure_buffer(
+            MetalBufferSlot::TileMetadata,
+            self.tile_windows
+                .len()
+                .saturating_mul(size_of::<MetalTileDispatchRecord>()),
+        )?;
+        self.ensure_buffer(
+            MetalBufferSlot::TileIndices,
+            tile_bins
+                .total_assignments()
+                .saturating_mul(size_of::<u32>()),
+        )?;
+
+        let pipeline = self.ensure_pipeline(MetalKernel::TileBackward)?.clone();
+
+        // Zero out gradient buffers
+        self.dispatch_fill_u32(MetalBufferSlot::GradPositions, 0, gaussian_count * 3)?;
+        self.dispatch_fill_u32(MetalBufferSlot::GradScales, 0, gaussian_count * 3)?;
+        self.dispatch_fill_u32(MetalBufferSlot::GradOpacity, 0, gaussian_count)?;
+        self.dispatch_fill_u32(MetalBufferSlot::GradColors, 0, gaussian_count * 3)?;
+
+        let setup = total_start.elapsed();
+
+        let staging_start = std::time::Instant::now();
+        self.write_slice(MetalBufferSlot::TileMetadata, tile_bins.records())?;
+        self.write_slice(MetalBufferSlot::TileIndices, tile_bins.packed_indices())?;
+        let staging = staging_start.elapsed();
+
+        let kernel_start = std::time::Instant::now();
+        let metal = self.device.as_metal_device()?;
+        let encoder = metal.command_encoder()?;
+        encoder.set_label(MetalKernel::TileBackward.function_name());
+        encoder.set_compute_pipeline_state(&pipeline);
+
+        // Bind buffers: camera(0), tile_records(1), tile_indices(2), gaussians(3)
+        encoder.set_buffer(
+            0,
+            self.buffer_handle(MetalBufferSlot::CameraUniforms)?
+                .map(|b| b.as_ref()),
+            0,
+        );
+        encoder.set_buffer(
+            1,
+            Some(
+                self.buffer_handle(MetalBufferSlot::TileMetadata)?
+                    .ok_or_else(|| candle_core::Error::Msg("missing tile metadata".into()))?
+                    .as_ref(),
+            ),
+            0,
+        );
+        encoder.set_buffer(
+            2,
+            Some(
+                self.buffer_handle(MetalBufferSlot::TileIndices)?
+                    .ok_or_else(|| candle_core::Error::Msg("missing tile indices".into()))?
+                    .as_ref(),
+            ),
+            0,
+        );
+        encoder.set_buffer(
+            3,
+            Some(
+                self.buffer_handle(MetalBufferSlot::ProjectionRecords)?
+                    .ok_or_else(|| candle_core::Error::Msg("missing projected gaussians".into()))?
+                    .as_ref(),
+            ),
+            0,
+        );
+
+        // rendered_color(4), rendered_depth(5), rendered_alpha(6)
+        encoder.set_buffer(
+            4,
+            Some(
+                self.buffer_handle(MetalBufferSlot::OutputColor)?
+                    .ok_or_else(|| candle_core::Error::Msg("missing output color".into()))?
+                    .as_ref(),
+            ),
+            0,
+        );
+        encoder.set_buffer(
+            5,
+            Some(
+                self.buffer_handle(MetalBufferSlot::OutputDepth)?
+                    .ok_or_else(|| candle_core::Error::Msg("missing output depth".into()))?
+                    .as_ref(),
+            ),
+            0,
+        );
+        encoder.set_buffer(
+            6,
+            Some(
+                self.buffer_handle(MetalBufferSlot::OutputAlpha)?
+                    .ok_or_else(|| candle_core::Error::Msg("missing output alpha".into()))?
+                    .as_ref(),
+            ),
+            0,
+        );
+
+        // target_color(7), target_depth(8)
+        encoder.set_buffer(
+            7,
+            Some(
+                self.buffer_handle(MetalBufferSlot::TargetColor)?
+                    .ok_or_else(|| candle_core::Error::Msg("missing target color".into()))?
+                    .as_ref(),
+            ),
+            0,
+        );
+        encoder.set_buffer(
+            8,
+            Some(
+                self.buffer_handle(MetalBufferSlot::TargetDepth)?
+                    .ok_or_else(|| candle_core::Error::Msg("missing target depth".into()))?
+                    .as_ref(),
+            ),
+            0,
+        );
+
+        // grad_positions(9), grad_scales(10), grad_opacity(11), grad_colors(12)
+        encoder.set_buffer(
+            9,
+            Some(
+                self.buffer_handle(MetalBufferSlot::GradPositions)?
+                    .ok_or_else(|| candle_core::Error::Msg("missing grad positions".into()))?
+                    .as_ref(),
+            ),
+            0,
+        );
+        encoder.set_buffer(
+            10,
+            Some(
+                self.buffer_handle(MetalBufferSlot::GradScales)?
+                    .ok_or_else(|| candle_core::Error::Msg("missing grad scales".into()))?
+                    .as_ref(),
+            ),
+            0,
+        );
+        encoder.set_buffer(
+            11,
+            Some(
+                self.buffer_handle(MetalBufferSlot::GradOpacity)?
+                    .ok_or_else(|| candle_core::Error::Msg("missing grad opacity".into()))?
+                    .as_ref(),
+            ),
+            0,
+        );
+        encoder.set_buffer(
+            12,
+            Some(
+                self.buffer_handle(MetalBufferSlot::GradColors)?
+                    .ok_or_else(|| candle_core::Error::Msg("missing grad colors".into()))?
+                    .as_ref(),
+            ),
+            0,
+        );
+
+        // loss_scalars(13)
+        encoder.set_buffer(
+            13,
+            Some(
+                self.buffer_handle(MetalBufferSlot::LossScalars)?
+                    .ok_or_else(|| candle_core::Error::Msg("missing loss scalars".into()))?
+                    .as_ref(),
+            ),
+            0,
+        );
+
+        let threads_per_group = tile_group_dims(&pipeline);
+        encoder.dispatch_threads(
+            MTLSize {
+                width: render_width,
+                height: render_height,
+                depth: 1,
+            },
+            threads_per_group,
+        );
+        drop(encoder);
+        self.device.synchronize()?;
+        let kernel = kernel_start.elapsed();
+
+        // Read back gradients from GPU
+        let frame = NativeBackwardFrame {
+            grad_positions: self.tensor_from_buffer(
+                MetalBufferSlot::GradPositions,
+                gaussian_count * 3,
+                DType::F32,
+                (gaussian_count, 3),
+            )?,
+            grad_log_scales: self.tensor_from_buffer(
+                MetalBufferSlot::GradScales,
+                gaussian_count * 3,
+                DType::F32,
+                (gaussian_count, 3),
+            )?,
+            grad_opacity_logits: self.tensor_from_buffer(
+                MetalBufferSlot::GradOpacity,
+                gaussian_count,
+                DType::F32,
+                (gaussian_count,),
+            )?,
+            grad_colors: self.tensor_from_buffer(
+                MetalBufferSlot::GradColors,
+                gaussian_count * 3,
+                DType::F32,
+                (gaussian_count, 3),
+            )?,
+        };
+
+        Ok((
+            frame,
+            NativeForwardProfile {
+                setup,
+                staging,
+                kernel,
+                total: total_start.elapsed(),
+            },
+        ))
+    }
+
+    pub(crate) fn compute_grad_magnitudes(
+        &mut self,
+        gaussian_count: usize,
+    ) -> candle_core::Result<Tensor> {
+        if gaussian_count == 0 {
+            return Tensor::zeros((0,), DType::F32, &self.device);
+        }
+        self.ensure_buffer(
+            MetalBufferSlot::GradMagnitudes,
+            gaussian_count.saturating_mul(size_of::<f32>()),
+        )?;
+        let pipeline = self.ensure_pipeline(MetalKernel::GradMagnitudes)?.clone();
+        let metal = self.device.as_metal_device()?;
+        let encoder = metal.command_encoder()?;
+        encoder.set_label(MetalKernel::GradMagnitudes.function_name());
+        encoder.set_compute_pipeline_state(&pipeline);
+        encoder.set_buffer(
+            0,
+            Some(
+                self.buffer_handle(MetalBufferSlot::GradPositions)?
+                    .ok_or_else(|| candle_core::Error::Msg("missing grad positions".into()))?
+                    .as_ref(),
+            ),
+            0,
+        );
+        encoder.set_buffer(
+            1,
+            Some(
+                self.buffer_handle(MetalBufferSlot::GradScales)?
+                    .ok_or_else(|| candle_core::Error::Msg("missing grad scales".into()))?
+                    .as_ref(),
+            ),
+            0,
+        );
+        encoder.set_buffer(
+            2,
+            Some(
+                self.buffer_handle(MetalBufferSlot::GradOpacity)?
+                    .ok_or_else(|| candle_core::Error::Msg("missing grad opacity".into()))?
+                    .as_ref(),
+            ),
+            0,
+        );
+        encoder.set_buffer(
+            3,
+            Some(
+                self.buffer_handle(MetalBufferSlot::GradColors)?
+                    .ok_or_else(|| candle_core::Error::Msg("missing grad colors".into()))?
+                    .as_ref(),
+            ),
+            0,
+        );
+        encoder.set_buffer(
+            4,
+            Some(
+                self.buffer_handle(MetalBufferSlot::GradMagnitudes)?
+                    .ok_or_else(|| candle_core::Error::Msg("missing grad magnitudes".into()))?
+                    .as_ref(),
+            ),
+            0,
+        );
+        let count = gaussian_count as u32;
+        encoder.set_bytes(5, &count);
+        let threads_per_group = pipeline
+            .max_total_threads_per_threadgroup()
+            .min(gaussian_count)
+            .max(1);
+        encoder.dispatch_threads(
+            MTLSize {
+                width: gaussian_count,
+                height: 1,
+                depth: 1,
+            },
+            MTLSize {
+                width: threads_per_group,
+                height: 1,
+                depth: 1,
+            },
+        );
+        drop(encoder);
+        self.device.synchronize()?;
+        self.tensor_from_buffer(
+            MetalBufferSlot::GradMagnitudes,
+            gaussian_count,
+            DType::F32,
+            (gaussian_count,),
+        )
     }
 
     pub(crate) fn dispatch_fill_u32(
@@ -891,6 +2586,23 @@ impl MetalRuntime {
         let byte_offset = view.byte_offset();
         let ptr = unsafe { (buffer.contents() as *const u8).add(byte_offset) }.cast::<T>();
         let values = unsafe { std::slice::from_raw_parts(ptr, element_count) };
+        Ok(values.to_vec())
+    }
+
+    pub(crate) fn read_buffer_structs<T: Copy>(
+        &self,
+        slot: MetalBufferSlot,
+        len: usize,
+    ) -> candle_core::Result<Vec<T>> {
+        let Some(buffer) = self
+            .buffers
+            .get(&slot)
+            .and_then(|buffer| buffer.backing.as_ref())
+        else {
+            candle_core::bail!("buffer {:?} is not backed by Metal", slot);
+        };
+        self.device.synchronize()?;
+        let values = unsafe { std::slice::from_raw_parts(buffer.contents() as *const T, len) };
         Ok(values.to_vec())
     }
 
@@ -1118,7 +2830,12 @@ mod tests {
     fn tile_bins_pack_indices_by_tile() {
         let runtime = MetalRuntime::new(32, 16, Device::Cpu).unwrap();
         let bins = runtime
-            .build_tile_bins(&[2.0f32, 14.0], &[15.0f32, 18.0], &[1.0f32, 1.0], &[14.0f32, 14.0])
+            .build_tile_bins(
+                &[2.0f32, 14.0],
+                &[15.0f32, 18.0],
+                &[1.0f32, 1.0],
+                &[14.0f32, 14.0],
+            )
             .unwrap();
 
         assert_eq!(bins.active_tile_count(), 2);
