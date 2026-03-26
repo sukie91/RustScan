@@ -1224,6 +1224,7 @@ pub(crate) enum MetalBufferSlot {
     AdamMColor,
     AdamVColor,
     AdamParamColor,
+    AdamHyperparams,
 }
 
 impl MetalBufferSlot {
@@ -1268,6 +1269,7 @@ impl MetalBufferSlot {
             Self::AdamMColor => "adam_m_color",
             Self::AdamVColor => "adam_v_color",
             Self::AdamParamColor => "adam_param_color",
+            Self::AdamHyperparams => "adam_hyperparams",
         }
     }
 }
@@ -2637,10 +2639,10 @@ impl MetalRuntime {
         encoder.set_buffer(1, Some(get_buf(grad_slot, "grads", self)?.as_ref()), 0);
         encoder.set_buffer(2, Some(get_buf(m_slot, "m", self)?.as_ref()), 0);
         encoder.set_buffer(3, Some(get_buf(v_slot, "v", self)?.as_ref()), 0);
-        self.write_struct(MetalBufferSlot::LossScalars, &hp)?; // reuse small temp slot
+        self.write_struct(MetalBufferSlot::AdamHyperparams, &hp)?;
         encoder.set_buffer(
             4,
-            self.buffer_handle(MetalBufferSlot::LossScalars)?
+            self.buffer_handle(MetalBufferSlot::AdamHyperparams)?
                 .map(|b| b.as_ref()),
             0,
         );

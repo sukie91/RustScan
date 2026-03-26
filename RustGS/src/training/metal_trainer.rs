@@ -1476,7 +1476,7 @@ impl MetalTrainer {
             ));
         }
 
-        self.runtime.stage_camera(camera)?;
+        // Camera will be staged inside project_gaussians, no need to stage here
         if should_profile && self.device.is_metal() {
             let gaussian_bindings = self.runtime.bind_gaussians(gaussians)?;
             let _ = (
@@ -3002,44 +3002,6 @@ mod tests {
             ..TrainingConfig::default()
         };
         let mut trainer = MetalTrainer::new(32, 16, &trainer_config, device.clone()).unwrap();
-        let _cpu_records = vec![
-            CpuProjectedGaussian {
-                source_idx: 0,
-                u: 8.0,
-                v: 8.0,
-                sigma_x: 2.0,
-                sigma_y: 2.0,
-                raw_sigma_x: 2.0,
-                raw_sigma_y: 2.0,
-                depth: 1.0,
-                opacity: 0.5,
-                opacity_logit: 0.0,
-                scale3d: [1.0, 1.0, 1.0],
-                color: [1.0, 0.0, 0.0],
-                min_x: 2.0,
-                max_x: 15.0,
-                min_y: 1.0,
-                max_y: 14.0,
-            },
-            CpuProjectedGaussian {
-                source_idx: 1,
-                u: 18.0,
-                v: 8.0,
-                sigma_x: 2.0,
-                sigma_y: 2.0,
-                raw_sigma_x: 2.0,
-                raw_sigma_y: 2.0,
-                depth: 2.0,
-                opacity: 0.5,
-                opacity_logit: 0.0,
-                scale3d: [1.0, 1.0, 1.0],
-                color: [0.0, 1.0, 0.0],
-                min_x: 14.0,
-                max_x: 18.0,
-                min_y: 1.0,
-                max_y: 14.0,
-            },
-        ];
         let projected = ProjectedGaussians {
             source_indices: Tensor::from_slice(&[0u32, 1], 2, &device).unwrap(),
             u: Tensor::from_slice(&[8.0f32, 18.0], 2, &device).unwrap(),
@@ -3096,44 +3058,6 @@ mod tests {
         )
         .unwrap();
         trainer.runtime.stage_camera(&camera).unwrap();
-        let _cpu_records = vec![
-            CpuProjectedGaussian {
-                source_idx: 0,
-                u: 8.0,
-                v: 8.0,
-                sigma_x: 2.0,
-                sigma_y: 2.0,
-                raw_sigma_x: 2.0,
-                raw_sigma_y: 2.0,
-                depth: 1.0,
-                opacity: 0.6,
-                opacity_logit: 0.0,
-                scale3d: [1.0, 1.0, 1.0],
-                color: [1.0, 0.0, 0.0],
-                min_x: 2.0,
-                max_x: 14.0,
-                min_y: 2.0,
-                max_y: 14.0,
-            },
-            CpuProjectedGaussian {
-                source_idx: 1,
-                u: 10.0,
-                v: 8.5,
-                sigma_x: 2.5,
-                sigma_y: 2.5,
-                raw_sigma_x: 2.5,
-                raw_sigma_y: 2.5,
-                depth: 2.0,
-                opacity: 0.4,
-                opacity_logit: 0.0,
-                scale3d: [1.0, 1.0, 1.0],
-                color: [0.0, 1.0, 0.0],
-                min_x: 3.0,
-                max_x: 17.0,
-                min_y: 2.0,
-                max_y: 15.0,
-            },
-        ];
         let projected = ProjectedGaussians {
             source_indices: Tensor::from_slice(&[0u32, 1], 2, &device).unwrap(),
             u: Tensor::from_slice(&[8.0f32, 10.0], 2, &device).unwrap(),
