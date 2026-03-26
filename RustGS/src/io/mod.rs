@@ -1,12 +1,9 @@
 //! IO module for scene files and checkpoints.
 //!
 //! - `scene_io`: PLY scene export/import
-//! - `training_checkpoint`: Legacy full-training checkpoint surface
 //! - `tum_dataset`: TUM RGB-D dataset loading for direct RustGS training
 
 pub mod scene_io;
-#[cfg(all(feature = "gpu", feature = "legacy-trainers"))]
-pub mod training_checkpoint;
 pub mod tum_dataset;
 
 use crate::core::GaussianMap;

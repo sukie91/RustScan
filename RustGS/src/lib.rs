@@ -59,11 +59,6 @@ pub use crate::training::{TrainingBackend, TrainingConfig, TrainingResult};
 
 // Re-export IO types
 pub use crate::io::scene_io::{load_scene_ply, save_scene_ply, SceneIoError, SceneMetadata};
-#[cfg(all(feature = "gpu", feature = "legacy-trainers"))]
-pub use crate::io::training_checkpoint::{
-    load_checkpoint, load_latest_checkpoint, resume_latest_checkpoint, save_checkpoint,
-    CheckpointGaussian, FullTrainingCheckpoint, TrainingCheckpointError,
-};
 pub use crate::io::tum_dataset::{load_tum_rgbd_dataset, TumRgbdConfig};
 pub use crate::io::TrainingCheckpoint;
 

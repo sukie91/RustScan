@@ -3,23 +3,12 @@
 //! Primary runtime path:
 //! - `metal_trainer` - Metal-native training loop used by the top-level API.
 //!
-//! Legacy/experimental trainers remain available behind the
-//! `legacy-trainers` feature to avoid carrying them in the default build.
 //! - `training_pipeline` - Shared densify/prune heuristics and utility losses.
 
 pub mod training_pipeline;
 
-#[cfg(all(feature = "gpu", feature = "legacy-trainers"))]
-pub mod trainer;
-
 #[cfg(feature = "gpu")]
 mod data_loading;
-
-#[cfg(all(feature = "gpu", feature = "legacy-trainers"))]
-pub mod complete_trainer;
-
-#[cfg(all(feature = "gpu", feature = "legacy-trainers"))]
-pub mod gpu_trainer;
 
 #[cfg(feature = "gpu")]
 pub mod metal_trainer;
@@ -33,12 +22,6 @@ mod metal_loss;
 #[cfg(feature = "gpu")]
 mod metal_backward;
 
-#[cfg(all(feature = "gpu", feature = "legacy-trainers"))]
-pub mod autodiff;
-
-#[cfg(all(feature = "gpu", feature = "legacy-trainers"))]
-pub mod autodiff_trainer;
-
 // Re-export common types at module level
 pub use training_pipeline::{
     compute_psnr, compute_ssim_loss, compute_training_loss, default_camera_intrinsics,
@@ -46,30 +29,8 @@ pub use training_pipeline::{
     TrainableGaussian, TrainingConfig as PipelineConfig, TrainingState,
 };
 
-#[cfg(all(feature = "gpu", feature = "legacy-trainers"))]
-pub use trainer::{TrainConfig, TrainState, Trainer};
-
-#[cfg(all(feature = "gpu", feature = "legacy-trainers"))]
-pub use complete_trainer::{
-    adam_update, CompleteTrainer, LrScheduler, TrainerAdamState,
-    TrainingResult as DetailedTrainingResult,
-};
-
-#[cfg(all(feature = "gpu", feature = "legacy-trainers"))]
-pub use gpu_trainer::{
-    GpuAdamState, GpuGaussianBuffer, GpuTrainer, GpuTrainerBuilder, GpuTrainerConfig, SyncData,
-};
-
 #[cfg(feature = "gpu")]
 pub use metal_trainer::MetalTrainer;
-
-#[cfg(all(feature = "gpu", feature = "legacy-trainers"))]
-pub use autodiff::{TrueAutodiffTrainer, VarCamera, VarGaussian, VarOutput, VarRenderer};
-
-#[cfg(all(feature = "gpu", feature = "legacy-trainers"))]
-pub use autodiff_trainer::{
-    AutodiffTrainer, DiffGaussian, DiffLoss, DiffRenderCamera, DiffRendered, DiffSplat,
-};
 
 use crate::TrainingError;
 use crate::{GaussianMap, TrainingDataset};
