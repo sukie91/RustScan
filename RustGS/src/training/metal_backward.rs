@@ -1,4 +1,4 @@
-use candle_core::{DType, Device, Tensor};
+use candle_core::Tensor;
 
 use crate::diff::diff_splat::DiffCamera;
 
@@ -7,7 +7,6 @@ use super::metal_runtime::{MetalRuntime, MetalTileBins};
 pub(crate) struct MetalBackwardGrads {
     pub positions: Tensor,
     pub log_scales: Tensor,
-    pub rotations: Tensor,
     pub opacity_logits: Tensor,
     pub colors: Tensor,
 }
@@ -23,11 +22,7 @@ pub(crate) struct MetalBackwardPass {
 /// are read back for densification decisions.
 pub(crate) fn backward_weighted_l1(
     runtime: &mut MetalRuntime,
-    device: &Device,
-    visible_count: usize,
     tile_bins: &MetalTileBins,
-    _target_color: &[f32],
-    _target_depth: &[f32],
     n_gaussians: usize,
     camera: &DiffCamera,
 ) -> candle_core::Result<MetalBackwardPass> {
@@ -40,7 +35,6 @@ pub(crate) fn backward_weighted_l1(
     let grads = MetalBackwardGrads {
         positions: frame.grad_positions,
         log_scales: frame.grad_log_scales,
-        rotations: Tensor::zeros((n_gaussians, 4), DType::F32, device)?,
         opacity_logits: frame.grad_opacity_logits,
         colors: frame.grad_colors,
     };

@@ -1156,40 +1156,6 @@ pub(crate) struct MetalProjectionRecord {
     pub max_y: f32,
 }
 
-impl MetalProjectedGaussian {
-    pub(crate) fn new(
-        u: f32,
-        v: f32,
-        sigma_x: f32,
-        sigma_y: f32,
-        depth: f32,
-        opacity: f32,
-        color_r: f32,
-        color_g: f32,
-        color_b: f32,
-        min_x: f32,
-        max_x: f32,
-        min_y: f32,
-        max_y: f32,
-    ) -> Self {
-        Self {
-            u,
-            v,
-            sigma_x,
-            sigma_y,
-            depth,
-            opacity,
-            color_r,
-            color_g,
-            color_b,
-            min_x,
-            max_x,
-            min_y,
-            max_y,
-        }
-    }
-}
-
 pub(crate) struct NativeForwardFrame {
     pub color: Tensor,
     pub depth: Tensor,
@@ -2832,6 +2798,7 @@ impl MetalRuntime {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn stage_tensor_from_slice<T: candle_core::WithDType + Copy, S: Into<Shape>>(
         &mut self,
         slot: MetalBufferSlot,

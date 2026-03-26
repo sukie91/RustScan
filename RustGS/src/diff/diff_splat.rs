@@ -206,10 +206,6 @@ pub struct RenderCache {
     order: Vec<usize>,
     /// Per-tile Gaussian index lists
     tile_lists: Vec<Vec<usize>>,
-    /// Per-Gaussian render records
-    records: Vec<GaussianRenderRecord>,
-    /// Color data converted from tensors
-    color_data: Vec<[f32; 3]>,
     /// Pre-computed per-Gaussian data (populated during sort pass)
     sorted_order: Vec<usize>,
     /// Reverse lookup: gaussian_idx → order_pos (sized to max gaussians)
@@ -235,8 +231,6 @@ impl RenderCache {
         Self {
             order: Vec::with_capacity(max_gaussians),
             tile_lists: vec![Vec::with_capacity(256); num_tiles],
-            records: Vec::with_capacity(max_gaussians),
-            color_data: Vec::with_capacity(max_gaussians),
             sorted_order: Vec::with_capacity(max_gaussians),
             idx_to_order_pos: vec![0; max_gaussians],
             sigma_x: Vec::with_capacity(max_gaussians),
@@ -248,47 +242,6 @@ impl RenderCache {
             min_y: Vec::with_capacity(max_gaussians),
             max_y: Vec::with_capacity(max_gaussians),
             cache_sorted: false,
-        }
-    }
-
-    fn clear(&mut self, num_gaussians: usize) {
-        self.order.clear();
-        self.records.clear();
-        self.color_data.clear();
-        self.sorted_order.clear();
-        self.cache_sorted = false;
-        self.sigma_x.clear();
-        self.sigma_y.clear();
-        self.radius_x.clear();
-        self.radius_y.clear();
-        self.min_x.clear();
-        self.max_x.clear();
-        self.min_y.clear();
-        self.max_y.clear();
-        // Reserve if current capacity is too small
-        if self.order.capacity() < num_gaussians {
-            self.order.reserve(num_gaussians - self.order.capacity());
-            self.records
-                .reserve(num_gaussians - self.records.capacity());
-            self.color_data
-                .reserve(num_gaussians - self.color_data.capacity());
-            self.sorted_order
-                .reserve(num_gaussians - self.sorted_order.capacity());
-            self.sigma_x
-                .reserve(num_gaussians - self.sigma_x.capacity());
-            self.sigma_y
-                .reserve(num_gaussians - self.sigma_y.capacity());
-            self.radius_x
-                .reserve(num_gaussians - self.radius_x.capacity());
-            self.radius_y
-                .reserve(num_gaussians - self.radius_y.capacity());
-            self.min_x.reserve(num_gaussians - self.min_x.capacity());
-            self.max_x.reserve(num_gaussians - self.max_x.capacity());
-            self.min_y.reserve(num_gaussians - self.min_y.capacity());
-            self.max_y.reserve(num_gaussians - self.max_y.capacity());
-        }
-        for tile in &mut self.tile_lists {
-            tile.clear();
         }
     }
 }

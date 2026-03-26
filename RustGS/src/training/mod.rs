@@ -1,26 +1,24 @@
 //! Training module for 3D Gaussian Splatting.
 //!
-//! This module provides various training strategies:
-//! - `trainer` - Basic CPU trainer with finite-difference gradients
-//! - `complete_trainer` - Full trainer with LR scheduler and SSIM loss
-//! - `gpu_trainer` - GPU-optimized trainer with minimal CPU-GPU transfer
-//! - `metal_trainer` - Primary Metal-native training loop that keeps render/loss/backward on GPU
-//! - `autodiff` - True autodiff using Candle's Var and backward()
-//! - `autodiff_trainer` - Autodiff trainer using candle-core 0.9.x API
-//! - `training_pipeline` - Training utilities, densify/prune, loss functions
+//! Primary runtime path:
+//! - `metal_trainer` - Metal-native training loop used by the top-level API.
+//!
+//! Legacy/experimental trainers remain available behind the
+//! `legacy-trainers` feature to avoid carrying them in the default build.
+//! - `training_pipeline` - Shared densify/prune heuristics and utility losses.
 
 pub mod training_pipeline;
 
-#[cfg(feature = "gpu")]
+#[cfg(all(feature = "gpu", feature = "legacy-trainers"))]
 pub mod trainer;
 
 #[cfg(feature = "gpu")]
 mod data_loading;
 
-#[cfg(feature = "gpu")]
+#[cfg(all(feature = "gpu", feature = "legacy-trainers"))]
 pub mod complete_trainer;
 
-#[cfg(feature = "gpu")]
+#[cfg(all(feature = "gpu", feature = "legacy-trainers"))]
 pub mod gpu_trainer;
 
 #[cfg(feature = "gpu")]
@@ -35,10 +33,10 @@ mod metal_loss;
 #[cfg(feature = "gpu")]
 mod metal_backward;
 
-#[cfg(feature = "gpu")]
+#[cfg(all(feature = "gpu", feature = "legacy-trainers"))]
 pub mod autodiff;
 
-#[cfg(feature = "gpu")]
+#[cfg(all(feature = "gpu", feature = "legacy-trainers"))]
 pub mod autodiff_trainer;
 
 // Re-export common types at module level
@@ -48,16 +46,16 @@ pub use training_pipeline::{
     TrainableGaussian, TrainingConfig as PipelineConfig, TrainingState,
 };
 
-#[cfg(feature = "gpu")]
+#[cfg(all(feature = "gpu", feature = "legacy-trainers"))]
 pub use trainer::{TrainConfig, TrainState, Trainer};
 
-#[cfg(feature = "gpu")]
+#[cfg(all(feature = "gpu", feature = "legacy-trainers"))]
 pub use complete_trainer::{
     adam_update, CompleteTrainer, LrScheduler, TrainerAdamState,
     TrainingResult as DetailedTrainingResult,
 };
 
-#[cfg(feature = "gpu")]
+#[cfg(all(feature = "gpu", feature = "legacy-trainers"))]
 pub use gpu_trainer::{
     GpuAdamState, GpuGaussianBuffer, GpuTrainer, GpuTrainerBuilder, GpuTrainerConfig, SyncData,
 };
@@ -65,10 +63,10 @@ pub use gpu_trainer::{
 #[cfg(feature = "gpu")]
 pub use metal_trainer::MetalTrainer;
 
-#[cfg(feature = "gpu")]
+#[cfg(all(feature = "gpu", feature = "legacy-trainers"))]
 pub use autodiff::{TrueAutodiffTrainer, VarCamera, VarGaussian, VarOutput, VarRenderer};
 
-#[cfg(feature = "gpu")]
+#[cfg(all(feature = "gpu", feature = "legacy-trainers"))]
 pub use autodiff_trainer::{
     AutodiffTrainer, DiffGaussian, DiffLoss, DiffRenderCamera, DiffRendered, DiffSplat,
 };

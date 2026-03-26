@@ -191,10 +191,6 @@ impl GaussianParameterSnapshot {
         [log[0].exp(), log[1].exp(), log[2].exp()]
     }
 
-    fn opacity(&self, idx: usize) -> f32 {
-        sigmoid_scalar(self.opacity_logits[idx])
-    }
-
     fn push(
         &mut self,
         position: [f32; 3],
@@ -1352,11 +1348,7 @@ impl MetalTrainer {
         }
         let backward = super::metal_backward::backward_weighted_l1(
             &mut self.runtime,
-            &self.device,
-            projected.visible_count,
             &projected.tile_bins,
-            &frame.target_color_cpu,
-            &frame.target_depth_cpu,
             gaussians.len(),
             &frame.camera,
         )?;
