@@ -4,6 +4,7 @@
 //!   rustgs train --input <slam_output.json|tum_dataset_dir> --output <scene.ply>
 //!   rustgs render --input <scene.ply> --camera <pose.json> --output <image.png>
 
+use anyhow::bail;
 use std::path::PathBuf;
 
 #[derive(Debug, clap::Parser)]
@@ -47,7 +48,7 @@ enum Commands {
         frame_stride: usize,
 
         /// Relative render scale used by Metal training
-        #[arg(long, default_value = "0.25")]
+        #[arg(long, default_value = "0.5")]
         metal_render_scale: f32,
 
         /// Number of Gaussians processed per GPU chunk during Metal training
@@ -73,6 +74,38 @@ enum Commands {
         /// Log topology scheduling/throughput diagnostics every N checks
         #[arg(long, default_value = "500")]
         topology_log_interval: usize,
+
+        /// Enable budget-driven chunked training mode
+        #[arg(long, default_value_t = false)]
+        chunked_training: bool,
+
+        /// Per-chunk memory budget in GiB
+        #[arg(long, default_value = "12.0")]
+        chunk_budget_gb: f32,
+
+        /// Relative overlap expansion applied to chunk bounds
+        #[arg(long, default_value = "0.15")]
+        chunk_overlap_ratio: f32,
+
+        /// Minimum number of cameras required for a chunk to remain trainable
+        #[arg(long, default_value = "3")]
+        min_cameras_per_chunk: usize,
+
+        /// Maximum number of chunks to generate (0 = automatic)
+        #[arg(long, default_value = "0")]
+        max_chunks: usize,
+
+        /// Explicitly keep only chunk core-region Gaussians during merge
+        #[arg(long, default_value_t = false, conflicts_with = "no_merge_core_only")]
+        merge_core_only: bool,
+
+        /// Disable core-only chunk merge filtering
+        #[arg(
+            long = "no-merge-core-only",
+            default_value_t = false,
+            conflicts_with = "merge_core_only"
+        )]
+        no_merge_core_only: bool,
 
         /// Use the tensor fallback instead of the native Metal forward rasterizer
         #[arg(long, default_value_t = false)]
@@ -118,6 +151,13 @@ fn main() -> anyhow::Result<()> {
             prune_interval,
             topology_warmup,
             topology_log_interval,
+            chunked_training,
+            chunk_budget_gb,
+            chunk_overlap_ratio,
+            min_cameras_per_chunk,
+            max_chunks,
+            merge_core_only,
+            no_merge_core_only,
             metal_disable_native_forward,
             log_level,
         } => {
@@ -149,6 +189,25 @@ fn main() -> anyhow::Result<()> {
             config.topology_warmup = topology_warmup;
             config.topology_log_interval = topology_log_interval;
             config.metal_use_native_forward = !metal_disable_native_forward;
+            config.chunked_training = chunked_training;
+            config.chunk_budget_gb = chunk_budget_gb;
+            config.chunk_overlap_ratio = chunk_overlap_ratio;
+            config.min_cameras_per_chunk = min_cameras_per_chunk;
+            config.max_chunks = max_chunks;
+            config.merge_core_only = if no_merge_core_only {
+                false
+            } else if merge_core_only {
+                true
+            } else {
+                true
+            };
+            config.chunk_artifact_dir = if config.chunked_training {
+                Some(default_chunk_artifact_dir(&output))
+            } else {
+                None
+            };
+            validate_chunked_training_args(&config)?;
+            log_chunked_training_config(&config);
 
             // Train
             #[cfg(feature = "gpu")]
@@ -240,4 +299,237 @@ fn load_training_input(
     }
 
     Ok(rustscan_types::SlamOutput::from_dataset(dataset))
+}
+
+fn validate_chunked_training_args(config: &rustgs::TrainingConfig) -> anyhow::Result<()> {
+    if !config.chunked_training {
+        return Ok(());
+    }
+
+    if config.chunk_budget_gb <= 0.0 {
+        bail!(
+            "--chunk-budget-gb must be > 0, got {}",
+            config.chunk_budget_gb
+        );
+    }
+    if !(0.0..0.5).contains(&config.chunk_overlap_ratio) {
+        bail!(
+            "--chunk-overlap-ratio must be in [0.0, 0.5), got {}",
+            config.chunk_overlap_ratio
+        );
+    }
+    if config.min_cameras_per_chunk == 0 {
+        bail!("--min-cameras-per-chunk must be >= 1");
+    }
+    if config.max_chunks > 0 && config.max_chunks < 2 {
+        bail!("--max-chunks must be 0 (auto) or >= 2 when --chunked-training is enabled");
+    }
+
+    Ok(())
+}
+
+fn log_chunked_training_config(config: &rustgs::TrainingConfig) {
+    if !config.chunked_training {
+        return;
+    }
+
+    let max_chunks = if config.max_chunks == 0 {
+        "auto".to_string()
+    } else {
+        config.max_chunks.to_string()
+    };
+
+    log::info!(
+        "Chunked training enabled | budget_gb={:.2} | overlap={:.2} | min_cameras={} | max_chunks={} | merge_core_only={} | artifact_dir={}",
+        config.chunk_budget_gb,
+        config.chunk_overlap_ratio,
+        config.min_cameras_per_chunk,
+        max_chunks,
+        config.merge_core_only,
+        config
+            .chunk_artifact_dir
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "<disabled>".to_string()),
+    );
+}
+
+fn default_chunk_artifact_dir(output: &std::path::Path) -> PathBuf {
+    let parent = output
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let stem = output
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .filter(|stem| !stem.is_empty())
+        .unwrap_or("scene");
+    parent.join(format!("{stem}-chunks"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{default_chunk_artifact_dir, validate_chunked_training_args, Cli, Commands};
+    use clap::Parser;
+    use std::path::PathBuf;
+
+    fn parse_cli(args: &[&str]) -> Cli {
+        Cli::try_parse_from(args).expect("cli args should parse")
+    }
+
+    #[test]
+    fn train_command_parses_chunked_defaults() {
+        let cli = parse_cli(&[
+            "rustgs",
+            "train",
+            "--input",
+            "scene.json",
+            "--output",
+            "scene.ply",
+        ]);
+        let Commands::Train {
+            chunked_training,
+            chunk_budget_gb,
+            chunk_overlap_ratio,
+            min_cameras_per_chunk,
+            max_chunks,
+            merge_core_only,
+            no_merge_core_only,
+            ..
+        } = cli.command
+        else {
+            panic!("expected train command");
+        };
+
+        assert!(!chunked_training);
+        assert_eq!(chunk_budget_gb, 12.0);
+        assert_eq!(chunk_overlap_ratio, 0.15);
+        assert_eq!(min_cameras_per_chunk, 3);
+        assert_eq!(max_chunks, 0);
+        assert!(!merge_core_only);
+        assert!(!no_merge_core_only);
+    }
+
+    #[test]
+    fn train_command_parses_all_chunked_flags() {
+        let cli = parse_cli(&[
+            "rustgs",
+            "train",
+            "--input",
+            "scene.json",
+            "--output",
+            "scene.ply",
+            "--chunked-training",
+            "--chunk-budget-gb",
+            "10.5",
+            "--chunk-overlap-ratio",
+            "0.2",
+            "--min-cameras-per-chunk",
+            "5",
+            "--max-chunks",
+            "8",
+            "--no-merge-core-only",
+        ]);
+        let Commands::Train {
+            chunked_training,
+            chunk_budget_gb,
+            chunk_overlap_ratio,
+            min_cameras_per_chunk,
+            max_chunks,
+            no_merge_core_only,
+            ..
+        } = cli.command
+        else {
+            panic!("expected train command");
+        };
+
+        assert!(chunked_training);
+        assert_eq!(chunk_budget_gb, 10.5);
+        assert_eq!(chunk_overlap_ratio, 0.2);
+        assert_eq!(min_cameras_per_chunk, 5);
+        assert_eq!(max_chunks, 8);
+        assert!(no_merge_core_only);
+    }
+
+    #[test]
+    fn train_command_rejects_conflicting_merge_flags() {
+        let err = Cli::try_parse_from([
+            "rustgs",
+            "train",
+            "--input",
+            "scene.json",
+            "--output",
+            "scene.ply",
+            "--merge-core-only",
+            "--no-merge-core-only",
+        ])
+        .expect_err("conflicting merge flags should fail");
+
+        let message = err.to_string();
+        assert!(message.contains("--merge-core-only"));
+        assert!(message.contains("--no-merge-core-only"));
+    }
+
+    #[test]
+    fn chunk_validation_accepts_non_chunked_defaults() {
+        let config = rustgs::TrainingConfig::default();
+        validate_chunked_training_args(&config).unwrap();
+    }
+
+    #[test]
+    fn chunk_validation_rejects_zero_budget() {
+        let config = rustgs::TrainingConfig {
+            chunked_training: true,
+            chunk_budget_gb: 0.0,
+            ..rustgs::TrainingConfig::default()
+        };
+        let err = validate_chunked_training_args(&config).expect_err("zero budget should fail");
+        assert!(err.to_string().contains("--chunk-budget-gb must be > 0"));
+    }
+
+    #[test]
+    fn chunk_validation_rejects_invalid_overlap() {
+        let config = rustgs::TrainingConfig {
+            chunked_training: true,
+            chunk_overlap_ratio: 0.5,
+            ..rustgs::TrainingConfig::default()
+        };
+        let err = validate_chunked_training_args(&config).expect_err("invalid overlap should fail");
+        assert!(err
+            .to_string()
+            .contains("--chunk-overlap-ratio must be in [0.0, 0.5)"));
+    }
+
+    #[test]
+    fn chunk_validation_rejects_zero_min_cameras() {
+        let config = rustgs::TrainingConfig {
+            chunked_training: true,
+            min_cameras_per_chunk: 0,
+            ..rustgs::TrainingConfig::default()
+        };
+        let err =
+            validate_chunked_training_args(&config).expect_err("zero min cameras should fail");
+        assert!(err
+            .to_string()
+            .contains("--min-cameras-per-chunk must be >= 1"));
+    }
+
+    #[test]
+    fn chunk_validation_rejects_illegal_max_chunks() {
+        let config = rustgs::TrainingConfig {
+            chunked_training: true,
+            max_chunks: 1,
+            ..rustgs::TrainingConfig::default()
+        };
+        let err = validate_chunked_training_args(&config).expect_err("max_chunks=1 should fail");
+        assert!(err
+            .to_string()
+            .contains("--max-chunks must be 0 (auto) or >= 2"));
+    }
+
+    #[test]
+    fn default_chunk_artifact_dir_uses_output_stem() {
+        let path = default_chunk_artifact_dir(std::path::Path::new("/tmp/scene.ply"));
+        assert_eq!(path, PathBuf::from("/tmp/scene-chunks"));
+    }
 }

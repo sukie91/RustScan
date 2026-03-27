@@ -249,7 +249,7 @@ kernel void tile_backward(
                       : (final_color_b < target_color[c3 + 2]) ? -loss_scalars.color_scale : 0.0f;
 
     float dd_depth = 0.0f;
-    if (loss_scalars.depth_scale > 0.0f) {
+    if (loss_scalars.depth_scale > 0.0f && target_depth[pixel_idx] > 0.0f) {
         const float depth_diff = final_depth - target_depth[pixel_idx];
         dd_depth = (depth_diff > 0.0f) ? loss_scalars.depth_scale
                  : (depth_diff < 0.0f) ? -loss_scalars.depth_scale : 0.0f;
@@ -3070,7 +3070,7 @@ mod tests {
 
     #[test]
     fn fill_kernel_writes_shared_buffer() {
-        let Ok(device) = Device::new_metal(0) else {
+        let Ok(device) = crate::try_metal_device() else {
             return;
         };
 

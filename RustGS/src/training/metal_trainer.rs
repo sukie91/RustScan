@@ -17,7 +17,7 @@ use super::data_loading::{
     load_training_data, map_from_trainable, trainable_from_map, LoadedTrainingData,
 };
 use super::metal_backward::MetalBackwardGrads;
-use super::metal_loss::mean_abs_diff;
+use super::metal_loss::{masked_mean_abs_diff, mean_abs_diff};
 use super::metal_runtime::{
     ChunkPixelWindow, MetalBufferSlot, MetalProjectionRecord, MetalRuntime, MetalTileBins,
     NativeForwardProfile,
@@ -28,7 +28,6 @@ use super::TrainingConfig;
 #[cfg(test)]
 use super::metal_runtime::ScreenRect;
 
-const DEFAULT_METAL_MAX_INITIAL_GAUSSIANS: usize = 4_096;
 const MIB: u64 = 1024 * 1024;
 const GIB: u64 = 1024 * 1024 * 1024;
 const DEFAULT_METAL_MEMORY_BUDGET_BYTES: u64 = 24 * GIB;
@@ -321,6 +320,54 @@ enum MetalMemoryDecision {
     Allow,
     Warn,
     Block,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChunkCapacityDisposition {
+    FitsBudget,
+    NeedsSubdivisionOrDegradation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChunkCapacityEstimate {
+    pub requested_initial_gaussians: usize,
+    pub affordable_initial_gaussians: usize,
+    pub frame_count: usize,
+    pub render_width: usize,
+    pub render_height: usize,
+    pub estimated_peak_bytes: u64,
+    pub requested_budget_bytes: u64,
+    pub effective_budget_bytes: u64,
+    pub physical_memory_bytes: Option<u64>,
+    pub disposition: ChunkCapacityDisposition,
+    dominant_components: String,
+    recommendations: Vec<String>,
+}
+
+impl ChunkCapacityEstimate {
+    pub fn estimated_peak_gib(&self) -> f64 {
+        bytes_to_gib(self.estimated_peak_bytes)
+    }
+
+    pub fn requested_budget_gib(&self) -> f64 {
+        bytes_to_gib(self.requested_budget_bytes)
+    }
+
+    pub fn effective_budget_gib(&self) -> f64 {
+        bytes_to_gib(self.effective_budget_bytes)
+    }
+
+    pub fn requires_subdivision_or_degradation(&self) -> bool {
+        self.disposition == ChunkCapacityDisposition::NeedsSubdivisionOrDegradation
+    }
+
+    pub fn dominant_components(&self) -> &str {
+        &self.dominant_components
+    }
+
+    pub fn recommendations(&self) -> &[String] {
+        &self.recommendations
+    }
 }
 
 impl MetalMemoryEstimate {
@@ -1330,7 +1377,8 @@ impl MetalTrainer {
 
         let loss_start = Instant::now();
         let color_loss = mean_abs_diff(&rendered.color, &frame.target_color)?;
-        let depth_loss = mean_abs_diff(&rendered.depth, &frame.target_depth)?;
+        let depth_loss =
+            masked_mean_abs_diff(&rendered.depth, &frame.target_depth, &frame.target_depth)?;
         let total = color_loss.broadcast_add(&depth_loss.affine(0.1, 0.0)?)?;
         let loss_value = total.to_vec0::<f32>()?;
         self.synchronize_if_needed(should_profile)?;
@@ -2132,7 +2180,7 @@ pub fn train(
         &effective_config,
         device,
     )?;
-    let memory_budget = detect_metal_memory_budget();
+    let memory_budget = training_memory_budget(config);
     let frame_count = loaded.cameras.len();
     log::info!(
         "MetalTrainer preflight | gaussians={} | frames={} | pixels={} | chunk_size={} | estimated_peak≈{:.1} GiB | budget={} | dominant={}",
@@ -2250,15 +2298,6 @@ pub fn train(
 
 fn effective_metal_config(config: &TrainingConfig) -> TrainingConfig {
     let mut effective = config.clone();
-    let defaults = TrainingConfig::default();
-    if effective.max_initial_gaussians == defaults.max_initial_gaussians {
-        effective.max_initial_gaussians = DEFAULT_METAL_MAX_INITIAL_GAUSSIANS;
-        log::warn!(
-            "Metal backend lowered max_initial_gaussians from {} to {} to avoid OOM. Override with --max-initial-gaussians if you want a different budget.",
-            defaults.max_initial_gaussians,
-            effective.max_initial_gaussians
-        );
-    }
     if effective.lr_rotation != 0.0 {
         log::warn!(
             "Metal backend currently freezes Gaussian rotations because the backward path does not propagate rotation-aware projection gradients yet; overriding lr_rotation from {} to 0.0 for this run.",
@@ -2267,6 +2306,96 @@ fn effective_metal_config(config: &TrainingConfig) -> TrainingConfig {
         effective.lr_rotation = 0.0;
     }
     effective
+}
+
+pub fn estimate_chunk_capacity(
+    dataset: &TrainingDataset,
+    config: &TrainingConfig,
+) -> Result<ChunkCapacityEstimate, TrainingError> {
+    if dataset.poses.is_empty() {
+        return Err(TrainingError::InvalidInput(
+            "training dataset does not contain any poses".to_string(),
+        ));
+    }
+
+    let effective_config = effective_metal_config(config);
+    let requested_initial_gaussians = if dataset.initial_points.is_empty() {
+        effective_config.max_initial_gaussians.max(1)
+    } else {
+        dataset
+            .initial_points
+            .len()
+            .min(effective_config.max_initial_gaussians.max(1))
+            .max(1)
+    };
+    let frame_count = dataset.poses.len();
+    let (render_width, render_height) = scaled_dimensions(
+        dataset.intrinsics.width as usize,
+        dataset.intrinsics.height as usize,
+        effective_config.metal_render_scale,
+    );
+    let pixel_count = render_width.saturating_mul(render_height);
+    let requested_budget_bytes = gib_to_bytes(config.chunk_budget_gb);
+    let effective_budget =
+        resolve_chunk_memory_budget(requested_budget_bytes, detect_metal_memory_budget());
+    let estimate = estimate_peak_memory(
+        requested_initial_gaussians,
+        pixel_count,
+        frame_count,
+        effective_config.metal_gaussian_chunk_size,
+    );
+    let affordable_initial_gaussians = affordable_initial_gaussian_cap(
+        requested_initial_gaussians,
+        pixel_count,
+        frame_count,
+        effective_config.metal_gaussian_chunk_size,
+        &effective_budget,
+    );
+    let disposition = if affordable_initial_gaussians < requested_initial_gaussians {
+        ChunkCapacityDisposition::NeedsSubdivisionOrDegradation
+    } else {
+        ChunkCapacityDisposition::FitsBudget
+    };
+    let mut recommendations = estimate
+        .recommendations()
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    if disposition == ChunkCapacityDisposition::NeedsSubdivisionOrDegradation {
+        recommendations.insert(
+            0,
+            format!(
+                "subdivide the chunk or degrade it to at most {} initial gaussians",
+                affordable_initial_gaussians.max(1)
+            ),
+        );
+    }
+
+    Ok(ChunkCapacityEstimate {
+        requested_initial_gaussians,
+        affordable_initial_gaussians,
+        frame_count,
+        render_width,
+        render_height,
+        estimated_peak_bytes: estimate.total_bytes(),
+        requested_budget_bytes,
+        effective_budget_bytes: effective_budget.safe_bytes,
+        physical_memory_bytes: effective_budget.physical_bytes,
+        disposition,
+        dominant_components: estimate.top_components_summary(3),
+        recommendations,
+    })
+}
+
+fn training_memory_budget(config: &TrainingConfig) -> MetalMemoryBudget {
+    if config.chunked_training {
+        resolve_chunk_memory_budget(
+            gib_to_bytes(config.chunk_budget_gb),
+            detect_metal_memory_budget(),
+        )
+    } else {
+        detect_metal_memory_budget()
+    }
 }
 
 fn affordable_initial_gaussian_cap(
@@ -2385,6 +2514,19 @@ fn detect_metal_memory_budget() -> MetalMemoryBudget {
     }
 }
 
+fn resolve_chunk_memory_budget(
+    requested_budget_bytes: u64,
+    system_budget: MetalMemoryBudget,
+) -> MetalMemoryBudget {
+    let safe_bytes = requested_budget_bytes
+        .max(1)
+        .min(system_budget.safe_bytes.max(1));
+    MetalMemoryBudget {
+        safe_bytes,
+        physical_bytes: system_budget.physical_bytes,
+    }
+}
+
 fn detect_physical_memory_bytes() -> Option<u64> {
     #[allow(unsafe_code)]
     unsafe {
@@ -2410,6 +2552,15 @@ fn apply_ratio(bytes: u64, numerator: u64, denominator: u64) -> u64 {
 
 fn bytes_to_gib(bytes: u64) -> f64 {
     bytes as f64 / 1024f64 / 1024f64 / 1024f64
+}
+
+fn gib_to_bytes(gib: f32) -> u64 {
+    if !gib.is_finite() || gib <= 0.0 {
+        return 0;
+    }
+    ((gib as f64) * 1024f64 * 1024f64 * 1024f64)
+        .round()
+        .clamp(0.0, u64::MAX as f64) as u64
 }
 
 fn format_memory(bytes: u64) -> String {
@@ -2768,7 +2919,7 @@ mod tests {
         let effective = effective_metal_config(&TrainingConfig::default());
         assert_eq!(
             effective.max_initial_gaussians,
-            DEFAULT_METAL_MAX_INITIAL_GAUSSIANS
+            TrainingConfig::default().max_initial_gaussians
         );
         assert_eq!(effective.lr_rotation, 0.0);
     }
@@ -2971,6 +3122,76 @@ mod tests {
     }
 
     #[test]
+    fn resolve_chunk_memory_budget_caps_requested_budget_to_system_limit() {
+        let system_budget = MetalMemoryBudget {
+            safe_bytes: 10 * GIB,
+            physical_bytes: Some(16 * GIB),
+        };
+        let resolved = resolve_chunk_memory_budget(12 * GIB, system_budget);
+        assert_eq!(resolved.safe_bytes, 10 * GIB);
+        assert_eq!(resolved.physical_bytes, Some(16 * GIB));
+    }
+
+    #[test]
+    fn gib_to_bytes_rejects_non_positive_values() {
+        assert_eq!(gib_to_bytes(0.0), 0);
+        assert_eq!(gib_to_bytes(-1.0), 0);
+    }
+
+    #[test]
+    fn chunk_capacity_marks_over_budget_requests_for_subdivision() {
+        let config = TrainingConfig {
+            chunked_training: true,
+            chunk_budget_gb: 1.0,
+            metal_render_scale: 1.0,
+            max_initial_gaussians: 57_474,
+            ..TrainingConfig::default()
+        };
+        let dataset = TrainingDataset {
+            intrinsics: crate::Intrinsics::from_focal(500.0, 1920, 1080),
+            depth_scale: 1000.0,
+            poses: vec![crate::ScenePose::new(
+                0,
+                std::path::PathBuf::from("frame.png"),
+                crate::SE3::identity(),
+                0.0,
+            )],
+            initial_points: Vec::new(),
+        };
+        let estimate = estimate_chunk_capacity(&dataset, &config).unwrap();
+        assert!(estimate.requires_subdivision_or_degradation());
+        assert!(estimate.affordable_initial_gaussians < estimate.requested_initial_gaussians);
+        assert!(estimate
+            .recommendations()
+            .first()
+            .expect("recommendations should not be empty")
+            .contains("subdivide the chunk"));
+    }
+
+    #[test]
+    fn chunk_capacity_uses_existing_initial_points_as_requested_scale() {
+        let config = TrainingConfig {
+            chunked_training: true,
+            chunk_budget_gb: 1.0,
+            max_initial_gaussians: 16,
+            ..TrainingConfig::default()
+        };
+        let dataset = TrainingDataset {
+            intrinsics: crate::Intrinsics::from_focal(500.0, 32, 32),
+            depth_scale: 1000.0,
+            poses: vec![crate::ScenePose::new(
+                0,
+                std::path::PathBuf::from("frame.png"),
+                crate::SE3::identity(),
+                0.0,
+            )],
+            initial_points: vec![([0.0, 0.0, 1.0], None); 64],
+        };
+        let estimate = estimate_chunk_capacity(&dataset, &config).unwrap();
+        assert_eq!(estimate.requested_initial_gaussians, 16);
+    }
+
+    #[test]
     fn profile_tracks_visible_gaussians() {
         let render = MetalRenderProfile {
             visible_gaussians: 12,
@@ -3037,7 +3258,7 @@ mod tests {
 
     #[test]
     fn native_forward_matches_baseline_on_tiny_scene() {
-        let Ok(device) = Device::new_metal(0) else {
+        let Ok(device) = crate::try_metal_device() else {
             return;
         };
         let trainer_config = TrainingConfig {
@@ -3108,7 +3329,7 @@ mod tests {
 
     #[test]
     fn metal_visible_set_stays_on_device() {
-        let Ok(device) = Device::new_metal(0) else {
+        let Ok(device) = crate::try_metal_device() else {
             return;
         };
         let trainer_config = TrainingConfig {

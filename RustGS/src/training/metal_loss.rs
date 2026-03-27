@@ -1,7 +1,5 @@
 use candle_core::op::BackpropOp;
-use candle_core::{
-    CpuStorage, CustomOp2, Layout, MetalStorage, Shape, Storage, Tensor,
-};
+use candle_core::{CpuStorage, CustomOp2, Layout, MetalStorage, Shape, Storage, Tensor};
 
 #[derive(Debug, Clone, Copy, Default)]
 struct MeanAbsDiff;
@@ -14,7 +12,35 @@ pub(crate) fn mean_abs_diff(predicted: &Tensor, target: &Tensor) -> candle_core:
             target.dims()
         );
     }
-    predicted.contiguous()?.apply_op2(&target.contiguous()?, MeanAbsDiff)
+    predicted
+        .contiguous()?
+        .apply_op2(&target.contiguous()?, MeanAbsDiff)
+}
+
+pub(crate) fn masked_mean_abs_diff(
+    predicted: &Tensor,
+    target: &Tensor,
+    valid_mask: &Tensor,
+) -> candle_core::Result<Tensor> {
+    if predicted.shape() != target.shape() || predicted.shape() != valid_mask.shape() {
+        candle_core::bail!(
+            "masked_mean_abs_diff shape mismatch: pred={:?}, target={:?}, mask={:?}",
+            predicted.dims(),
+            target.dims(),
+            valid_mask.dims()
+        );
+    }
+
+    let dtype = predicted.dtype();
+    let mask = valid_mask.gt(0.0f64)?.to_dtype(dtype)?;
+    let valid_count = mask.flatten_all()?.sum(0)?;
+    if valid_count.to_vec0::<f32>()? <= 0.0 {
+        return Tensor::zeros((), dtype, predicted.device());
+    }
+
+    let masked_diff = predicted.sub(target)?.abs()?.broadcast_mul(&mask)?;
+    let masked_sum = masked_diff.flatten_all()?.sum(0)?;
+    masked_sum.broadcast_div(&valid_count)
 }
 
 impl CustomOp2 for MeanAbsDiff {
@@ -135,7 +161,7 @@ fn extract_metal_scalar(tensor: &Tensor) -> candle_core::Result<(MetalStorage, S
 mod tests {
     use candle_core::{Device, Tensor, Var};
 
-    use super::mean_abs_diff;
+    use super::{masked_mean_abs_diff, mean_abs_diff};
 
     fn assert_close_scalar(actual: f32, expected: f32, tolerance: f32) {
         assert!(
@@ -198,10 +224,33 @@ mod tests {
 
     #[test]
     fn mean_abs_diff_matches_baseline_on_metal() -> candle_core::Result<()> {
-        if !candle_core::utils::metal_is_available() {
+        let Ok(device) = crate::try_metal_device() else {
             return Ok(());
-        }
-        let device = Device::new_metal(0)?;
+        };
         run_loss_parity_case(&device, 1e-5)
+    }
+
+    #[test]
+    fn masked_mean_abs_diff_ignores_invalid_entries() -> candle_core::Result<()> {
+        let device = Device::Cpu;
+        let predicted = Tensor::from_vec(vec![1.0f32, 9.0, 3.0], 3, &device)?;
+        let target = Tensor::from_vec(vec![2.0f32, 0.0, 1.0], 3, &device)?;
+        let mask = Tensor::from_vec(vec![1.0f32, 0.0, 1.0], 3, &device)?;
+
+        let loss = masked_mean_abs_diff(&predicted, &target, &mask)?;
+        assert_close_scalar(loss.to_vec0::<f32>()?, 1.5, 1e-6);
+        Ok(())
+    }
+
+    #[test]
+    fn masked_mean_abs_diff_returns_zero_without_valid_entries() -> candle_core::Result<()> {
+        let device = Device::Cpu;
+        let predicted = Tensor::from_vec(vec![1.0f32, 9.0, 3.0], 3, &device)?;
+        let target = Tensor::from_vec(vec![2.0f32, 0.0, 1.0], 3, &device)?;
+        let mask = Tensor::zeros(3, candle_core::DType::F32, &device)?;
+
+        let loss = masked_mean_abs_diff(&predicted, &target, &mask)?;
+        assert_close_scalar(loss.to_vec0::<f32>()?, 0.0, 1e-6);
+        Ok(())
     }
 }

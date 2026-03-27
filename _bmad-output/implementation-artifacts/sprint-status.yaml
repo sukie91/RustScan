@@ -193,3 +193,52 @@ development_status:
   11-2-create-end-to-end-pipeline-script: done
   11-3-update-documentation: done
   epic-11-retrospective: optional
+
+  # ============================================================
+  # Epic 12: RustGS Chunked Training Entry & Budget Control — DONE
+  # Chunked training for 16GB memory-constrained machines
+  # ============================================================
+  epic-12: done
+  12-1-chunked-training-cli-and-config-entry: done
+  12-2-budget-driven-chunk-capacity-estimation: done
+  12-3-chunked-path-selection-and-early-guardrails: done
+  12-4-non-chunked-compatibility-and-entry-regression: done
+  epic-12-retrospective: optional
+
+  # ============================================================
+  # Epic 13: Spatial Chunk Planning & Camera Assignment — DONE
+  # ============================================================
+  epic-13: done
+  13-1-spatial-chunk-generation-from-sparse-geometry-or-camera-trajectory: done
+  13-2-camera-assignment-and-weak-chunk-filtering: done
+  13-3-per-chunk-dataset-materialization: done
+  13-4-chunk-planning-and-boundary-regression-tests: done
+  epic-13-retrospective: optional
+
+  # ============================================================
+  # Epic 14: Sequential Chunk Training & Artifact Output — DONE
+  # ============================================================
+  epic-14: done
+  14-1-sequential-chunk-training-orchestrator: done
+  14-2-per-chunk-adaptive-parameter-overrides: done
+  14-3-chunk-artifact-and-report-persistence: done
+  14-4-lifecycle-cleanup-and-memory-bounded-regression-validation: done
+  epic-14-retrospective: optional
+
+  # ============================================================
+  # Epic 15: Merge & Core-Region Retention — DONE
+  # ============================================================
+  epic-15: done
+  15-1-core-only-merge-filtering: done
+  15-2-final-merged-scene-output: done
+  15-3-merge-correctness-and-seam-regression-tests: done
+  epic-15-retrospective: optional
+
+  # ============================================================
+  # Epic 16: Status Tracking & Long-Running Development Workflow — DONE
+  # ============================================================
+  epic-16: done
+  16-1-story-status-field-convention: done
+  16-2-handoff-note-convention-for-interrupted-work: done
+  16-3-chunked-training-development-workflow-documentation: done
+  epic-16-retrospective: optional

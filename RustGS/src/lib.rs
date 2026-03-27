@@ -55,6 +55,14 @@ pub use crate::render::{
 };
 
 // Re-export training types
+#[cfg(feature = "gpu")]
+pub use crate::training::{
+    estimate_chunk_capacity, ChunkCapacityDisposition, ChunkCapacityEstimate,
+};
+pub use crate::training::{
+    materialize_chunk_dataset, plan_spatial_chunks, ChunkBounds, ChunkBoundsSource,
+    ChunkDisposition, ChunkPlan, MaterializedChunkDataset, PlannedChunk,
+};
 pub use crate::training::{TrainingBackend, TrainingConfig, TrainingResult};
 
 // Re-export IO types
@@ -83,7 +91,7 @@ pub(crate) fn require_metal_device() -> Result<Device, TrainingError> {
 }
 
 #[cfg(feature = "gpu")]
-fn try_metal_device() -> Result<Device, String> {
+pub(crate) fn try_metal_device() -> Result<Device, String> {
     static PANIC_HOOK_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     let hook_lock = PANIC_HOOK_LOCK.get_or_init(|| Mutex::new(()));
     let _guard = hook_lock

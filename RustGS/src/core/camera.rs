@@ -87,7 +87,6 @@ impl GaussianCamera {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use glam::Vec3;
 
     #[test]
     fn test_gaussian_camera_creation() {

@@ -1,5 +1,5 @@
 ---
-stepsCompleted: [1, 2]
+stepsCompleted: [1, 2, 3, 4]
 inputDocuments:
   - _bmad-output/planning-artifacts/prd.md
   - _bmad-output/planning-artifacts/architecture.md
@@ -149,27 +149,346 @@ RustViewer需求 → Epic 8: RustViewer 3D可视化GUI
 - 11-2: 创建端到端管道脚本
 - 11-3: 更新文档
 
-<!-- Repeat for each epic in epics_list (N = 1, 2, 3...) -->
+### Epic 12: 分块训练入口与预算控制
+用户可以显式启用分块训练，并用内存预算驱动训练规模，使 RustGS 在 16GB 机器上避免直接 OOM
+**FRs covered:** FR1, FR2, FR5, FR6, FR7, FR11, FR12
 
-## Epic {{N}}: {{epic_title_N}}
+### Epic 13: 空间分块与相机子集构建
+系统可以从 SlamOutput/TrainingDataset 自动生成空间块、overlap 和块级相机子集，为逐块训练准备稳定输入
+**FRs covered:** FR3, FR4, FR5
 
-{{epic_goal_N}}
+### Epic 14: 逐块训练执行与块级产物导出
+系统可以顺序训练每个 chunk，自动应用块级参数覆盖，并输出可合并的块级场景结果
+**FRs covered:** FR6, FR7, FR8, FR11
 
-<!-- Repeat for each story (M = 1, 2, 3...) within epic N -->
+### Epic 15: 场景合并与核心区保留
+系统可以将多个 chunk 的训练结果合并为单个场景文件，并通过 merge-core-only 控制 overlap 区域的保留策略
+**FRs covered:** FR8, FR9, FR10
 
-### Story {{N}}.{{M}}: {{story_title_N_M}}
+### Epic 16: 状态跟踪、恢复上下文与长期开发可维护性
+开发者可以基于文档 frontmatter 和每条 Story 状态字段持续推进长期开发，并在更换电脑或中断后快速恢复上下文
+**FRs covered:** FR13, NFR4, NFR8
 
-As a {{user_type}},
-I want {{capability}},
-So that {{value_benefit}}.
+## Epic 12: 分块训练入口与预算控制
+
+让 RustGS 具备正式的 chunked training 入口、预算模型和模式路由，使 16GB 机器能够以可预期方式启动分块训练。
+
+### Story 12.1: Chunked Training CLI and Config Entry
+
+Status: done
+
+As a RustGS CLI user,
+I want to enable chunked training and provide chunk-related options from the command line,
+So that I can run training under a fixed memory budget on a 16GB machine without changing code.
 
 **Acceptance Criteria:**
 
-<!-- for each AC on this story -->
+**Given** the existing `rustgs train` command
+**When** I pass chunked-training flags
+**Then** the CLI parses them successfully into `rustgs::TrainingConfig`
 
-**Given** {{precondition}}
-**When** {{action}}
-**Then** {{expected_outcome}}
-**And** {{additional_criteria}}
+**Given** no chunk-related flags are passed
+**When** training starts
+**Then** the current non-chunked path behaves exactly as before
 
-<!-- End story repeat -->
+**Given** invalid chunk parameters are passed
+**When** argument validation runs
+**Then** the CLI returns a clear error message describing the invalid value and expected range
+
+### Story 12.2: Budget-Driven Chunk Capacity Estimation
+
+Status: done
+
+As a RustGS training operator,
+I want chunk capacity to be derived from a memory budget,
+So that chunk sizing is predictable and safe on a 16GB machine.
+
+**Acceptance Criteria:**
+
+**Given** a chunk memory budget in GiB
+**When** the estimator runs
+**Then** it computes a maximum allowable per-chunk training scale using the existing Metal memory estimate model
+
+**Given** a training input and budget
+**When** the estimator predicts a chunk would exceed budget
+**Then** the system marks the chunk for further subdivision or degradation rather than attempting unsafe training
+
+### Story 12.3: Chunked Path Selection and Early Guardrails
+
+Status: done
+
+As a RustGS user,
+I want the training entrypoint to route into chunked orchestration only when requested,
+So that normal training and chunked training remain clearly separated.
+
+**Acceptance Criteria:**
+
+**Given** `chunked_training == true`
+**When** training begins
+**Then** the system enters the chunked training orchestration path
+
+**Given** `chunked_training == false`
+**When** training begins
+**Then** the system uses the existing normal training path
+
+### Story 12.4: Non-Chunked Compatibility and Entry Regression
+
+Status: done
+
+As a maintainer,
+I want regression coverage around the new chunked entrypoint,
+So that adding chunked mode does not break the existing trainer.
+
+**Acceptance Criteria:**
+
+**Given** existing non-chunked test inputs
+**When** tests run
+**Then** existing training behavior still passes unchanged
+
+**Given** chunked mode is enabled on a small fixture
+**When** integration tests run
+**Then** the entrypoint reaches the chunk planner and completes without changing tracked file formats
+
+## Epic 13: 空间分块与相机子集构建
+
+让 RustGS 能从弱几何输入中自动切分空间块并构建块级相机子集，为逐块训练提供稳定数据准备能力。
+
+### Story 13.1: Spatial Chunk Generation from Sparse Geometry or Camera Trajectory
+
+Status: done
+
+As a chunk planner,
+I want to generate spatial chunks from sparse points or fallback camera trajectory bounds,
+So that chunking works for SlamOutput-style inputs without per-frame depth.
+
+**Acceptance Criteria:**
+
+**Given** `initial_points` is present
+**When** chunk planning starts
+**Then** chunk bounds are derived from the point-cloud bounding box
+
+**Given** `initial_points` is empty
+**When** chunk planning starts
+**Then** chunk bounds fall back to camera-trajectory bounds
+
+### Story 13.2: Camera Assignment and Weak-Chunk Filtering
+
+Status: done
+
+As a chunk planner,
+I want to assign cameras to chunks and filter weak chunks,
+So that each chunk has enough observations to be trainable.
+
+**Acceptance Criteria:**
+
+**Given** a set of chunks and camera poses
+**When** assignment runs
+**Then** a camera is included in a chunk if its center or relevant sparse points intersect the chunk overlap region
+
+**Given** a chunk has fewer than the configured minimum cameras
+**When** chunk validation runs
+**Then** the chunk is merged, skipped, or degraded according to a deterministic rule
+
+### Story 13.3: Per-Chunk Dataset Materialization
+
+Status: done
+
+As a chunked trainer,
+I want per-chunk datasets to be materialized from the global input,
+So that each chunk can train independently on local views and local initialization.
+
+**Acceptance Criteria:**
+
+**Given** a validated chunk
+**When** dataset materialization runs
+**Then** the chunk dataset contains only the assigned poses and only the local initial points relevant to that chunk
+
+**Given** a chunk has no usable local points
+**When** dataset materialization runs
+**Then** the system falls back to frame-based initialization or fails with a clear chunk-scoped diagnostic
+
+### Story 13.4: Chunk Planning and Boundary Regression Tests
+
+Status: done
+
+As a maintainer,
+I want deterministic tests for chunk planning and assignment,
+So that planner behavior stays stable as training evolves.
+
+**Acceptance Criteria:**
+
+**Given** synthetic bounding boxes, points, and camera poses
+**When** unit tests run
+**Then** chunk count, overlap expansion, and camera assignment are deterministic
+
+**Given** boundary cameras and overlap regions
+**When** tests run
+**Then** edge assignment cases are explicitly validated
+
+## Epic 14: 逐块训练执行与块级产物导出
+
+让 RustGS 能顺序训练每个 chunk、根据预算应用块级覆盖参数，并输出可合并的块级结果和执行报告。
+
+### Story 14.1: Sequential Chunk Training Orchestrator
+
+Status: done
+
+As a RustGS user on a 16GB machine,
+I want chunks to train one by one,
+So that peak memory remains bounded.
+
+**Acceptance Criteria:**
+
+**Given** a list of trainable chunks
+**When** chunked training starts
+**Then** chunks are processed strictly sequentially rather than in parallel
+
+**Given** one chunk finishes
+**When** the next chunk begins
+**Then** the previous chunk's heavy training state is released before continuing
+
+### Story 14.2: Per-Chunk Adaptive Parameter Overrides
+
+Status: done
+
+As a chunked trainer,
+I want to override training parameters per chunk when needed,
+So that over-budget chunks can still finish under 16GB constraints.
+
+**Acceptance Criteria:**
+
+**Given** a chunk exceeds budget at default settings
+**When** adaptive planning runs
+**Then** the system first tries spatial subdivision, then chunk-local gaussian limits, then render-scale reduction
+
+**Given** a chunk still cannot be made safe
+**When** the planner exhausts allowed degradation
+**Then** the chunk is marked failed or skipped with a clear reason
+
+### Story 14.3: Chunk Artifact and Report Persistence
+
+Status: done
+
+As a maintainer,
+I want chunk training to emit explicit intermediate outputs,
+So that merge and debugging have stable inputs.
+
+**Acceptance Criteria:**
+
+**Given** a chunk finishes training successfully
+**When** the trainer persists outputs
+**Then** it produces a chunk scene artifact and a machine-readable chunk report entry
+
+**Given** chunked training completes
+**When** the overall report is written
+**Then** it contains one entry per chunk with final status and effective parameters
+
+### Story 14.4: Lifecycle Cleanup and Memory-Bounded Regression Validation
+
+Status: done
+
+As a maintainer,
+I want proof that chunked execution actually limits memory pressure,
+So that the feature meets its core goal.
+
+**Acceptance Criteria:**
+
+**Given** chunk-local resources are released
+**When** moving from one chunk to the next
+**Then** tests or diagnostics confirm stale trainer state is not retained across chunks
+
+**Given** chunked training on a bounded fixture
+**When** profiling or estimator-based regression tests run
+**Then** per-chunk memory remains within the configured budget envelope
+
+## Epic 15: 场景合并与核心区保留
+
+让 RustGS 能把多个 chunk 的训练结果稳定合并为单场景输出，同时控制 overlap 区的高斯保留策略。
+
+### Story 15.1: Core-Only Merge Filtering
+
+Status: done
+
+As a chunked training pipeline,
+I want to keep only core-region gaussians by default,
+So that overlap regions do not create duplicated seam geometry.
+
+**Acceptance Criteria:**
+
+**Given** a trained chunk with core and overlap AABBs
+**When** merge-core-only is enabled
+**Then** only gaussians whose centers fall inside the core AABB are retained for merge
+
+### Story 15.2: Final Merged Scene Output
+
+Status: done
+
+As a RustGS user,
+I want chunked training to still produce one final scene file,
+So that downstream tooling does not need a new consumption model.
+
+**Acceptance Criteria:**
+
+**Given** multiple successful chunk outputs
+**When** merge completes
+**Then** the system produces one merged `GaussianMap` and one final PLY scene file
+
+### Story 15.3: Merge Correctness and Seam Regression Tests
+
+Status: done
+
+As a maintainer,
+I want tests around chunk merge correctness,
+So that seam handling stays stable as training code evolves.
+
+**Acceptance Criteria:**
+
+**Given** synthetic chunk outputs with overlapping gaussians
+**When** merge-core-only tests run
+**Then** only expected core-region gaussians remain
+
+## Epic 16: 状态跟踪、恢复上下文与长期开发可维护性
+
+让长期开发和跨机器恢复有统一的状态字段、handoff 约定和工作流程，而不是依赖口头同步。
+
+### Story 16.1: Story Status Field Convention
+
+Status: done
+
+As a project maintainer,
+I want every story to carry an explicit status field,
+So that progress is visible and durable across long-running development.
+
+**Acceptance Criteria:**
+
+**Given** the chunked-training epic/story document
+**When** story sections are finalized
+**Then** each story includes a required status field initialized to `todo`
+
+### Story 16.2: Handoff Note Convention for Interrupted Work
+
+Status: done
+
+As a developer who may switch computers,
+I want a lightweight handoff note per story,
+So that I can resume work without reconstructing context from scratch.
+
+**Acceptance Criteria:**
+
+**Given** a story is in `in_progress` or `blocked`
+**When** the developer pauses work
+**Then** the story includes a short handoff note describing current state, next step, and known blocker
+
+### Story 16.3: Chunked Training Development Workflow Documentation
+
+Status: done
+
+As a maintainer,
+I want the chunked-training development workflow documented,
+So that implementation, review, and status maintenance stay consistent over a long project duration.
+
+**Acceptance Criteria:**
+
+**Given** the chunked-training epic section
+**When** documentation is finalized
+**Then** it defines the required story lifecycle, status values, and completion/update rules

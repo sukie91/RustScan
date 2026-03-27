@@ -107,7 +107,17 @@ pub(crate) fn load_training_data(
         build_initial_map_from_frames(dataset, &frames, config)?
     } else {
         let init_config = GaussianInitConfig::default();
-        let gaussians = initialize_gaussian3d_from_points(&dataset.initial_points, &init_config);
+        let mut gaussians =
+            initialize_gaussian3d_from_points(&dataset.initial_points, &init_config);
+        let max_initial = config.max_initial_gaussians.max(1);
+        if gaussians.len() > max_initial {
+            log::warn!(
+                "Truncating point-initialized chunk from {} to {} gaussians to respect max_initial_gaussians",
+                gaussians.len(),
+                max_initial,
+            );
+            gaussians.truncate(max_initial);
+        }
         let mut map = GaussianMap::from_gaussians(gaussians);
         map.update_states();
         map
