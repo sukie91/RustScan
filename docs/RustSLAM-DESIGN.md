@@ -2,6 +2,10 @@
 
 > Rust 实现的视觉 SLAM 库
 
+> 状态更新（2026-03-28）：
+> 当前 RustSLAM 已切换为 SLAM-only 边界，不再负责 3DGS 训练。`RustGS` 负责高斯训练，`RustMesh` 负责网格阶段。
+> 本文主要保留历史设计脉络；当前实现状态、真实视频结论和是否可交给 RustGS，请优先参考 [RustSLAM-README.md](./RustSLAM-README.md) 与 [RustSLAM-Experiment-2026-03-28.md](./RustSLAM-Experiment-2026-03-28.md)。
+
 ---
 
 ## 一、项目概述

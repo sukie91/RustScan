@@ -5,163 +5,82 @@
   <img src="https://img.shields.io/badge/License-MIT-green.svg?style=for-the-badge" alt="License">
 </p>
 
-A pure Rust implementation of Visual SLAM (Simultaneous Localization and Mapping) supporting monocular, stereo, and RGB-D cameras.
+RustSLAM 是 RustScan 里的 SLAM 阶段。自 2026-03-28 起，它只负责视觉 SLAM，不再承担 3D Gaussian Splatting 的训练、渲染或网格生成。
 
-## 📋 Features
+## 当前职责
 
-### Core SLAM
-- ✅ **Visual Odometry** - Monocular/Stereo/RGB-D
-- ✅ **Bundle Adjustment** - Gauss-Newton optimization
-- ✅ **Loop Closing** - BoW-based detection
-- ✅ **Relocalization** - Recover from tracking loss
+- 从视频或数据集读取图像帧
+- 执行稀疏特征跟踪、PnP、重定位和局部建图
+- 导出相机位姿、关键帧 RGB 和稀疏点到 `slam_output.json`
+- 作为 RustGS 的前置阶段，为后续高斯训练提供输入
 
-### Features
-- ✅ **ORB Feature Extraction**
-- ✅ **Harris/FAST Corner Detection**
-- ✅ **Feature Matching** - BFMatcher, KNN, Lowe Ratio Test
+## 不再负责的内容
 
-### Map Representations (Switchable)
-- 🏗️ **Sparse Map** - Traditional feature point SLAM (done)
-- 🔮 **Dense Map** - 3D Gaussian Splatting (Phase 1 ✅)
+- 高斯初始化
+- 3DGS 训练
+- 高斯渲染
+- Mesh 提取
 
-## 📁 Project Structure
+这些能力现在分别由 `RustGS` 和 `RustMesh` 负责。
 
-```
-RustSLAM/
-├── src/
-│   ├── core/              # Core data structures
-│   │   ├── frame.rs       # Frame
-│   │   ├── keyframe.rs    # KeyFrame
-│   │   ├── map_point.rs   # MapPoint
-│   │   ├── map.rs         # Map
-│   │   ├── camera.rs      # Camera model
-│   │   └── pose.rs        # SE3 Pose
-│   │
-│   ├── features/          # Feature extraction
-│   │   ├── orb.rs         # ORB extractor
-│   │   ├── pure_rust.rs   # Harris/FAST
-│   │   ├── matcher.rs     # Feature matching
-│   │   └── knn_matcher.rs # KNN matching
-│   │
-│   ├── tracker/           # Visual Odometry
-│   │   ├── vo.rs          # Main VO pipeline
-│   │   └── solver.rs      # PnP, Essential Matrix, Triangulation
-│   │
-│   ├── mapping/           # Local Mapping
-│   │   └── local_mapping.rs
-│   │
-│   ├── optimizer/         # Bundle Adjustment
-│   │   └── ba.rs
-│   │
-│   ├── loop_closing/      # Loop Detection
-│   │   ├── vocabulary.rs  # BoW Vocabulary
-│   │   ├── database.rs    # KeyFrame Database
-│   │   ├── detector.rs    # Loop Detector
-│   │   └── relocalization.rs
-│   │
-│   ├── fusion/            # Dense Fusion (Coming Soon)
-│   │   └── gaussian.rs    # 3D Gaussian
-│   │
-│   └── viewer/            # Visualization
-│       └── mod.rs
-│
-├── examples/              # Examples
-│   └── run_vo.rs
-│
-├── Cargo.toml
-└── DESIGN.md             # Design document
-```
+## 当前事实来源
 
-## 🚀 Quick Start
+- 最新真实视频实验结论见 [RustSLAM-Experiment-2026-03-28.md](./RustSLAM-Experiment-2026-03-28.md)
+- 历史设计思路见 [RustSLAM-DESIGN.md](./RustSLAM-DESIGN.md)
 
-### Prerequisites
+如果两者冲突，以实验纪要和当前代码行为为准。
 
-- Rust 1.75+
-- (Optional) OpenCV 4.x for enhanced features
+## 关键变化
 
-### Build
+- `RustSLAM/src/tracker/solver.rs`
+  - PnP 在 RANSAC 之后会继续评估完整 DLT 候选，避免更好的绝对位姿被较差的随机样本遮蔽。
+  - 三角化阈值放宽到更适合手持 iPhone 视频的小基线场景，并修正了相机中心/可见性判断。
+- `RustSLAM/src/tracker/vo.rs`
+  - 新增轻量级 anchor keyframe 缓存和重定位统计。
+  - 将重定位最小内点阈值与常规 tracking 阈值解耦。
+  - 单目恢复阶段也允许持续补充 anchor，避免 anchor 池很快枯竭。
+- `RustSLAM/src/cli/mod.rs`
+  - CLI 切换为 SLAM-only 输出。
+  - `slam_output.json` 和 checkpoint 中都包含真实稀疏点。
+  - 运行日志会输出 `sparse_points` 和 `VO relocalization` 统计，便于评估真实视频效果。
+
+## 快速开始
+
+在仓库根目录执行：
 
 ```bash
-cd RustSLAM
-cargo build --release
+cargo build -p rustslam --release
+target/release/rustslam \
+  --input test_data/video/sofa.MOV \
+  --output output/sofa_full_anchor_diag6 \
+  --output-format json
 ```
 
-### Run Visual Odometry
+主要输出：
 
-```bash
-cargo run --example run_vo
-```
+- `output/<run>/results.json`
+- `output/<run>/slam_output.json`
+- `output/<run>/checkpoints/pipeline.json`
 
-### Tests
+交给 RustGS 的核心文件是 `slam_output.json`。
 
-```bash
-cargo test
-```
+## 当前结论
 
-## 📊 Test Results
+- RustSLAM 现在已经能在真实 iPhone 视频上导出非空、有限值的稀疏点和相机位姿。
+- `sofa.MOV` 全量运行的当前最好结果为 `1731` 帧、`100` 个位姿、`43004` 个稀疏点。
+- 但整段视频的 tracking success 仍只有 `50.9%`，说明这版已经明显改善，却还没有达到“直接放心交给 RustGS 做最终训练”的理想状态。
 
-```
-test result: ok. 77 passed, 0 failed
-```
+## 已知限制
 
-## 🗺️ Roadmap
+- 目前仍是单目 RGB 稀疏 SLAM，不包含基于输入视频的稠密深度重建。
+- 对纹理弱、视差小、长时间遮挡的视频，重定位仍不够稳定。
+- 更高的稀疏点数量伴随更长的全量运行时间，这是当前鲁棒性换来的代价。
 
-### Phase 1: Core SLAM ✅
-- [x] SE3 Pose
-- [x] ORB Feature Extraction
-- [x] Feature Matching
-- [x] Visual Odometry
-- [x] Bundle Adjustment
-- [x] Loop Closing
-- [x] Relocalization
-
-### Phase 2: Dense Reconstruction ✅ COMPLETE
-- [x] 3D Gaussian data structures
-- [x] Gaussian Renderer (color + depth)
-- [x] **Tiled Rasterization**
-- [x] **Depth Sorting**
-- [x] **Alpha Blending**
-- [x] Gaussian Tracking (ICP)
-- [x] Incremental Gaussian Mapping
-- [x] **Densification** (Gaussian splitting)
-- [x] **Pruning** (Opacity-based)
-- [x] Differentiable Renderer (Candle + Metal MPS)
-- [x] Training Pipeline (Trainer + Adam optimizer)
-- [x] TRUE Backward Propagation (Var + backward() + gradients.get())
-- [x] **SLAM Integration** (Sparse + Dense fusion)
-
-### Phase 3: Advanced Features
-- [ ] IMU Integration
-- [ ] Multi-map SLAM
-- [ ] Semantic Mapping
-
-## 🔬 Comparison with pySLAM
-
-| Feature | pySLAM | RustSLAM |
-|---------|--------|-----------|
-| Visual Odometry | ✅ | ✅ |
-| Bundle Adjustment | ✅ | ✅ |
-| BoW Vocabulary | ✅ | ✅ |
-| KeyFrame Database | ✅ | ✅ |
-| Loop Closing | ✅ | ✅ |
-| Relocalization | ✅ | ✅ |
-| 3D Gaussian | ✅ | 🔄 Coming |
-| Volumetric | ✅ | ❌ |
-| Depth Prediction | ✅ | ❌ |
-
-## 📖 References
+## 参考
 
 - [ORB-SLAM3](https://github.com/UZ-SLAMLab/ORB_SLAM3)
 - [pySLAM](https://github.com/luigifreda/pyslam)
-- [RTG-SLAM](https://github.com/MisEty/RTG-SLAM) - Real-time 3DGS
-- [SplaTAM](https://github.com/spla-tam/SplaTAM) - CVPR 2024
 
-## 📄 License
+## License
 
-MIT License - see LICENSE file for details.
-
----
-
-<p align="center">
-Built with ❤️ in Rust
-</p>
+MIT License

@@ -1,5 +1,6 @@
 //! RustScan CLI entrypoint.
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
@@ -7,21 +8,19 @@ use std::time::Instant;
 
 use clap::{Parser, ValueEnum};
 use log::{debug, error, info, warn};
+use rustscan_types::MapPointData;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sysinfo::{get_current_pid, System};
 use thiserror::Error;
 
 use crate::config::SlamConfig;
-use crate::core::{Camera, SE3};
-use crate::fusion::{
-    GaussianCamera, GaussianMap, GaussianRenderer, MeshExtractionConfig, MeshExtractor,
-};
+use crate::core::{Camera, Frame, KeyFrame, Map, SE3};
 use crate::io::{
     video_decoder as video, Dataset, DatasetConfig, EurocDataset, KittiDataset, TumRgbdDataset,
 };
+use crate::mapping::{LocalMapping, LocalMappingConfig};
 use crate::tracker::VisualOdometry;
-use glam::{Mat4, Vec3};
 use pipeline_checkpoint::{
     load_pipeline_checkpoint, save_pipeline_checkpoint, slam_frames_dir, CameraCheckpoint,
     KeyframeCheckpoint, MapPointCheckpoint, PipelineCheckpoint, PipelineCheckpointError,
@@ -33,8 +32,7 @@ mod integration_tests;
 mod pipeline_checkpoint;
 mod slam_pipeline;
 
-#[cfg(not(feature = "gpu"))]
-use crate::fusion::{GaussianMapper, MapperConfig};
+const MIB_BYTES: f64 = 1024.0 * 1024.0;
 
 /// RustScan command-line arguments.
 #[derive(Parser, Debug)]
@@ -169,7 +167,6 @@ struct ResolvedConfig {
     output_format: OutputFormat,
     slam: SlamConfig,
     video: VideoConfig,
-    log_format: LogFormat,
     mesh_voxel_size: Option<f32>,
 }
 
@@ -330,6 +327,7 @@ struct ResultsJson {
     output: Option<String>,
     processing_time_ms: u128,
     camera_count: usize,
+    slam_output: Option<String>,
     mesh: MeshStats,
     error: Option<ErrorInfo>,
     diagnostics: Diagnostics,
@@ -337,18 +335,12 @@ struct ResultsJson {
 
 struct PipelineReport {
     camera_count: usize,
+    slam_output_path: PathBuf,
     mesh: MeshStats,
-}
-
-#[derive(Debug, Clone, Copy)]
-enum StageMarker {
-    Gaussian,
-    Mesh,
 }
 
 struct DecodedVideo {
     decoder: video::VideoDecoder,
-    info: video::VideoInfo,
     camera: Camera,
     total_frames: usize,
 }
@@ -372,14 +364,7 @@ struct SlamStageOutput {
     keyframes: Vec<KeyframeSample>,
     camera: Camera,
     frame_count: usize,
-    tracking_success_ratio: Option<f32>,
-    tracking_success_frames: usize,
-}
-
-struct GaussianStageOutput {
-    map: GaussianMap,
-    keyframes: Vec<KeyframeSample>,
-    camera: Camera,
+    map_points: Vec<MapPointData>,
 }
 
 pub fn run() -> ExitCode {
@@ -444,13 +429,19 @@ pub fn run() -> ExitCode {
         }
     };
 
-    info!("Starting RustScan pipeline");
+    info!("Starting RustScan SLAM pipeline");
     info!("Input: {}", resolved.input.display());
     info!("Output: {}", output_dir.display());
     debug!(
         "Loaded SLAM config camera: {}x{}",
         resolved.slam.camera.width, resolved.slam.camera.height
     );
+    if let Some(voxel_size) = resolved.mesh_voxel_size {
+        warn!(
+            "mesh_voxel_size={} is ignored because RustSLAM now runs in SLAM-only mode",
+            voxel_size
+        );
+    }
 
     let pipeline_report = match run_pipeline(&resolved) {
         Ok(report) => report,
@@ -472,6 +463,7 @@ pub fn run() -> ExitCode {
         output: Some(output_dir.display().to_string()),
         processing_time_ms: start.elapsed().as_millis(),
         camera_count: pipeline_report.camera_count,
+        slam_output: Some(pipeline_report.slam_output_path.display().to_string()),
         mesh: pipeline_report.mesh,
         error: None,
         diagnostics: build_diagnostics(
@@ -678,7 +670,6 @@ fn finalize_config(config: RustScanConfig) -> Result<ResolvedConfig, CliError> {
         output_format: config.output_format,
         slam: config.slam,
         video: config.video,
-        log_format: config.log_format,
         mesh_voxel_size: config.mesh_voxel_size,
     })
 }
@@ -711,8 +702,8 @@ fn run_pipeline(config: &ResolvedConfig) -> Result<PipelineReport, CliError> {
     let (slam, mut checkpoint_state) =
         match load_slam_from_checkpoint(&config.output, checkpoint.as_ref()) {
             Some(slam) => {
-                info!("Stage 1/4: Input loading skipped (checkpoint)");
-                info!("Stage 2/4: SLAM skipped (checkpoint)");
+                info!("Stage 1/2: Input loading skipped (checkpoint)");
+                info!("Stage 2/2: SLAM skipped (checkpoint)");
                 (slam, checkpoint.unwrap_or_default())
             }
             None => {
@@ -724,31 +715,20 @@ fn run_pipeline(config: &ResolvedConfig) -> Result<PipelineReport, CliError> {
             }
         };
     let camera_count = slam.keyframes.len();
-    let gaussian = run_gaussian_stage(slam, config)?;
-
-    // Write Gaussian positions into the SLAM checkpoint as map_points so that
-    // RustViewer can display them without a separate scene.ply load.
-    checkpoint_state =
-        update_stage_completion(&config.output, checkpoint_state, StageMarker::Gaussian)
-            .map_err(|err| CliError::Pipeline(format!("Checkpoint save: {err}")))?;
-    if let Some(slam_ck) = checkpoint_state.slam.as_mut() {
-        slam_ck.map_points = gaussian
-            .map
-            .gaussians()
-            .iter()
-            .map(|g| MapPointCheckpoint {
-                position: [g.position.x, g.position.y, g.position.z],
-                color: Some(g.color),
-            })
-            .collect();
-    }
+    reset_post_slam_checkpoint_state(&mut checkpoint_state);
     save_pipeline_checkpoint(&config.output, &checkpoint_state)
         .map_err(|err| CliError::Pipeline(format!("Checkpoint save: {err}")))?;
-    let mesh = run_mesh_stage(gaussian, &config.output, config.mesh_voxel_size)?;
-    let _ = update_stage_completion(&config.output, checkpoint_state, StageMarker::Mesh)
-        .map_err(|err| CliError::Pipeline(format!("Checkpoint save: {err}")))?;
+    let slam_output_path = export_slam_output_for_rustgs(&slam, &config.output)?;
+    info!(
+        "SLAM export ready for RustGS: {}",
+        slam_output_path.display()
+    );
 
-    Ok(PipelineReport { camera_count, mesh })
+    Ok(PipelineReport {
+        camera_count,
+        slam_output_path,
+        mesh: MeshStats::default(),
+    })
 }
 
 fn load_slam_from_checkpoint(
@@ -829,16 +809,20 @@ fn load_slam_from_checkpoint(
     }
 
     info!(
-        "Resuming from SLAM checkpoint with {} keyframes",
-        keyframes.len()
+        "Resuming from SLAM checkpoint with {} keyframes and {} sparse points",
+        keyframes.len(),
+        slam_checkpoint.map_points.len()
     );
 
     Some(SlamStageOutput {
         keyframes,
         camera,
         frame_count: slam_checkpoint.frame_count,
-        tracking_success_ratio: None,
-        tracking_success_frames: 0,
+        map_points: slam_checkpoint
+            .map_points
+            .iter()
+            .map(|point| MapPointData::new(point.position, point.color))
+            .collect(),
     })
 }
 
@@ -910,6 +894,8 @@ fn save_slam_checkpoint(
 
     checkpoint.video_completed = true;
     checkpoint.slam_completed = true;
+    checkpoint.gaussian_completed = false;
+    checkpoint.mesh_completed = false;
     checkpoint.slam = Some(SlamCheckpoint {
         camera: CameraCheckpoint {
             fx: slam.camera.focal.x,
@@ -921,28 +907,23 @@ fn save_slam_checkpoint(
         },
         frame_count: slam.frame_count,
         keyframes,
-        map_points: Vec::new(),
+        map_points: slam
+            .map_points
+            .iter()
+            .map(|point| MapPointCheckpoint {
+                position: point.position,
+                color: point.color,
+            })
+            .collect(),
     });
 
     save_pipeline_checkpoint(output_dir, &checkpoint)?;
     Ok(checkpoint)
 }
 
-fn update_stage_completion(
-    output_dir: &Path,
-    mut checkpoint: PipelineCheckpoint,
-    stage: StageMarker,
-) -> Result<PipelineCheckpoint, PipelineCheckpointError> {
-    match stage {
-        StageMarker::Gaussian => {
-            checkpoint.gaussian_completed = true;
-        }
-        StageMarker::Mesh => {
-            checkpoint.mesh_completed = true;
-        }
-    }
-    save_pipeline_checkpoint(output_dir, &checkpoint)?;
-    Ok(checkpoint)
+fn reset_post_slam_checkpoint_state(checkpoint: &mut PipelineCheckpoint) {
+    checkpoint.gaussian_completed = false;
+    checkpoint.mesh_completed = false;
 }
 
 fn validate_slam_checkpoint(output_dir: &Path, checkpoint: &SlamCheckpoint) -> Result<(), String> {
@@ -1085,7 +1066,7 @@ fn load_input_source(config: &ResolvedConfig) -> Result<InputSource, CliError> {
 
     match detect_dataset_kind(config) {
         Some(DatasetKind::Tum) => {
-            info!("Stage 1/4: Loading TUM RGB-D dataset");
+            info!("Stage 1/2: Loading TUM RGB-D dataset");
             let dataset = TumRgbdDataset::load(dataset_config)
                 .map_err(|err| CliError::Pipeline(format!("TUM dataset load: {err}")))?;
             let metadata = dataset.metadata();
@@ -1099,7 +1080,7 @@ fn load_input_source(config: &ResolvedConfig) -> Result<InputSource, CliError> {
             Ok(InputSource::Dataset(Box::new(dataset)))
         }
         Some(DatasetKind::Kitti) => {
-            info!("Stage 1/4: Loading KITTI odometry dataset");
+            info!("Stage 1/2: Loading KITTI odometry dataset");
             let dataset = KittiDataset::load(dataset_config)
                 .map_err(|err| CliError::Pipeline(format!("KITTI dataset load: {err}")))?;
             let metadata = dataset.metadata();
@@ -1113,7 +1094,7 @@ fn load_input_source(config: &ResolvedConfig) -> Result<InputSource, CliError> {
             Ok(InputSource::Dataset(Box::new(dataset)))
         }
         Some(DatasetKind::Euroc) => {
-            info!("Stage 1/4: Loading EuRoC MAV dataset");
+            info!("Stage 1/2: Loading EuRoC MAV dataset");
             let dataset = EurocDataset::load(dataset_config)
                 .map_err(|err| CliError::Pipeline(format!("EuRoC dataset load: {err}")))?;
             let metadata = dataset.metadata();
@@ -1134,7 +1115,7 @@ fn load_input_source(config: &ResolvedConfig) -> Result<InputSource, CliError> {
 }
 
 fn decode_video(config: &ResolvedConfig) -> Result<DecodedVideo, CliError> {
-    info!("Stage 1/4: Video decode");
+    info!("Stage 1/2: Video decode");
     debug!(
         "Video decoder config: cache_capacity={}, prefer_hardware={}",
         config.video.cache_capacity, config.video.prefer_hardware
@@ -1176,7 +1157,6 @@ fn decode_video(config: &ResolvedConfig) -> Result<DecodedVideo, CliError> {
     info!("Video decode completed");
     Ok(DecodedVideo {
         decoder,
-        info,
         camera,
         total_frames,
     })
@@ -1186,7 +1166,7 @@ fn run_slam_stage(
     input: InputSource,
     config: &ResolvedConfig,
 ) -> Result<SlamStageOutput, CliError> {
-    info!("Stage 2/4: SLAM");
+    info!("Stage 2/2: SLAM");
     let stage_start = Instant::now();
 
     match input {
@@ -1195,12 +1175,100 @@ fn run_slam_stage(
     }
 }
 
+fn build_local_mapping(config: &ResolvedConfig, camera: Camera) -> LocalMapping {
+    let defaults = LocalMappingConfig::default();
+    let mut local_mapping = LocalMapping::new(LocalMappingConfig {
+        max_keyframes: config.slam.mapper.local_mapping_window.max(2),
+        max_map_points: config
+            .slam
+            .mapper
+            .max_keyframes
+            .max(1)
+            .saturating_mul(config.slam.mapper.max_points_per_keyframe.max(1)),
+        min_observations: defaults.min_observations,
+        min_triangulation_angle: config.slam.mapper.min_triangulation_angle.max(0.1),
+        min_triangulation_dist: config.slam.mapper.min_point_distance.max(0.0),
+        max_reprojection_error: config.slam.mapper.max_reproj_error.max(0.1),
+        local_ba_enabled: config.slam.mapper.use_local_mapping,
+        local_ba_iterations: config.slam.optimizer.local_ba_iterations.max(1),
+        local_ba_interval: defaults.local_ba_interval,
+        culling_threshold: defaults.culling_threshold,
+    });
+    local_mapping.set_camera(camera);
+    local_mapping.set_map(Map::new());
+    local_mapping
+}
+
+fn build_mapping_keyframe(
+    index: usize,
+    timestamp: f64,
+    width: u32,
+    height: u32,
+    pose: SE3,
+    features: crate::core::FrameFeatures,
+) -> KeyFrame {
+    let mut frame = Frame::new(index as u64, timestamp, width, height);
+    frame.set_pose(pose);
+    frame.mark_as_keyframe();
+    KeyFrame::new(frame, features)
+}
+
+fn collect_sparse_map_points(local_mapping: &LocalMapping) -> Vec<MapPointData> {
+    let Some(map) = local_mapping.map() else {
+        return Vec::new();
+    };
+
+    map.valid_points()
+        .filter(|point| point.observations >= 2)
+        .filter(|point| point.position.is_finite())
+        .map(|point| {
+            MapPointData::new(
+                [point.position.x, point.position.y, point.position.z],
+                point.color,
+            )
+        })
+        .collect()
+}
+
+fn sparse_point_bin(point: [f32; 3]) -> (i32, i32, i32) {
+    const BIN_SCALE: f32 = 100.0;
+    (
+        (point[0] * BIN_SCALE).round() as i32,
+        (point[1] * BIN_SCALE).round() as i32,
+        (point[2] * BIN_SCALE).round() as i32,
+    )
+}
+
+fn accumulate_map_point(
+    points: &mut Vec<MapPointData>,
+    seen_bins: &mut HashSet<(i32, i32, i32)>,
+    point: MapPointData,
+) {
+    if !point.position.iter().all(|value| value.is_finite()) {
+        return;
+    }
+    let bin = sparse_point_bin(point.position);
+    if seen_bins.insert(bin) {
+        points.push(point);
+    }
+}
+
+fn sparse_point_within_export_range(point: [f32; 3], max_distance: f32) -> bool {
+    if !point.iter().all(|value| value.is_finite()) {
+        return false;
+    }
+
+    let distance_sq = point.iter().map(|value| value * value).sum::<f32>();
+    distance_sq.is_finite() && distance_sq.sqrt() <= max_distance.max(1.0)
+}
+
 fn run_slam_from_video(
     mut decoded: DecodedVideo,
     config: &ResolvedConfig,
     stage_start: Instant,
 ) -> Result<SlamStageOutput, CliError> {
     let mut vo = VisualOdometry::with_params(decoded.camera, config.slam.tracker.clone());
+    let mut local_mapping = build_local_mapping(config, decoded.camera);
     let keyframe_interval = config.slam.mapper.keyframe_interval.max(1);
     let max_keyframes = config.slam.mapper.max_keyframes.max(1);
     let stride = config.slam.dataset.stride.max(1);
@@ -1223,9 +1291,10 @@ fn run_slam_from_video(
     let log_interval = progress_interval(total_target);
 
     let mut keyframes = Vec::new();
+    let mut vo_sparse_points = Vec::new();
+    let mut vo_sparse_bins = HashSet::new();
     let mut processed = 0usize;
     let mut success_frames = 0usize;
-    let mut last_pose = SE3::identity();
     let mut index = 0usize;
 
     loop {
@@ -1248,24 +1317,35 @@ fn run_slam_from_video(
         let result = vo.process_frame(&gray, frame.width, frame.height);
         if result.success {
             success_frames += 1;
-            last_pose = result.pose;
-        }
-        let pose = if result.success {
-            result.pose
-        } else {
-            last_pose
-        };
+            for point in vo.last_sparse_points() {
+                accumulate_map_point(
+                    &mut vo_sparse_points,
+                    &mut vo_sparse_bins,
+                    MapPointData::new(point, None),
+                );
+            }
+            if let Some(features) = vo.last_features() {
+                local_mapping.insert_keyframe(build_mapping_keyframe(
+                    frame.index,
+                    frame.timestamp,
+                    frame.width,
+                    frame.height,
+                    result.pose,
+                    features,
+                ));
 
-        if processed % keyframe_interval == 0 && keyframes.len() < max_keyframes {
-            keyframes.push(KeyframeSample {
-                index: frame.index,
-                timestamp: frame.timestamp,
-                width: frame.width,
-                height: frame.height,
-                color: frame.data.as_ref().clone(),
-                depth: None,
-                pose,
-            });
+                if processed % keyframe_interval == 0 && keyframes.len() < max_keyframes {
+                    keyframes.push(KeyframeSample {
+                        index: frame.index,
+                        timestamp: frame.timestamp,
+                        width: frame.width,
+                        height: frame.height,
+                        color: frame.data.as_ref().clone(),
+                        depth: None,
+                        pose: result.pose,
+                    });
+                }
+            }
         }
 
         processed += 1;
@@ -1285,29 +1365,55 @@ fn run_slam_from_video(
     } else {
         None
     };
+    let mut map_points = collect_sparse_map_points(&local_mapping);
+    let mut seen_sparse_bins = map_points
+        .iter()
+        .map(|point| sparse_point_bin(point.position))
+        .collect::<HashSet<_>>();
+    for point in vo_sparse_points {
+        accumulate_map_point(&mut map_points, &mut seen_sparse_bins, point);
+    }
+    let max_export_distance = config.slam.mapper.max_point_distance.max(1.0);
+    map_points
+        .retain(|point| sparse_point_within_export_range(point.position, max_export_distance));
 
     log_progress("SLAM", processed, total_target, stage_start);
     if let Some(ratio) = tracking_success_ratio {
         info!(
-            "SLAM completed: frames={}, keyframes={}, tracking_success={:.1}%",
+            "SLAM completed: frames={}, keyframes={}, sparse_points={}, tracking_success={:.1}%",
             processed,
             keyframes.len(),
+            map_points.len(),
             ratio * 100.0
         );
     } else {
         info!(
-            "SLAM completed: frames={}, keyframes={}",
+            "SLAM completed: frames={}, keyframes={}, sparse_points={}",
             processed,
-            keyframes.len()
+            keyframes.len(),
+            map_points.len()
         );
     }
+    let relocalization_stats = vo.relocalization_stats();
+    info!(
+        "VO relocalization: lost_events={}, direct_retrack={}/{}, anchor_store={}, anchor_success={}/{}, anchor_candidates_tested={}, monocular_reinit={}/{}, cached_anchors={}",
+        relocalization_stats.lost_events,
+        relocalization_stats.direct_retrack_successes,
+        relocalization_stats.direct_retrack_attempts,
+        relocalization_stats.anchor_store_successes,
+        relocalization_stats.anchor_relocalization_successes,
+        relocalization_stats.anchor_relocalization_calls,
+        relocalization_stats.anchor_candidates_tested,
+        relocalization_stats.monocular_reinit_successes,
+        relocalization_stats.monocular_reinit_attempts,
+        relocalization_stats.cached_anchor_keyframes,
+    );
 
     Ok(SlamStageOutput {
         keyframes,
         camera: decoded.camera,
         frame_count: processed,
-        tracking_success_ratio,
-        tracking_success_frames: success_frames,
+        map_points,
     })
 }
 
@@ -1318,6 +1424,7 @@ fn run_slam_from_dataset(
 ) -> Result<SlamStageOutput, CliError> {
     let camera = dataset.camera();
     let mut vo = VisualOdometry::with_params(camera.clone(), config.slam.tracker.clone());
+    let mut local_mapping = build_local_mapping(config, camera);
 
     let keyframe_interval = config.slam.mapper.keyframe_interval.max(1);
     let max_keyframes = config.slam.mapper.max_keyframes.max(1);
@@ -1325,9 +1432,10 @@ fn run_slam_from_dataset(
     let log_interval = progress_interval(total_frames);
 
     let mut keyframes = Vec::new();
+    let mut vo_sparse_points = Vec::new();
+    let mut vo_sparse_bins = HashSet::new();
     let mut processed = 0usize;
     let mut success_frames = 0usize;
-    let mut last_pose = SE3::identity();
 
     for index in 0..total_frames {
         let frame = match dataset.get_frame(index) {
@@ -1345,24 +1453,35 @@ fn run_slam_from_dataset(
 
         if result.success {
             success_frames += 1;
-            last_pose = result.pose;
-        }
-        let pose = if result.success {
-            result.pose
-        } else {
-            last_pose
-        };
+            for point in vo.last_sparse_points() {
+                accumulate_map_point(
+                    &mut vo_sparse_points,
+                    &mut vo_sparse_bins,
+                    MapPointData::new(point, None),
+                );
+            }
+            if let Some(features) = vo.last_features() {
+                local_mapping.insert_keyframe(build_mapping_keyframe(
+                    frame.index,
+                    frame.timestamp,
+                    frame.width,
+                    frame.height,
+                    result.pose,
+                    features,
+                ));
 
-        if processed % keyframe_interval == 0 && keyframes.len() < max_keyframes {
-            keyframes.push(KeyframeSample {
-                index: frame.index,
-                timestamp: frame.timestamp,
-                width: frame.width,
-                height: frame.height,
-                color: frame.color,
-                depth: frame.depth,
-                pose,
-            });
+                if processed % keyframe_interval == 0 && keyframes.len() < max_keyframes {
+                    keyframes.push(KeyframeSample {
+                        index: frame.index,
+                        timestamp: frame.timestamp,
+                        width: frame.width,
+                        height: frame.height,
+                        color: frame.color,
+                        depth: frame.depth,
+                        pose: result.pose,
+                    });
+                }
+            }
         }
 
         processed += 1;
@@ -1380,158 +1499,63 @@ fn run_slam_from_dataset(
     } else {
         None
     };
+    let mut map_points = collect_sparse_map_points(&local_mapping);
+    let mut seen_sparse_bins = map_points
+        .iter()
+        .map(|point| sparse_point_bin(point.position))
+        .collect::<HashSet<_>>();
+    for point in vo_sparse_points {
+        accumulate_map_point(&mut map_points, &mut seen_sparse_bins, point);
+    }
+    let max_export_distance = config.slam.mapper.max_point_distance.max(1.0);
+    map_points
+        .retain(|point| sparse_point_within_export_range(point.position, max_export_distance));
 
     log_progress("SLAM", processed, total_frames, stage_start);
     if let Some(ratio) = tracking_success_ratio {
         info!(
-            "SLAM completed: frames={}, keyframes={}, tracking_success={:.1}%",
+            "SLAM completed: frames={}, keyframes={}, sparse_points={}, tracking_success={:.1}%",
             processed,
             keyframes.len(),
+            map_points.len(),
             ratio * 100.0
         );
     } else {
         info!(
-            "SLAM completed: frames={}, keyframes={}",
+            "SLAM completed: frames={}, keyframes={}, sparse_points={}",
             processed,
-            keyframes.len()
+            keyframes.len(),
+            map_points.len()
         );
     }
+    let relocalization_stats = vo.relocalization_stats();
+    info!(
+        "VO relocalization: lost_events={}, direct_retrack={}/{}, anchor_store={}, anchor_success={}/{}, anchor_candidates_tested={}, monocular_reinit={}/{}, cached_anchors={}",
+        relocalization_stats.lost_events,
+        relocalization_stats.direct_retrack_successes,
+        relocalization_stats.direct_retrack_attempts,
+        relocalization_stats.anchor_store_successes,
+        relocalization_stats.anchor_relocalization_successes,
+        relocalization_stats.anchor_relocalization_calls,
+        relocalization_stats.anchor_candidates_tested,
+        relocalization_stats.monocular_reinit_successes,
+        relocalization_stats.monocular_reinit_attempts,
+        relocalization_stats.cached_anchor_keyframes,
+    );
 
     Ok(SlamStageOutput {
         keyframes,
         camera,
         frame_count: processed,
-        tracking_success_ratio,
-        tracking_success_frames: success_frames,
+        map_points,
     })
 }
 
-fn run_gaussian_stage(
-    slam: SlamStageOutput,
-    config: &ResolvedConfig,
-) -> Result<GaussianStageOutput, CliError> {
-    info!("Stage 3/4: 3DGS mapping");
-    let stage_start = Instant::now();
-
-    if slam.keyframes.is_empty() {
-        warn!("3DGS mapping skipped: no keyframes available");
-        return Ok(GaussianStageOutput {
-            map: GaussianMap::default(),
-            keyframes: slam.keyframes,
-            camera: slam.camera,
-        });
-    }
-
-    #[cfg(feature = "gpu")]
-    {
-        let slam_output = build_rustgs_slam_output(&slam, &config.output)?;
-        let mut training_config = rustgs::TrainingConfig::default();
-        let iterations = std::env::var("RUSTSCAN_GAUSSIAN_ITERATIONS")
-            .ok()
-            .or_else(|| std::env::var("RUSTSCAN_E2E_GAUSSIAN_ITERS").ok())
-            .and_then(|value| value.parse::<usize>().ok())
-            .unwrap_or(3_000)
-            .max(1);
-        training_config.iterations = iterations;
-        training_config.max_initial_gaussians = 100_000;
-        training_config.use_synthetic_depth = true;
-
-        info!(
-            "Delegating 3DGS training to RustGS (frames={}, iterations={})",
-            slam_output.num_poses(),
-            training_config.iterations,
-        );
-
-        let trained = rustgs::train_from_slam(&slam_output, &training_config)
-            .map_err(|err| CliError::Pipeline(format!("RustGS training: {err}")))?;
-        let map = convert_rustgs_map(&trained);
-
-        log_progress(
-            "3DGS",
-            slam.keyframes.len(),
-            slam.keyframes.len(),
-            stage_start,
-        );
-        info!("3DGS training completed: gaussians={}", map.len());
-
-        return Ok(GaussianStageOutput {
-            map,
-            keyframes: slam.keyframes,
-            camera: slam.camera,
-        });
-    }
-
-    #[cfg(not(feature = "gpu"))]
-    {
-        let has_real_depth = slam.keyframes.iter().any(|kf| kf.depth.is_some());
-        if !has_real_depth {
-            warn!("No depth input; using synthetic depth for 3DGS mapping");
-        }
-
-        let width = slam.camera.width as usize;
-        let height = slam.camera.height as usize;
-        let mut mapper_config = MapperConfig::default();
-        let target_gaussians = mapper_config.max_gaussians.max(1);
-        mapper_config.sampling_step = compute_sampling_step(width, height, target_gaussians);
-
-        let mut mapper = GaussianMapper::with_config(mapper_config.clone(), width, height);
-        let total_keyframes = slam.keyframes.len();
-        let log_interval = progress_interval(total_keyframes);
-
-        for (idx, keyframe) in slam.keyframes.iter().enumerate() {
-            let depth = keyframe.depth.clone().unwrap_or_else(|| {
-                synthetic_depth(
-                    &keyframe.color,
-                    keyframe.width as usize,
-                    keyframe.height as usize,
-                    mapper_config.min_depth,
-                    mapper_config.max_depth,
-                )
-            });
-            let colors: Vec<[u8; 3]> = keyframe
-                .color
-                .chunks_exact(3)
-                .map(|c| [c[0], c[1], c[2]])
-                .collect();
-
-            let rotation = keyframe.pose.rotation();
-            let translation = keyframe.pose.translation();
-            let _ = mapper.update(
-                &depth,
-                &colors,
-                keyframe.width as usize,
-                keyframe.height as usize,
-                slam.camera.focal.x,
-                slam.camera.focal.y,
-                slam.camera.principal.x,
-                slam.camera.principal.y,
-                &rotation,
-                &translation,
-            );
-
-            let processed = idx + 1;
-            if should_log_progress(processed, total_keyframes, log_interval) {
-                log_progress("3DGS", processed, total_keyframes, stage_start);
-            }
-        }
-
-        log_progress("3DGS", total_keyframes, total_keyframes, stage_start);
-        info!("3DGS mapping completed: gaussians={}", mapper.map().len());
-
-        Ok(GaussianStageOutput {
-            map: mapper.map().clone(),
-            keyframes: slam.keyframes,
-            camera: slam.camera,
-        })
-    }
-}
-
-#[cfg(feature = "gpu")]
 fn build_rustgs_slam_output(
     slam: &SlamStageOutput,
     output_dir: &Path,
-) -> Result<rustgs::SlamOutput, CliError> {
-    let mut output = rustgs::SlamOutput::new(rustgs::Intrinsics::new(
+) -> Result<rustscan_types::SlamOutput, CliError> {
+    let mut output = rustscan_types::SlamOutput::new(rustscan_types::Intrinsics::new(
         slam.camera.focal.x,
         slam.camera.focal.y,
         slam.camera.principal.x,
@@ -1563,12 +1587,16 @@ fn build_rustgs_slam_output(
             ))
         })?;
 
-        let pose = rustgs::SE3::from_rotation_translation(
+        let pose = rustscan_types::SE3::from_rotation_translation(
             &keyframe.pose.rotation(),
             &keyframe.pose.translation(),
         );
-        let mut scene_pose =
-            rustgs::ScenePose::new(keyframe.index as u64, color_path, pose, keyframe.timestamp);
+        let mut scene_pose = rustscan_types::ScenePose::new(
+            keyframe.index as u64,
+            color_path,
+            pose,
+            keyframe.timestamp,
+        );
 
         if let Some(depth) = &keyframe.depth {
             let depth_path = frames_dir.join(format!("frame_{:06}.depth", keyframe.index));
@@ -1599,108 +1627,31 @@ fn build_rustgs_slam_output(
         output.add_pose(scene_pose);
     }
 
+    for point in &slam.map_points {
+        output.add_map_point(*point);
+    }
+
     Ok(output)
 }
 
-#[cfg(feature = "gpu")]
-fn convert_rustgs_map(source: &rustgs::GaussianMap) -> GaussianMap {
-    let mut map = GaussianMap::new(source.len().max(100_000));
-    for gaussian in source.gaussians() {
-        let converted = crate::fusion::gaussian::Gaussian3D {
-            position: gaussian.position,
-            scale: gaussian.scale,
-            rotation: gaussian.rotation,
-            opacity: gaussian.opacity,
-            color: gaussian.color,
-            features: gaussian.features.clone(),
-            state: match gaussian.state {
-                rustgs::GaussianState::New => crate::fusion::gaussian::GaussianState::New,
-                rustgs::GaussianState::Unstable => crate::fusion::gaussian::GaussianState::Unstable,
-                rustgs::GaussianState::Stable => crate::fusion::gaussian::GaussianState::Stable,
-            },
-        };
-        let _ = map.add(converted);
-    }
-    map.update_states();
-    map
+fn slam_output_json_path(output_dir: &Path) -> PathBuf {
+    output_dir.join("slam_output.json")
 }
 
-fn run_mesh_stage(
-    gaussian: GaussianStageOutput,
+fn export_slam_output_for_rustgs(
+    slam: &SlamStageOutput,
     output_dir: &Path,
-    mesh_voxel_size: Option<f32>,
-) -> Result<MeshStats, CliError> {
-    info!("Stage 4/4: Mesh extraction");
-    let stage_start = Instant::now();
+) -> Result<PathBuf, CliError> {
+    let slam_output = build_rustgs_slam_output(slam, output_dir)?;
+    let path = slam_output_json_path(output_dir);
+    slam_output.save(&path).map_err(|err| {
+        CliError::Pipeline(format!("write SLAM export {}: {err}", path.display()))
+    })?;
+    Ok(path)
+}
 
-    let mut extractor = build_mesh_extractor(&gaussian.map, mesh_voxel_size);
-    let width = gaussian.camera.width as usize;
-    let height = gaussian.camera.height as usize;
-    let renderer = GaussianRenderer::new(width, height);
-
-    let total_views = gaussian.keyframes.len();
-    let log_interval = progress_interval(total_views);
-
-    for (idx, keyframe) in gaussian.keyframes.iter().enumerate() {
-        let camera = GaussianCamera::new(
-            gaussian.camera.focal.x,
-            gaussian.camera.focal.y,
-            gaussian.camera.principal.x,
-            gaussian.camera.principal.y,
-        )
-        .with_pose(keyframe.pose.rotation(), keyframe.pose.translation());
-
-        let (depth, color) = renderer.render_depth_and_color(&gaussian.map, &camera);
-        let mat = keyframe.pose.to_matrix();
-        let flat = [
-            mat[0][0], mat[0][1], mat[0][2], mat[0][3], mat[1][0], mat[1][1], mat[1][2], mat[1][3],
-            mat[2][0], mat[2][1], mat[2][2], mat[2][3], mat[3][0], mat[3][1], mat[3][2], mat[3][3],
-        ];
-        let extrinsics = Mat4::from_cols_array(&flat);
-
-        extractor.integrate_from_gaussians(
-            |i| depth[i],
-            Some(&color),
-            width,
-            height,
-            [
-                gaussian.camera.focal.x,
-                gaussian.camera.focal.y,
-                gaussian.camera.principal.x,
-                gaussian.camera.principal.y,
-            ],
-            &extrinsics,
-        );
-
-        let processed = idx + 1;
-        if should_log_progress(processed, total_views, log_interval) {
-            log_progress("Mesh", processed, total_views, stage_start);
-        }
-    }
-
-    let report = extractor.extract_with_postprocessing_report();
-    let mesh = report.mesh;
-
-    extractor
-        .export_mesh_files(&mesh, output_dir)
-        .map_err(|err| CliError::Pipeline(format!("Mesh export: {err}")))?;
-    extractor
-        .export_mesh_metadata_files(&mesh, report.isolated_triangle_percentage, output_dir)
-        .map_err(|err| CliError::Pipeline(format!("Mesh metadata: {err}")))?;
-
-    log_progress("Mesh", total_views, total_views, stage_start);
-    info!(
-        "Mesh extraction completed: vertices={}, triangles={}, isolated_pct={:.2}",
-        mesh.vertices.len(),
-        mesh.triangles.len(),
-        report.isolated_triangle_percentage
-    );
-
-    Ok(MeshStats {
-        vertex_count: mesh.vertices.len(),
-        triangle_count: mesh.triangles.len(),
-        isolated_triangle_percent: report.isolated_triangle_percentage,
-    })
+fn bytes_to_mib(bytes: u64) -> f64 {
+    bytes as f64 / MIB_BYTES
 }
 
 fn resolve_camera(config: &SlamConfig, width: u32, height: u32) -> Camera {
@@ -1736,70 +1687,6 @@ fn rgb_to_grayscale(rgb: &[u8], width: usize, height: usize) -> Vec<u8> {
         gray.push(luma);
     }
     gray
-}
-
-#[cfg(not(feature = "gpu"))]
-fn synthetic_depth(
-    color: &[u8],
-    width: usize,
-    height: usize,
-    min_depth: f32,
-    max_depth: f32,
-) -> Vec<f32> {
-    let expected = width.saturating_mul(height).saturating_mul(3);
-    let mut depth = Vec::with_capacity(width * height);
-    if color.len() < expected || min_depth >= max_depth {
-        depth.resize(width * height, min_depth.max(0.01));
-        return depth;
-    }
-
-    let range = max_depth - min_depth;
-    for chunk in color.chunks_exact(3) {
-        let r = chunk[0] as f32 / 255.0;
-        let g = chunk[1] as f32 / 255.0;
-        let b = chunk[2] as f32 / 255.0;
-        let luma = 0.299 * r + 0.587 * g + 0.114 * b;
-        let z = max_depth - luma * range;
-        depth.push(z.clamp(min_depth, max_depth));
-    }
-
-    depth
-}
-
-#[cfg(not(feature = "gpu"))]
-fn compute_sampling_step(width: usize, height: usize, max_gaussians: usize) -> usize {
-    let pixels = width.saturating_mul(height).max(1);
-    let ratio = (pixels as f32 / max_gaussians.max(1) as f32).sqrt();
-    ratio.ceil().max(2.0) as usize
-}
-
-fn build_mesh_extractor(map: &GaussianMap, mesh_voxel_size: Option<f32>) -> MeshExtractor {
-    let default_voxel = MeshExtractionConfig::default().tsdf_config.voxel_size;
-    let voxel_size = mesh_voxel_size
-        .filter(|v| *v > 0.0)
-        .unwrap_or(default_voxel);
-    let Some((min, max)) = gaussian_bounds(map) else {
-        return MeshExtractor::default();
-    };
-
-    let extent = max - min;
-    let max_extent = extent.x.max(extent.y).max(extent.z);
-    let size = (max_extent * 1.2).max(1.0);
-    let center = (min + max) * 0.5;
-
-    MeshExtractor::centered(center, size, voxel_size)
-}
-
-fn gaussian_bounds(map: &GaussianMap) -> Option<(Vec3, Vec3)> {
-    let mut iter = map.gaussians().iter();
-    let first = iter.next()?;
-    let mut min = first.position;
-    let mut max = first.position;
-    for gaussian in iter {
-        min = min.min(gaussian.position);
-        max = max.max(gaussian.position);
-    }
-    Some((min, max))
 }
 
 fn progress_interval(total: usize) -> usize {
@@ -1877,7 +1764,7 @@ fn current_process_memory_mb() -> Option<f64> {
     let mut system = System::new();
     system.refresh_process(pid);
     let process = system.process(pid)?;
-    Some(process.memory() as f64 / 1024.0)
+    Some(bytes_to_mib(process.memory()))
 }
 
 fn current_gpu_utilization_percent() -> Option<f32> {
@@ -1917,6 +1804,9 @@ fn print_text_summary(results: &ResultsJson) {
     }
     println!("Processing time (ms): {}", results.processing_time_ms);
     println!("Camera count: {}", results.camera_count);
+    if let Some(slam_output) = &results.slam_output {
+        println!("SLAM output: {}", slam_output);
+    }
     println!("Mesh vertices: {}", results.mesh.vertex_count);
     println!("Mesh triangles: {}", results.mesh.triangle_count);
 }
@@ -1989,6 +1879,7 @@ fn handle_error(
         output: output.as_ref().map(|path| path.display().to_string()),
         processing_time_ms: start.elapsed().as_millis(),
         camera_count: 0,
+        slam_output: None,
         mesh: MeshStats::default(),
         error: Some(error_info),
         diagnostics,
