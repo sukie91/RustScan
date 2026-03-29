@@ -4,11 +4,11 @@
 //! - Stereo matching (for stereo cameras like KITTI)
 //! - Depth fusion (combining multiple depth sources)
 
-pub mod stereo;
 pub mod fusion;
+pub mod stereo;
 
 #[cfg(test)]
 mod additional_tests;
 
-pub use stereo::{StereoMatcher, StereoConfig, BlockMatcher};
 pub use fusion::{DepthFusion, DepthFusionConfig, DepthObservation, TemporalDepthFusion};
+pub use stereo::{BlockMatcher, StereoConfig, StereoMatcher};

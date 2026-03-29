@@ -33,8 +33,8 @@ impl Default for MapperConfig {
     fn default() -> Self {
         Self {
             max_gaussians: 100_000,
-            min_depth: 0.01,   // 1cm
-            max_depth: 10.0,   // 10m
+            min_depth: 0.01, // 1cm
+            max_depth: 10.0, // 10m
             sampling_step: 2,
             error_threshold: 0.1,
             densify_interval: 100,
@@ -91,7 +91,7 @@ impl GaussianMapper {
     }
 
     /// Process a new RGB-D frame
-    /// 
+    ///
     /// 1. Add new Gaussians from newly observed pixels
     /// 2. Classify Gaussians as Stable/Unstable
     /// 3. Mark Gaussians for optimization
@@ -109,26 +109,30 @@ impl GaussianMapper {
         translation: &[f32; 3],
     ) -> MapperUpdateResult {
         self.frame_count += 1;
-        
+
         let mut added = 0;
         let mut pruned = 0;
-        
+
         // 1. Always add Gaussians for first few frames, then periodically
         if self.frame_count <= 5 || self.frame_count % self.config.densify_interval == 0 {
             added = self.add_from_depth(
-                depth, color, width, height,
-                fx, fy, cx, cy,
-                rotation, translation,
+                depth,
+                color,
+                width,
+                height,
+                fx,
+                fy,
+                cx,
+                cy,
+                rotation,
+                translation,
             );
         }
 
         // 2. Compute rendering error and classify
-        let (stable_count, unstable_ids) = self.classify_gaussians(
-            depth, width, height,
-            fx, fy, cx, cy,
-            rotation, translation,
-        );
-        
+        let (stable_count, unstable_ids) =
+            self.classify_gaussians(depth, width, height, fx, fy, cx, cy, rotation, translation);
+
         let unstable_count = unstable_ids.len();
         self.optimize_ids = unstable_ids;
         if self.frame_count % self.config.densify_interval == 0 {
@@ -160,7 +164,7 @@ impl GaussianMapper {
     ) -> usize {
         let step = self.config.sampling_step;
         let mut added = 0;
-        
+
         // Compute camera rotation matrix
         let r = glam::Mat3::from_cols(
             glam::Vec3::new(rotation[0][0], rotation[0][1], rotation[0][2]),
@@ -183,18 +187,14 @@ impl GaussianMapper {
                 // Backproject to camera frame
                 let x_cam = (x as f32 - cx) * z / fx;
                 let y_cam = (y as f32 - cy) * z / fy;
-                
+
                 // Transform to world frame
                 let p_cam = glam::Vec3::new(x_cam, y_cam, z);
                 let p_world = r * p_cam + t;
 
                 // Create Gaussian
-                let gaussian = Gaussian3D::from_depth_point(
-                    p_world.x,
-                    p_world.y,
-                    p_world.z,
-                    color[idx],
-                );
+                let gaussian =
+                    Gaussian3D::from_depth_point(p_world.x, p_world.y, p_world.z, color[idx]);
 
                 if self.map.add(gaussian).is_some() {
                     added += 1;
@@ -206,7 +206,7 @@ impl GaussianMapper {
     }
 
     /// Classify Gaussians as Stable or Unstable
-    /// 
+    ///
     /// Stable: renders well to observed images
     /// Unstable: needs optimization
     fn classify_gaussians(
@@ -222,19 +222,19 @@ impl GaussianMapper {
         translation: &[f32; 3],
     ) -> (usize, Vec<usize>) {
         // Render current view
-        let camera = crate::fusion::GaussianCamera::new(fx, fy, cx, cy)
-            .with_pose(*rotation, *translation);
-        
+        let camera =
+            crate::fusion::GaussianCamera::new(fx, fy, cx, cy).with_pose(*rotation, *translation);
+
         let rendered_depth = self.renderer.render_depth(&self.map, &camera);
-        
+
         // Compare rendered vs observed depth
         let mut valid_pixels = 0usize;
         let mut total_error = 0.0f32;
-        
+
         for i in 0..rendered_depth.len() {
             let rend_d = rendered_depth[i];
             let obs_d = depth[i];
-            
+
             if rend_d > 0.0 && obs_d > 0.0 {
                 total_error += (rend_d - obs_d).abs();
                 valid_pixels += 1;
@@ -274,7 +274,7 @@ impl GaussianMapper {
     }
 
     /// Optimize selected Gaussians (placeholder for full BA)
-    /// 
+    ///
     /// In full implementation, this would:
     /// 1. Build optimization problem
     /// 2. Compute gradients
@@ -286,7 +286,9 @@ impl GaussianMapper {
                 gaussian.opacity = (gaussian.opacity + 0.02 * steps as f32).clamp(0.0, 1.0);
                 let shrink = 0.99f32.powi(steps as i32);
                 gaussian.scale *= shrink;
-                gaussian.scale = gaussian.scale.clamp(glam::Vec3::splat(0.001), glam::Vec3::splat(0.1));
+                gaussian.scale = gaussian
+                    .scale
+                    .clamp(glam::Vec3::splat(0.001), glam::Vec3::splat(0.1));
                 gaussian.state = GaussianState::Stable;
             }
         }
@@ -346,25 +348,27 @@ mod tests {
     #[test]
     fn test_mapper_update() {
         let mut mapper = GaussianMapper::new(64, 64);
-        
+
         // Create test depth and color
         let depth = vec![1.0f32; 64 * 64];
         let color = vec![[255u8, 255, 255]; 64 * 64];
-        
-        let rotation = [
-            [1.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0],
-            [0.0, 0.0, 1.0],
-        ];
+
+        let rotation = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
         let translation = [0.0, 0.0, 0.0];
-        
+
         let result = mapper.update(
-            &depth, &color,
-            64, 64,
-            500.0, 500.0, 32.0, 32.0,
-            &rotation, &translation,
+            &depth,
+            &color,
+            64,
+            64,
+            500.0,
+            500.0,
+            32.0,
+            32.0,
+            &rotation,
+            &translation,
         );
-        
+
         assert!(result.total_gaussians > 0);
     }
 

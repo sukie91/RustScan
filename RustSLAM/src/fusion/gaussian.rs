@@ -49,7 +49,11 @@ impl Gaussian3D {
             scale: Vec3::splat(0.01), // 1cm default scale
             rotation: Quat::IDENTITY,
             opacity: 0.5,
-            color: [color[0] as f32 / 255.0, color[1] as f32 / 255.0, color[2] as f32 / 255.0],
+            color: [
+                color[0] as f32 / 255.0,
+                color[1] as f32 / 255.0,
+                color[2] as f32 / 255.0,
+            ],
             features: None,
             state: GaussianState::New,
         }
@@ -64,29 +68,37 @@ impl Gaussian3D {
 
     /// Project Gaussian to 2D (for rendering)
     /// Returns: (center_x, center_y, radius)
-    pub fn project(&self, fx: f32, fy: f32, cx: f32, cy: f32, pose: &[[f32; 3]; 3], t: &[f32; 3]) -> Option<[f32; 3]> {
+    pub fn project(
+        &self,
+        fx: f32,
+        fy: f32,
+        cx: f32,
+        cy: f32,
+        pose: &[[f32; 3]; 3],
+        t: &[f32; 3],
+    ) -> Option<[f32; 3]> {
         // Transform to camera frame
         let r = Mat3::from_cols(
             Vec3::new(pose[0][0], pose[0][1], pose[0][2]),
             Vec3::new(pose[1][0], pose[1][1], pose[1][2]),
             Vec3::new(pose[2][0], pose[2][1], pose[2][2]),
         );
-        
+
         let translation = Vec3::new(t[0], t[1], t[2]);
         let cam_pos = r.transpose() * (self.position - translation);
-        
+
         // Behind camera
         if cam_pos.z <= 0.0 {
             return None;
         }
-        
+
         // Project to image plane
         let u = fx * cam_pos.x / cam_pos.z + cx;
         let v = fy * cam_pos.y / cam_pos.z + cy;
-        
+
         // Approximate radius using scale
         let radius = (fx + fy) * self.scale.x / cam_pos.z;
-        
+
         Some([u, v, radius])
     }
 
@@ -143,15 +155,15 @@ impl GaussianMap {
         if self.gaussians.len() >= self.max_gaussians {
             return None;
         }
-        
+
         let id = self.gaussians.len();
         self.gaussians.push(gaussian);
-        
+
         // Remove oldest if over capacity
         if self.gaussians.len() > self.max_gaussians {
             self.gaussians.remove(0);
         }
-        
+
         Some(id)
     }
 
@@ -175,39 +187,39 @@ impl GaussianMap {
             Vec3::new(pose[2][0], pose[2][1], pose[2][2]),
         );
         let translation = Vec3::new(t[0], t[1], t[2]);
-        
+
         let mut added = 0;
-        
+
         // Sample points from depth
         for v in (0..height).step_by(2) {
             for u in (0..width).step_by(2) {
                 let idx = v * width + u;
                 let z = depth[idx];
-                
+
                 // Valid depth
                 if z > 0.01 && z < 10.0 {
                     // Backproject to 3D
                     let x = (u as f32 - cx) * z / fx;
                     let y = (v as f32 - cy) * z / fy;
-                    
+
                     // Transform to world frame
                     let cam_pos = Vec3::new(x, y, z);
                     let world_pos = r * cam_pos + translation;
-                    
+
                     let gaussian = Gaussian3D::from_depth_point(
                         world_pos.x,
                         world_pos.y,
                         world_pos.z,
                         color[idx],
                     );
-                    
+
                     if self.add(gaussian).is_some() {
                         added += 1;
                     }
                 }
             }
         }
-        
+
         added
     }
 
@@ -243,14 +255,17 @@ impl GaussianMap {
 
     /// Update Gaussian states (call after optimization)
     pub fn update_states(&mut self) {
-        self.stable_count = self.gaussians.iter()
+        self.stable_count = self
+            .gaussians
+            .iter()
             .filter(|g| g.state == GaussianState::Stable)
             .count();
     }
 
     /// Get unstable Gaussians for optimization
     pub fn get_unstable(&self) -> Vec<usize> {
-        self.gaussians.iter()
+        self.gaussians
+            .iter()
             .enumerate()
             .filter(|(_, g)| g.state == GaussianState::Unstable || g.state == GaussianState::New)
             .map(|(i, _)| i)
@@ -302,11 +317,7 @@ impl GaussianCamera {
             fy,
             cx,
             cy,
-            rotation: [
-                [1.0, 0.0, 0.0],
-                [0.0, 1.0, 0.0],
-                [0.0, 0.0, 1.0],
-            ],
+            rotation: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
             translation: [0.0, 0.0, 0.0],
         }
     }
@@ -334,14 +345,17 @@ mod tests {
     fn test_gaussian_projection() {
         let g = Gaussian3D::from_depth_point(0.0, 0.0, 1.0, [255, 128, 64]);
         let camera = GaussianCamera::new(500.0, 500.0, 320.0, 240.0);
-        
+
         // Camera at origin looking at +Z
         let result = g.project(
-            camera.fx, camera.fy, camera.cx, camera.cy,
+            camera.fx,
+            camera.fy,
+            camera.cx,
+            camera.cy,
             &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
             &[0.0, 0.0, 0.0],
         );
-        
+
         assert!(result.is_some());
         let [u, v, _] = result.unwrap();
         assert!((u - 320.0).abs() < 0.1);
@@ -352,30 +366,34 @@ mod tests {
     fn test_gaussian_map() {
         let mut map = GaussianMap::new(100);
         assert!(map.is_empty());
-        
+
         let g = Gaussian3D::default();
         map.add(g);
-        
+
         assert_eq!(map.len(), 1);
     }
 
     #[test]
     fn test_gaussian_map_from_depth() {
         let mut map = GaussianMap::new(1000);
-        
+
         // Simple 4x4 depth frame
         let depth = [1.0f32; 16];
         let color = [[255u8, 255, 255]; 16];
-        
+
         let added = map.add_from_depth(
             &depth,
             &color,
-            4, 4,
-            500.0, 500.0, 320.0, 240.0,
+            4,
+            4,
+            500.0,
+            500.0,
+            320.0,
+            240.0,
             &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
             &[0.0, 0.0, 0.0],
         );
-        
+
         assert!(added > 0);
     }
 }

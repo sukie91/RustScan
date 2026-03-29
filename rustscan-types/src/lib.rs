@@ -6,11 +6,11 @@
 //! - `TrainingDataset`: Dataset for 3DGS offline training
 //! - `SlamOutput`: SLAM output format for downstream processing
 
-pub mod pose;
 pub mod camera;
+pub mod pose;
 pub mod scene;
 
 // Re-exports
+pub use camera::{Intrinsics, ScenePose, TrainingDataset};
 pub use pose::SE3;
-pub use camera::{Intrinsics, TrainingDataset, ScenePose};
-pub use scene::{SlamOutput, MapPointData};
+pub use scene::{MapPointData, SlamOutput};

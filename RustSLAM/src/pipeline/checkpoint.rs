@@ -12,15 +12,30 @@ use crate::core::{Frame, FrameFeatures, KeyFrame, Map, MapPoint, SE3};
 #[derive(Debug, Error)]
 pub enum CheckpointError {
     #[error("failed to create checkpoint directory {path}: {source}")]
-    CreateDir { path: PathBuf, source: std::io::Error },
+    CreateDir {
+        path: PathBuf,
+        source: std::io::Error,
+    },
     #[error("failed to write checkpoint {path}: {source}")]
-    Write { path: PathBuf, source: std::io::Error },
+    Write {
+        path: PathBuf,
+        source: std::io::Error,
+    },
     #[error("failed to read checkpoint {path}: {source}")]
-    Read { path: PathBuf, source: std::io::Error },
+    Read {
+        path: PathBuf,
+        source: std::io::Error,
+    },
     #[error("failed to serialize checkpoint {path}: {source}")]
-    Serialize { path: PathBuf, source: serde_json::Error },
+    Serialize {
+        path: PathBuf,
+        source: serde_json::Error,
+    },
     #[error("failed to deserialize checkpoint {path}: {source}")]
-    Deserialize { path: PathBuf, source: serde_json::Error },
+    Deserialize {
+        path: PathBuf,
+        source: serde_json::Error,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -94,7 +109,11 @@ impl CheckpointManager {
         })
     }
 
-    pub fn maybe_save(&mut self, frame_index: usize, map: &Map) -> Result<PathBuf, CheckpointError> {
+    pub fn maybe_save(
+        &mut self,
+        frame_index: usize,
+        map: &Map,
+    ) -> Result<PathBuf, CheckpointError> {
         if self.config.interval == 0 {
             return Ok(PathBuf::new());
         }
@@ -231,9 +250,11 @@ pub fn save_checkpoint(checkpoint: &SlamCheckpoint, path: &Path) -> Result<(), C
         source,
     })?;
     let writer = BufWriter::new(file);
-    serde_json::to_writer_pretty(writer, checkpoint).map_err(|source| CheckpointError::Serialize {
-        path: path.to_path_buf(),
-        source,
+    serde_json::to_writer_pretty(writer, checkpoint).map_err(|source| {
+        CheckpointError::Serialize {
+            path: path.to_path_buf(),
+            source,
+        }
     })?;
     Ok(())
 }
@@ -266,13 +287,19 @@ pub fn load_latest_checkpoint(dir: &Path) -> Result<Option<SlamCheckpoint>, Chec
         })?;
         let path = entry.path();
         if let Some(frame_index) = parse_checkpoint_name(&path) {
-            if best.as_ref().map(|(idx, _)| frame_index > *idx).unwrap_or(true) {
+            if best
+                .as_ref()
+                .map(|(idx, _)| frame_index > *idx)
+                .unwrap_or(true)
+            {
                 best = Some((frame_index, path));
             }
         }
     }
 
-    let Some((_idx, path)) = best else { return Ok(None); };
+    let Some((_idx, path)) = best else {
+        return Ok(None);
+    };
     load_checkpoint(&path).map(Some)
 }
 

@@ -3,11 +3,11 @@
 //! This module implements a visual vocabulary for efficient loop detection.
 //! Based on ORB-SLAM3's BoW approach.
 
+use crate::features::base::Descriptors;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
-use crate::features::base::Descriptors;
 
 /// A visual word (cluster center)
 #[derive(Debug, Clone)]
@@ -77,7 +77,7 @@ impl Vocabulary {
     }
 
     /// Transform a descriptor to word IDs and weights
-    /// 
+    ///
     /// Returns: (word_ids, word_weights)
     pub fn transform(&self, descriptors: &Descriptors) -> (Vec<u32>, Vec<f32>) {
         let mut word_ids = Vec::with_capacity(descriptors.count as usize);
@@ -117,7 +117,7 @@ impl Vocabulary {
 
         for _ in 0..self.depth {
             let node = &self.nodes[&node_id];
-            
+
             if node.children.is_empty() {
                 break;
             }
@@ -140,7 +140,10 @@ impl Vocabulary {
         }
 
         // Return word ID at leaf
-        self.nodes.get(&node_id).and_then(|n| n.word_id).unwrap_or(0)
+        self.nodes
+            .get(&node_id)
+            .and_then(|n| n.word_id)
+            .unwrap_or(0)
     }
 
     /// Compute similarity between two BoW vectors
@@ -181,13 +184,21 @@ impl Vocabulary {
 
         // Words
         for word in &self.words {
-            writeln!(file, "W {} {:.6} {:?}", word.id, word.weight, word.descriptor)?;
+            writeln!(
+                file,
+                "W {} {:.6} {:?}",
+                word.id, word.weight, word.descriptor
+            )?;
         }
 
         // Nodes
         for (id, node) in &self.nodes {
             let word_id = node.word_id.map(|w| w.to_string()).unwrap_or_default();
-            writeln!(file, "N {} {} {:?} {:.6}", id, word_id, node.descriptor, node.weight)?;
+            writeln!(
+                file,
+                "N {} {} {:?} {:.6}",
+                id, word_id, node.descriptor, node.weight
+            )?;
         }
 
         Ok(())
@@ -218,7 +229,11 @@ impl Vocabulary {
                     let id: u32 = parts[1].parse().unwrap_or(0);
                     let weight: f32 = parts[2].parse().unwrap_or(0.0);
                     // Parse descriptor...
-                    words.push(Word { id, weight, descriptor: Vec::new() });
+                    words.push(Word {
+                        id,
+                        weight,
+                        descriptor: Vec::new(),
+                    });
                 }
                 "N" => {
                     // Parse node...
@@ -253,10 +268,7 @@ pub fn kmeans(descriptors: &[Vec<u8>], k: usize, max_iterations: usize) -> Vec<V
     }
 
     // Initialize centers randomly
-    let mut centers: Vec<Vec<u8>> = descriptors.iter()
-        .take(k)
-        .cloned()
-        .collect();
+    let mut centers: Vec<Vec<u8>> = descriptors.iter().take(k).cloned().collect();
 
     // If not enough descriptors, pad
     while centers.len() < k {

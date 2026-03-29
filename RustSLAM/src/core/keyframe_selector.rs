@@ -27,7 +27,7 @@ pub struct KeyframeSelectorConfig {
 impl Default for KeyframeSelectorConfig {
     fn default() -> Self {
         Self {
-            translation_threshold: 0.1,  // 10cm
+            translation_threshold: 0.1, // 10cm
             rotation_threshold: 10.0,   // 10 degrees
             min_time_interval: 0.5,     // 0.5 seconds
             min_tracked_features: 50,
@@ -194,7 +194,9 @@ impl KeyframeSelector {
         // Check tracking quality degradation
         if let Some(last_tracked) = self.last_kf_tracked_features {
             let tracked_ratio = tracked_features as f32 / last_tracked as f32;
-            if tracked_ratio < self.config.covisibility_threshold && tracked_features < self.config.min_tracked_features * 2 {
+            if tracked_ratio < self.config.covisibility_threshold
+                && tracked_features < self.config.min_tracked_features * 2
+            {
                 self.num_keyframes += 1;
                 self.last_kf_pose = Some(current_pose.clone());
                 self.last_kf_timestamp = Some(timestamp);
@@ -305,15 +307,23 @@ impl KeyframeCulling {
             // Compute rotation angle from matrix
             let rot1 = delta1.rotation();
             let rot2 = delta2.rotation();
-            let angle1 = ((rot1[0][0] + rot1[1][1] + rot1[2][2] - 1.0) / 2.0).acos().to_degrees();
-            let angle2 = ((rot2[0][0] + rot2[1][1] + rot2[2][2] - 1.0) / 2.0).acos().to_degrees();
+            let angle1 = ((rot1[0][0] + rot1[1][1] + rot1[2][2] - 1.0) / 2.0)
+                .acos()
+                .to_degrees();
+            let angle2 = ((rot2[0][0] + rot2[1][1] + rot2[2][2] - 1.0) / 2.0)
+                .acos()
+                .to_degrees();
 
             // Check distance with neighbors
             let t1 = curr.translation();
             let t0 = prev.translation();
             let t2 = next.translation();
-            let dist1 = ((t1[0] - t0[0]).powi(2) + (t1[1] - t0[1]).powi(2) + (t1[2] - t0[2]).powi(2)).sqrt();
-            let dist2 = ((t2[0] - t1[0]).powi(2) + (t2[1] - t1[1]).powi(2) + (t2[2] - t1[2]).powi(2)).sqrt();
+            let dist1 =
+                ((t1[0] - t0[0]).powi(2) + (t1[1] - t0[1]).powi(2) + (t1[2] - t0[2]).powi(2))
+                    .sqrt();
+            let dist2 =
+                ((t2[0] - t1[0]).powi(2) + (t2[1] - t1[1]).powi(2) + (t2[2] - t1[2]).powi(2))
+                    .sqrt();
 
             // If both angles and distances are small, this keyframe is redundant
             if angle1 < self.min_angle

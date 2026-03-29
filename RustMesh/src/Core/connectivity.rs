@@ -3,7 +3,7 @@
 //! Polygonal mesh connectivity implementation.
 //! Provides iteration and circulation over mesh elements.
 
-use crate::handles::{VertexHandle, HalfedgeHandle, EdgeHandle, FaceHandle};
+use crate::handles::{EdgeHandle, FaceHandle, HalfedgeHandle, VertexHandle};
 use crate::soa_kernel::SoAKernel;
 
 // ============================================================================
@@ -21,13 +21,16 @@ pub struct VertexIndexIter {
 impl VertexIndexIter {
     #[inline]
     pub fn new(n_vertices: usize) -> Self {
-        Self { current: 0, end: n_vertices }
+        Self {
+            current: 0,
+            end: n_vertices,
+        }
     }
 }
 
 impl Iterator for VertexIndexIter {
     type Item = usize;
-    
+
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         if self.current < self.end {
@@ -50,13 +53,16 @@ pub struct FaceIndexIter {
 impl FaceIndexIter {
     #[inline]
     pub fn new(n_faces: usize) -> Self {
-        Self { current: 0, end: n_faces }
+        Self {
+            current: 0,
+            end: n_faces,
+        }
     }
 }
 
 impl Iterator for FaceIndexIter {
     type Item = usize;
-    
+
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         if self.current < self.end {
@@ -215,12 +221,12 @@ impl RustMesh {
 
         let n = vertices.len();
         let mut halfedges: Vec<HalfedgeHandle> = Vec::with_capacity(n);
-        
+
         // First: create all edges and track them
         for i in 0..n {
             let start = vertices[i];
             let end = vertices[(i + 1) % n];
-            
+
             // Create the halfedge from start to end
             let he = self.add_edge(start, end);
             // The halfedge used by this face must be free (no face assigned yet)
@@ -235,7 +241,7 @@ impl RustMesh {
         for i in 0..n {
             let curr = halfedges[i];
             let next_in_face = halfedges[(i + 1) % n];
-            
+
             self.kernel.set_next_halfedge_handle(curr, next_in_face);
             self.kernel.set_prev_halfedge_handle(next_in_face, curr);
         }
@@ -320,7 +326,7 @@ impl RustMesh {
     pub fn is_boundary(&self, heh: HalfedgeHandle) -> bool {
         self.kernel.is_boundary(heh)
     }
-    
+
     /// Validate halfedge structure integrity
     /// Returns Ok if valid, Err with message if issues found
     pub fn validate(&self) -> Result<(), String> {
@@ -328,17 +334,23 @@ impl RustMesh {
         let n_edges = self.n_edges();
         let n_faces = self.n_faces();
         let n_halfedges = self.n_halfedges();
-        
+
         // Euler formula check: V - E + F = 2 for closed manifold
         // For meshes with boundary: V - E + F = 1 + B (B = boundary components)
         let euler = n_vertices as i32 - n_edges as i32 + n_faces as i32;
-        println!("Euler characteristic: {} (V={}, E={}, F={})", euler, n_vertices, n_edges, n_faces);
-        
+        println!(
+            "Euler characteristic: {} (V={}, E={}, F={})",
+            euler, n_vertices, n_edges, n_faces
+        );
+
         // Check: halfedges should be 2 * edges
         if n_halfedges != 2 * n_edges {
-            return Err(format!("Halfedge count mismatch: {} != 2 * {}", n_halfedges, n_edges));
+            return Err(format!(
+                "Halfedge count mismatch: {} != 2 * {}",
+                n_halfedges, n_edges
+            ));
         }
-        
+
         // Check each vertex has valid halfedge
         for vh in 0..n_vertices {
             let vh = VertexHandle::new(vh as u32);
@@ -348,7 +360,7 @@ impl RustMesh {
                 }
             }
         }
-        
+
         // Check halfedge cycles (prevent infinite loops)
         for fh in 0..n_faces {
             let fh = FaceHandle::new(fh as u32);
@@ -370,7 +382,7 @@ impl RustMesh {
                 }
             }
         }
-        
+
         // Check vertex rings (prevent infinite loops)
         for vh in 0..n_vertices {
             let vh = VertexHandle::new(vh as u32);
@@ -391,7 +403,7 @@ impl RustMesh {
                 }
             }
         }
-        
+
         Ok(())
     }
 
@@ -462,11 +474,11 @@ impl RustMesh {
     pub unsafe fn vertex_sum_simd(&self) -> (f32, f32, f32) {
         self.kernel.vertex_sum_simd()
     }
-    
+
     // =========================================================================
     // Edge Collapse (Halfedge Collapse)
     // =========================================================================
-    
+
     /// Check if an edge collapse is legal
     /// Returns true if the halfedge can be collapsed without creating topological issues.
     ///
@@ -479,8 +491,8 @@ impl RustMesh {
             return false;
         }
 
-        let v0 = self.to_vertex_handle(heh);   // Vertex to be removed
-        let v1 = self.from_vertex_handle(heh);  // Remaining vertex
+        let v0 = self.to_vertex_handle(heh); // Vertex to be removed
+        let v1 = self.from_vertex_handle(heh); // Remaining vertex
 
         // Both vertices must have valid halfedges
         if self.halfedge_handle(v0).is_none() || self.halfedge_handle(v1).is_none() {
@@ -499,12 +511,14 @@ impl RustMesh {
         }
 
         // Collect neighbors of v0 (excluding v1)
-        let neighbors_v0: Vec<VertexHandle> = self.vertex_vertices(v0)
+        let neighbors_v0: Vec<VertexHandle> = self
+            .vertex_vertices(v0)
             .map(|c| c.filter(|&v| v != v1).collect())
             .unwrap_or_default();
 
         // Collect neighbors of v1 (excluding v0)
-        let neighbors_v1: Vec<VertexHandle> = self.vertex_vertices(v1)
+        let neighbors_v1: Vec<VertexHandle> = self
+            .vertex_vertices(v1)
             .map(|c| c.filter(|&v| v != v0).collect())
             .unwrap_or_default();
 
@@ -579,32 +593,32 @@ impl RustMesh {
         }
         false
     }
-    
+
     /// Collapse a halfedge: move v0 to v1 and remove v0 and adjacent faces
     /// Returns Ok if successful, Err with message if failed
     pub fn collapse(&mut self, heh: HalfedgeHandle) -> Result<(), &'static str> {
         if !self.is_collapse_ok(heh) {
             return Err("Collapse not legal");
         }
-        
-        let v0 = self.to_vertex_handle(heh);   // Vertex to be removed
+
+        let v0 = self.to_vertex_handle(heh); // Vertex to be removed
         let v1 = self.from_vertex_handle(heh); // Remaining vertex
-        
+
         // Get the opposite halfedge
         let heh_opp = self.opposite_halfedge_handle(heh);
-        
+
         // Get adjacent faces to delete
         let fh_left = self.face_handle(heh);
         let fh_right = self.face_handle(heh_opp);
-        
+
         // Get the halfedges that need to be reconnected after collapse
         // These are the halfedges around v0 that will form the new ring
         let heh_prev = self.prev_halfedge_handle(heh);
         let heh_opp_next = self.next_halfedge_handle(heh_opp);
-        
+
         // Step 1: Update all halfedges that point to v0 to point to v1 instead
         self.redirect_halfedges(v0, v1)?;
-        
+
         // Step 2: Delete the adjacent faces
         if let Some(fh) = fh_left {
             self.delete_face(fh);
@@ -612,31 +626,35 @@ impl RustMesh {
         if let Some(fh) = fh_right {
             self.delete_face(fh);
         }
-        
+
         // Step 3: Reconnect the halfedge ring
         // Connect heh_prev -> heh_opp_next to form a continuous loop
         if heh_prev.is_valid() && heh_opp_next.is_valid() {
             self.kernel.set_next_halfedge_handle(heh_prev, heh_opp_next);
         }
-        
+
         // Step 4: Delete vertex v0
         self.delete_vertex(v0);
-        
+
         // Step 5: Delete the edge (both halfedges)
         let eh = self.edge_handle(heh);
         self.delete_edge(eh);
-        
+
         Ok(())
     }
-    
+
     /// Redirect all halfedges that reference from_vertex to reference to_vertex
-    fn redirect_halfedges(&mut self, from_vertex: VertexHandle, to_vertex: VertexHandle) -> Result<(), &'static str> {
+    fn redirect_halfedges(
+        &mut self,
+        from_vertex: VertexHandle,
+        to_vertex: VertexHandle,
+    ) -> Result<(), &'static str> {
         // Get all halfedges and update those that reference from_vertex
         let n_halfedges = self.n_halfedges();
-        
+
         for heh_idx in 0..n_halfedges {
             let heh = HalfedgeHandle::new(heh_idx as u32);
-            
+
             // Check if this halfedge's to_vertex is from_vertex
             let to_vh = self.to_vertex_handle(heh);
             if to_vh == from_vertex {
@@ -645,10 +663,10 @@ impl RustMesh {
                 self.kernel.set_halfedge_to_vertex(heh, to_vertex);
             }
         }
-        
+
         Ok(())
     }
-    
+
     /// Delete a face from the mesh
     pub fn delete_face(&mut self, fh: FaceHandle) {
         // Delete the face in the kernel
@@ -657,7 +675,7 @@ impl RustMesh {
         // so that vertex circulators can still traverse around vertices
         self.kernel.delete_face(fh);
     }
-    
+
     /// Get all halfedges of a face
     fn get_face_halfedges(&self, fh: FaceHandle) -> Vec<HalfedgeHandle> {
         let mut result = Vec::new();
@@ -674,12 +692,12 @@ impl RustMesh {
         }
         result
     }
-    
+
     /// Delete a vertex from the mesh
     pub fn delete_vertex(&mut self, vh: VertexHandle) {
         self.kernel.delete_vertex(vh);
     }
-    
+
     /// Delete an edge from the mesh
     pub fn delete_edge(&mut self, eh: EdgeHandle) {
         self.kernel.delete_edge(eh);
@@ -920,21 +938,24 @@ impl RustMesh {
     /// Set vertex normal by index (for IO operations)
     pub fn set_vertex_normal_by_index(&mut self, idx: usize, normal: glam::Vec3) {
         if idx < self.n_vertices() {
-            self.kernel.set_vertex_normal(VertexHandle::from_usize(idx), normal);
+            self.kernel
+                .set_vertex_normal(VertexHandle::from_usize(idx), normal);
         }
     }
 
     /// Set vertex color by index (for IO operations)
     pub fn set_vertex_color_by_index(&mut self, idx: usize, color: glam::Vec4) {
         if idx < self.n_vertices() {
-            self.kernel.set_vertex_color(VertexHandle::from_usize(idx), color);
+            self.kernel
+                .set_vertex_color(VertexHandle::from_usize(idx), color);
         }
     }
 
     /// Set vertex texcoord by index (for IO operations)
     pub fn set_vertex_texcoord_by_index(&mut self, idx: usize, texcoord: glam::Vec2) {
         if idx < self.n_vertices() {
-            self.kernel.set_vertex_texcoord(VertexHandle::from_usize(idx), texcoord);
+            self.kernel
+                .set_vertex_texcoord(VertexHandle::from_usize(idx), texcoord);
         }
     }
 
@@ -1149,14 +1170,20 @@ mod tests_soa {
         assert!(mesh.has_face_normals());
 
         mesh.set_f_normal(FaceHandle::new(0), glam::vec3(0.0, 0.0, 1.0));
-        assert_eq!(mesh.f_normal(FaceHandle::new(0)), Some(glam::vec3(0.0, 0.0, 1.0)));
+        assert_eq!(
+            mesh.f_normal(FaceHandle::new(0)),
+            Some(glam::vec3(0.0, 0.0, 1.0))
+        );
 
         // Request face colors
         mesh.request_face_colors();
         assert!(mesh.has_face_colors());
 
         mesh.set_f_color(FaceHandle::new(0), glam::vec4(0.5, 0.5, 0.5, 1.0));
-        assert_eq!(mesh.f_color(FaceHandle::new(0)), Some(glam::vec4(0.5, 0.5, 0.5, 1.0)));
+        assert_eq!(
+            mesh.f_color(FaceHandle::new(0)),
+            Some(glam::vec4(0.5, 0.5, 0.5, 1.0))
+        );
     }
 }
 

@@ -48,7 +48,7 @@ impl Frame {
     }
 
     /// Get the camera center in world coordinates
-    /// 
+    ///
     /// For a camera pose T_wc (world from camera), the camera center
     /// in world coordinates is: C_w = -R_wc^T * t_wc
     pub fn camera_center(&self) -> Option<[f32; 3]> {

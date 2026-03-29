@@ -2,7 +2,9 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::pipeline::realtime::{PipelineConfig, PipelineState, RealtimePipeline, RealtimePipelineBuilder};
+    use crate::pipeline::realtime::{
+        PipelineConfig, PipelineState, RealtimePipeline, RealtimePipelineBuilder,
+    };
 
     #[test]
     fn test_pipeline_config() {

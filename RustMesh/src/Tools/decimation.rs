@@ -3,7 +3,7 @@
 // Based on OpenMesh's DecimaterT framework
 // ============================================================================
 
-use crate::{RustMesh, VertexHandle, HalfedgeHandle, FaceHandle, QuadricT, Vec3};
+use crate::{FaceHandle, HalfedgeHandle, QuadricT, RustMesh, Vec3, VertexHandle};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
@@ -86,7 +86,9 @@ impl PartialOrd for CollapseCandidate {
 
 impl Ord for CollapseCandidate {
     fn cmp(&self, other: &Self) -> Ordering {
-        other.priority.partial_cmp(&self.priority)
+        other
+            .priority
+            .partial_cmp(&self.priority)
             .unwrap_or(Ordering::Equal)
     }
 }
@@ -113,33 +115,33 @@ impl<'a> ModQuadricT<'a> {
         let heh = self.mesh.face_halfedge_handle(fh)?;
         let mut vertices = Vec::new();
         let mut current = heh;
-        
+
         loop {
             if vertices.len() >= 64 {
                 break;
             }
-            
+
             let vh = self.mesh.to_vertex_handle(current);
             vertices.push(vh);
-            
+
             let next = self.mesh.next_halfedge_handle(current);
             if next == current || !next.is_valid() || vertices.len() >= 64 {
                 break;
             }
             current = next;
-            
+
             if current == heh {
                 break;
             }
         }
-        
+
         if vertices.len() >= 3 {
             Some(vertices)
         } else {
             None
         }
     }
-    
+
     pub fn initialize(&mut self) {
         for q in &mut self.vertex_quadrics {
             *q = Some(QuadricT::zero());
@@ -151,14 +153,14 @@ impl<'a> ModQuadricT<'a> {
                     let p0 = self.mesh.point(verts[0]).unwrap();
                     let p1 = self.mesh.point(verts[1]).unwrap();
                     let p2 = self.mesh.point(verts[2]).unwrap();
-                    
+
                     let edge1 = p1 - p0;
                     let edge2 = p2 - p0;
                     let normal = edge1.cross(edge2).normalize();
                     let center = (p0 + p1 + p2) / 3.0;
-                    
+
                     let q = QuadricT::from_face(normal, center);
-                    
+
                     for vh in &verts {
                         let idx = vh.idx_usize();
                         if let Some(ref mut vq) = self.vertex_quadrics[idx] {
@@ -173,57 +175,57 @@ impl<'a> ModQuadricT<'a> {
     pub fn collapse_priority(&self, v0: VertexHandle, v1: VertexHandle) -> (f32, bool) {
         let idx0 = v0.idx_usize();
         let idx1 = v1.idx_usize();
-        
+
         let q0 = match self.vertex_quadrics.get(idx0) {
             Some(Some(q)) => q,
             _ => return (f32::MAX, false),
         };
-        
+
         let q1 = match self.vertex_quadrics.get(idx1) {
             Some(Some(q)) => q,
             _ => return (f32::MAX, false),
         };
-        
+
         let q = q0.add_values(*q1);
         let (_optimal, error) = q.optimize();
-        
+
         if self.max_err > 0.0 && error > self.max_err {
             return (f32::MAX, false);
         }
-        
+
         (error, true)
     }
 
     pub fn optimal_position(&self, v0: VertexHandle, v1: VertexHandle) -> Vec3 {
         let idx0 = v0.idx_usize();
         let idx1 = v1.idx_usize();
-        
+
         let q0 = match self.vertex_quadrics.get(idx0) {
             Some(Some(q)) => q,
             _ => return self.mesh.point(v1).unwrap_or(Vec3::ZERO),
         };
-        
+
         let q1 = match self.vertex_quadrics.get(idx1) {
             Some(Some(q)) => q,
             _ => return self.mesh.point(v1).unwrap_or(Vec3::ZERO),
         };
-        
+
         let q = q0.add_values(*q1);
         let (optimal, _) = q.optimize();
-        
+
         optimal
     }
 
     pub fn postprocess_collapse(&mut self, v_removed: VertexHandle, v_kept: VertexHandle) {
         let idx_removed = v_removed.idx_usize();
         let idx_kept = v_kept.idx_usize();
-        
+
         let q_removed = if idx_removed < self.vertex_quadrics.len() {
             self.vertex_quadrics[idx_removed]
         } else {
             return;
         };
-        
+
         if let Some(qr) = q_removed {
             if idx_kept < self.vertex_quadrics.len() {
                 if let Some(ref mut qk) = self.vertex_quadrics[idx_kept] {
@@ -264,8 +266,8 @@ impl<'a> Decimater<'a> {
     }
 
     pub fn collapse_info(&mut self, heh: HalfedgeHandle) -> Option<CollapseInfo> {
-        let to_vh = self.mesh.to_vertex_handle(heh);     // v_removed
-        let from_vh = self.mesh.from_vertex_handle(heh);  // v_kept
+        let to_vh = self.mesh.to_vertex_handle(heh); // v_removed
+        let from_vh = self.mesh.from_vertex_handle(heh); // v_kept
 
         // Create a temporary quadric module for this query
         let mut qm = ModQuadricT::new(&*self.mesh);
@@ -291,8 +293,8 @@ impl<'a> Decimater<'a> {
 
         let mut info = CollapseInfo::new();
         info.halfedge = heh;
-        info.v_removed = to_vh;   // to_vertex is removed in collapse()
-        info.v_kept = from_vh;    // from_vertex is kept
+        info.v_removed = to_vh; // to_vertex is removed in collapse()
+        info.v_kept = from_vh; // from_vertex is kept
         info.faces_removed = faces_removed;
         info.new_position = optimal_pos;
         info.error = error;
@@ -304,31 +306,31 @@ impl<'a> Decimater<'a> {
         if !self.mesh.is_collapse_ok(heh) {
             return Err("Collapse not legal according to mesh topology");
         }
-        
+
         self.mesh.collapse(heh)?;
         self.collapsed += 1;
-        
+
         Ok(())
     }
 
     pub fn decimate(&mut self, max_collapses: usize) -> usize {
         self.initialize();
-        
+
         let target = if max_collapses > 0 {
             max_collapses
         } else {
             self.mesh.n_vertices() - self.config.min_vertices
         };
-        
+
         // Build quadric once at start
         let n_verts = self.mesh.n_vertices();
         let mut vertex_quadrics: Vec<Option<QuadricT>> = vec![None; n_verts];
-        
+
         // Initialize quadrics
         for q in &mut vertex_quadrics {
             *q = Some(QuadricT::zero());
         }
-        
+
         // Accumulate face quadrics
         for fh in self.mesh.faces() {
             if let Some(verts) = self.get_face_vertices_internal(fh) {
@@ -336,14 +338,14 @@ impl<'a> Decimater<'a> {
                     let p0 = self.mesh.point(verts[0]).unwrap();
                     let p1 = self.mesh.point(verts[1]).unwrap();
                     let p2 = self.mesh.point(verts[2]).unwrap();
-                    
+
                     let edge1 = p1 - p0;
                     let edge2 = p2 - p0;
                     let normal = edge1.cross(edge2).normalize();
                     let center = (p0 + p1 + p2) / 3.0;
-                    
+
                     let q = QuadricT::from_face(normal, center);
-                    
+
                     for vh in &verts {
                         let idx = vh.idx_usize();
                         if let Some(ref mut vq) = vertex_quadrics[idx] {
@@ -353,19 +355,19 @@ impl<'a> Decimater<'a> {
                 }
             }
         }
-        
+
         // P0-13 fix: Use BinaryHeap for O(log n) collapse selection
         let mut heap: BinaryHeap<CollapseCandidate> = BinaryHeap::new();
-        
+
         // Initialize heap with all valid collapse candidates
         for heh_idx in 0..self.mesh.n_halfedges() {
             let heh = HalfedgeHandle::new(heh_idx as u32);
             let to_vh = self.mesh.to_vertex_handle(heh);
             let from_vh = self.mesh.from_vertex_handle(heh);
-            
+
             let idx0 = from_vh.idx_usize();
             let idx1 = to_vh.idx_usize();
-            
+
             let q0 = match vertex_quadrics.get(idx0) {
                 Some(Some(q)) => q,
                 _ => continue,
@@ -374,14 +376,14 @@ impl<'a> Decimater<'a> {
                 Some(Some(q)) => q,
                 _ => continue,
             };
-            
+
             let combined = q0.add_values(*q1);
             let (_opt, error) = combined.optimize();
-            
+
             if self.config.max_err > 0.0 && error > self.config.max_err {
                 continue;
             }
-            
+
             heap.push(CollapseCandidate {
                 priority: error,
                 halfedge: heh,
@@ -389,7 +391,7 @@ impl<'a> Decimater<'a> {
                 v_kept: from_vh,
             });
         }
-        
+
         let mut collapses = 0;
         let mut retries = 0;
         let max_retries = heap.len().max(1000);
@@ -428,41 +430,41 @@ impl<'a> Decimater<'a> {
                     }
 
                     collapses += 1;
-                    retries = 0;  // Reset retries on success
+                    retries = 0; // Reset retries on success
                 }
                 None => break,
             }
         }
-        
+
         self.collapsed = collapses;
         collapses
     }
-    
+
     // Internal helper for face vertices
     fn get_face_vertices_internal(&self, fh: FaceHandle) -> Option<Vec<VertexHandle>> {
         let heh = self.mesh.face_halfedge_handle(fh)?;
         let mut vertices = Vec::new();
         let mut current = heh;
-        
+
         loop {
             if vertices.len() >= 64 {
                 break;
             }
-            
+
             let vh = self.mesh.to_vertex_handle(current);
             vertices.push(vh);
-            
+
             let next = self.mesh.next_halfedge_handle(current);
             if next == current || !next.is_valid() || vertices.len() >= 64 {
                 break;
             }
             current = next;
-            
+
             if current == heh {
                 break;
             }
         }
-        
+
         if vertices.len() >= 3 {
             Some(vertices)
         } else {
@@ -474,7 +476,7 @@ impl<'a> Decimater<'a> {
         if target_vertices >= self.mesh.n_vertices() {
             return 0;
         }
-        
+
         self.decimate(self.mesh.n_vertices() - target_vertices)
     }
 
@@ -485,13 +487,12 @@ impl<'a> Decimater<'a> {
 
 /// Convenience function
 pub fn decimate_mesh(mesh: &mut RustMesh, target_vertices: usize, max_err: f32) -> usize {
-    let mut decimater = Decimater::new(mesh)
-        .with_config(DecimationConfig {
-            max_err,
-            min_vertices: target_vertices,
-            ..Default::default()
-        });
-    
+    let mut decimater = Decimater::new(mesh).with_config(DecimationConfig {
+        max_err,
+        min_vertices: target_vertices,
+        ..Default::default()
+    });
+
     decimater.decimate_to(target_vertices)
 }
 
@@ -513,11 +514,13 @@ mod tests {
         let n_verts = mesh.n_vertices();
         println!("Cube has {} vertices", n_verts);
         assert!(n_verts > 0);
-        
+
         let mut module = ModQuadricT::new(&mesh);
         module.initialize();
-        
-        let initialized_count = module.vertex_quadrics.iter()
+
+        let initialized_count = module
+            .vertex_quadrics
+            .iter()
             .filter(|q| q.is_some())
             .count();
         println!("Initialized quadrics: {}", initialized_count);
@@ -529,16 +532,16 @@ mod tests {
         let mesh = generate_cube();
         let mut module = ModQuadricT::new(&mesh);
         module.initialize();
-        
+
         let n_vertices = mesh.n_vertices();
         assert!(n_vertices >= 2);
-        
+
         let v0 = VertexHandle::new(0);
         let v1 = VertexHandle::new(1);
-        
+
         assert!(v0.is_valid());
         assert!(v1.is_valid());
-        
+
         let (priority, is_legal) = module.collapse_priority(v0, v1);
         assert!(is_legal);
         assert!(priority >= 0.0);
@@ -548,17 +551,17 @@ mod tests {
     fn test_collapse_info() {
         let mut mesh = generate_cube();
         let mut decimater = Decimater::new(&mut mesh);
-        
+
         let n_halfedges = decimater.mesh.n_halfedges();
         let mut valid_collapses = 0;
-        
+
         for heh_idx in 0..n_halfedges.min(100) {
             let heh = HalfedgeHandle::new(heh_idx as u32);
             if decimater.collapse_info(heh).is_some() {
                 valid_collapses += 1;
             }
         }
-        
+
         println!("Valid collapses: {}", valid_collapses);
         assert!(true);
     }
@@ -568,9 +571,9 @@ mod tests {
         let mesh = generate_sphere(1.0, 8, 8);
         let n_vertices = mesh.n_vertices();
         println!("Sphere has {} vertices", n_vertices);
-        
+
         assert!(n_vertices > 10);
-        
+
         let mut mesh = generate_sphere(1.0, 8, 8);
         let target = n_vertices / 2;
         let collapsed = decimate_mesh(&mut mesh, target, 0.0);

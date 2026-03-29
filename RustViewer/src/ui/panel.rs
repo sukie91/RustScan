@@ -81,10 +81,20 @@ pub fn draw_side_panel(
         // SCENE LAYERS section
         draw_section_header(ui, "SCENE LAYERS");
 
-        draw_layer_toggle(ui, &mut scene.layers.trajectory, "Camera Trajectory", SYSTEM_BLUE);
+        draw_layer_toggle(
+            ui,
+            &mut scene.layers.trajectory,
+            "Camera Trajectory",
+            SYSTEM_BLUE,
+        );
         draw_layer_toggle(ui, &mut scene.layers.map_points, "Map Points", SYSTEM_GREEN);
         draw_layer_toggle(ui, &mut scene.layers.gaussians, "Gaussians", SYSTEM_ORANGE);
-        draw_layer_toggle(ui, &mut scene.layers.mesh_wireframe, "Mesh Wireframe", SYSTEM_GRAY);
+        draw_layer_toggle(
+            ui,
+            &mut scene.layers.mesh_wireframe,
+            "Mesh Wireframe",
+            SYSTEM_GRAY,
+        );
         draw_layer_toggle(ui, &mut scene.layers.mesh_solid, "Mesh Solid", SYSTEM_GRAY);
 
         // Divider
@@ -111,19 +121,13 @@ fn draw_loading_indicator(ui: &mut egui::Ui, state: &UiState) {
         ui.spacing_mut().item_spacing = Vec2::new(0.0, 6.0);
 
         // Progress bar
-        let (rect, _) = ui.allocate_exact_size(
-            Vec2::new(ui.available_width(), 3.0),
-            egui::Sense::hover(),
-        );
+        let (rect, _) =
+            ui.allocate_exact_size(Vec2::new(ui.available_width(), 3.0), egui::Sense::hover());
         ui.painter().rect_filled(rect, 2.0, SYSTEM_BLUE);
 
         // Loading text
         let msg = state.loading_message.as_deref().unwrap_or("Loading...");
-        ui.label(
-            egui::RichText::new(msg)
-                .size(12.0)
-                .color(TEXT_PRIMARY),
-        );
+        ui.label(egui::RichText::new(msg).size(12.0).color(TEXT_PRIMARY));
     });
 }
 
@@ -136,13 +140,12 @@ fn draw_error_alert(ui: &mut egui::Ui, error: &str, state: &mut UiState) {
     frame.show(ui, |ui| {
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new("⚠️").size(16.0));
-            ui.label(
-                egui::RichText::new(error)
-                    .size(12.0)
-                    .color(SYSTEM_RED),
-            );
+            ui.label(egui::RichText::new(error).size(12.0).color(SYSTEM_RED));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button(egui::RichText::new("×").size(16.0).color(SYSTEM_GRAY)).clicked() {
+                if ui
+                    .button(egui::RichText::new("×").size(16.0).color(SYSTEM_GRAY))
+                    .clicked()
+                {
                     state.load_error = None;
                 }
             });
@@ -179,7 +182,11 @@ fn draw_blue_button(ui: &mut egui::Ui, icon: &str, label: &str) -> bool {
     // Calculate proper centering with 8px gap between icon and text
     let font_id = egui::FontId::proportional(13.0);
     let icon_width = ui.fonts(|f| f.glyph_width(&font_id, icon.chars().next().unwrap()));
-    let text_width = ui.fonts(|f| f.layout_no_wrap(label.to_string(), font_id.clone(), Color32::WHITE).size().x);
+    let text_width = ui.fonts(|f| {
+        f.layout_no_wrap(label.to_string(), font_id.clone(), Color32::WHITE)
+            .size()
+            .x
+    });
     let gap = 8.0;
     let total_width = icon_width + gap + text_width;
 
@@ -205,10 +212,8 @@ fn draw_blue_button(ui: &mut egui::Ui, icon: &str, label: &str) -> bool {
 }
 
 fn draw_divider(ui: &mut egui::Ui) {
-    let (rect, _) = ui.allocate_exact_size(
-        Vec2::new(ui.available_width(), 1.0),
-        egui::Sense::hover(),
-    );
+    let (rect, _) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), 1.0), egui::Sense::hover());
     ui.painter().rect_filled(
         rect,
         0.0,
@@ -230,10 +235,8 @@ fn draw_layer_toggle(ui: &mut egui::Ui, checked: &mut bool, label: &str, color: 
     // Draw checkbox
     let checkbox_size = 16.0;
     let checkbox_pos = rect.left_center() + Vec2::new(12.0, -checkbox_size / 2.0);
-    let checkbox_rect = egui::Rect::from_min_size(
-        checkbox_pos.into(),
-        Vec2::new(checkbox_size, checkbox_size),
-    );
+    let checkbox_rect =
+        egui::Rect::from_min_size(checkbox_pos.into(), Vec2::new(checkbox_size, checkbox_size));
 
     if *checked {
         ui.painter().rect_filled(checkbox_rect, 4.0, SYSTEM_BLUE);
@@ -257,12 +260,11 @@ fn draw_layer_toggle(ui: &mut egui::Ui, checked: &mut bool, label: &str, color: 
 
     // Draw color badge
     let badge_size = 12.0;
-    let badge_pos = checkbox_pos + Vec2::new(checkbox_size + 16.0, (checkbox_size - badge_size) / 2.0);
-    let badge_rect = egui::Rect::from_min_size(
-        badge_pos.into(),
-        Vec2::new(badge_size, badge_size),
-    );
-    ui.painter().circle_filled(badge_rect.center(), badge_size / 2.0, color);
+    let badge_pos =
+        checkbox_pos + Vec2::new(checkbox_size + 16.0, (checkbox_size - badge_size) / 2.0);
+    let badge_rect = egui::Rect::from_min_size(badge_pos.into(), Vec2::new(badge_size, badge_size));
+    ui.painter()
+        .circle_filled(badge_rect.center(), badge_size / 2.0, color);
 
     // Draw label
     let label_pos = badge_pos + Vec2::new(badge_size + 8.0, badge_size / 2.0);
@@ -295,7 +297,11 @@ fn draw_auto_fit_button(ui: &mut egui::Ui) -> bool {
     let label = "Auto Fit Scene";
     let font_id = egui::FontId::proportional(13.0);
     let icon_width = ui.fonts(|f| f.glyph_width(&font_id, icon.chars().next().unwrap()));
-    let text_width = ui.fonts(|f| f.layout_no_wrap(label.to_string(), font_id.clone(), TEXT_PRIMARY).size().x);
+    let text_width = ui.fonts(|f| {
+        f.layout_no_wrap(label.to_string(), font_id.clone(), TEXT_PRIMARY)
+            .size()
+            .x
+    });
     let gap = 8.0;
     let total_width = icon_width + gap + text_width;
 

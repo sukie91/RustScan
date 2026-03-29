@@ -6,15 +6,18 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
-use crate::core::Camera;
 use super::{Dataset, DatasetMetadata, Frame};
+use crate::core::Camera;
 
 #[cfg(feature = "opencv")]
 use opencv::{
     core::Mat,
     imgproc,
     prelude::*,
-    videoio::{VideoCapture, CAP_ANY, CAP_PROP_FPS, CAP_PROP_FRAME_COUNT, CAP_PROP_FRAME_HEIGHT, CAP_PROP_FRAME_WIDTH, CAP_PROP_POS_FRAMES},
+    videoio::{
+        VideoCapture, CAP_ANY, CAP_PROP_FPS, CAP_PROP_FRAME_COUNT, CAP_PROP_FRAME_HEIGHT,
+        CAP_PROP_FRAME_WIDTH, CAP_PROP_POS_FRAMES,
+    },
 };
 
 /// Errors that can occur while loading video files
@@ -165,7 +168,8 @@ impl Dataset for VideoLoader {
 
         #[cfg(feature = "opencv")]
         {
-            let color = self.read_frame_at(index)
+            let color = self
+                .read_frame_at(index)
                 .map_err(|e| super::DatasetError::Image(e.to_string()))?;
             let timestamp = index as f64 / self.fps;
 
@@ -214,8 +218,16 @@ mod tests {
             // Verify reasonable values
             assert!(camera.fx() > 0.0, "fx should be positive");
             assert!(camera.fy() > 0.0, "fy should be positive");
-            assert_eq!(camera.cx(), width as f32 / 2.0, "cx should be at image center");
-            assert_eq!(camera.cy(), height as f32 / 2.0, "cy should be at image center");
+            assert_eq!(
+                camera.cx(),
+                width as f32 / 2.0,
+                "cx should be at image center"
+            );
+            assert_eq!(
+                camera.cy(),
+                height as f32 / 2.0,
+                "cy should be at image center"
+            );
             assert_eq!(camera.width(), width, "width should match");
             assert_eq!(camera.height(), height, "height should match");
         }

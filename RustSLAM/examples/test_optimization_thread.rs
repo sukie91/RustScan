@@ -2,8 +2,8 @@
 //!
 //! Tests BA convergence and 3DGS training with synthetic data.
 
-use rustslam::optimizer::ba::{BundleAdjuster, BACamera, BALandmark, BAObservation};
 use rustslam::core::SE3;
+use rustslam::optimizer::ba::{BACamera, BALandmark, BAObservation, BundleAdjuster};
 use rustslam::test_utils::*;
 
 fn test_ba_basic_workflow() {
@@ -55,10 +55,7 @@ fn test_synthetic_poses_generation() {
         let t1 = line_poses[i - 1].translation();
         let t2 = line_poses[i].translation();
         let diff = (t1[0] - t2[0]).abs() + (t1[1] - t2[1]).abs() + (t1[2] - t2[2]).abs();
-        assert!(
-            diff > 0.01,
-            "Consecutive poses should be different"
-        );
+        assert!(diff > 0.01, "Consecutive poses should be different");
     }
 }
 
@@ -76,7 +73,10 @@ fn test_synthetic_depth_generation() {
     assert_eq!(planar_depth.len(), 100 * 100);
     // Planar depth should vary
     let min_depth = planar_depth.iter().cloned().fold(f32::INFINITY, f32::min);
-    let max_depth = planar_depth.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    let max_depth = planar_depth
+        .iter()
+        .cloned()
+        .fold(f32::NEG_INFINITY, f32::max);
     assert!(
         max_depth - min_depth > 0.1,
         "Planar depth should vary across image"

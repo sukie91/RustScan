@@ -320,7 +320,9 @@ pub struct TrainingConfig {
     pub min_depth: f32,
     /// Maximum valid depth in meters
     pub max_depth: f32,
-    /// Generate synthetic depth from image luminance when depth is unavailable
+    /// Generate synthetic depth from image luminance when depth is unavailable.
+    /// Disabled by default for RGB-only datasets because pseudo-depth targets
+    /// can destabilize geometric optimization.
     pub use_synthetic_depth: bool,
     /// Render scale used by the Metal backend (relative to input resolution).
     pub metal_render_scale: f32,
@@ -367,7 +369,7 @@ impl Default for TrainingConfig {
             sampling_step: 0,
             min_depth: 0.01,
             max_depth: 10.0,
-            use_synthetic_depth: true,
+            use_synthetic_depth: false,
             metal_render_scale: 0.5,
             metal_gaussian_chunk_size: 32,
             metal_profile_steps: false,
@@ -598,13 +600,31 @@ fn merge_chunk_scene(
     core_bounds: &ChunkBounds,
     merge_core_only: bool,
 ) -> usize {
+    let original_chunk = if merge_core_only {
+        Some(chunk_scene.clone())
+    } else {
+        None
+    };
+
     let removed = if merge_core_only {
+        let original_len = chunk_scene.len();
         let removed = retain_gaussians_in_bounds(chunk_scene, core_bounds);
-        log::info!(
-            "Core-only merge filter removed {} gaussians before aggregation",
-            removed,
-        );
-        removed
+        if original_len > 0 && chunk_scene.is_empty() {
+            log::warn!(
+                "Core-only merge filter removed all {} gaussians for a chunk; falling back to unfiltered merge",
+                original_len,
+            );
+            if let Some(original_chunk) = original_chunk {
+                *chunk_scene = original_chunk;
+            }
+            0
+        } else {
+            log::info!(
+                "Core-only merge filter removed {} gaussians before aggregation",
+                removed,
+            );
+            removed
+        }
     } else {
         0
     };
@@ -1066,6 +1086,37 @@ mod gpu_tests {
     }
 
     #[test]
+    fn core_only_merge_filter_falls_back_when_it_would_empty_chunk() {
+        let mut merged = GaussianMap::default();
+        let mut chunk_scene = GaussianMap::from_gaussians(vec![
+            Gaussian3D::new(
+                glam::Vec3::new(1.5, 0.0, 0.0),
+                glam::Vec3::ONE,
+                glam::Quat::IDENTITY,
+                1.0,
+                [1.0, 0.0, 0.0],
+            ),
+            Gaussian3D::new(
+                glam::Vec3::new(2.5, 0.0, 0.0),
+                glam::Vec3::ONE,
+                glam::Quat::IDENTITY,
+                1.0,
+                [0.0, 1.0, 0.0],
+            ),
+        ]);
+        let core_bounds = ChunkBounds {
+            min: [0.0, -1.0, -1.0],
+            max: [1.0, 1.0, 1.0],
+        };
+
+        let removed = merge_chunk_scene(&mut merged, &mut chunk_scene, &core_bounds, true);
+
+        assert_eq!(removed, 0);
+        assert_eq!(merged.len(), 2);
+        assert_eq!(chunk_scene.len(), 2);
+    }
+
+    #[test]
     fn merged_scene_output_contains_gaussians_from_multiple_chunks() {
         let mut merged = GaussianMap::default();
         let core_bounds = ChunkBounds {
@@ -1104,5 +1155,10 @@ mod gpu_tests {
         persist_gaussian_map_scene(&path, &merged, 10).unwrap();
         let (gaussians, _) = crate::load_scene_ply(&path).unwrap();
         assert_eq!(gaussians.len(), 2);
+    }
+
+    #[test]
+    fn default_training_config_disables_synthetic_depth() {
+        assert!(!TrainingConfig::default().use_synthetic_depth);
     }
 }

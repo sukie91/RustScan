@@ -4,7 +4,7 @@
 //! In the dual mesh, faces become vertices and vertices become faces.
 
 use crate::connectivity::RustMesh;
-use crate::handles::{VertexHandle, FaceHandle, HalfedgeHandle, EdgeHandle};
+use crate::handles::{EdgeHandle, FaceHandle, HalfedgeHandle, VertexHandle};
 use glam::Vec3;
 use std::collections::HashMap;
 
@@ -41,7 +41,7 @@ impl std::fmt::Display for DualError {
 impl std::error::Error for DualError {}
 
 /// Check if a mesh can be dualized
-/// 
+///
 /// A mesh is dualizable if it is a closed manifold:
 /// - No boundary edges (all halfedges have a face)
 /// - Each vertex is incident to exactly two faces (manifold)
@@ -71,28 +71,28 @@ pub fn is_dualizable(mesh: &RustMesh) -> bool {
             let mut current = start_heh;
             let mut iterations = 0;
             const MAX_ITERATIONS: usize = 1000;
-            
+
             loop {
                 iterations += 1;
                 if iterations > MAX_ITERATIONS {
                     // Potential infinite loop - mesh has issues
                     return false;
                 }
-                
+
                 // Check if this halfedge has a face (should for closed mesh)
                 if mesh.face_handle(current).is_some() {
                     count += 1;
                 }
-                
+
                 // Move to next halfedge around vertex
                 let opposite = mesh.opposite_halfedge_handle(current);
                 current = mesh.next_halfedge_handle(opposite);
-                
+
                 if current == start_heh || !current.is_valid() {
                     break;
                 }
             }
-            
+
             // A proper vertex in a closed mesh should have at least 3 incident faces
             if count < 3 {
                 return false;
@@ -118,7 +118,7 @@ fn face_centroid(mesh: &RustMesh, fh: FaceHandle) -> Vec3 {
                 centroid += point;
                 count += 1;
             }
-            
+
             current = mesh.next_halfedge_handle(current);
             if current == start_heh || !current.is_valid() {
                 break;
@@ -137,20 +137,20 @@ fn face_centroid(mesh: &RustMesh, fh: FaceHandle) -> Vec3 {
 #[allow(dead_code)]
 fn get_face_vertices(mesh: &RustMesh, fh: FaceHandle) -> Vec<VertexHandle> {
     let mut vertices = Vec::new();
-    
+
     if let Some(start_heh) = mesh.face_halfedge_handle(fh) {
         let mut current = start_heh;
         loop {
             let vh = mesh.from_vertex_handle(current);
             vertices.push(vh);
-            
+
             current = mesh.next_halfedge_handle(current);
             if current == start_heh || !current.is_valid() {
                 break;
             }
         }
     }
-    
+
     vertices
 }
 
@@ -188,12 +188,12 @@ fn get_vertex_faces(mesh: &RustMesh, vh: VertexHandle) -> Vec<FaceHandle> {
 }
 
 /// Create a dual mesh from the input mesh
-/// 
+///
 /// In the dual mesh:
 /// - Each face of the original mesh becomes a vertex (at the face centroid)
 /// - Each vertex of the original mesh becomes a face
 /// - Two dual vertices are connected if the corresponding original faces share an edge
-/// 
+///
 /// The result is written back to the input mesh (replacing its contents).
 pub fn dualize(mesh: &mut RustMesh) -> DualResult<()> {
     // Validate mesh
@@ -204,7 +204,7 @@ pub fn dualize(mesh: &mut RustMesh) -> DualResult<()> {
     // Check if mesh is closed manifold
     if !is_dualizable(mesh) {
         return Err(DualError::NotClosed(
-            "Mesh must be a closed manifold to be dualized".to_string()
+            "Mesh must be a closed manifold to be dualized".to_string(),
         ));
     }
 
@@ -222,7 +222,7 @@ pub fn dualize(mesh: &mut RustMesh) -> DualResult<()> {
     // Step 2: For each original vertex, collect adjacent face centroids to form dual faces
     // Build the dual mesh
     let mut dual_mesh_new = RustMesh::new();
-    
+
     // Add dual vertices (at face centroids)
     let mut dual_vertex_handles: Vec<VertexHandle> = Vec::with_capacity(n_faces);
     for centroid in &face_centroids {
@@ -234,7 +234,7 @@ pub fn dualize(mesh: &mut RustMesh) -> DualResult<()> {
     // The dual face is formed by the dual vertices corresponding to incident faces
     for vh in mesh.vertices() {
         let incident_faces = get_vertex_faces(mesh, vh);
-        
+
         if incident_faces.len() < 3 {
             continue; // Need at least 3 faces to form a valid dual face
         }
@@ -242,16 +242,16 @@ pub fn dualize(mesh: &mut RustMesh) -> DualResult<()> {
         // Build ordered list of dual vertices
         // We need to order them correctly based on the original vertex's edge structure
         let mut ordered_dual_vertices: Vec<VertexHandle> = Vec::new();
-        
+
         // Get one incident face to start
         if let Some(first_fh) = incident_faces.first() {
             let first_dual_v = dual_vertex_handles[first_fh.idx_usize()];
             ordered_dual_vertices.push(first_dual_v);
-            
+
             // Find the remaining faces in order by traversing edges from the vertex
             // For each edge from the vertex, find the adjacent face and its dual vertex
             let mut visited: Vec<usize> = vec![first_fh.idx_usize()];
-            
+
             // Get the starting halfedge
             if let Some(start_heh) = mesh.halfedge_handle(vh) {
                 let mut current_heh = start_heh;
@@ -295,11 +295,8 @@ pub fn dualize(mesh: &mut RustMesh) -> DualResult<()> {
         // Add the dual face
         if ordered_dual_vertices.len() >= 3 {
             // Close the cycle by going back to start
-            let face_verts: Vec<VertexHandle> = ordered_dual_vertices
-                .iter()
-                .copied()
-                .collect();
-            
+            let face_verts: Vec<VertexHandle> = ordered_dual_vertices.iter().copied().collect();
+
             if dual_mesh_new.add_face(&face_verts).is_none() {
                 // Try with reversed order if face creation failed
                 let reversed: Vec<VertexHandle> = ordered_dual_vertices.into_iter().rev().collect();
@@ -315,12 +312,12 @@ pub fn dualize(mesh: &mut RustMesh) -> DualResult<()> {
 }
 
 /// Create a dual mesh and return it (without modifying original)
-/// 
+///
 /// This creates a new mesh with the dual topology.
 pub fn dual_mesh(mesh: &RustMesh) -> DualResult<RustMesh> {
     // We need to rebuild the mesh data manually since RustMesh doesn't implement Clone
     let mut dual = RustMesh::new();
-    
+
     // Compute face centroids
     let n_faces = mesh.n_faces();
     let mut face_centroids: Vec<Vec3> = Vec::with_capacity(n_faces);
@@ -342,23 +339,23 @@ pub fn dual_mesh(mesh: &RustMesh) -> DualResult<RustMesh> {
     // For each original vertex, create a dual face
     for vh in mesh.vertices() {
         let incident_faces = get_vertex_faces(mesh, vh);
-        
+
         if incident_faces.len() < 3 {
             continue;
         }
 
         // Build ordered list of dual vertices
         let mut ordered_dual_vertices: Vec<VertexHandle> = Vec::new();
-        
+
         if let Some(first_fh) = incident_faces.first() {
             let first_dual_v = dual_vertex_handles[first_fh.idx_usize()];
             ordered_dual_vertices.push(first_dual_v);
-            
+
             let mut visited: Vec<usize> = vec![first_fh.idx_usize()];
-            
+
             if let Some(start_heh) = mesh.halfedge_handle(vh) {
                 let mut current_heh = start_heh;
-                
+
                 loop {
                     let opposite = mesh.opposite_halfedge_handle(current_heh);
                     if let Some(fh) = mesh.face_handle(opposite) {
@@ -368,9 +365,9 @@ pub fn dual_mesh(mesh: &RustMesh) -> DualResult<RustMesh> {
                             visited.push(fh_idx);
                         }
                     }
-                    
+
                     current_heh = mesh.next_halfedge_handle(opposite);
-                    
+
                     if current_heh == start_heh || !current_heh.is_valid() {
                         break;
                     }
@@ -387,7 +384,7 @@ pub fn dual_mesh(mesh: &RustMesh) -> DualResult<RustMesh> {
 
         if ordered_dual_vertices.len() >= 3 {
             let face_verts: Vec<VertexHandle> = ordered_dual_vertices.iter().copied().collect();
-            
+
             if dual.add_face(&face_verts).is_none() {
                 let reversed: Vec<VertexHandle> = ordered_dual_vertices.into_iter().rev().collect();
                 let _ = dual.add_face(&reversed);
@@ -401,7 +398,7 @@ pub fn dual_mesh(mesh: &RustMesh) -> DualResult<RustMesh> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_data::{generate_tetrahedron, generate_cube};
+    use crate::test_data::{generate_cube, generate_tetrahedron};
 
     #[test]
     fn test_is_dualizable_tetrahedron() {
@@ -422,23 +419,29 @@ mod tests {
     fn test_dualize_tetrahedron() {
         // Tetrahedron dual should be another tetrahedron
         let mut mesh = generate_tetrahedron();
-        
+
         let original_v = mesh.n_vertices();
         let original_f = mesh.n_faces();
-        
+
         println!("Original tetrahedron: V={}, F={}", original_v, original_f);
-        
+
         dualize(&mut mesh).expect("Failed to dualize tetrahedron");
-        
+
         let dual_v = mesh.n_vertices();
         let dual_f = mesh.n_faces();
-        
+
         println!("Dual tetrahedron: V={}, F={}", dual_v, dual_f);
-        
+
         // Tetrahedron has 4 vertices and 4 faces
         // Its dual should also have 4 vertices and 4 faces
-        assert_eq!(dual_v, original_f, "Dual should have vertices = original faces");
-        assert_eq!(dual_f, original_v, "Dual should have faces = original vertices");
+        assert_eq!(
+            dual_v, original_f,
+            "Dual should have vertices = original faces"
+        );
+        assert_eq!(
+            dual_f, original_v,
+            "Dual should have faces = original vertices"
+        );
     }
 
     #[test]
@@ -459,15 +462,21 @@ mod tests {
 
         println!("Dual: V={}, F={}", dual_v, dual_f);
 
-        assert_eq!(dual_v, original_f, "Dual should have vertices = original faces");
-        assert_eq!(dual_f, original_v, "Dual should have faces = original vertices");
+        assert_eq!(
+            dual_v, original_f,
+            "Dual should have vertices = original faces"
+        );
+        assert_eq!(
+            dual_f, original_v,
+            "Dual should have faces = original vertices"
+        );
     }
 
     #[test]
     fn test_dual_mesh_function() {
         let original = generate_tetrahedron();
         let dual = dual_mesh(&original).expect("Failed to create dual mesh");
-        
+
         assert_eq!(dual.n_vertices(), original.n_faces());
         assert_eq!(dual.n_faces(), original.n_vertices());
     }

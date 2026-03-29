@@ -3,7 +3,7 @@
 //! Circulators provide iterator-based traversal of adjacent mesh elements.
 
 use crate::connectivity::RustMesh;
-use crate::handles::{VertexHandle, HalfedgeHandle, EdgeHandle, FaceHandle};
+use crate::handles::{EdgeHandle, FaceHandle, HalfedgeHandle, VertexHandle};
 
 /// Vertex-Vertex Circulator: Visit all unique vertices adjacent to a vertex
 pub struct VertexVertexCirculator<'a> {
@@ -403,7 +403,7 @@ mod tests {
         let mesh = generate_tetrahedron();
         let v_count = mesh.vertices().count();
         assert_eq!(v_count, 4);
-        
+
         let f_count = mesh.faces().count();
         assert_eq!(f_count, 4);
     }
@@ -412,13 +412,15 @@ mod tests {
     fn test_halfedge_structure() {
         // Verify that halfedge next pointers are correctly set
         let mesh = generate_tetrahedron();
-        
+
         // Each face should have 3 halfedges in a cycle
         for fh in mesh.faces() {
-            let start_heh = mesh.face_halfedge_handle(fh).expect("Face should have halfedge");
-            
+            let start_heh = mesh
+                .face_halfedge_handle(fh)
+                .expect("Face should have halfedge");
+
             eprintln!("Face {:?}: start_heh = {:?}", fh, start_heh);
-            
+
             // Follow the cycle
             let mut count = 0;
             let mut heh = start_heh;
@@ -427,7 +429,7 @@ mod tests {
                 if count > 10 {
                     panic!("More than 10 halfedges in face cycle - next pointers broken!");
                 }
-                
+
                 let next = mesh.next_halfedge_handle(heh);
                 eprintln!("  heh={:?} -> next={:?}", heh, next);
                 if next == start_heh {
@@ -435,7 +437,7 @@ mod tests {
                 }
                 heh = next;
             }
-            
+
             assert_eq!(count, 3, "Face should have exactly 3 halfedges in cycle");
         }
     }
@@ -453,26 +455,35 @@ mod tests {
         eprintln!("v0 = {:?}, neighbors = {:?}", v0, neighbors);
 
         // Tetrahedron: each vertex has 3 neighbors
-        assert_eq!(neighbors.len(), 3, "Expected 3 neighbors, got {:?}", neighbors);
+        assert_eq!(
+            neighbors.len(),
+            3,
+            "Expected 3 neighbors, got {:?}",
+            neighbors
+        );
 
         // Verify neighbors are unique and not self
         let mut unique: Vec<_> = neighbors.iter().filter(|&&vh| vh != v0).collect();
         unique.sort();
         unique.dedup();
         eprintln!("unique (after filter) = {:?}", unique);
-        assert_eq!(unique.len(), 3, "All 3 neighbors should be unique and not self");
+        assert_eq!(
+            unique.len(),
+            3,
+            "All 3 neighbors should be unique and not self"
+        );
     }
 
     #[test]
     fn test_vertex_face_circulator() {
         let mesh = generate_tetrahedron();
         let v0 = VertexHandle::from_usize(0);
-        
+
         let faces: Vec<_> = match mesh.vertex_faces(v0) {
             Some(c) => c.collect(),
             None => panic!("No circulator for vertex 0"),
         };
-        
+
         // Tetrahedron: each vertex belongs to 3 faces
         assert_eq!(faces.len(), 3, "Expected 3 faces, got {:?}", faces);
     }
@@ -481,12 +492,12 @@ mod tests {
     fn test_face_vertex_circulator() {
         let mesh = generate_tetrahedron();
         let fh = FaceHandle::from_usize(0);
-        
+
         let vertices: Vec<_> = match mesh.face_vertices(fh) {
             Some(c) => c.collect(),
             None => panic!("No circulator for face 0"),
         };
-        
+
         // Each face is a triangle
         assert_eq!(vertices.len(), 3, "Expected 3 vertices, got {:?}", vertices);
     }
@@ -495,14 +506,19 @@ mod tests {
     fn test_face_face_circulator() {
         let mesh = generate_tetrahedron();
         let fh = FaceHandle::from_usize(0);
-        
+
         let neighbors: Vec<_> = match mesh.face_faces(fh) {
             Some(c) => c.collect(),
             None => panic!("No circulator for face 0"),
         };
-        
+
         // Tetrahedron: each face has 3 adjacent faces
-        assert_eq!(neighbors.len(), 3, "Expected 3 adjacent faces, got {:?}", neighbors);
+        assert_eq!(
+            neighbors.len(),
+            3,
+            "Expected 3 adjacent faces, got {:?}",
+            neighbors
+        );
     }
 
     #[test]
@@ -517,12 +533,22 @@ mod tests {
         };
 
         // Tetrahedron: each vertex has 3 outgoing halfedges
-        assert_eq!(halfedges.len(), 3, "Expected 3 halfedges, got {:?}", halfedges);
+        assert_eq!(
+            halfedges.len(),
+            3,
+            "Expected 3 halfedges, got {:?}",
+            halfedges
+        );
 
         // All returned halfedges should be outgoing from v0
         for heh in &halfedges {
-            assert_eq!(mesh.from_vertex_handle(*heh), v0,
-                "Halfedge {:?} should be outgoing from vertex {:?}", heh, v0);
+            assert_eq!(
+                mesh.from_vertex_handle(*heh),
+                v0,
+                "Halfedge {:?} should be outgoing from vertex {:?}",
+                heh,
+                v0
+            );
         }
     }
 
@@ -552,7 +578,11 @@ mod tests {
         );
 
         sorted_edges.dedup();
-        assert_eq!(sorted_edges.len(), 3, "Edges around vertex should be unique");
+        assert_eq!(
+            sorted_edges.len(),
+            3,
+            "Edges around vertex should be unique"
+        );
     }
 
     #[test]
@@ -565,7 +595,12 @@ mod tests {
                 None => panic!("No iterator for face {:?}", fh),
             };
 
-            assert_eq!(halfedges.len(), 3, "Expected 3 halfedges, got {:?}", halfedges);
+            assert_eq!(
+                halfedges.len(),
+                3,
+                "Expected 3 halfedges, got {:?}",
+                halfedges
+            );
 
             for heh in &halfedges {
                 assert_eq!(

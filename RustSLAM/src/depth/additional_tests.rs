@@ -2,7 +2,10 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::depth::{StereoMatcher, StereoConfig, BlockMatcher, DepthFusion, DepthFusionConfig, DepthObservation, TemporalDepthFusion};
+    use crate::depth::{
+        BlockMatcher, DepthFusion, DepthFusionConfig, DepthObservation, StereoConfig,
+        StereoMatcher, TemporalDepthFusion,
+    };
 
     fn create_test_stereo_pair(width: usize, height: usize) -> (Vec<u8>, Vec<u8>) {
         let left: Vec<u8> = (0..height)
@@ -10,14 +13,16 @@ mod tests {
             .collect();
 
         let right: Vec<u8> = (0..height)
-            .flat_map(|y| (0..width).map(move |x| {
-                let shift = 10;
-                if x >= shift {
-                    ((x - shift + y) % 256) as u8
-                } else {
-                    0
-                }
-            }))
+            .flat_map(|y| {
+                (0..width).map(move |x| {
+                    let shift = 10;
+                    if x >= shift {
+                        ((x - shift + y) % 256) as u8
+                    } else {
+                        0
+                    }
+                })
+            })
             .collect();
 
         (left, right)
@@ -54,11 +59,14 @@ mod tests {
     #[test]
     fn test_depth_fusion_add_observation() {
         let mut fusion = DepthFusion::default();
-        fusion.add_observation(0, DepthObservation {
-            depth: 1.5,
-            confidence: 0.8,
-            source_id: 1,
-        });
+        fusion.add_observation(
+            0,
+            DepthObservation {
+                depth: 1.5,
+                confidence: 0.8,
+                source_id: 1,
+            },
+        );
         assert_eq!(fusion.num_observations(0), 1);
     }
 
@@ -72,11 +80,14 @@ mod tests {
     #[test]
     fn test_depth_fusion_clear() {
         let mut fusion = DepthFusion::default();
-        fusion.add_observation(0, DepthObservation {
-            depth: 1.0,
-            confidence: 0.8,
-            source_id: 0,
-        });
+        fusion.add_observation(
+            0,
+            DepthObservation {
+                depth: 1.0,
+                confidence: 0.8,
+                source_id: 0,
+            },
+        );
         fusion.clear();
         assert_eq!(fusion.num_observations(0), 0);
     }

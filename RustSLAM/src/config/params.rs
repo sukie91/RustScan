@@ -75,7 +75,8 @@ impl TrackerParams {
         if self.min_features == 0 {
             errs.push("tracker.min_features must be > 0".into());
         }
-        if self.max_features > 0 && self.min_features > 0 && self.max_features <= self.min_features {
+        if self.max_features > 0 && self.min_features > 0 && self.max_features <= self.min_features
+        {
             errs.push(format!(
                 "tracker.max_features ({}) must be > min_features ({})",
                 self.max_features, self.min_features
@@ -88,10 +89,16 @@ impl TrackerParams {
             errs.push("tracker.patch_size must be > 0".into());
         }
         if self.scale_factor <= 1.0 {
-            errs.push(format!("tracker.scale_factor ({}) must be > 1.0", self.scale_factor));
+            errs.push(format!(
+                "tracker.scale_factor ({}) must be > 1.0",
+                self.scale_factor
+            ));
         }
         if self.match_ratio <= 0.0 || self.match_ratio > 1.0 {
-            errs.push(format!("tracker.match_ratio ({}) must be in (0, 1]", self.match_ratio));
+            errs.push(format!(
+                "tracker.match_ratio ({}) must be in (0, 1]",
+                self.match_ratio
+            ));
         }
         if self.min_matches == 0 {
             errs.push("tracker.min_matches must be > 0".into());
@@ -154,7 +161,10 @@ impl MapperParams {
         if self.max_keyframes == 0 {
             errs.push("mapper.max_keyframes must be > 0".into());
         }
-        if self.max_keyframes > 0 && self.min_keyframes > 0 && self.max_keyframes <= self.min_keyframes {
+        if self.max_keyframes > 0
+            && self.min_keyframes > 0
+            && self.max_keyframes <= self.min_keyframes
+        {
             errs.push(format!(
                 "mapper.max_keyframes ({}) must be > min_keyframes ({})",
                 self.max_keyframes, self.min_keyframes

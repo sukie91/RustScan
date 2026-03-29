@@ -10,11 +10,20 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 pub enum MeshMetadataError {
     #[error("failed to create output directory {path}: {source}")]
-    CreateDir { path: String, source: std::io::Error },
+    CreateDir {
+        path: String,
+        source: std::io::Error,
+    },
     #[error("failed to write metadata {path}: {source}")]
-    Write { path: String, source: std::io::Error },
+    Write {
+        path: String,
+        source: std::io::Error,
+    },
     #[error("failed to serialize metadata {path}: {source}")]
-    Serialize { path: String, source: serde_json::Error },
+    Serialize {
+        path: String,
+        source: serde_json::Error,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -53,9 +62,11 @@ pub fn save_mesh_metadata(path: &Path, metadata: &MeshMetadata) -> Result<(), Me
         source,
     })?;
     let writer = BufWriter::new(file);
-    serde_json::to_writer_pretty(writer, metadata).map_err(|source| MeshMetadataError::Serialize {
-        path: path.display().to_string(),
-        source,
+    serde_json::to_writer_pretty(writer, metadata).map_err(|source| {
+        MeshMetadataError::Serialize {
+            path: path.display().to_string(),
+            source,
+        }
     })?;
     Ok(())
 }

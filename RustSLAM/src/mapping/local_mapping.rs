@@ -1,17 +1,19 @@
 //! Local Mapping module
-//! 
+//!
 //! This module handles local mapping in the SLAM system:
 //! - Receives keyframes from the tracking thread
 //! - Triangulates new map points
 //! - Performs local Bundle Adjustment
 //! - Filters redundant keyframes
 
+use glam::Vec3;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, RwLock};
-use glam::Vec3;
 
-use crate::core::{Camera, KeyFrame, Map, MapPoint, SE3};
-use crate::optimizer::ba::{BundleAdjuster, BACamera, BALandmark, BAObservation};
+use crate::core::{Camera, FrameFeatures, KeyFrame, Map, MapPoint, SE3};
+use crate::features::{Descriptors, FeatureMatcher, HammingMatcher};
+use crate::optimizer::ba::{BACamera, BALandmark, BAObservation, BundleAdjuster};
+use crate::tracker::solver::Triangulator;
 
 /// Configuration for Local Mapping
 #[derive(Debug, Clone)]
@@ -44,13 +46,13 @@ impl Default for LocalMappingConfig {
             max_keyframes: 10,
             max_map_points: 1000,
             min_observations: 2,
-            min_triangulation_angle: 3.0,  // degrees
+            min_triangulation_angle: 3.0, // degrees
             min_triangulation_dist: 0.1,
-            max_reprojection_error: 4.0,   // pixels
+            max_reprojection_error: 4.0, // pixels
             local_ba_enabled: true,
             local_ba_iterations: 10,
             local_ba_interval: 5,
-            culling_threshold: 0.9,       // 90% mapped points = redundant
+            culling_threshold: 0.9, // 90% mapped points = redundant
         }
     }
 }
@@ -69,7 +71,7 @@ pub enum MappingState {
 }
 
 /// Local Mapping module
-/// 
+///
 /// Receives keyframes from tracking and:
 /// 1. Triangulates new map points from consecutive keyframes
 /// 2. Runs local Bundle Adjustment
@@ -89,8 +91,6 @@ pub struct LocalMapping {
     new_keyframes: VecDeque<KeyFrame>,
     /// Camera for triangulation
     camera: Option<Camera>,
-    /// Next map point ID
-    next_point_id: u64,
     /// Keyframes since last local BA
     keyframes_since_ba: usize,
 }
@@ -106,7 +106,6 @@ impl LocalMapping {
             local_map_points: HashSet::new(),
             new_keyframes: VecDeque::new(),
             camera: None,
-            next_point_id: 0,
             keyframes_since_ba: 0,
         }
     }
@@ -164,7 +163,7 @@ impl LocalMapping {
     pub fn insert_keyframe(&mut self, keyframe: KeyFrame) {
         self.state = MappingState::Processing;
         self.new_keyframes.push_back(keyframe);
-        
+
         // Process immediately
         self.process_new_keyframes();
     }
@@ -172,20 +171,22 @@ impl LocalMapping {
     /// Process all new keyframes in the queue
     fn process_new_keyframes(&mut self) {
         while let Some(keyframe) = self.new_keyframes.pop_front() {
-            // Add keyframe to local keyframes
             let kf_id = keyframe.id();
+            self.insert_keyframe_into_map(keyframe);
+
+            // Add keyframe to local keyframes
             self.local_keyframes.push(kf_id);
             self.keyframes_since_ba = self.keyframes_since_ba.saturating_add(1);
-            
+
             // Limit local keyframes
             while self.local_keyframes.len() > self.config.max_keyframes {
                 self.local_keyframes.remove(0);
             }
-            
+
             // Triangulate new points
-            self.triangulate_new_points(&keyframe);
+            self.triangulate_new_points(kf_id);
         }
-        
+
         // Run local BA if enabled
         if self.config.local_ba_enabled
             && (self.config.local_ba_interval == 0
@@ -194,45 +195,59 @@ impl LocalMapping {
             self.run_local_ba();
             self.keyframes_since_ba = 0;
         }
-        
+
         // Cull redundant keyframes
         self.cull_redundant_keyframes();
-        
+
         self.state = MappingState::Idle;
     }
 
+    fn insert_keyframe_into_map(&mut self, keyframe: KeyFrame) {
+        if let Some(ref shared) = self.map {
+            let mut map = shared.write().unwrap_or_else(|e| e.into_inner());
+            map.insert_keyframe_with_id(keyframe.id(), keyframe);
+        }
+    }
+
     /// Triangulate new map points from the new keyframe with its neighbors
-    fn triangulate_new_points(&mut self, new_keyframe: &KeyFrame) {
-        // Get the pose of the new keyframe
-        let Some(new_pose) = new_keyframe.pose() else {
+    fn triangulate_new_points(&mut self, new_keyframe_id: u64) {
+        let Some(ref shared) = self.map else {
             return;
         };
-        
-        // Find neighboring keyframes to triangulate with
-        // For simplicity, use previous keyframes in local_keyframes
-        // Collect the neighbor keyframes first to avoid borrow issues
-        let neighbor_data: Vec<(KeyFrame, SE3)> = if let Some(ref shared) = self.map {
+
+        let (new_keyframe, new_pose, neighbor_data) = {
             let map = shared.read().unwrap_or_else(|e| e.into_inner());
-            self.local_keyframes.iter()
-                .filter(|&&kf_id| kf_id != new_keyframe.id())
+            let Some(new_keyframe) = map.get_keyframe(new_keyframe_id).cloned() else {
+                return;
+            };
+            let Some(new_pose) = new_keyframe.pose() else {
+                return;
+            };
+
+            let neighbors: Vec<(KeyFrame, SE3)> = self
+                .local_keyframes
+                .iter()
+                .filter(|&&kf_id| kf_id != new_keyframe_id)
                 .filter_map(|&kf_id| {
-                    map.get_keyframe(kf_id).and_then(|kf| {
-                        kf.pose().map(|pose| (kf.clone(), pose))
-                    })
+                    map.get_keyframe(kf_id)
+                        .and_then(|kf| kf.pose().map(|pose| (kf.clone(), pose)))
                 })
-                .collect()
-        } else {
-            Vec::new()
+                .collect();
+            (new_keyframe, new_pose, neighbors)
         };
-        
+
         // Now triangulate with each neighbor
         for (neighbor_kf, neighbor_pose) in neighbor_data {
             self.triangulate_between_keyframes(
-                new_keyframe,
+                &new_keyframe,
                 &new_pose,
                 &neighbor_kf,
                 &neighbor_pose,
             );
+
+            if self.local_map_points.len() >= self.config.max_map_points {
+                break;
+            }
         }
     }
 
@@ -244,140 +259,210 @@ impl LocalMapping {
         kf2: &KeyFrame,
         pose2: &SE3,
     ) {
-        // Get features without map points
-        let features1 = &kf1.features;
-        let features2 = &kf2.features;
-        
-        // Simple triangulation: create map points for unmatched features
-        // In a real system, this would use proper match triangulation
-        
-        // Check if we have reached max map points
         if self.local_map_points.len() >= self.config.max_map_points {
             return;
         }
-        
-        // Get camera poses
-        let t1 = pose1.translation();
-        let t2 = pose2.translation();
-        
-        // Calculate baseline (distance between cameras)
-        let dx = t2[0] - t1[0];
-        let dy = t2[1] - t1[1];
-        let dz = t2[2] - t1[2];
-        let baseline = (dx * dx + dy * dy + dz * dz).sqrt();
-        
-        // Check minimum baseline
-        if baseline < self.config.min_triangulation_dist {
+
+        let Some(desc1) = descriptors_from_features(&kf1.features) else {
             return;
-        }
-        
-        // Use configured camera intrinsics if available; otherwise fall back to defaults.
-        let (fx, fy) = if let Some(ref cam) = self.camera {
-            (cam.focal.x.max(1.0), cam.focal.y.max(1.0))
-        } else {
-            let defaults = Camera::default();
-            (defaults.focal.x.max(1.0), defaults.focal.y.max(1.0))
+        };
+        let Some(desc2) = descriptors_from_features(&kf2.features) else {
+            return;
         };
 
-        // For each feature in kf1 without a map point, try to triangulate
-        for (i, (kp1, mp1)) in features1.keypoints.iter()
-            .zip(features1.map_points.iter())
-            .enumerate() 
-        {
-            // Skip if already has a map point
-            if mp1.is_some() {
+        let camera = self.camera.unwrap_or_default();
+        let matcher = HammingMatcher::new(2).with_ratio_threshold(0.75);
+        let Ok(mut matches) = matcher.match_descriptors(&desc1, &desc2) else {
+            return;
+        };
+        if matches.is_empty() {
+            return;
+        }
+
+        matches.sort_by(|a, b| {
+            a.distance
+                .partial_cmp(&b.distance)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        let mut tri_pts1 = Vec::new();
+        let mut tri_pts2 = Vec::new();
+        let mut feature_pairs = Vec::new();
+        let mut used_kf1 = HashSet::new();
+        let mut used_kf2 = HashSet::new();
+
+        for m in matches {
+            let idx1 = m.query_idx as usize;
+            let idx2 = m.train_idx as usize;
+
+            if idx1 >= kf1.features.keypoints.len() || idx2 >= kf2.features.keypoints.len() {
                 continue;
             }
-            
-            // Find corresponding feature in kf2 (simplified - in real system use matching)
-            // For now, create a simple triangulated point based on position
-            let _kp2_opt = features2.keypoints.get(i);
-            
-            // Calculate simple triangulation
-            // This is a simplified version - real implementation would use DLT
-            let depth = baseline * 0.5; // Simplified depth estimation
-            
-            // Create 3D point in world coordinates (simplified)
-            let x = kp1[0] * depth / fx;
-            let y = kp1[1] * depth / fy;
-            let z = depth;
-            
-            // Check if point is in front of both cameras
-            let point_world = [x, y, z];
-            
-            // Transform to camera 1 frame
-            let point_cam1 = pose1.inverse().transform_point(&point_world);
-            let point_cam2 = pose2.inverse().transform_point(&point_world);
-            
-            if point_cam1[2] > 0.0 && point_cam2[2] > 0.0 {
-                // Valid triangulation - add to map
-                self.add_map_point(point_world, kf1.id());
+            if kf1
+                .features
+                .map_points
+                .get(idx1)
+                .and_then(|point_id| *point_id)
+                .is_some()
+            {
+                continue;
+            }
+            if kf2
+                .features
+                .map_points
+                .get(idx2)
+                .and_then(|point_id| *point_id)
+                .is_some()
+            {
+                continue;
+            }
+            if !used_kf1.insert(idx1) || !used_kf2.insert(idx2) {
+                continue;
+            }
+
+            tri_pts1.push(normalize_keypoint(&camera, kf1.features.keypoints[idx1]));
+            tri_pts2.push(normalize_keypoint(&camera, kf2.features.keypoints[idx2]));
+            feature_pairs.push((idx1, idx2));
+        }
+
+        if tri_pts1.is_empty() {
+            return;
+        }
+
+        let triangulator = Triangulator {
+            min_angle: self.config.min_triangulation_angle.to_radians(),
+            min_dist: self.config.min_triangulation_dist,
+            max_error: self.config.max_reprojection_error,
+        };
+        let triangulated = triangulator.triangulate(pose1, pose2, &tri_pts1, &tri_pts2);
+
+        let mut accepted = Vec::new();
+        for ((idx1, idx2), maybe_point) in feature_pairs.into_iter().zip(triangulated.into_iter()) {
+            let Some(point_world) = maybe_point else {
+                continue;
+            };
+            if !passes_depth_check(pose1, &point_world) || !passes_depth_check(pose2, &point_world)
+            {
+                continue;
+            }
+
+            let kp1 = kf1.features.keypoints[idx1];
+            let kp2 = kf2.features.keypoints[idx2];
+            let err1 = reprojection_error_pixels(&camera, pose1, &point_world, kp1);
+            let err2 = reprojection_error_pixels(&camera, pose2, &point_world, kp2);
+            if err1 > self.config.max_reprojection_error
+                || err2 > self.config.max_reprojection_error
+            {
+                continue;
+            }
+
+            accepted.push((idx1, idx2, point_world));
+            if self.local_map_points.len() + accepted.len() >= self.config.max_map_points {
+                break;
             }
         }
-    }
 
-    /// Add a new map point to the local map
-    fn add_map_point(&mut self, position: [f32; 3], ref_kf: u64) {
-        let point_id = self.next_point_id;
-        self.next_point_id += 1;
-        
-        let map_point = MapPoint::new(point_id, Vec3::from(position), ref_kf);
-        
-        // Add to map if available
+        if accepted.is_empty() {
+            return;
+        }
+
         if let Some(ref shared) = self.map {
             let mut map = shared.write().unwrap_or_else(|e| e.into_inner());
-            map.add_point(map_point);
+            for (idx1, idx2, point_world) in accepted {
+                let already_mapped_1 = map
+                    .get_keyframe(kf1.id())
+                    .and_then(|kf| kf.features.map_points.get(idx1))
+                    .and_then(|point_id| *point_id)
+                    .is_some();
+                let already_mapped_2 = map
+                    .get_keyframe(kf2.id())
+                    .and_then(|kf| kf.features.map_points.get(idx2))
+                    .and_then(|point_id| *point_id)
+                    .is_some();
+                if already_mapped_1 || already_mapped_2 {
+                    continue;
+                }
+
+                let point_id = self.add_map_point_to_map(&mut map, point_world, kf1.id());
+
+                if let Some(kf) = map.get_keyframe_mut(kf1.id()) {
+                    if idx1 < kf.features.map_points.len() {
+                        kf.features.map_points[idx1] = Some(point_id);
+                    }
+                }
+                if let Some(kf) = map.get_keyframe_mut(kf2.id()) {
+                    if idx2 < kf.features.map_points.len() {
+                        kf.features.map_points[idx2] = Some(point_id);
+                    }
+                }
+
+                self.local_map_points.insert(point_id);
+            }
         }
-        
-        // Track in local map points
-        self.local_map_points.insert(point_id);
-        
-        // Limit local map points
+
         while self.local_map_points.len() > self.config.max_map_points {
-            if let Some(id) = self.local_map_points.iter().next().cloned() {
+            if let Some(id) = self.local_map_points.iter().next().copied() {
                 self.local_map_points.remove(&id);
             }
         }
     }
 
+    /// Add a new map point to the shared map and return its assigned ID.
+    fn add_map_point_to_map(&self, map: &mut Map, position: [f32; 3], ref_kf: u64) -> u64 {
+        let mut map_point = MapPoint::new(0, Vec3::from(position), ref_kf);
+        map_point.observations = 2;
+        map.add_point(map_point)
+    }
+
     /// Run local Bundle Adjustment
     pub fn run_local_ba(&mut self) {
         self.state = MappingState::RunningLocalBA;
-        
+
         // Get local keyframes and map points
         let local_kfs: Vec<u64> = self.local_keyframes.clone();
         let local_mps: Vec<u64> = self.local_map_points.iter().cloned().collect();
-        
+
         if local_kfs.len() < 2 || local_mps.is_empty() {
             self.state = MappingState::Idle;
             return;
         }
-        
+
         // Build BA problem
         let mut adjuster = BundleAdjuster::new();
-        
+
         // Add cameras
         let mut camera_indices: HashMap<u64, usize> = HashMap::new();
 
         if let Some(ref shared) = self.map {
             let map = shared.read().unwrap_or_else(|e| e.into_inner());
             for &kf_id in &local_kfs {
-                if let Some(_kf) = map.get_keyframe(kf_id) {
+                if let Some(kf) = map.get_keyframe(kf_id) {
                     // Get camera intrinsics (use default if not available)
                     let (fx, fy, cx, cy) = if let Some(ref cam) = self.camera {
-                        (cam.focal.x as f64, cam.focal.y as f64, cam.principal.x as f64, cam.principal.y as f64)
+                        (
+                            cam.focal.x as f64,
+                            cam.focal.y as f64,
+                            cam.principal.x as f64,
+                            cam.principal.y as f64,
+                        )
                     } else {
                         let defaults = crate::config::CameraConfig::default();
-                        (defaults.fx as f64, defaults.fy as f64, defaults.cx as f64, defaults.cy as f64)
+                        (
+                            defaults.fx as f64,
+                            defaults.fy as f64,
+                            defaults.cx as f64,
+                            defaults.cy as f64,
+                        )
                     };
-                    
-                    let ba_cam = BACamera::new(fx, fy, cx, cy);
+
+                    let pose = kf.pose().unwrap_or(SE3::identity()).inverse();
+                    let ba_cam = BACamera::new(fx, fy, cx, cy).with_pose(pose).fix_pose();
                     let idx = adjuster.add_camera(ba_cam);
                     camera_indices.insert(kf_id, idx);
                 }
             }
         }
-        
+
         // Add landmarks
         let mut landmark_indices: HashMap<u64, usize> = HashMap::new();
 
@@ -395,7 +480,7 @@ impl LocalMapping {
                 }
             }
         }
-        
+
         // Add observations
         if let Some(ref shared) = self.map {
             let map = shared.read().unwrap_or_else(|e| e.into_inner());
@@ -404,16 +489,16 @@ impl LocalMapping {
                     let Some(&cam_idx) = camera_indices.get(&kf_id) else {
                         continue;
                     };
-                    
+
                     for (feat_idx, mp_id) in kf.features.map_points.iter().enumerate() {
                         let Some(lm_id) = *mp_id else {
                             continue;
                         };
-                        
+
                         let Some(&lm_idx) = landmark_indices.get(&lm_id) else {
                             continue;
                         };
-                        
+
                         if feat_idx < kf.features.keypoints.len() {
                             let kp = kf.features.keypoints[feat_idx];
                             let obs = BAObservation::new(kp[0] as f64, kp[1] as f64);
@@ -423,10 +508,10 @@ impl LocalMapping {
                 }
             }
         }
-        
+
         // Run optimization
         let result = adjuster.optimize(self.config.local_ba_iterations);
-        
+
         match result {
             Ok((_cameras, landmarks)) => {
                 // Update map points with optimized positions
@@ -436,7 +521,17 @@ impl LocalMapping {
                         if *lm_idx < landmarks.len() {
                             let lm = &landmarks[*lm_idx];
                             if let Some(mp) = map.get_point_mut(*mp_id) {
-                                mp.position = Vec3::new(lm.position[0] as f32, lm.position[1] as f32, lm.position[2] as f32);
+                                let new_position = Vec3::new(
+                                    lm.position[0] as f32,
+                                    lm.position[1] as f32,
+                                    lm.position[2] as f32,
+                                );
+                                if new_position.is_finite() {
+                                    mp.position = new_position;
+                                    mp.mark_inlier();
+                                } else {
+                                    mp.mark_outlier();
+                                }
                             }
                         }
                     }
@@ -447,57 +542,59 @@ impl LocalMapping {
                 eprintln!("Local BA failed: {}", e);
             }
         }
-        
+
         self.state = MappingState::Idle;
     }
 
     /// Cull redundant keyframes
-    /// 
+    ///
     /// A keyframe is redundant if more than culling_threshold (e.g., 90%)
     /// of its map points are also observed by other keyframes.
-    /// 
+    ///
     /// Returns the number of keyframes culled
     pub fn cull_redundant_keyframes(&mut self) -> usize {
         self.state = MappingState::Culling;
-        
+
         let mut culled_count = 0;
         let mut to_remove: Vec<u64> = Vec::new();
-        
+
         // Need at least 3 keyframes to consider culling
         if self.local_keyframes.len() < 3 {
             self.state = MappingState::Idle;
             return 0;
         }
-        
+
         // Check each keyframe (skip the newest ones)
         // Usually we don't cull the most recent keyframes
         let check_range = self.local_keyframes.len().saturating_sub(3)..self.local_keyframes.len();
-        
+
         for i in check_range {
             let kf_id = self.local_keyframes[i];
-            
+
             if let Some(ref shared) = self.map {
                 let map = shared.read().unwrap_or_else(|e| e.into_inner());
                 if let Some(kf) = map.get_keyframe(kf_id) {
                     // Count mapped points
-                    let mapped_count = kf.features.map_points
+                    let mapped_count = kf
+                        .features
+                        .map_points
                         .iter()
                         .filter(|mp| mp.is_some())
                         .count();
-                    
+
                     // Count observations from other keyframes
                     let mut observed_count = 0;
-                    
+
                     if let Some(mp_id) = kf.features.map_points.iter().find(|mp| mp.is_some()) {
                         if let Some(mp) = map.get_point(mp_id.unwrap()) {
                             observed_count = mp.observations as usize;
                         }
                     }
-                    
+
                     // Calculate ratio
                     if mapped_count > 0 {
                         let ratio = observed_count as f32 / mapped_count as f32;
-                        
+
                         if ratio > self.config.culling_threshold {
                             to_remove.push(kf_id);
                         }
@@ -505,13 +602,13 @@ impl LocalMapping {
                 }
             }
         }
-        
+
         // Remove culled keyframes from local list
         for kf_id in &to_remove {
             self.local_keyframes.retain(|&id| id != *kf_id);
             culled_count += 1;
         }
-        
+
         self.state = MappingState::Idle;
         culled_count
     }
@@ -545,6 +642,53 @@ impl LocalMapping {
     }
 }
 
+fn descriptors_from_features(features: &FrameFeatures) -> Option<Descriptors> {
+    if features.keypoints.is_empty() || features.descriptors.is_empty() {
+        return None;
+    }
+    if features.descriptors.len() % features.keypoints.len() != 0 {
+        return None;
+    }
+
+    let size = features.descriptors.len() / features.keypoints.len();
+    if size == 0 {
+        return None;
+    }
+
+    Some(Descriptors {
+        data: features.descriptors.clone(),
+        size,
+        count: features.keypoints.len(),
+    })
+}
+
+fn normalize_keypoint(camera: &Camera, keypoint: [f32; 2]) -> [f32; 2] {
+    [
+        (keypoint[0] - camera.principal.x) / camera.focal.x.max(1.0),
+        (keypoint[1] - camera.principal.y) / camera.focal.y.max(1.0),
+    ]
+}
+
+fn passes_depth_check(pose: &SE3, point_world: &[f32; 3]) -> bool {
+    pose.transform_point(point_world)[2] > 0.0
+}
+
+fn reprojection_error_pixels(
+    camera: &Camera,
+    pose: &SE3,
+    point_world: &[f32; 3],
+    keypoint: [f32; 2],
+) -> f32 {
+    let point_camera = pose.transform_point(point_world);
+    let Some(projected) = camera.project(&Vec3::from(point_camera)) else {
+        return f32::INFINITY;
+    };
+
+    let dx = projected.x - keypoint[0];
+    let dy = projected.y - keypoint[1];
+    (dx * dx + dy * dy).sqrt()
+}
+
 impl Default for LocalMapping {
     fn default() -> Self {
         Self::new(LocalMappingConfig::default())
@@ -554,7 +698,46 @@ impl Default for LocalMapping {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::{Frame, FrameFeatures};
+    use crate::core::{Frame, FrameFeatures, Map};
+    use glam::Vec3;
+
+    fn make_descriptors(count: usize) -> Vec<u8> {
+        let mut descriptors = vec![0u8; count * 32];
+        for idx in 0..count {
+            descriptors[idx * 32] = (idx as u8).wrapping_mul(17).wrapping_add(11);
+            descriptors[idx * 32 + 1] = (idx as u8).wrapping_mul(29).wrapping_add(7);
+        }
+        descriptors
+    }
+
+    fn build_test_keyframe(
+        id: u64,
+        pose: SE3,
+        camera: Camera,
+        world_points: &[[f32; 3]],
+    ) -> KeyFrame {
+        let mut frame = Frame::new(id, id as f64, camera.width, camera.height);
+        frame.set_pose(pose);
+        frame.mark_as_keyframe();
+
+        let keypoints = world_points
+            .iter()
+            .map(|point_world| {
+                let point_camera = pose.transform_point(point_world);
+                let pixel = camera.project(&Vec3::from(point_camera)).unwrap();
+                [pixel.x, pixel.y]
+            })
+            .collect::<Vec<_>>();
+        let feature_count = keypoints.len();
+
+        let features = FrameFeatures {
+            keypoints,
+            descriptors: make_descriptors(feature_count),
+            map_points: vec![None; feature_count],
+        };
+
+        KeyFrame::new(frame, features)
+    }
 
     #[test]
     fn test_config_default() {
@@ -572,21 +755,92 @@ mod tests {
     }
 
     #[test]
+    fn test_inserted_keyframe_is_persisted_in_map() {
+        let mut mapping = LocalMapping::new(LocalMappingConfig::default());
+        mapping.set_map(Map::new());
+
+        let mut frame = Frame::new(7, 0.0, 640, 480);
+        frame.set_pose(SE3::identity());
+        frame.mark_as_keyframe();
+        let features = FrameFeatures {
+            keypoints: vec![[10.0, 12.0]],
+            descriptors: make_descriptors(1),
+            map_points: vec![None],
+        };
+
+        mapping.insert_keyframe(KeyFrame::new(frame, features));
+
+        let map = mapping.map().unwrap();
+        assert!(map.get_keyframe(7).is_some());
+        assert_eq!(map.num_keyframes(), 1);
+    }
+
+    #[test]
+    fn test_matching_keyframes_generate_sparse_points() {
+        let camera = Camera::new(100.0, 100.0, 50.0, 50.0, 100, 100);
+        let world_points = vec![
+            [0.0, 0.0, 2.0],
+            [0.2, 0.1, 2.5],
+            [-0.2, 0.05, 2.3],
+            [0.1, -0.15, 2.8],
+        ];
+
+        let mut mapping = LocalMapping::new(LocalMappingConfig {
+            local_ba_enabled: false,
+            min_triangulation_dist: 0.05,
+            ..LocalMappingConfig::default()
+        });
+        mapping.set_camera(camera);
+        mapping.set_map(Map::new());
+
+        let pose1 = SE3::identity();
+        let pose2 = SE3::from_axis_angle(&[0.0, 0.0, 0.0], &[-0.2, 0.0, 0.0]);
+        let kf1 = build_test_keyframe(0, pose1, camera, &world_points);
+        let kf2 = build_test_keyframe(1, pose2, camera, &world_points);
+
+        mapping.insert_keyframe(kf1);
+        mapping.insert_keyframe(kf2);
+
+        let map = mapping.map().unwrap();
+        assert!(map.num_points() > 0, "expected triangulated map points");
+        assert!(map
+            .get_keyframe(0)
+            .unwrap()
+            .features
+            .map_points
+            .iter()
+            .any(|point_id| point_id.is_some()));
+        assert!(map
+            .get_keyframe(1)
+            .unwrap()
+            .features
+            .map_points
+            .iter()
+            .any(|point_id| point_id.is_some()));
+    }
+
+    #[test]
     fn test_state_transitions() {
         let mut mapping = LocalMapping::new(LocalMappingConfig::default());
-        
+
         // Initially idle
         assert_eq!(mapping.state(), MappingState::Idle);
-        
+
         // After insert, should process then go back to idle
         let frame = Frame::new(0, 0.0, 640, 480);
         let features = FrameFeatures::new();
         let kf = KeyFrame::new(frame, features);
-        
+
         mapping.insert_keyframe(kf);
-        
+
         // State should eventually return to idle
         // (may briefly be Processing/RunningLocalBA/Culling)
-        assert!(matches!(mapping.state(), MappingState::Idle | MappingState::Processing | MappingState::RunningLocalBA | MappingState::Culling));
+        assert!(matches!(
+            mapping.state(),
+            MappingState::Idle
+                | MappingState::Processing
+                | MappingState::RunningLocalBA
+                | MappingState::Culling
+        ));
     }
 }

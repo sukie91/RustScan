@@ -31,10 +31,10 @@ fn main() -> std::io::Result<()> {
     ];
 
     let triangles = vec![
-        [0, 1, 2],  // Base triangle
-        [0, 1, 3],  // Side 1
-        [1, 2, 3],  // Side 2
-        [2, 0, 3],  // Side 3
+        [0, 1, 2], // Base triangle
+        [0, 1, 3], // Side 1
+        [1, 2, 3], // Side 2
+        [2, 0, 3], // Side 3
     ];
 
     let normals = vec![
@@ -45,10 +45,10 @@ fn main() -> std::io::Result<()> {
     ];
 
     let colors = vec![
-        [1.0, 0.0, 0.0],  // Red
-        [0.0, 1.0, 0.0],  // Green
-        [0.0, 0.0, 1.0],  // Blue
-        [1.0, 1.0, 0.0],  // Yellow
+        [1.0, 0.0, 0.0], // Red
+        [0.0, 1.0, 0.0], // Green
+        [0.0, 0.0, 1.0], // Blue
+        [1.0, 1.0, 0.0], // Yellow
     ];
 
     // Convert to RustMesh
@@ -82,7 +82,11 @@ fn main() -> std::io::Result<()> {
     // Export to PLY (Binary)
     let ply_binary_path = "/tmp/e2e_output_binary.ply";
     println!("Exporting to PLY (Binary): {}", ply_binary_path);
-    rustmesh::io::write_ply(&mesh, ply_binary_path, rustmesh::io::PlyFormat::BinaryLittleEndian)?;
+    rustmesh::io::write_ply(
+        &mesh,
+        ply_binary_path,
+        rustmesh::io::PlyFormat::BinaryLittleEndian,
+    )?;
     println!("  ✓ PLY Binary export complete");
 
     println!("\n=== Export Complete ===");
@@ -106,7 +110,8 @@ fn main() -> std::io::Result<()> {
 
     println!("\n=== Integration Example for RustSLAM ===");
     println!("To integrate with RustSLAM 3DGS mesh extraction:");
-    println!("
+    println!(
+        "
     // In RustSLAM:
     use rustslam::fusion::{{MeshExtractor, MeshExtractionConfig}};
 
@@ -139,7 +144,8 @@ fn main() -> std::io::Result<()> {
     // 3. Export
     rustmesh::io::write_obj(&mesh, \"output.obj\")?;
     rustmesh::io::write_ply(&mesh, \"output.ply\", PlyFormat::Ascii)?;
-    ");
+    "
+    );
 
     Ok(())
 }

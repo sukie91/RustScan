@@ -39,7 +39,10 @@ impl SE3 {
         let rotation = Quat::from_axis_angle(axis, angle);
         let translation = Vec3::new(translation[0], translation[1], translation[2]);
 
-        Self { rotation, translation }
+        Self {
+            rotation,
+            translation,
+        }
     }
 
     /// Create identity pose
@@ -54,19 +57,31 @@ impl SE3 {
     #[allow(dead_code)]
     pub fn from_rotation_translation(rotation: &[[f32; 3]; 3], translation: &[f32; 3]) -> Self {
         let r = Mat3::from_cols_array(&[
-            rotation[0][0], rotation[0][1], rotation[0][2],
-            rotation[1][0], rotation[1][1], rotation[1][2],
-            rotation[2][0], rotation[2][1], rotation[2][2],
+            rotation[0][0],
+            rotation[0][1],
+            rotation[0][2],
+            rotation[1][0],
+            rotation[1][1],
+            rotation[1][2],
+            rotation[2][0],
+            rotation[2][1],
+            rotation[2][2],
         ]);
         let rot = Quat::from_mat3(&r);
         let t = Vec3::new(translation[0], translation[1], translation[2]);
 
-        Self { rotation: rot, translation: t }
+        Self {
+            rotation: rot,
+            translation: t,
+        }
     }
 
     /// Create from quaternion and translation vectors
     pub fn from_quat_translation(rotation: Quat, translation: Vec3) -> Self {
-        Self { rotation, translation }
+        Self {
+            rotation,
+            translation,
+        }
     }
 
     /// Convert to 4x4 transformation matrix
@@ -85,14 +100,20 @@ impl SE3 {
     pub fn compose(&self, other: &SE3) -> SE3 {
         let rotation = self.rotation * other.rotation;
         let translation = self.translation + self.rotation * other.translation;
-        SE3 { rotation, translation }
+        SE3 {
+            rotation,
+            translation,
+        }
     }
 
     /// Inverse of the pose
     pub fn inverse(&self) -> SE3 {
         let rotation = self.rotation.inverse();
         let translation = -(rotation * self.translation);
-        SE3 { rotation, translation }
+        SE3 {
+            rotation,
+            translation,
+        }
     }
 
     /// Transform a 3D point
@@ -127,7 +148,12 @@ impl SE3 {
 
     /// Get quaternion as [x, y, z, w]
     pub fn quaternion(&self) -> [f32; 4] {
-        [self.rotation.x, self.rotation.y, self.rotation.z, self.rotation.w]
+        [
+            self.rotation.x,
+            self.rotation.y,
+            self.rotation.z,
+            self.rotation.w,
+        ]
     }
 
     /// Get rotation as axis-angle [rx, ry, rz]
@@ -166,7 +192,10 @@ impl SE3 {
             v + (c1 * omega_hat * v) + (c2 * omega_hat * omega_hat * v)
         };
 
-        SE3 { rotation, translation: t_vec }
+        SE3 {
+            rotation,
+            translation: t_vec,
+        }
     }
 
     /// Log map: group element to Lie algebra

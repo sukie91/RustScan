@@ -1,7 +1,7 @@
 //! Camera model representation
 
-use glam::{Mat3, Vec3};
 use crate::config::config::CameraConfig;
+use glam::{Mat3, Vec3};
 
 /// Camera intrinsic parameters
 #[derive(Debug, Clone, Copy)]
@@ -42,7 +42,14 @@ impl Camera {
 
     /// Create a camera from CameraConfig
     pub fn from_config(config: &CameraConfig) -> Self {
-        Self::new(config.fx, config.fy, config.cx, config.cy, config.width, config.height)
+        Self::new(
+            config.fx,
+            config.fy,
+            config.cx,
+            config.cy,
+            config.width,
+            config.height,
+        )
     }
 
     /// Get the intrinsic matrix
@@ -59,13 +66,13 @@ impl Camera {
         if point.z <= 0.0 {
             return None;
         }
-        
+
         let x = point.x / point.z;
         let y = point.y / point.z;
-        
+
         let px = self.focal.x * x + self.principal.x;
         let py = self.focal.y * y + self.principal.y;
-        
+
         Some(Vec3::new(px, py, point.z))
     }
 
@@ -78,7 +85,7 @@ impl Camera {
 
     /// Check if a pixel is inside the image
     pub fn is_in_image(&self, pixel: &Vec3, margin: i32) -> bool {
-        pixel.x >= margin as f32 
+        pixel.x >= margin as f32
             && pixel.x < (self.width as i32 - margin) as f32
             && pixel.y >= margin as f32
             && pixel.y < (self.height as i32 - margin) as f32

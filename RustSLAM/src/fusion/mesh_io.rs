@@ -11,9 +11,15 @@ use crate::fusion::marching_cubes::Mesh;
 #[derive(Debug, Error)]
 pub enum MeshIoError {
     #[error("failed to create output directory {path}: {source}")]
-    CreateDir { path: String, source: std::io::Error },
+    CreateDir {
+        path: String,
+        source: std::io::Error,
+    },
     #[error("failed to write mesh {path}: {source}")]
-    Write { path: String, source: std::io::Error },
+    Write {
+        path: String,
+        source: std::io::Error,
+    },
 }
 
 pub fn save_mesh_obj(path: &Path, mesh: &Mesh) -> Result<(), MeshIoError> {
@@ -27,13 +33,17 @@ pub fn save_mesh_obj(path: &Path, mesh: &Mesh) -> Result<(), MeshIoError> {
         path: path.display().to_string(),
         source,
     })?;
-    writeln!(writer, "# vertices {}", mesh.vertices.len()).map_err(|source| MeshIoError::Write {
-        path: path.display().to_string(),
-        source,
+    writeln!(writer, "# vertices {}", mesh.vertices.len()).map_err(|source| {
+        MeshIoError::Write {
+            path: path.display().to_string(),
+            source,
+        }
     })?;
-    writeln!(writer, "# triangles {}", mesh.triangles.len()).map_err(|source| MeshIoError::Write {
-        path: path.display().to_string(),
-        source,
+    writeln!(writer, "# triangles {}", mesh.triangles.len()).map_err(|source| {
+        MeshIoError::Write {
+            path: path.display().to_string(),
+            source,
+        }
     })?;
 
     for v in &mesh.vertices {
@@ -64,11 +74,9 @@ pub fn save_mesh_obj(path: &Path, mesh: &Mesh) -> Result<(), MeshIoError> {
         let a = tri.indices[0] + 1;
         let b = tri.indices[1] + 1;
         let c = tri.indices[2] + 1;
-        writeln!(writer, "f {a}//{a} {b}//{b} {c}//{c}").map_err(|source| {
-            MeshIoError::Write {
-                path: path.display().to_string(),
-                source,
-            }
+        writeln!(writer, "f {a}//{a} {b}//{b} {c}//{c}").map_err(|source| MeshIoError::Write {
+            path: path.display().to_string(),
+            source,
         })?;
     }
 
@@ -183,7 +191,10 @@ pub fn save_mesh_ply(path: &Path, mesh: &Mesh) -> Result<(), MeshIoError> {
     Ok(())
 }
 
-pub fn export_mesh(output_dir: &Path, mesh: &Mesh) -> Result<(std::path::PathBuf, std::path::PathBuf), MeshIoError> {
+pub fn export_mesh(
+    output_dir: &Path,
+    mesh: &Mesh,
+) -> Result<(std::path::PathBuf, std::path::PathBuf), MeshIoError> {
     if !output_dir.exists() {
         fs::create_dir_all(output_dir).map_err(|source| MeshIoError::CreateDir {
             path: output_dir.display().to_string(),
@@ -203,9 +214,9 @@ pub fn export_mesh(output_dir: &Path, mesh: &Mesh) -> Result<(std::path::PathBuf
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
+    use crate::fusion::marching_cubes::{Mesh, MeshTriangle, MeshVertex};
     use glam::Vec3;
-    use crate::fusion::marching_cubes::{MeshVertex, MeshTriangle, Mesh};
+    use tempfile::tempdir;
 
     #[test]
     fn test_export_mesh_files() {

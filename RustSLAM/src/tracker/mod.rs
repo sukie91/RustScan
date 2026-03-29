@@ -1,9 +1,9 @@
 //! Visual Odometry module
 
-pub mod vo;
 pub mod solver;
 #[cfg(test)]
 mod solver_tests;
+pub mod vo;
 
-pub use vo::{VisualOdometry, VOState, VOResult};
-pub use solver::{PnPSolver, EssentialSolver, Triangulator, PnPProblem, Sim3Solver};
+pub use solver::{EssentialSolver, PnPProblem, PnPSolver, Sim3Solver, Triangulator};
+pub use vo::{VOResult, VOState, VisualOdometry};

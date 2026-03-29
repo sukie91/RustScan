@@ -57,7 +57,10 @@ impl FeatureMatcher for HammingMatcher {
         let mut buckets_8: HashMap<u8, Vec<usize>> = HashMap::new();
         for t_idx in 0..train.count {
             if let Some(desc) = train.get(t_idx) {
-                buckets_16.entry(Self::bucket_key(desc)).or_default().push(t_idx);
+                buckets_16
+                    .entry(Self::bucket_key(desc))
+                    .or_default()
+                    .push(t_idx);
                 buckets_8.entry(desc[0]).or_default().push(t_idx);
             }
         }
@@ -85,9 +88,16 @@ impl FeatureMatcher for HammingMatcher {
                 for bit in 0..16 {
                     let neighbor = key ^ (1u16 << bit);
                     if let Some(group) = buckets_16.get(&neighbor) {
-                        add_group_candidates(group, &mut candidate_indices, &mut seen, max_candidates);
+                        add_group_candidates(
+                            group,
+                            &mut candidate_indices,
+                            &mut seen,
+                            max_candidates,
+                        );
                     }
-                    if candidate_indices.len() >= min_candidates || candidate_indices.len() >= max_candidates {
+                    if candidate_indices.len() >= min_candidates
+                        || candidate_indices.len() >= max_candidates
+                    {
                         break;
                     }
                 }
@@ -103,9 +113,16 @@ impl FeatureMatcher for HammingMatcher {
                 for bit in 0..8 {
                     let neighbor = key8 ^ (1u8 << bit);
                     if let Some(group) = buckets_8.get(&neighbor) {
-                        add_group_candidates(group, &mut candidate_indices, &mut seen, max_candidates);
+                        add_group_candidates(
+                            group,
+                            &mut candidate_indices,
+                            &mut seen,
+                            max_candidates,
+                        );
                     }
-                    if candidate_indices.len() >= min_candidates || candidate_indices.len() >= max_candidates {
+                    if candidate_indices.len() >= min_candidates
+                        || candidate_indices.len() >= max_candidates
+                    {
                         break;
                     }
                 }
@@ -118,7 +135,9 @@ impl FeatureMatcher for HammingMatcher {
                 for _ in 0..target.saturating_mul(2) {
                     if seen.insert(probe) {
                         candidate_indices.push(probe);
-                        if candidate_indices.len() >= target || candidate_indices.len() >= max_candidates {
+                        if candidate_indices.len() >= target
+                            || candidate_indices.len() >= max_candidates
+                        {
                             break;
                         }
                     }
@@ -139,7 +158,9 @@ impl FeatureMatcher for HammingMatcher {
                     }
                 }
             }
-            let Some(best) = best else { continue; };
+            let Some(best) = best else {
+                continue;
+            };
 
             if let Some(ratio) = ratio_threshold {
                 if let Some(second) = second {

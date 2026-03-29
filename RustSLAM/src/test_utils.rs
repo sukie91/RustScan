@@ -15,8 +15,8 @@
 //! let frame = create_mock_frame(640, 480, FramePattern::Checkerboard);
 //! ```
 
-use crate::fusion::tsdf_volume::{TsdfVolume, TsdfConfig};
 use crate::core::pose::SE3;
+use crate::fusion::tsdf_volume::{TsdfConfig, TsdfVolume};
 use glam::Vec3;
 use std::f32::consts::PI;
 

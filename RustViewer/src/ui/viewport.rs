@@ -31,9 +31,11 @@ pub fn draw_empty_state(ui: &mut egui::Ui) {
 
             // Description
             ui.label(
-                egui::RichText::new("Load checkpoint, Gaussian, or mesh files to visualize 3D results")
-                    .size(13.0)
-                    .color(SYSTEM_GRAY),
+                egui::RichText::new(
+                    "Load checkpoint, Gaussian, or mesh files to visualize 3D results",
+                )
+                .size(13.0)
+                .color(SYSTEM_GRAY),
             );
 
             ui.add_space(24.0);
@@ -41,10 +43,8 @@ pub fn draw_empty_state(ui: &mut egui::Ui) {
             // Open Files button (placeholder - actual file opening is in sidebar)
             let button_width = 120.0;
             let button_height = 32.0;
-            let (rect, response) = ui.allocate_exact_size(
-                Vec2::new(button_width, button_height),
-                egui::Sense::click(),
-            );
+            let (rect, response) = ui
+                .allocate_exact_size(Vec2::new(button_width, button_height), egui::Sense::click());
 
             let bg_color = if response.clicked() {
                 Color32::from_rgb(0, 85, 200)

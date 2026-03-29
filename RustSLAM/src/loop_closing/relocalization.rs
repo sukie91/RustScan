@@ -4,11 +4,11 @@
 //! by querying the BoW database for similar keyframes and attempting
 //! PnP pose estimation against top-N candidates.
 
-use crate::core::{Map, KeyFrame, SE3};
+use crate::core::{KeyFrame, Map, SE3};
 use crate::features::base::{Descriptors, FeatureMatcher, ORB_DESCRIPTOR_SIZE};
 use crate::features::HammingMatcher;
 use crate::loop_closing::{KeyFrameDatabase, Vocabulary};
-use crate::tracker::solver::{PnPSolver, PnPProblem};
+use crate::tracker::solver::{PnPProblem, PnPSolver};
 
 /// Relocalization result
 #[derive(Debug, Clone)]
@@ -98,7 +98,9 @@ impl Relocalizer {
         // Try each candidate until we find a good match
         for (kf_id, _) in candidates.iter().take(self.max_candidates) {
             if let Some(keyframe) = map.get_keyframe(*kf_id) {
-                if let Some(result) = self.try_pnp(keyframe, current_descriptors, current_keypoints, map) {
+                if let Some(result) =
+                    self.try_pnp(keyframe, current_descriptors, current_keypoints, map)
+                {
                     if result.success {
                         return result;
                     }
@@ -171,7 +173,11 @@ impl Relocalizer {
 
         Some(RelocalizationResult {
             success: num_inliers >= self.min_inliers,
-            pose: if num_inliers >= self.min_inliers { Some(pose) } else { None },
+            pose: if num_inliers >= self.min_inliers {
+                Some(pose)
+            } else {
+                None
+            },
             num_inliers,
             matched_keyframe_id: Some(keyframe.id()),
         })
@@ -217,7 +223,11 @@ impl DescriptorsExt for Descriptors {
         Descriptors {
             data: data.to_vec(),
             size: ORB_DESCRIPTOR_SIZE,
-            count: if !data.is_empty() { data.len() / ORB_DESCRIPTOR_SIZE } else { 0 },
+            count: if !data.is_empty() {
+                data.len() / ORB_DESCRIPTOR_SIZE
+            } else {
+                0
+            },
         }
     }
 }
@@ -297,7 +307,9 @@ mod tests {
         // Keyframe with matching descriptors and map points
         let mut features = FrameFeatures::new();
         for i in 0..8 {
-            features.keypoints.push([250.0 + i as f32 * 20.0, 240.0 + i as f32 * 10.0]);
+            features
+                .keypoints
+                .push([250.0 + i as f32 * 20.0, 240.0 + i as f32 * 10.0]);
             let mut desc = vec![0u8; ORB_DESCRIPTOR_SIZE];
             desc[0] = i as u8;
             desc[1] = (i * 7) as u8;
@@ -310,9 +322,10 @@ mod tests {
         let kf = KeyFrame::new(frame, features.clone());
 
         // Current frame: correct projections of the 3D points (identity pose)
-        let current_kps: Vec<[f32; 2]> = positions.iter().map(|p| {
-            [500.0 * p.x / p.z + 320.0, 500.0 * p.y / p.z + 240.0]
-        }).collect();
+        let current_kps: Vec<[f32; 2]> = positions
+            .iter()
+            .map(|p| [500.0 * p.x / p.z + 320.0, 500.0 * p.y / p.z + 240.0])
+            .collect();
 
         let result = reloc.try_pnp(&kf, &features.descriptors, &current_kps, &map);
         // Should find correspondences and solve PnP successfully

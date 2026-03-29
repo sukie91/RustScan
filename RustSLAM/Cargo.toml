@@ -49,9 +49,7 @@ kiddo = "5.2.1"
 
 # Linear algebra (required for apex-solver)
 nalgebra = "0.33"
-candle-core = { version = "0.9.2", features = ["metal"], optional = true }
-candle-metal = { version = "0.27.1", features = ["mps"], optional = true }
-rustgs = { path = "../RustGS", default-features = false }
+rustscan-types = { path = "../rustscan-types" }
 
 # Video decoding
 ffmpeg-next = { version = "8.0", optional = true }
@@ -59,9 +57,8 @@ lru = { version = "0.12", optional = true }
 sysinfo = { version = "0.30", optional = true }
 
 [features]
-default = ["slam-pipeline", "gpu"]
+default = ["slam-pipeline"]
 slam-pipeline = ["dep:ffmpeg-next", "dep:lru", "dep:sysinfo"]
-gpu = ["dep:candle-core", "dep:candle-metal", "rustgs/gpu"]
 viewer-types = []
 opencv = ["dep:opencv"]
 deep-learning = ["dep:tch"]

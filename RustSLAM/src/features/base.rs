@@ -9,10 +9,10 @@ pub const ORB_DESCRIPTOR_SIZE: usize = 32;
 pub enum FeatureError {
     #[error("OpenCV error: {0}")]
     OpenCV(String),
-    
+
     #[error("Image error: {0}")]
     Image(String),
-    
+
     #[error("No features found")]
     NoFeatures,
 }
@@ -122,16 +122,24 @@ pub struct Match {
 /// Trait for feature extractors
 pub trait FeatureExtractor {
     /// Detect keypoints and compute descriptors
-    fn detect_and_compute(&mut self, image: &[u8], width: u32, height: u32) 
-        -> Result<(Vec<KeyPoint>, Descriptors), FeatureError>;
-    
+    fn detect_and_compute(
+        &mut self,
+        image: &[u8],
+        width: u32,
+        height: u32,
+    ) -> Result<(Vec<KeyPoint>, Descriptors), FeatureError>;
+
     /// Detect keypoints only
-    fn detect(&mut self, image: &[u8], width: u32, height: u32) 
-        -> Result<Vec<KeyPoint>, FeatureError>;
-    
+    fn detect(
+        &mut self,
+        image: &[u8],
+        width: u32,
+        height: u32,
+    ) -> Result<Vec<KeyPoint>, FeatureError>;
+
     /// Get number of features to extract
     fn num_features(&self) -> usize;
-    
+
     /// Set number of features
     fn set_num_features(&mut self, num: usize);
 }

@@ -1,10 +1,12 @@
 //! Loop closing coordinator that runs detection and triggers global BA.
 
 use crate::core::Map;
-use crate::features::{Descriptors, HammingMatcher, FeatureMatcher};
 use crate::features::base::ORB_DESCRIPTOR_SIZE;
-use crate::loop_closing::detector::{LoopCandidate, LoopDetectionResult, LoopDetector, compute_sim3_from_matches};
-use crate::optimizer::ba::{BundleAdjuster, BACamera, BALandmark, BAObservation};
+use crate::features::{Descriptors, FeatureMatcher, HammingMatcher};
+use crate::loop_closing::detector::{
+    compute_sim3_from_matches, LoopCandidate, LoopDetectionResult, LoopDetector,
+};
+use crate::optimizer::ba::{BACamera, BALandmark, BAObservation, BundleAdjuster};
 
 /// Loop closing coordinator.
 pub struct LoopClosing {
@@ -49,10 +51,12 @@ impl LoopClosing {
             return LoopDetectionResult::no_loop();
         }
 
-        let candidates = self
+        let candidates =
+            self.detector
+                .compute_loop_candidates(map, current_frame_id, &descriptors.data);
+        let consistent = self
             .detector
-            .compute_loop_candidates(map, current_frame_id, &descriptors.data);
-        let consistent = self.detector.compute_loop_consistency(&candidates, current_frame_id);
+            .compute_loop_consistency(&candidates, current_frame_id);
         let Some(best) = consistent.first().cloned() else {
             return LoopDetectionResult::no_loop();
         };
@@ -94,12 +98,21 @@ impl LoopClosing {
             let Some(q_mp_id) = current_kf.features.map_points.get(q_idx).and_then(|id| *id) else {
                 continue;
             };
-            let Some(t_mp_id) = candidate_kf.features.map_points.get(t_idx).and_then(|id| *id) else {
+            let Some(t_mp_id) = candidate_kf
+                .features
+                .map_points
+                .get(t_idx)
+                .and_then(|id| *id)
+            else {
                 continue;
             };
 
-            let Some(mp1) = map.get_point(q_mp_id) else { continue; };
-            let Some(mp2) = map.get_point(t_mp_id) else { continue; };
+            let Some(mp1) = map.get_point(q_mp_id) else {
+                continue;
+            };
+            let Some(mp2) = map.get_point(t_mp_id) else {
+                continue;
+            };
 
             points1.push([mp1.position.x, mp1.position.y, mp1.position.z]);
             points2.push([mp2.position.x, mp2.position.y, mp2.position.z]);
@@ -134,12 +147,7 @@ fn run_global_ba(map: &mut Map, iterations: usize, intrinsics: [f64; 4]) -> Resu
 
     let mut camera_indices = std::collections::HashMap::new();
     for kf in map.keyframes() {
-        let mut cam = BACamera::new(
-            intrinsics[0],
-            intrinsics[1],
-            intrinsics[2],
-            intrinsics[3],
-        );
+        let mut cam = BACamera::new(intrinsics[0], intrinsics[1], intrinsics[2], intrinsics[3]);
         if let Some(pose) = kf.pose() {
             cam = cam.with_pose(pose);
         }
@@ -158,13 +166,23 @@ fn run_global_ba(map: &mut Map, iterations: usize, intrinsics: [f64; 4]) -> Resu
     }
 
     for kf in map.keyframes() {
-        let Some(&cam_idx) = camera_indices.get(&kf.id()) else { continue; };
+        let Some(&cam_idx) = camera_indices.get(&kf.id()) else {
+            continue;
+        };
         for (feat_idx, mp_id) in kf.features.map_points.iter().enumerate() {
-            let Some(mp_id) = *mp_id else { continue; };
-            let Some(&lm_idx) = landmark_indices.get(&mp_id) else { continue; };
+            let Some(mp_id) = *mp_id else {
+                continue;
+            };
+            let Some(&lm_idx) = landmark_indices.get(&mp_id) else {
+                continue;
+            };
             if feat_idx < kf.features.keypoints.len() {
                 let kp = kf.features.keypoints[feat_idx];
-                adjuster.add_observation(cam_idx, lm_idx, BAObservation::new(kp[0] as f64, kp[1] as f64));
+                adjuster.add_observation(
+                    cam_idx,
+                    lm_idx,
+                    BAObservation::new(kp[0] as f64, kp[1] as f64),
+                );
             }
         }
     }

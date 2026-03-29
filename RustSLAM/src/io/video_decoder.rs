@@ -9,13 +9,13 @@ use std::sync::Arc;
 use lru::LruCache;
 use thiserror::Error;
 
-use ffmpeg_next as ffmpeg;
 use ffmpeg::codec;
 use ffmpeg::format;
 use ffmpeg::media;
 use ffmpeg::software::scaling::{context::Context as ScalingContext, flag::Flags as ScalingFlags};
-use ffmpeg::util::frame;
 use ffmpeg::util::format::pixel::Pixel;
+use ffmpeg::util::frame;
+use ffmpeg_next as ffmpeg;
 
 #[derive(Debug, Error)]
 pub enum VideoError {
@@ -112,8 +112,8 @@ impl VideoDecoder {
 
         ffmpeg::init().map_err(|err| VideoError::InitFailed(err.to_string()))?;
 
-        let input = format::input(&path_str)
-            .map_err(|err| VideoError::OpenFailed(err.to_string()))?;
+        let input =
+            format::input(&path_str).map_err(|err| VideoError::OpenFailed(err.to_string()))?;
 
         let format_name = input.format().name().to_string();
         let extension = path
@@ -223,8 +223,8 @@ impl VideoDecoder {
             .path
             .to_str()
             .ok_or_else(|| VideoError::InvalidPath(self.path.clone()))?;
-        self.input = format::input(path_str)
-            .map_err(|err| VideoError::OpenFailed(err.to_string()))?;
+        self.input =
+            format::input(path_str).map_err(|err| VideoError::OpenFailed(err.to_string()))?;
 
         let stream = self
             .input

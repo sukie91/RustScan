@@ -8,8 +8,8 @@
 //!
 //! Example dataset: https://vision.in.tum.de/data/datasets/rgbd-dataset/download
 
-use std::path::PathBuf;
 use std::env;
+use std::path::PathBuf;
 
 use rustslam::io::{Dataset, DatasetConfig, TumRgbdDataset};
 
@@ -27,7 +27,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let dataset_path = PathBuf::from(&args[1]);
 
     if !dataset_path.exists() {
-        eprintln!("Error: Dataset path '{}' does not exist", dataset_path.display());
+        eprintln!(
+            "Error: Dataset path '{}' does not exist",
+            dataset_path.display()
+        );
         return Ok(());
     }
 
@@ -36,13 +39,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         root_path: dataset_path.clone(),
         load_depth: true,
         load_ground_truth: true,
-        max_frames: 100,  // Limit to first 100 frames for demonstration
-        stride: 5,        // Load every 5th frame
+        max_frames: 100, // Limit to first 100 frames for demonstration
+        stride: 5,       // Load every 5th frame
     };
 
     println!("Loading dataset from: {}", dataset_path.display());
-    println!("Configuration: load_depth={}, load_ground_truth={}, max_frames={}, stride={}",
-             config.load_depth, config.load_ground_truth, config.max_frames, config.stride);
+    println!(
+        "Configuration: load_depth={}, load_ground_truth={}, max_frames={}, stride={}",
+        config.load_depth, config.load_ground_truth, config.max_frames, config.stride
+    );
 
     // Load the dataset
     let dataset = TumRgbdDataset::load(config)?;
@@ -63,7 +68,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\nCamera Parameters:");
     println!("  Resolution: {}x{}", camera.width, camera.height);
     println!("  Focal length: ({}, {})", camera.focal.x, camera.focal.y);
-    println!("  Principal point: ({}, {})", camera.principal.x, camera.principal.y);
+    println!(
+        "  Principal point: ({}, {})",
+        camera.principal.x, camera.principal.y
+    );
     println!("  Distortion: {:?}", camera.distortion);
 
     // Iterate through frames
@@ -81,14 +89,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("    Timestamp: {:.3} s", frame.timestamp);
                 println!("    Dimensions: {}x{}", frame.width, frame.height);
                 println!("    Color data: {} bytes", frame.color.len());
-                println!("    Depth data: {}",
+                println!(
+                    "    Depth data: {}",
                     if frame.has_depth() {
                         format!("{} floats", frame.depth.as_ref().unwrap().len())
                     } else {
                         "None".to_string()
-                    });
-                println!("    Ground truth pose: {}",
-                    if frame.has_ground_truth() { "Available" } else { "None" });
+                    }
+                );
+                println!(
+                    "    Ground truth pose: {}",
+                    if frame.has_ground_truth() {
+                        "Available"
+                    } else {
+                        "None"
+                    }
+                );
 
                 // Example: Print first few depth values if available
                 if let Some(depth) = &frame.depth {
@@ -118,8 +134,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("  First frame: {}x{} image", frame.width, frame.height);
                 if let Some(pose) = frame.ground_truth_pose {
                     let t = pose.translation();
-                    println!("  Ground truth pose: translation=({:.2}, {:.2}, {:.2})",
-                             t[0], t[1], t[2]);
+                    println!(
+                        "  Ground truth pose: translation=({:.2}, {:.2}, {:.2})",
+                        t[0], t[1], t[2]
+                    );
                 }
             }
             Err(e) => eprintln!("  Error getting frame 0: {}", e),
@@ -130,8 +148,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if middle_idx > 0 {
             match dataset.get_frame(middle_idx) {
                 Ok(frame) => {
-                    println!("  Middle frame ({}): timestamp={:.3}s",
-                             middle_idx, frame.timestamp);
+                    println!(
+                        "  Middle frame ({}): timestamp={:.3}s",
+                        middle_idx, frame.timestamp
+                    );
                 }
                 Err(e) => eprintln!("  Error getting frame {}: {}", middle_idx, e),
             }

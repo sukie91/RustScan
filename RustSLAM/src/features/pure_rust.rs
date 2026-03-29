@@ -1,9 +1,13 @@
 //! Pure Rust feature detection algorithms
-//! 
+//!
 //! Implements Harris corner detection and FAST detector in pure Rust.
 
-use crate::features::base::{Descriptors, FeatureError, FeatureExtractor, KeyPoint as BaseKeyPoint};
-use crate::features::utils::{build_brief_descriptors, filter_by_response, select_keypoints_grid, to_grayscale};
+use crate::features::base::{
+    Descriptors, FeatureError, FeatureExtractor, KeyPoint as BaseKeyPoint,
+};
+use crate::features::utils::{
+    build_brief_descriptors, filter_by_response, select_keypoints_grid, to_grayscale,
+};
 
 /// A detected keypoint
 #[derive(Debug, Clone, Copy)]
@@ -85,12 +89,12 @@ impl HarrisDetector {
     }
 
     /// Detect corners in a grayscale image
-    /// 
+    ///
     /// Input image should be in row-major format (y fastest)
     pub fn detect(&self, image: &[u8], width: u32, height: u32) -> Vec<KeyPoint> {
         let w = width as usize;
         let h = height as usize;
-        
+
         if image.len() != w * h || w < 3 || h < 3 {
             return Vec::new();
         }
@@ -98,14 +102,14 @@ impl HarrisDetector {
         // Compute gradients
         let mut ix = vec![0i32; w * h];
         let mut iy = vec![0i32; w * h];
-        
+
         self.compute_gradients(image, width, height, &mut ix, &mut iy);
 
         // Compute Ixx, Iyy, Ixy
         let mut ixx = vec![0i64; w * h];
         let mut iyy = vec![0i64; w * h];
         let mut ixy = vec![0i64; w * h];
-        
+
         for i in 1..(h - 1) {
             for j in 1..(w - 1) {
                 let idx = i * w + j;
@@ -122,13 +126,13 @@ impl HarrisDetector {
         let kernel_size = 5isize;
         let half_k = kernel_size / 2;
         let gaussian = Kernels::gaussian(kernel_size as usize, 1.2);
-        
+
         for i in half_k..(h as isize - half_k) {
             for j in half_k..(w as isize - half_k) {
                 let mut sum_ixx = 0.0f32;
                 let mut sum_iyy = 0.0f32;
                 let mut sum_ixy = 0.0f32;
-                
+
                 // Gaussian-weighted second moment matrix improves Harris stability.
                 for di in -half_k..=half_k {
                     for dj in -half_k..=half_k {
@@ -140,7 +144,7 @@ impl HarrisDetector {
                         sum_ixy += ixy[idx] as f32 * weight;
                     }
                 }
-                
+
                 // Compute Harris response: det(M) - k * trace(M)^2
                 let det = sum_ixx * sum_iyy - sum_ixy * sum_ixy;
                 let trace = sum_ixx + sum_iyy;
@@ -153,30 +157,35 @@ impl HarrisDetector {
     }
 
     /// Compute image gradients using Sobel operator
-    fn compute_gradients(&self, image: &[u8], width: u32, height: u32, ix: &mut [i32], iy: &mut [i32]) {
+    fn compute_gradients(
+        &self,
+        image: &[u8],
+        width: u32,
+        height: u32,
+        ix: &mut [i32],
+        iy: &mut [i32],
+    ) {
         let w = width as usize;
         let h = height as usize;
-        
+
         for i in 1..(h - 1) {
             for j in 1..(w - 1) {
                 // Sobel X
-                let gx = 
-                    -1 * image[(i-1)*w + (j-1)] as i32 +
-                    -2 * image[i*w + (j-1)] as i32 +
-                    -1 * image[(i+1)*w + (j-1)] as i32 +
-                     1 * image[(i-1)*w + (j+1)] as i32 +
-                     2 * image[i*w + (j+1)] as i32 +
-                     1 * image[(i+1)*w + (j+1)] as i32;
-                
+                let gx = -1 * image[(i - 1) * w + (j - 1)] as i32
+                    + -2 * image[i * w + (j - 1)] as i32
+                    + -1 * image[(i + 1) * w + (j - 1)] as i32
+                    + 1 * image[(i - 1) * w + (j + 1)] as i32
+                    + 2 * image[i * w + (j + 1)] as i32
+                    + 1 * image[(i + 1) * w + (j + 1)] as i32;
+
                 // Sobel Y
-                let gy = 
-                    -1 * image[(i-1)*w + (j-1)] as i32 +
-                    -2 * image[(i-1)*w + j] as i32 +
-                    -1 * image[(i-1)*w + (j+1)] as i32 +
-                     1 * image[(i+1)*w + (j-1)] as i32 +
-                     2 * image[(i+1)*w + j] as i32 +
-                     1 * image[(i+1)*w + (j+1)] as i32;
-                
+                let gy = -1 * image[(i - 1) * w + (j - 1)] as i32
+                    + -2 * image[(i - 1) * w + j] as i32
+                    + -1 * image[(i - 1) * w + (j + 1)] as i32
+                    + 1 * image[(i + 1) * w + (j - 1)] as i32
+                    + 2 * image[(i + 1) * w + j] as i32
+                    + 1 * image[(i + 1) * w + (j + 1)] as i32;
+
                 ix[i * w + j] = gx;
                 iy[i * w + j] = gy;
             }
@@ -189,13 +198,13 @@ impl HarrisDetector {
         let h = height as usize;
         let r = self.params.nms_radius as isize;
         let thresh = self.params.threshold;
-        
+
         let mut corners = Vec::new();
-        
+
         for i in (r as usize + 1)..(h - r as usize - 1) {
             for j in (r as usize + 1)..(w - r as usize - 1) {
                 let val = response[i * w + j];
-                
+
                 if val > thresh {
                     // Check if it's a local maximum
                     let mut is_max = true;
@@ -215,17 +224,21 @@ impl HarrisDetector {
                             break;
                         }
                     }
-                    
+
                     if is_max {
                         corners.push(KeyPoint::with_response(j as f32, i as f32, val));
                     }
                 }
             }
         }
-        
+
         // Sort by response (strongest first)
-        corners.sort_by(|a, b| b.response.partial_cmp(&a.response).unwrap_or(std::cmp::Ordering::Equal));
-        
+        corners.sort_by(|a, b| {
+            b.response
+                .partial_cmp(&a.response)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
         corners
     }
 }
@@ -271,23 +284,35 @@ impl FastDetector {
     pub fn detect(&self, image: &[u8], width: u32, height: u32) -> Vec<KeyPoint> {
         let w = width as usize;
         let h = height as usize;
-        
+
         if image.len() != w * h || w < 7 || h < 7 {
             return Vec::new();
         }
 
         let mut corners = Vec::new();
         let t = self.params.threshold as i32;
-        
+
         // FAST corner detection (simplified)
         // Check 16 pixels in a circle around the center pixel
         let circle_16 = [
-            (0isize, -3isize), (1isize, -3isize), (2isize, -2isize), (3isize, -1isize),
-            (3isize, 0isize), (3isize, 1isize), (2isize, 2isize), (1isize, 3isize),
-            (0isize, 3isize), (-1isize, 3isize), (-2isize, 2isize), (-3isize, 1isize),
-            (-3isize, 0isize), (-3isize, -1isize), (-2isize, -2isize), (-1isize, -3isize),
+            (0isize, -3isize),
+            (1isize, -3isize),
+            (2isize, -2isize),
+            (3isize, -1isize),
+            (3isize, 0isize),
+            (3isize, 1isize),
+            (2isize, 2isize),
+            (1isize, 3isize),
+            (0isize, 3isize),
+            (-1isize, 3isize),
+            (-2isize, 2isize),
+            (-3isize, 1isize),
+            (-3isize, 0isize),
+            (-3isize, -1isize),
+            (-2isize, -2isize),
+            (-1isize, -3isize),
         ];
-        
+
         for i in 3isize..(h as isize - 3) {
             for j in 3isize..(w as isize - 3) {
                 let center = image[(i * w as isize + j) as usize] as i32;
@@ -348,7 +373,12 @@ impl FastDetector {
         Some(max_diff as f32)
     }
 
-    fn nonmax_suppression(&self, corners: Vec<KeyPoint>, width: usize, height: usize) -> Vec<KeyPoint> {
+    fn nonmax_suppression(
+        &self,
+        corners: Vec<KeyPoint>,
+        width: usize,
+        height: usize,
+    ) -> Vec<KeyPoint> {
         if corners.is_empty() {
             return corners;
         }
@@ -554,7 +584,7 @@ impl Kernels {
     pub fn gaussian(size: usize, sigma: f32) -> Vec<f32> {
         let mut kernel = Vec::with_capacity(size * size);
         let half = size / 2;
-        
+
         for dy in 0..size {
             for dx in 0..size {
                 let x = dx as f32 - half as f32;
@@ -563,13 +593,13 @@ impl Kernels {
                 kernel.push(val);
             }
         }
-        
+
         // Normalize
         let sum: f32 = kernel.iter().sum();
         for v in &mut kernel {
             *v /= sum;
         }
-        
+
         kernel
     }
 }
@@ -610,7 +640,7 @@ mod tests {
     fn test_gaussian_kernel() {
         let kernel = Kernels::gaussian(5, 1.0);
         assert_eq!(kernel.len(), 25);
-        
+
         // Check sum is approximately 1
         let sum: f32 = kernel.iter().sum();
         assert!((sum - 1.0).abs() < 0.001);
@@ -619,7 +649,7 @@ mod tests {
     #[test]
     fn test_harris_detector() {
         let detector = HarrisDetector::default();
-        
+
         // Create a simple test image with corners
         let mut image = vec![0u8; 100 * 100];
         // Add a corner-like pattern
@@ -628,7 +658,7 @@ mod tests {
                 image[i * 100 + j] = 255;
             }
         }
-        
+
         let corners = detector.detect(&image, 100, 100);
         // Should detect at least some corners
         assert!(corners.len() > 0);
@@ -637,10 +667,10 @@ mod tests {
     #[test]
     fn test_fast_detector() {
         let detector = FastDetector::default();
-        
+
         // Create a simple test image
         let image = vec![128u8; 100 * 100];
-        
+
         let corners = detector.detect(&image, 100, 100);
         // On uniform image, should find no corners
         assert_eq!(corners.len(), 0);
@@ -655,10 +685,22 @@ mod tests {
         let cy = 7isize;
 
         let circle_16 = [
-            (0isize, -3isize), (1isize, -3isize), (2isize, -2isize), (3isize, -1isize),
-            (3isize, 0isize), (3isize, 1isize), (2isize, 2isize), (1isize, 3isize),
-            (0isize, 3isize), (-1isize, 3isize), (-2isize, 2isize), (-3isize, 1isize),
-            (-3isize, 0isize), (-3isize, -1isize), (-2isize, -2isize), (-1isize, -3isize),
+            (0isize, -3isize),
+            (1isize, -3isize),
+            (2isize, -2isize),
+            (3isize, -1isize),
+            (3isize, 0isize),
+            (3isize, 1isize),
+            (2isize, 2isize),
+            (1isize, 3isize),
+            (0isize, 3isize),
+            (-1isize, 3isize),
+            (-2isize, 2isize),
+            (-3isize, 1isize),
+            (-3isize, 0isize),
+            (-3isize, -1isize),
+            (-2isize, -2isize),
+            (-1isize, -3isize),
         ];
 
         // Construct a bright run that wraps around ring end -> start.
@@ -677,7 +719,9 @@ mod tests {
         });
         let corners = detector.detect(&image, width, height);
 
-        assert!(corners.iter().any(|kp| kp.x as i32 == cx as i32 && kp.y as i32 == cy as i32));
+        assert!(corners
+            .iter()
+            .any(|kp| kp.x as i32 == cx as i32 && kp.y as i32 == cy as i32));
     }
 
     #[test]

@@ -84,26 +84,11 @@ pub fn configure_apple_style(ctx: &egui::Context) {
 
     // Font sizes
     style.text_styles = [
-        (
-            egui::TextStyle::Heading,
-            FontId::proportional(20.0),
-        ),
-        (
-            egui::TextStyle::Body,
-            FontId::proportional(13.0),
-        ),
-        (
-            egui::TextStyle::Button,
-            FontId::proportional(13.0),
-        ),
-        (
-            egui::TextStyle::Small,
-            FontId::proportional(11.0),
-        ),
-        (
-            egui::TextStyle::Monospace,
-            FontId::monospace(13.0),
-        ),
+        (egui::TextStyle::Heading, FontId::proportional(20.0)),
+        (egui::TextStyle::Body, FontId::proportional(13.0)),
+        (egui::TextStyle::Button, FontId::proportional(13.0)),
+        (egui::TextStyle::Small, FontId::proportional(11.0)),
+        (egui::TextStyle::Monospace, FontId::monospace(13.0)),
     ]
     .into();
 

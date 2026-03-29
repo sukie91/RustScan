@@ -3,9 +3,9 @@
 //! Uses rendered depth from Gaussian map for camera tracking.
 //! Based on RTG-SLAM and SplaTAM approaches.
 
-use crate::fusion::gaussian::{GaussianMap, GaussianCamera};
-use crate::fusion::renderer::GaussianRenderer;
 use crate::core::SE3;
+use crate::fusion::gaussian::{GaussianCamera, GaussianMap};
+use crate::fusion::renderer::GaussianRenderer;
 use glam::Vec3;
 
 /// Tracking result
@@ -73,8 +73,8 @@ impl GaussianTracker {
             cx,
             cy,
             icp_iterations: 10,
-            depth_threshold: 0.5,  // 50cm
-            max_correspondence_dist: 0.1,  // 10cm
+            depth_threshold: 0.5,         // 50cm
+            max_correspondence_dist: 0.1, // 10cm
         }
     }
 
@@ -87,7 +87,7 @@ impl GaussianTracker {
     }
 
     /// Track camera pose using rendered depth
-    /// 
+    ///
     /// Uses ICP (Iterative Closest Point) between rendered depth and observed depth
     pub fn track(
         &self,
@@ -109,11 +109,7 @@ impl GaussianTracker {
             let rendered_depth = self.renderer.render_depth(map, &camera);
 
             // Compute ICP
-            let (matches, error) = self.compute_icp(
-                &rendered_depth,
-                observed_depth,
-                &camera,
-            );
+            let (matches, error) = self.compute_icp(&rendered_depth, observed_depth, &camera);
 
             if matches.is_empty() {
                 break;
@@ -152,13 +148,7 @@ impl GaussianTracker {
         let rotation = pose.rotation_matrix();
         let translation = pose.translation();
 
-        GaussianCamera::new(
-            self.fx,
-            self.fy,
-            self.cx,
-            self.cy,
-        )
-        .with_pose(rotation, translation)
+        GaussianCamera::new(self.fx, self.fy, self.cx, self.cy).with_pose(rotation, translation)
     }
 
     /// Compute ICP correspondence
@@ -288,9 +278,9 @@ mod tests {
         let tracker = GaussianTracker::new(64, 64);
         let map = GaussianMap::new(100);
         let depth = vec![1.0f32; 64 * 64];
-        
+
         let result = tracker.track(&map, &depth, SE3::identity());
-        
+
         assert!(!result.success);
     }
 
@@ -298,18 +288,17 @@ mod tests {
     fn test_tracking_with_gaussians() {
         let tracker = GaussianTracker::new(64, 64);
         let mut map = GaussianMap::new(100);
-        
+
         // Add a Gaussian at z=1.0
-        let g = crate::fusion::gaussian::Gaussian3D::from_depth_point(
-            0.0, 0.0, 1.0, [255, 128, 64]
-        );
+        let g =
+            crate::fusion::gaussian::Gaussian3D::from_depth_point(0.0, 0.0, 1.0, [255, 128, 64]);
         map.add(g);
-        
+
         // Match depth
         let depth = vec![1.0f32; 64 * 64];
-        
+
         let result = tracker.track(&map, &depth, SE3::identity());
-        
+
         // Should have some matches
         assert!(result.num_matches >= 0);
     }

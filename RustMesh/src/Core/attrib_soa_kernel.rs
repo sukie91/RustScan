@@ -3,8 +3,8 @@
 //! Unified kernel combining SoA layout with dynamic attribute system.
 //! Provides SIMD-friendly storage with flexible property support.
 
-use crate::handles::{VertexHandle, HalfedgeHandle, EdgeHandle, FaceHandle};
-use crate::items::{Halfedge, Edge, Face};
+use crate::handles::{EdgeHandle, FaceHandle, HalfedgeHandle, VertexHandle};
+use crate::items::{Edge, Face, Halfedge};
 use glam::{Vec2, Vec3, Vec4};
 use std::collections::HashMap;
 
@@ -468,7 +468,8 @@ impl AttribSoAKernel {
     /// Get opposite halfedge handle
     #[inline]
     pub fn opposite_halfedge_handle(&self, heh: HalfedgeHandle) -> Option<HalfedgeHandle> {
-        self.halfedge(heh).and_then(|h| h.opposite_halfedge_handle())
+        self.halfedge(heh)
+            .and_then(|h| h.opposite_halfedge_handle())
     }
 
     /// Get edge handle from halfedge
@@ -533,7 +534,9 @@ impl AttribSoAKernel {
     /// Get vertex's halfedge handle
     #[inline]
     pub fn halfedge_handle(&self, vh: VertexHandle) -> Option<HalfedgeHandle> {
-        self.halfedge_handles.get(vh.idx() as usize).and_then(|h| *h)
+        self.halfedge_handles
+            .get(vh.idx() as usize)
+            .and_then(|h| *h)
     }
 
     /// Set vertex's halfedge handle
@@ -584,7 +587,8 @@ impl AttribSoAKernel {
 
     /// Get vertex normal
     pub fn vertex_normal(&self, vh: VertexHandle) -> Option<Vec3> {
-        self.vertex_normals.as_ref()
+        self.vertex_normals
+            .as_ref()
             .and_then(|n| n.get(vh.idx() as usize).copied())
     }
 
@@ -612,7 +616,8 @@ impl AttribSoAKernel {
 
     /// Get vertex color
     pub fn vertex_color(&self, vh: VertexHandle) -> Option<Vec4> {
-        self.vertex_colors.as_ref()
+        self.vertex_colors
+            .as_ref()
             .and_then(|c| c.get(vh.idx() as usize).copied())
     }
 
@@ -640,7 +645,8 @@ impl AttribSoAKernel {
 
     /// Get vertex texcoord
     pub fn vertex_texcoord(&self, vh: VertexHandle) -> Option<Vec2> {
-        self.vertex_texcoords.as_ref()
+        self.vertex_texcoords
+            .as_ref()
             .and_then(|t| t.get(vh.idx() as usize).copied())
     }
 
@@ -672,7 +678,8 @@ impl AttribSoAKernel {
 
     /// Get halfedge normal
     pub fn halfedge_normal(&self, heh: HalfedgeHandle) -> Option<Vec3> {
-        self.halfedge_normals.as_ref()
+        self.halfedge_normals
+            .as_ref()
             .and_then(|n| n.get(heh.idx() as usize).copied())
     }
 
@@ -700,7 +707,8 @@ impl AttribSoAKernel {
 
     /// Get halfedge color
     pub fn halfedge_color(&self, heh: HalfedgeHandle) -> Option<Vec4> {
-        self.halfedge_colors.as_ref()
+        self.halfedge_colors
+            .as_ref()
             .and_then(|c| c.get(heh.idx() as usize).copied())
     }
 
@@ -728,7 +736,8 @@ impl AttribSoAKernel {
 
     /// Get halfedge texcoord
     pub fn halfedge_texcoord(&self, heh: HalfedgeHandle) -> Option<Vec2> {
-        self.halfedge_texcoords.as_ref()
+        self.halfedge_texcoords
+            .as_ref()
             .and_then(|t| t.get(heh.idx() as usize).copied())
     }
 
@@ -760,7 +769,8 @@ impl AttribSoAKernel {
 
     /// Get edge color
     pub fn edge_color(&self, eh: EdgeHandle) -> Option<Vec4> {
-        self.edge_colors.as_ref()
+        self.edge_colors
+            .as_ref()
             .and_then(|c| c.get(eh.idx() as usize).copied())
     }
 
@@ -792,7 +802,8 @@ impl AttribSoAKernel {
 
     /// Get face normal
     pub fn face_normal(&self, fh: FaceHandle) -> Option<Vec3> {
-        self.face_normals.as_ref()
+        self.face_normals
+            .as_ref()
             .and_then(|n| n.get(fh.idx() as usize).copied())
     }
 
@@ -820,7 +831,8 @@ impl AttribSoAKernel {
 
     /// Get face color
     pub fn face_color(&self, fh: FaceHandle) -> Option<Vec4> {
-        self.face_colors.as_ref()
+        self.face_colors
+            .as_ref()
             .and_then(|c| c.get(fh.idx() as usize).copied())
     }
 
@@ -854,22 +866,29 @@ impl AttribSoAKernel {
     }
 
     /// Get dynamic property value (simplified - only works for f32)
-    pub fn get_property<T: PropValue + Copy + TryFrom<f32>>(&self, handle: PropHandle, idx: usize) -> Option<T>
+    pub fn get_property<T: PropValue + Copy + TryFrom<f32>>(
+        &self,
+        handle: PropHandle,
+        idx: usize,
+    ) -> Option<T>
     where
         T: TryFrom<DynamicProperty> + Default,
     {
-        self.dynamic_props.get(&handle.id).and_then(|prop| {
-            match prop {
-                DynamicProperty::Float(v) => {
-                    v.get(idx).and_then(|&val| T::try_from(val).ok())
-                }
+        self.dynamic_props
+            .get(&handle.id)
+            .and_then(|prop| match prop {
+                DynamicProperty::Float(v) => v.get(idx).and_then(|&val| T::try_from(val).ok()),
                 _ => None,
-            }
-        })
+            })
     }
 
     /// Set dynamic property value (simplified - only works for f32)
-    pub fn set_property<T: PropValue + Copy + Into<f32>>(&mut self, handle: PropHandle, idx: usize, value: T) {
+    pub fn set_property<T: PropValue + Copy + Into<f32>>(
+        &mut self,
+        handle: PropHandle,
+        idx: usize,
+        value: T,
+    ) {
         if let Some(prop) = self.dynamic_props.get_mut(&handle.id) {
             match prop {
                 DynamicProperty::Float(v) => {
@@ -982,7 +1001,10 @@ mod tests {
         let vh = kernel.add_vertex(Vec3::new(1.0, 2.0, 3.0));
 
         assert_eq!(kernel.n_vertices(), 1);
-        assert_eq!(kernel.point(vh.idx() as usize), Some(Vec3::new(1.0, 2.0, 3.0)));
+        assert_eq!(
+            kernel.point(vh.idx() as usize),
+            Some(Vec3::new(1.0, 2.0, 3.0))
+        );
     }
 
     #[test]

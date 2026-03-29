@@ -62,11 +62,7 @@ impl Sim3 {
     /// Create identity Sim3
     pub fn identity() -> Self {
         Self {
-            rotation: [
-                [1.0, 0.0, 0.0],
-                [0.0, 1.0, 0.0],
-                [0.0, 0.0, 1.0],
-            ],
+            rotation: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
             translation: [0.0, 0.0, 0.0],
             scale: 1.0,
         }
@@ -136,7 +132,7 @@ impl LoopDetector {
     }
 
     /// Compute BoW similarity between two descriptors
-    /// 
+    ///
     /// This is a simplified BoW implementation using
     /// descriptor clustering for vocabulary
     fn compute_bow_similarity(&self, query: &[u8], train: &[u8]) -> f32 {
@@ -214,12 +210,12 @@ impl LoopDetector {
     }
 
     /// Compute loop candidates for a given frame
-    /// 
+    ///
     /// # Arguments
     /// * `map` - The map containing keyframes
     /// * `current_frame_id` - ID of the current frame
     /// * `descriptors` - Descriptors of the current frame
-    /// 
+    ///
     /// # Returns
     /// Vector of loop candidates sorted by score
     pub fn compute_loop_candidates(
@@ -233,7 +229,7 @@ impl LoopDetector {
         // Get all keyframes from map
         for keyframe in map.keyframes() {
             let kf_id = keyframe.id();
-            
+
             // Skip if too close to current frame
             if current_frame_id.saturating_sub(kf_id) < self.min_distance {
                 continue;
@@ -257,13 +253,17 @@ impl LoopDetector {
         }
 
         // Sort by score descending
-        candidates.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        candidates.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         candidates
     }
 
     /// Check loop consistency using temporal filtering
-    /// 
+    ///
     /// This ensures that loop candidates are consistent over time
     /// to avoid false positives from transient matches
     pub fn compute_loop_consistency(
@@ -284,7 +284,11 @@ impl LoopDetector {
             return filtered;
         }
 
-        filtered.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        filtered.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         // Bootstrap: when no confirmed loops exist yet, keep only the strongest candidate.
         if self.recent_loops.is_empty() {
@@ -330,15 +334,15 @@ impl Default for LoopDetector {
 }
 
 /// Compute similarity transform (Sim3) between two point clouds
-/// 
+///
 /// This implements the method to compute Sim3 from matched 3D points:
 /// - Find rotation, translation, and scale that best aligns two point sets
-/// 
+///
 /// # Arguments
 /// * `rotation` - Initial rotation matrix (3x3)
 /// * `translation` - Initial translation vector
 /// * `scale` - Initial scale
-/// 
+///
 /// # Returns
 /// Option containing the Sim3 transform if computation succeeded
 pub fn compute_similarity_transform(
@@ -348,7 +352,7 @@ pub fn compute_similarity_transform(
 ) -> Option<Sim3> {
     // Simplified implementation: validate and return the input as Sim3
     // A full implementation would use SVD to find optimal transformation
-    
+
     // Validate rotation matrix (should be orthogonal)
     let det = rotation[0][0] * (rotation[1][1] * rotation[2][2] - rotation[1][2] * rotation[2][1])
         - rotation[0][1] * (rotation[1][0] * rotation[2][2] - rotation[1][2] * rotation[2][0])
@@ -372,12 +376,9 @@ pub fn compute_similarity_transform(
 }
 
 /// Compute Sim3 from matched 3D points between two keyframes
-/// 
+///
 /// This is a more complete implementation that takes actual point matches
-pub fn compute_sim3_from_matches(
-    points1: &[[f32; 3]],
-    points2: &[[f32; 3]],
-) -> Option<Sim3> {
+pub fn compute_sim3_from_matches(points1: &[[f32; 3]], points2: &[[f32; 3]]) -> Option<Sim3> {
     if points1.len() != points2.len() || points1.len() < 3 {
         return None;
     }
@@ -385,14 +386,14 @@ pub fn compute_sim3_from_matches(
     // Compute centroids
     let mut centroid1 = [0.0f32; 3];
     let mut centroid2 = [0.0f32; 3];
-    
+
     for i in 0..points1.len() {
         for j in 0..3 {
             centroid1[j] += points1[i][j];
             centroid2[j] += points2[i][j];
         }
     }
-    
+
     let n = points1.len() as f32;
     for j in 0..3 {
         centroid1[j] /= n;
@@ -522,7 +523,7 @@ mod tests {
         // Same points should give identity transform
         let points = vec![[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
         let result = compute_sim3_from_matches(&points, &points);
-        
+
         assert!(result.is_some());
         let sim3 = result.unwrap();
         assert!((sim3.scale - 1.0).abs() < 1e-4);
@@ -533,7 +534,7 @@ mod tests {
         // Translated points
         let points1 = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
         let points2 = vec![[1.0, 1.0, 0.0], [2.0, 1.0, 0.0], [1.0, 2.0, 0.0]];
-        
+
         let result = compute_sim3_from_matches(&points1, &points2);
         assert!(result.is_some());
     }
@@ -542,7 +543,7 @@ mod tests {
     fn test_compute_sim3_from_matches_empty() {
         let points1: Vec<[f32; 3]> = vec![];
         let points2: Vec<[f32; 3]> = vec![];
-        
+
         let result = compute_sim3_from_matches(&points1, &points2);
         assert!(result.is_none());
     }
@@ -551,9 +552,21 @@ mod tests {
     fn test_loop_consistency_bootstrap_keeps_strongest() {
         let detector = LoopDetector::new();
         let candidates = vec![
-            LoopCandidate { keyframe_id: 10, score: 0.9, timestamp: 1.0 },
-            LoopCandidate { keyframe_id: 20, score: 0.7, timestamp: 2.0 },
-            LoopCandidate { keyframe_id: 30, score: 0.6, timestamp: 3.0 },
+            LoopCandidate {
+                keyframe_id: 10,
+                score: 0.9,
+                timestamp: 1.0,
+            },
+            LoopCandidate {
+                keyframe_id: 20,
+                score: 0.7,
+                timestamp: 2.0,
+            },
+            LoopCandidate {
+                keyframe_id: 30,
+                score: 0.6,
+                timestamp: 3.0,
+            },
         ];
 
         let consistent = detector.compute_loop_consistency(&candidates, 100);
@@ -567,8 +580,16 @@ mod tests {
         detector.add_confirmed_loop(25);
 
         let candidates = vec![
-            LoopCandidate { keyframe_id: 24, score: 0.06, timestamp: 1.0 },
-            LoopCandidate { keyframe_id: 80, score: 0.06, timestamp: 2.0 },
+            LoopCandidate {
+                keyframe_id: 24,
+                score: 0.06,
+                timestamp: 1.0,
+            },
+            LoopCandidate {
+                keyframe_id: 80,
+                score: 0.06,
+                timestamp: 2.0,
+            },
         ];
 
         let consistent = detector.compute_loop_consistency(&candidates, 200);
@@ -600,8 +621,16 @@ mod tests {
         detector.add_confirmed_loop(70);
 
         let candidates = vec![
-            LoopCandidate { keyframe_id: 72, score: 0.1, timestamp: 1.0 },
-            LoopCandidate { keyframe_id: 130, score: 0.9, timestamp: 2.0 },
+            LoopCandidate {
+                keyframe_id: 72,
+                score: 0.1,
+                timestamp: 1.0,
+            },
+            LoopCandidate {
+                keyframe_id: 130,
+                score: 0.9,
+                timestamp: 2.0,
+            },
         ];
 
         let consistent = detector.compute_loop_consistency(&candidates, 250);

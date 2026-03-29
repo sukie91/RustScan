@@ -7,8 +7,8 @@
 //! - Kinect Fusion algorithm
 //! - PGSR (Planar-based Gaussian Splatting Reconstruction)
 
+use glam::{Mat4, Vec3};
 use std::collections::HashMap;
-use glam::{Vec3, Mat4};
 
 /// A 3D voxel cell in the TSDF volume
 #[derive(Debug, Clone)]
@@ -53,8 +53,8 @@ pub struct TsdfConfig {
 impl Default for TsdfConfig {
     fn default() -> Self {
         Self {
-            voxel_size: 0.01,       // 1cm voxels
-            sdf_trunc: 0.03,        // 3cm truncation
+            voxel_size: 0.01, // 1cm voxels
+            sdf_trunc: 0.03,  // 3cm truncation
             min_bound: Vec3::new(-1.0, -1.0, -1.0),
             max_bound: Vec3::new(1.0, 1.0, 1.0),
             max_weight: 100.0,
@@ -110,9 +110,13 @@ impl TsdfVolume {
         let y = ((pos.y - self.config.min_bound.y) / self.config.voxel_size).floor() as i32;
         let z = ((pos.z - self.config.min_bound.z) / self.config.voxel_size).floor() as i32;
 
-        if x >= 0 && x < self.volume_dims.0 &&
-           y >= 0 && y < self.volume_dims.1 &&
-           z >= 0 && z < self.volume_dims.2 {
+        if x >= 0
+            && x < self.volume_dims.0
+            && y >= 0
+            && y < self.volume_dims.1
+            && z >= 0
+            && z < self.volume_dims.2
+        {
             Some((x, y, z))
         } else {
             None
@@ -159,12 +163,13 @@ impl TsdfVolume {
         extrinsics: &Mat4,
     ) {
         let depth_fn = |idx: usize| -> f32 { depth.get(idx).copied().unwrap_or(0.0) };
-        let color_fn = color.map(|colors| {
-            move |idx: usize| -> Option<[u8; 3]> { colors.get(idx).copied() }
-        });
+        let color_fn =
+            color.map(|colors| move |idx: usize| -> Option<[u8; 3]> { colors.get(idx).copied() });
         self.integrate_depth_map(
             &depth_fn,
-            color_fn.as_ref().map(|f| f as &dyn Fn(usize) -> Option<[u8; 3]>),
+            color_fn
+                .as_ref()
+                .map(|f| f as &dyn Fn(usize) -> Option<[u8; 3]>),
             width,
             height,
             intrinsics,
@@ -247,13 +252,17 @@ impl TsdfVolume {
                                     let cr = c[0] as f32 / 255.0;
                                     let cg = c[1] as f32 / 255.0;
                                     let cb = c[2] as f32 / 255.0;
-                                    let color_denom = (voxel.color_weight + integration_weight).max(1e-8);
+                                    let color_denom =
+                                        (voxel.color_weight + integration_weight).max(1e-8);
                                     voxel.color = [
-                                        (voxel.color[0] * voxel.color_weight + cr * integration_weight)
+                                        (voxel.color[0] * voxel.color_weight
+                                            + cr * integration_weight)
                                             / color_denom,
-                                        (voxel.color[1] * voxel.color_weight + cg * integration_weight)
+                                        (voxel.color[1] * voxel.color_weight
+                                            + cg * integration_weight)
                                             / color_denom,
-                                        (voxel.color[2] * voxel.color_weight + cb * integration_weight)
+                                        (voxel.color[2] * voxel.color_weight
+                                            + cb * integration_weight)
                                             / color_denom,
                                     ];
                                     voxel.color_weight += integration_weight;

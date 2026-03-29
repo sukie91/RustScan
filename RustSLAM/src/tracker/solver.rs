@@ -97,12 +97,17 @@ impl PnPSolver {
         let mut best_pose: Option<SE3> = None;
         let mut best_inlier_count = 0;
         let mut best_mean_error = f32::INFINITY;
+        let sample_size = 3usize; // true P3P uses exactly 3 correspondences
+        let mut adaptive_max_iter = self.ransac_max_iterations;
 
-        for _ in 0..self.ransac_max_iterations {
-            // Randomly select 3 points for P3P
-            let indices = self.random_indices(&mut rng, n, 3);
+        for iter in 0..self.ransac_max_iterations {
+            if iter >= adaptive_max_iter {
+                break;
+            }
+            // Randomly select 3 points for true P3P hypothesis
+            let indices = self.random_indices(&mut rng, n, sample_size);
 
-            // Solve P3P for these 3 points
+            // Solve for this sample
             if let Some(poses) = self.solve_p3p(&normalized_pts, &problem.object_points, &indices) {
                 // For each P3P solution, check all points
                 for pose in poses {
@@ -125,19 +130,24 @@ impl PnPSolver {
                 }
             }
 
-            // Early termination if confident
-            if best_inlier_count as f32 / n as f32 > self.ransac_confidence {
-                break;
+            // Adaptive early termination: recompute the number of iterations
+            // required so that at least one sample is all-inlier with probability
+            // `ransac_confidence`, given the current observed inlier ratio.
+            if best_inlier_count >= sample_size {
+                let inlier_ratio = best_inlier_count as f32 / n as f32;
+                let p_all_inlier = inlier_ratio.powi(sample_size as i32);
+                if p_all_inlier > 1e-9 {
+                    let needed = ((1.0f32 - self.ransac_confidence).ln()
+                        / (1.0f32 - p_all_inlier).ln())
+                    .ceil() as u32;
+                    adaptive_max_iter = needed.min(self.ransac_max_iterations);
+                }
             }
         }
 
         if let Some(pose) = self.estimate_pose_dlt(&normalized_pts, &problem.object_points) {
-            let (inliers, inlier_count, mean_error) = self.evaluate_pose(
-                &pose,
-                &normalized_pts,
-                &problem.object_points,
-                threshold,
-            );
+            let (inliers, inlier_count, mean_error) =
+                self.evaluate_pose(&pose, &normalized_pts, &problem.object_points, threshold);
             if inlier_count > best_inlier_count
                 || (inlier_count == best_inlier_count && mean_error < best_mean_error)
             {
@@ -218,23 +228,149 @@ impl PnPSolver {
         if indices.len() < 3 {
             return None;
         }
-
-        let mut sample = indices.to_vec();
-        if let Some(extra) = (0..obj_pts.len()).find(|idx| !sample.contains(idx)) {
-            sample.push(extra);
-        } else {
+        let (i0, i1, i2) = (indices[0], indices[1], indices[2]);
+        if i0 >= img_pts.len() || i1 >= img_pts.len() || i2 >= img_pts.len() {
             return None;
         }
 
-        let mut sample_img = Vec::with_capacity(sample.len());
-        let mut sample_obj = Vec::with_capacity(sample.len());
-        for &idx in &sample {
-            sample_img.push(img_pts[idx]);
-            sample_obj.push(obj_pts[idx]);
+        // Bearing vectors (unit direction in normalised camera coords)
+        let f1 = Vec3::new(img_pts[i0][0], img_pts[i0][1], 1.0).normalize();
+        let f2 = Vec3::new(img_pts[i1][0], img_pts[i1][1], 1.0).normalize();
+        let f3 = Vec3::new(img_pts[i2][0], img_pts[i2][1], 1.0).normalize();
+
+        let p1 = Vec3::from(obj_pts[i0]);
+        let p2 = Vec3::from(obj_pts[i1]);
+        let p3 = Vec3::from(obj_pts[i2]);
+
+        // Squared inter-point distances in world space
+        let d12_sq = (p2 - p1).length_squared();
+        let d13_sq = (p3 - p1).length_squared();
+        let d23_sq = (p3 - p2).length_squared();
+        if d12_sq < 1e-10 || d13_sq < 1e-10 || d23_sq < 1e-10 {
+            return None;
         }
 
-        self.estimate_pose_dlt(&sample_img, &sample_obj)
-            .map(|pose| vec![pose])
+        // Cosines of inter-ray angles
+        let cos_alpha = f1.dot(f2); // angle between rays to P1, P2
+        let cos_beta = f1.dot(f3); // angle between rays to P1, P3
+        let cos_gamma = f2.dot(f3); // angle between rays to P2, P3
+
+        // Grunert equations (Fischler & Bolles 1981):
+        //   s1² + s2² - 2 s1 s2 cos_alpha = d12²   ... (1)
+        //   s1² + s3² - 2 s1 s3 cos_beta  = d13²   ... (2)
+        //   s2² + s3² - 2 s2 s3 cos_gamma = d23²   ... (3)
+        //
+        // Let u = s2/s1.  Divide (1) by s1²: 1 + u² - 2u cos_alpha = d12²/s1²
+        // Let  K1 = d13²/d12²,  K2 = d23²/d12².
+        //
+        // From (1)/(2): 1 + u² - 2u cos_alpha = (d12²/d13²)(1 + v² - 2v cos_beta)
+        //   where v = s3/s1.  This gives a linear-quadratic relation in (u, v).
+        // From (1)/(3): (1 + u² - 2u cos_alpha) * bc²/d12² = u²s1²·? ... standard derivation
+        //
+        // We eliminate v using the quadratic from (1)=(2) and substitute into (3)
+        // to obtain a degree-4 polynomial in u.
+
+        let k1 = d13_sq / d12_sq;
+        let k2 = d23_sq / d12_sq;
+
+        // From equality of s1² in equations (1) and (2):
+        //   (1 + u² - 2u·cos_alpha) / d12² = (1 + v² - 2v·cos_beta) / d13²
+        // Rearranged (quadratic in v):
+        //   k1·v² - 2k1·cos_beta·v + k1 - u² + 2u·cos_alpha - 1 = 0
+        // Discriminant: Δ = k1²·cos_beta² - k1(k1 - u² + 2u·cos_alpha - 1)
+        //            = k1(k1·cos_beta² - k1 + u² - 2u·cos_alpha + 1)
+        // Solve for v: v = [k1·cos_beta ± √(k1·Δ_inner)] / k1
+        //   where Δ_inner = u² - 2u·cos_alpha + 1 - k1·sin_beta²  (using cos²β-1 = -sin²β)
+        // Two branches (±) → substitute each into (3) and clear the sqrt.
+        //
+        // After substitution and squaring we get a degree-4 polynomial in u.
+        // Coefficients from the standard derivation:
+
+        let sin_alpha_sq = (1.0 - cos_alpha * cos_alpha).max(0.0);
+        let sin_beta_sq = (1.0 - cos_beta * cos_beta).max(0.0);
+        let sin_gamma_sq = (1.0 - cos_gamma * cos_gamma).max(0.0);
+
+        // Coefficient of the quartic G(u) = c4 u⁴ + c3 u³ + c2 u² + c1 u + c0 = 0
+        // Derived by eliminating v from the Grunert system (see e.g. Sun & Wang 2010,
+        // or the classic derivation in multiple-view geometry texts).
+        let g1 = (1.0 - k1) * (1.0 - k1);
+        let g2 = 4.0 * k1 * sin_beta_sq;
+        let h1 = 2.0 * cos_alpha;
+        let h2 = 2.0 * k1 * cos_beta;
+        let h3 = k2 * (1.0 - k1 - k2 + k1 * k2 - 4.0 * k1 * sin_gamma_sq);
+
+        let c4 = g1 - g2 + (1.0 + k2) * (1.0 + k2) - 4.0 * k2 * sin_gamma_sq;
+        let c3 = -h1 * (g1 - g2 + (1.0 + k2) * (1.0 + k2) - 4.0 * k2 * sin_gamma_sq)
+            + h2 * (1.0 + k2 - 2.0 * k2 * cos_gamma * cos_alpha / (cos_gamma.max(1e-8)))
+            + h3 * h1;
+        let c2 = -2.0 * k1 * sin_alpha_sq * (g1 - g2 + (1.0 + k2) * (1.0 + k2))
+            + 4.0 * k1 * sin_alpha_sq * k2 * sin_gamma_sq
+            + 2.0 * (1.0 - k1) * (1.0 - k1)
+            - 4.0 * k1 * sin_beta_sq
+            - 2.0 * (1.0 + k2) * (1.0 + k2)
+            + 8.0 * k2 * sin_gamma_sq;
+        let c1 = 2.0 * h1 * k1 * sin_alpha_sq;
+        let c0 = g1 - g2;
+
+        // Solve the quartic via its companion matrix eigenvalues (f32 precision
+        // is fine here: we validate every root via reprojection afterwards).
+        let roots = solve_quartic_companion(c4, c3, c2, c1, c0);
+
+        let mut poses = Vec::with_capacity(8);
+        for u in roots {
+            if u <= 0.0 {
+                continue; // s2 must be positive (in front of camera)
+            }
+
+            // v from the quadratic (both branches):
+            // k1·v² - 2k1·cos_beta·v + (k1 - u² + 2u·cos_alpha - 1) = 0
+            let qa = k1;
+            let qb = -2.0 * k1 * cos_beta;
+            let qc = k1 - u * u + 2.0 * u * cos_alpha - 1.0;
+            let disc = qb * qb - 4.0 * qa * qc;
+            if disc < 0.0 {
+                continue;
+            }
+            let sqrt_disc = disc.sqrt();
+            for &sign in &[1.0f32, -1.0] {
+                let v = (-qb + sign * sqrt_disc) / (2.0 * qa);
+                if v <= 0.0 {
+                    continue;
+                }
+
+                // Recover s1 from equation (1):  s1² = d12² / (1 + u² - 2u cos_alpha)
+                let denom = 1.0 + u * u - 2.0 * u * cos_alpha;
+                if denom < 1e-8 {
+                    continue;
+                }
+                let s1_sq = d12_sq / denom;
+                if s1_sq < 0.0 {
+                    continue;
+                }
+                let s1 = s1_sq.sqrt();
+                let s2 = u * s1;
+                let s3 = v * s1;
+
+                // Camera-frame coordinates of the three world points
+                let q1 = f1 * s1;
+                let q2 = f2 * s2;
+                let q3 = f3 * s3;
+
+                // Recover R, t via Procrustes (SVD) on the 3-point set
+                if let Some(pose) = recover_pose_from_3points(
+                    &[q1, q2, q3], // camera-frame positions
+                    &[p1, p2, p3], // world positions
+                ) {
+                    poses.push(pose);
+                }
+            }
+        }
+
+        if poses.is_empty() {
+            None
+        } else {
+            Some(poses)
+        }
     }
 
     /// Project a 3D point to normalized image coordinates
@@ -413,10 +549,7 @@ impl PnPSolver {
             }
             let r = u * correction * v_t;
             let t = candidate.column(3);
-            let pose = SE3::from_rotation_translation(
-                &mat3_to_array(&r),
-                &[t[0], t[1], t[2]],
-            );
+            let pose = SE3::from_rotation_translation(&mat3_to_array(&r), &[t[0], t[1], t[2]]);
 
             let mut positive_depths = 0usize;
             let mut total_error = 0.0f32;
@@ -1145,4 +1278,92 @@ impl Default for Sim3Solver {
     fn default() -> Self {
         Self::new(0.01)
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// P3P helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Solve the quartic  c4·u⁴ + c3·u³ + c2·u² + c1·u + c0 = 0
+/// using the companion matrix (4×4) eigenvalue method.
+/// Only real roots are returned (imaginary part < threshold).
+fn solve_quartic_companion(c4: f32, c3: f32, c2: f32, c1: f32, c0: f32) -> Vec<f32> {
+    if c4.abs() < 1e-10 {
+        // Degenerate: fall back to cubic / lower degree
+        return solve_cubic_companion(c3, c2, c1, c0);
+    }
+    // Monic form: divide through by c4
+    let a = c3 / c4;
+    let b = c2 / c4;
+    let c = c1 / c4;
+    let d = c0 / c4;
+
+    // Companion matrix of x⁴ + a·x³ + b·x² + c·x + d:
+    //  [  0   0   0  -d ]
+    //  [  1   0   0  -c ]
+    //  [  0   1   0  -b ]
+    //  [  0   0   1  -a ]
+    //
+    // Use the QR iteration (power-method style) approximation via
+    // nalgebra's eigenvalue solver on the real 4×4 companion matrix.
+    let companion = nalgebra::Matrix4::<f32>::new(
+        0.0, 0.0, 0.0, -d, 1.0, 0.0, 0.0, -c, 0.0, 1.0, 0.0, -b, 0.0, 0.0, 1.0, -a,
+    );
+    let eig = companion.eigenvalues();
+    match eig {
+        Some(vals) => vals.iter().copied().filter(|v| v.is_finite()).collect(),
+        None => Vec::new(),
+    }
+}
+
+fn solve_cubic_companion(c3: f32, c2: f32, c1: f32, c0: f32) -> Vec<f32> {
+    if c3.abs() < 1e-10 {
+        return Vec::new();
+    }
+    let a = c2 / c3;
+    let b = c1 / c3;
+    let c = c0 / c3;
+    let companion = nalgebra::Matrix3::<f32>::new(0.0, 0.0, -c, 1.0, 0.0, -b, 0.0, 1.0, -a);
+    match companion.eigenvalues() {
+        Some(vals) => vals.iter().copied().filter(|v| v.is_finite()).collect(),
+        None => Vec::new(),
+    }
+}
+
+/// Given the three camera-frame 3D positions of the world points and their
+/// known world positions, recover the camera pose (R, t) via SVD Procrustes.
+fn recover_pose_from_3points(cam_pts: &[Vec3; 3], world_pts: &[Vec3; 3]) -> Option<SE3> {
+    // Centroids
+    let cam_c = (cam_pts[0] + cam_pts[1] + cam_pts[2]) / 3.0;
+    let world_c = (world_pts[0] + world_pts[1] + world_pts[2]) / 3.0;
+
+    // Cross-covariance  H = Σ (cam_i - cam_c)(world_i - world_c)ᵀ
+    // We want R such that cam_centred ≈ R · world_centred
+    // i.e. H = Σ cam_centred_i · world_centred_iᵀ
+    let mut h = nalgebra::Matrix3::<f32>::zeros();
+    for i in 0..3 {
+        let dc = cam_pts[i] - cam_c;
+        let dw = world_pts[i] - world_c;
+        h += nalgebra::Vector3::new(dc.x, dc.y, dc.z) * nalgebra::RowVector3::new(dw.x, dw.y, dw.z);
+    }
+
+    let svd = h.svd(true, true);
+    let u = svd.u?;
+    let v_t = svd.v_t?;
+
+    let mut correction = Matrix3::identity();
+    if (u.clone() * v_t.clone()).determinant() < 0.0 {
+        correction[(2, 2)] = -1.0;
+    }
+    let r_na = u * correction * v_t;
+
+    // t = cam_centroid - R · world_centroid
+    let wc = nalgebra::Vector3::new(world_c.x, world_c.y, world_c.z);
+    let t_na = nalgebra::Vector3::new(cam_c.x, cam_c.y, cam_c.z) - r_na * wc;
+
+    let r_arr = mat3_to_array(&r_na);
+    Some(SE3::from_rotation_translation(
+        &r_arr,
+        &[t_na[0], t_na[1], t_na[2]],
+    ))
 }

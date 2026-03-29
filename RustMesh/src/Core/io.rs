@@ -7,15 +7,15 @@
 //! - OFF (Object File Format)
 
 pub mod obj;
+pub mod off;
 pub mod ply;
 pub mod stl;
-pub mod off;
 
 // Re-export for convenience
 pub use obj::{read_obj, write_obj};
+pub use off::{read_off, write_off};
 pub use ply::{read_ply, write_ply, PlyFormat};
 pub use stl::{read_stl, write_stl, StlFormat};
-pub use off::{read_off, write_off};
 
 use std::path::Path;
 

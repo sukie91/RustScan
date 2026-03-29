@@ -7,10 +7,10 @@
 //! - Fix face winding order
 //! - Merge close vertices
 
-use std::collections::HashMap;
 use crate::connectivity::RustMesh;
-use crate::handles::{VertexHandle, FaceHandle};
 use crate::geometry::{triangle_area, triangle_normal};
+use crate::handles::{FaceHandle, VertexHandle};
+use std::collections::HashMap;
 
 /// Error type for mesh repair operations
 #[derive(Debug, Clone)]
@@ -52,13 +52,13 @@ pub fn remove_duplicates(mesh: &mut RustMesh) -> Result<usize, MeshRepairError> 
     // Map from quantized position to first vertex handle at that position
     // Using i64 to store quantized coordinates (f32 * 1000000 as i64 to avoid Eq issue)
     let mut position_map: HashMap<(i64, i64, i64), VertexHandle> = HashMap::new();
-    
+
     // First pass: collect all duplicate pairs (vertex to merge -> target vertex)
     let mut duplicates: Vec<(VertexHandle, VertexHandle)> = Vec::new();
-    
+
     // Collect vertex data first
     let vertices: Vec<_> = mesh.vertices().collect();
-    
+
     for vh in vertices {
         if let Some(point) = mesh.point(vh) {
             // Quantize to avoid floating point equality issues
@@ -67,7 +67,7 @@ pub fn remove_duplicates(mesh: &mut RustMesh) -> Result<usize, MeshRepairError> 
                 (point.y * 1_000_000.0) as i64,
                 (point.z * 1_000_000.0) as i64,
             );
-            
+
             if let Some(first_vh) = position_map.get(&key) {
                 // This is a duplicate - record for later processing
                 duplicates.push((vh, *first_vh));
@@ -77,9 +77,9 @@ pub fn remove_duplicates(mesh: &mut RustMesh) -> Result<usize, MeshRepairError> 
             }
         }
     }
-    
+
     let merged_count = duplicates.len();
-    
+
     // Second pass: process duplicates (now we can mutably borrow mesh)
     // Keep a reference for later use
     let duplicates_ref = &duplicates;
@@ -128,19 +128,19 @@ fn compact_vertices(mesh: &mut RustMesh, keep_vertex: &[bool]) -> Result<(), Mes
     // Build remapping: old index -> new index
     let mut remap: Vec<Option<usize>> = vec![None; keep_vertex.len()];
     let mut new_count = 0;
-    
+
     for (i, &keep) in keep_vertex.iter().enumerate() {
         if keep {
             remap[i] = Some(new_count);
             new_count += 1;
         }
     }
-    
+
     // For now, we just clear and rebuild the mesh
     // A more efficient approach would be to update in-place
     let old_n_vertices = mesh.n_vertices();
     let old_n_faces = mesh.n_faces();
-    
+
     // IMPORTANT: Save face data BEFORE clearing mesh
     let mut old_face_data: Vec<Vec<VertexHandle>> = Vec::new();
     for i in 0..old_n_faces {
@@ -151,7 +151,7 @@ fn compact_vertices(mesh: &mut RustMesh, keep_vertex: &[bool]) -> Result<(), Mes
             old_face_data.push(valid_verts);
         }
     }
-    
+
     // Store old geometry
     let mut old_points: Vec<(VertexHandle, glam::Vec3)> = Vec::new();
     for i in 0..old_n_vertices {
@@ -162,17 +162,17 @@ fn compact_vertices(mesh: &mut RustMesh, keep_vertex: &[bool]) -> Result<(), Mes
             }
         }
     }
-    
+
     // Clear mesh
     mesh.clear();
-    
+
     // Rebuild with unique vertices
     let mut new_vh_map: HashMap<usize, VertexHandle> = HashMap::new();
     for (old_vh, point) in old_points {
         let new_vh = mesh.add_vertex(point);
         new_vh_map.insert(old_vh.idx_usize(), new_vh);
     }
-    
+
     // Rebuild faces using SAVED data (not from mesh after clear)
     for face_verts in old_face_data {
         let mut new_face_verts: Vec<VertexHandle> = Vec::new();
@@ -198,7 +198,7 @@ fn compact_vertices(mesh: &mut RustMesh, keep_vertex: &[bool]) -> Result<(), Mes
             }
         }
     }
-    
+
     Ok(())
 }
 
@@ -241,7 +241,7 @@ fn is_face_degenerate(mesh: &RustMesh, verts: &[VertexHandle]) -> bool {
     if verts.len() < 3 {
         return true;
     }
-    
+
     // For triangles, check using cross product
     if verts.len() == 3 {
         let p0 = match mesh.point(verts[0]) {
@@ -256,20 +256,20 @@ fn is_face_degenerate(mesh: &RustMesh, verts: &[VertexHandle]) -> bool {
             Some(p) => p,
             None => return true,
         };
-        
+
         // Check if area is close to zero
         let area = triangle_area(p0, p1, p2);
         return area < 1e-10;
     }
-    
+
     // For polygons, compute area using triangulation from centroid
     // A face is degenerate if all vertices are collinear or within tolerance
     let mut total_area = 0.0f32;
     let centroid = compute_polygon_centroid(mesh, verts);
-    
+
     for i in 0..verts.len() {
         let j = (i + 1) % verts.len();
-        
+
         let pi = match mesh.point(verts[i]) {
             Some(p) => p,
             None => return true,
@@ -278,12 +278,12 @@ fn is_face_degenerate(mesh: &RustMesh, verts: &[VertexHandle]) -> bool {
             Some(p) => p,
             None => return true,
         };
-        
+
         // Triangle from centroid
         let tri_area = triangle_area(centroid, pi, pj);
         total_area += tri_area;
     }
-    
+
     total_area < 1e-10
 }
 
@@ -292,17 +292,17 @@ fn compute_polygon_centroid(mesh: &RustMesh, verts: &[VertexHandle]) -> glam::Ve
     if verts.is_empty() {
         return glam::Vec3::ZERO;
     }
-    
+
     let mut sum = glam::Vec3::ZERO;
     let mut count = 0;
-    
+
     for vh in verts {
         if let Some(p) = mesh.point(*vh) {
             sum += p;
             count += 1;
         }
     }
-    
+
     if count > 0 {
         sum / count as f32
     } else {
@@ -339,7 +339,7 @@ pub fn fix_winding_order(mesh: &mut RustMesh) -> Result<usize, MeshRepairError> 
 
     // Collect faces first to avoid borrow issues
     let faces: Vec<_> = mesh.faces().collect();
-    
+
     // Check each face against reference
     for fh in faces {
         if let Some(current_normal) = compute_face_normal(mesh, fh) {
@@ -379,15 +379,15 @@ fn flip_face_winding(mesh: &mut RustMesh, fh: FaceHandle) -> Result<(), MeshRepa
 
     // Reverse the vertex order (but keep first vertex to maintain manifold)
     face_verts.reverse();
-    
+
     // Remove old face and add new one
     // Note: In a full implementation, we'd modify in-place
     delete_face(mesh, fh);
-    
+
     if face_verts.len() >= 3 {
         mesh.add_face(&face_verts);
     }
-    
+
     Ok(())
 }
 
@@ -410,36 +410,36 @@ pub fn merge_close_vertices(mesh: &mut RustMesh, threshold: f32) -> Result<usize
     let threshold_sq = threshold * threshold;
     let mut merged_count = 0;
     let n_vertices = mesh.n_vertices();
-    
+
     // Track which vertices are still valid
     let mut is_active: Vec<bool> = vec![true; n_vertices];
-    
+
     // For each vertex, find and merge close neighbors
     for i in 0..n_vertices {
         if !is_active[i] {
             continue;
         }
-        
+
         let vh_i = VertexHandle::new(i as u32);
         let p_i = match mesh.point(vh_i) {
             Some(p) => p,
             None => continue,
         };
-        
+
         // Find all vertices close to this one
         for j in (i + 1)..n_vertices {
             if !is_active[j] {
                 continue;
             }
-            
+
             let vh_j = VertexHandle::new(j as u32);
             let p_j = match mesh.point(vh_j) {
                 Some(p) => p,
                 None => continue,
             };
-            
+
             let dist_sq = (p_i - p_j).length_squared();
-            
+
             if dist_sq < threshold_sq {
                 // Merge j into i
                 remap_vertex_in_faces(mesh, vh_j, vh_i);
@@ -448,12 +448,12 @@ pub fn merge_close_vertices(mesh: &mut RustMesh, threshold: f32) -> Result<usize
             }
         }
     }
-    
+
     // Compact if we merged anything
     if merged_count > 0 {
         compact_vertices(mesh, &is_active)?;
     }
-    
+
     Ok(merged_count)
 }
 
@@ -470,21 +470,24 @@ pub fn merge_close_vertices(mesh: &mut RustMesh, threshold: f32) -> Result<usize
 /// # Arguments
 /// * `mesh` - The mesh to repair
 /// * `merge_threshold` - Distance threshold for merging vertices
-pub fn repair_mesh(mesh: &mut RustMesh, merge_threshold: f32) -> Result<RepairStats, MeshRepairError> {
+pub fn repair_mesh(
+    mesh: &mut RustMesh,
+    merge_threshold: f32,
+) -> Result<RepairStats, MeshRepairError> {
     let mut stats = RepairStats::default();
-    
+
     // Step 1: Merge close vertices
     stats.vertices_merged = merge_close_vertices(mesh, merge_threshold)?;
-    
+
     // Step 2: Remove duplicate vertices (exact positions)
     stats.duplicates_removed = remove_duplicates(mesh)?;
-    
+
     // Step 3: Remove degenerate faces
     stats.degenerate_faces_removed = remove_degenerate_faces(mesh)?;
-    
+
     // Step 4: Fix winding order
     stats.faces_flipped = fix_winding_order(mesh)?;
-    
+
     Ok(stats)
 }
 
@@ -525,17 +528,17 @@ mod tests {
 
     fn create_test_mesh() -> RustMesh {
         let mut mesh = RustMesh::new();
-        
+
         // Create a simple quad
         let v0 = mesh.add_vertex(Vec3::new(0.0, 0.0, 0.0));
         let v1 = mesh.add_vertex(Vec3::new(1.0, 0.0, 0.0));
         let v2 = mesh.add_vertex(Vec3::new(1.0, 1.0, 0.0));
         let v3 = mesh.add_vertex(Vec3::new(0.0, 1.0, 0.0));
-        
+
         // Add two triangles to form a quad
         mesh.add_face(&[v0, v1, v2]);
         mesh.add_face(&[v0, v2, v3]);
-        
+
         mesh
     }
 
@@ -543,33 +546,37 @@ mod tests {
     fn test_remove_degenerate_faces() {
         let mut mesh = create_test_mesh();
         let initial_faces = mesh.n_faces();
-        
+
         // Add a degenerate triangle (all same point)
         let v0 = mesh.add_vertex(Vec3::new(0.0, 0.0, 0.0));
         let v1 = mesh.add_vertex(Vec3::new(0.0, 0.0, 0.0)); // duplicate
         let v2 = mesh.add_vertex(Vec3::new(0.0, 0.0, 0.0)); // duplicate
         mesh.add_face(&[v0, v1, v2]);
-        
+
         // Add another degenerate (collinear)
         let v3 = mesh.add_vertex(Vec3::new(2.0, 0.0, 0.0));
         let v4 = mesh.add_vertex(Vec3::new(3.0, 0.0, 0.0));
         let v5 = mesh.add_vertex(Vec3::new(4.0, 0.0, 0.0));
         mesh.add_face(&[v3, v4, v5]);
-        
+
         let removed = remove_degenerate_faces(&mut mesh).unwrap();
-        assert!(removed >= 2, "Should remove at least 2 degenerate faces, got {}", removed);
+        assert!(
+            removed >= 2,
+            "Should remove at least 2 degenerate faces, got {}",
+            removed
+        );
     }
 
     #[test]
     fn test_fix_winding_order() {
         let mut mesh = create_test_mesh();
-        
+
         // Add a face with reversed winding
         let v0 = mesh.add_vertex(Vec3::new(2.0, 0.0, 0.0));
         let v1 = mesh.add_vertex(Vec3::new(3.0, 0.0, 0.0));
         let v2 = mesh.add_vertex(Vec3::new(2.5, 1.0, 0.0));
         mesh.add_face(&[v0, v1, v2]); // This should have opposite normal
-        
+
         let flipped = fix_winding_order(&mut mesh).unwrap();
         // At least one face should be flipped
         assert!(flipped >= 0);
@@ -579,13 +586,13 @@ mod tests {
     fn test_merge_close_vertices() {
         let mut mesh = create_test_mesh();
         let initial_verts = mesh.n_vertices();
-        
+
         // Add vertices very close together
         let v0 = mesh.add_vertex(Vec3::new(0.001, 0.0, 0.0)); // very close to (0,0,0)
         let v1 = mesh.add_vertex(Vec3::new(0.0001, 0.0, 0.0)); // even closer
         mesh.add_face(&[VertexHandle::new(0), v0, VertexHandle::new(2)]);
         mesh.add_face(&[VertexHandle::new(0), VertexHandle::new(1), v0]);
-        
+
         let merged = merge_close_vertices(&mut mesh, 0.01).unwrap();
         assert!(merged >= 0, "Should merge some close vertices");
     }
@@ -612,7 +619,7 @@ mod tests {
             degenerate_faces_removed: 2,
             faces_flipped: 1,
         };
-        
+
         let display = format!("{}", stats);
         assert!(display.contains("vertices_merged: 5"));
         assert!(display.contains("duplicates_removed: 3"));
@@ -621,7 +628,7 @@ mod tests {
     #[test]
     fn test_empty_mesh() {
         let mut mesh = RustMesh::new();
-        
+
         assert_eq!(remove_duplicates(&mut mesh).unwrap(), 0);
         assert_eq!(remove_degenerate_faces(&mut mesh).unwrap(), 0);
         assert_eq!(fix_winding_order(&mut mesh).unwrap(), 0);

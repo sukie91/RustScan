@@ -2,19 +2,18 @@
 //!
 //! Provides loop detection using Bag of Words vocabulary.
 
-pub mod vocabulary;
-pub mod detector;
-pub mod database;
-pub mod relocalization;
-pub mod optimized_detector;
 pub mod closing;
+pub mod database;
+pub mod detector;
+pub mod optimized_detector;
+pub mod relocalization;
+pub mod vocabulary;
 
-pub use vocabulary::{Vocabulary, Word, hamming_distance, kmeans};
-pub use detector::{LoopDetector, LoopCandidate, LoopDetectionResult};
-pub use database::{KeyFrameDatabase, KeyFrameEntry};
-pub use relocalization::{Relocalizer, RelocalizationResult};
-pub use optimized_detector::{
-    InvertedIndex, GeometricVerifier, DescriptorDistance,
-    OptimizedLoopDetectorConfig,
-};
 pub use closing::LoopClosing;
+pub use database::{KeyFrameDatabase, KeyFrameEntry};
+pub use detector::{LoopCandidate, LoopDetectionResult, LoopDetector};
+pub use optimized_detector::{
+    DescriptorDistance, GeometricVerifier, InvertedIndex, OptimizedLoopDetectorConfig,
+};
+pub use relocalization::{RelocalizationResult, Relocalizer};
+pub use vocabulary::{hamming_distance, kmeans, Vocabulary, Word};

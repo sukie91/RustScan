@@ -1,5 +1,5 @@
 //! Bundle Adjustment module
-//! 
+//!
 //! Provides BA functionality for optimizing camera poses and 3D points.
 //! Implements Bundle Adjustment using Gauss-Newton algorithm.
 
@@ -38,11 +38,19 @@ impl BACamera {
     }
 
     /// Get focal length
-    pub fn fx(&self) -> f64 { self.intrinsics[0] }
-    pub fn fy(&self) -> f64 { self.intrinsics[1] }
+    pub fn fx(&self) -> f64 {
+        self.intrinsics[0]
+    }
+    pub fn fy(&self) -> f64 {
+        self.intrinsics[1]
+    }
     /// Get principal point
-    pub fn cx(&self) -> f64 { self.intrinsics[2] }
-    pub fn cy(&self) -> f64 { self.intrinsics[3] }
+    pub fn cx(&self) -> f64 {
+        self.intrinsics[2]
+    }
+    pub fn cy(&self) -> f64 {
+        self.intrinsics[3]
+    }
 }
 
 impl std::fmt::Debug for BACamera {
@@ -95,7 +103,7 @@ impl BAObservation {
 }
 
 /// Bundle Adjustment problem builder
-/// 
+///
 /// This struct holds the BA problem data and provides methods to build
 /// and solve the optimization problem using Gauss-Newton algorithm.
 pub struct BundleAdjuster {
@@ -176,11 +184,11 @@ impl BundleAdjuster {
     fn project(&self, cam_idx: usize, lm_idx: usize) -> Option<[f64; 2]> {
         let camera = &self.cameras[cam_idx];
         let landmark = &self.landmarks[lm_idx];
-        
+
         let pose = camera.pose;
         let R = pose.rotation_matrix();
         let t = pose.translation();
-        
+
         // Transform point to camera frame
         let px = landmark.position[0] as f32;
         let py = landmark.position[1] as f32;
@@ -188,31 +196,32 @@ impl BundleAdjuster {
         let tx = t[0] as f32;
         let ty = t[1] as f32;
         let tz = t[2] as f32;
-        
+
         // p_cam = R^T * (p_world - t)
         let x = R[0][0] * (px - tx) + R[1][0] * (py - ty) + R[2][0] * (pz - tz);
         let y = R[0][1] * (px - tx) + R[1][1] * (py - ty) + R[2][1] * (pz - tz);
         let z = R[0][2] * (px - tx) + R[1][2] * (py - ty) + R[2][2] * (pz - tz);
-        
+
         if z <= 1e-10 {
             return None;
         }
-        
+
         // Project to image plane
         let fx = camera.fx() as f32;
         let fy = camera.fy() as f32;
         let cx = camera.cx() as f32;
         let cy = camera.cy() as f32;
-        
+
         let u = fx * x / z + cx;
         let v = fy * y / z + cy;
-        
+
         Some([u as f64, v as f64])
     }
 
     /// Compute all reprojection errors
     fn compute_errors(&self) -> Vec<f64> {
-        self.observations.iter()
+        self.observations
+            .iter()
             .filter_map(|(cam_idx, lm_idx, obs)| {
                 self.project(*cam_idx, *lm_idx).map(|proj| {
                     let dx = proj[0] - obs.uv[0];
@@ -234,7 +243,10 @@ impl BundleAdjuster {
     }
 
     /// Build and run BA optimization using Gauss-Newton
-    pub fn optimize(&mut self, max_iterations: usize) -> Result<(Vec<BACamera>, Vec<BALandmark>), String> {
+    pub fn optimize(
+        &mut self,
+        max_iterations: usize,
+    ) -> Result<(Vec<BACamera>, Vec<BALandmark>), String> {
         if self.cameras.is_empty() {
             return Err("No cameras in BA problem".to_string());
         }
@@ -249,7 +261,7 @@ impl BundleAdjuster {
         let initial_errors = self.compute_errors();
         let initial_cost: f64 = initial_errors.iter().sum();
         self.initial_cost = Some(initial_cost);
-        
+
         if self.verbose {
             println!("Initial cost: {:.6}", initial_cost);
         }
@@ -262,15 +274,15 @@ impl BundleAdjuster {
 
         for iter in 0..max_iterations {
             self.iterations = iter + 1;
-            
+
             // Compute errors
             let errors = self.compute_errors();
             let total_cost: f64 = errors.iter().sum();
-            
+
             if self.verbose {
                 println!("Iteration {}: cost = {:.6}", iter + 1, total_cost);
             }
-            
+
             // Check convergence
             if iter > 0 && (total_cost - prev_cost).abs() < 1e-6 {
                 if self.verbose {
@@ -279,7 +291,7 @@ impl BundleAdjuster {
                 break;
             }
             prev_cost = total_cost;
-            
+
             let num_obs = self.num_observations().max(1) as f64;
             let pose_lr = 1e-3f64 / num_obs;
             let point_lr = 1e-3f64 / num_obs;
@@ -293,10 +305,12 @@ impl BundleAdjuster {
                 let base_pose = self.cameras[cam_idx].pose;
                 let mut grad = [0.0f64; 6];
                 for axis in 0..6 {
-                    self.cameras[cam_idx].pose = Self::perturb_pose(&base_pose, axis, eps_pose as f32);
+                    self.cameras[cam_idx].pose =
+                        Self::perturb_pose(&base_pose, axis, eps_pose as f32);
                     let plus = self.total_cost();
 
-                    self.cameras[cam_idx].pose = Self::perturb_pose(&base_pose, axis, -(eps_pose as f32));
+                    self.cameras[cam_idx].pose =
+                        Self::perturb_pose(&base_pose, axis, -(eps_pose as f32));
                     let minus = self.total_cost();
 
                     grad[axis] = (plus - minus) / (2.0 * eps_pose);
@@ -339,12 +353,11 @@ impl BundleAdjuster {
         let final_errors = self.compute_errors();
         let final_cost: f64 = final_errors.iter().sum();
         self.final_cost = Some(final_cost);
-        
+
         if self.verbose {
             if let Some(init) = self.initial_cost {
                 if init > 0.0 {
-                    println!("Cost reduction: {:.2}%", 
-                        (1.0 - final_cost / init) * 100.0);
+                    println!("Cost reduction: {:.2}%", (1.0 - final_cost / init) * 100.0);
                 }
             }
         }
@@ -498,9 +511,14 @@ mod tests {
         let t0 = initial_pose.translation();
         let t1 = cams[0].pose.translation();
 
-        assert!(final_cost < initial_cost, "BA should reduce reprojection cost");
         assert!(
-            (t1[0] - t0[0]).abs() > 1e-5 || (t1[1] - t0[1]).abs() > 1e-5 || (t1[2] - t0[2]).abs() > 1e-5,
+            final_cost < initial_cost,
+            "BA should reduce reprojection cost"
+        );
+        assert!(
+            (t1[0] - t0[0]).abs() > 1e-5
+                || (t1[1] - t0[1]).abs() > 1e-5
+                || (t1[2] - t0[2]).abs() > 1e-5,
             "Camera pose should be updated during optimization"
         );
     }

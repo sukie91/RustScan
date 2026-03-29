@@ -8,8 +8,8 @@
 //!        ↑                              ↓
 //!        ←←←←← Loop Closure ←←←←←←←←
 
-use crate::fusion::tiled_renderer::{Gaussian, TiledRenderer, RenderBuffer, densify, prune};
 use crate::core::SE3;
+use crate::fusion::tiled_renderer::{densify, prune, Gaussian, RenderBuffer, TiledRenderer};
 
 /// Configuration for Sparse-Dense SLAM
 #[derive(Debug, Clone)]
@@ -38,8 +38,8 @@ impl Default for SlamConfig {
             max_gaussians: 100_000,
             densify_threshold: 0.0002,
             prune_threshold: 0.005,
-            kf_dist_threshold: 0.5,  // meters
-            kf_angle_threshold: 10.0,  // degrees
+            kf_dist_threshold: 0.5,   // meters
+            kf_angle_threshold: 10.0, // degrees
         }
     }
 }
@@ -105,16 +105,18 @@ impl KeyFrame {
         // Check translation distance
         let t1 = self.pose.translation();
         let t2 = current_pose.translation();
-        let dist = ((t1[0] - t2[0]).powi(2) + 
-                   (t1[1] - t2[1]).powi(2) + 
-                   (t1[2] - t2[2]).powi(2)).sqrt();
+        let dist =
+            ((t1[0] - t2[0]).powi(2) + (t1[1] - t2[1]).powi(2) + (t1[2] - t2[2]).powi(2)).sqrt();
 
         // Check rotation angle
         let r1 = self.pose.rotation_matrix();
         let r2 = current_pose.rotation_matrix();
-        
+
         // Simplified angle check
-        let angle = ((r1[0][0] * r2[0][0] + r1[0][1] * r2[0][1] + r1[0][2] * r2[0][2]).acos() * 180.0 / std::f32::consts::PI).abs();
+        let angle = ((r1[0][0] * r2[0][0] + r1[0][1] * r2[0][1] + r1[0][2] * r2[0][2]).acos()
+            * 180.0
+            / std::f32::consts::PI)
+            .abs();
 
         dist > 0.5 || angle > 10.0
     }
@@ -193,7 +195,7 @@ impl SparseDenseSlam {
     }
 
     /// Process a new frame with sparse tracking result
-    /// 
+    ///
     /// This is called after sparse tracking gives us a pose estimate
     pub fn process_frame(
         &mut self,
@@ -206,7 +208,7 @@ impl SparseDenseSlam {
 
         // Create keyframe if needed
         let mut is_keyframe = false;
-        
+
         if self.keyframes.is_empty() {
             // First frame - always create keyframe
             is_keyframe = true;
@@ -241,7 +243,7 @@ impl SparseDenseSlam {
 
         // Periodic densification
         if self.frame_id % 100 == 0 && !self.gaussians.is_empty() {
-            // Compute gradients (simplified - would come from autodiff)
+            // Use a placeholder gradient buffer for heuristic densification.
             let grads = vec![0.0f32; self.gaussians.len()];
             densify(&mut self.gaussians, &grads, self.config.densify_threshold);
         }
@@ -268,12 +270,7 @@ impl SparseDenseSlam {
     }
 
     /// Update dense 3DGS map from RGB-D frame
-    fn update_dense_map(
-        &mut self,
-        color: &[u8],
-        depth: &[f32],
-        pose: SE3,
-    ) {
+    fn update_dense_map(&mut self, color: &[u8], depth: &[f32], pose: SE3) {
         let width = self.renderer.width;
         let height = self.renderer.height;
 
@@ -282,7 +279,7 @@ impl SparseDenseSlam {
         let trans = pose.translation();
 
         // Sample points from depth
-        let step = 2;  // Sample every other pixel
+        let step = 2; // Sample every other pixel
         let mut new_gaussians = Vec::new();
 
         for y in (0..height).step_by(step) {
@@ -306,11 +303,7 @@ impl SparseDenseSlam {
 
                 // Get color
                 let c_idx = idx * 3;
-                let pixel_color = [
-                    color[c_idx],
-                    color[c_idx + 1],
-                    color[c_idx + 2],
-                ];
+                let pixel_color = [color[c_idx], color[c_idx + 1], color[c_idx + 2]];
 
                 // Create Gaussian
                 let gaussian = Gaussian::from_depth_point(wx, wy, wz, pixel_color);
@@ -364,17 +357,17 @@ pub struct SlamOutput {
 }
 
 /// Integration with existing RustSLAM sparse tracking
-/// 
+///
 /// Usage:
 /// ```ignore
 /// // In your main loop:
-/// 
+///
 /// // 1. Get sparse tracking result (from existing RustSLAM)
 /// let tracked_pose = sparse_tracker.track(frame);
-/// 
+///
 /// // 2. Feed to dense SLAM
 /// let output = dense_slam.process_frame(color, depth, tracked_pose);
-/// 
+///
 /// // 3. Get rendered view (optional)
 /// let rendered = dense_slam.render();
 /// ```
@@ -396,12 +389,7 @@ impl SlamIntegrator {
     }
 
     /// Process frame from sparse tracking
-    pub fn process(
-        &mut self,
-        color: Vec<u8>,
-        depth: Vec<f32>,
-        sparse_pose: SE3,
-    ) -> SlamOutput {
+    pub fn process(&mut self, color: Vec<u8>, depth: Vec<f32>, sparse_pose: SE3) -> SlamOutput {
         self.sparse_dense.process_frame(color, depth, sparse_pose)
     }
 
@@ -441,7 +429,10 @@ mod tests {
             vec![],
             640,
             480,
-            500.0, 500.0, 320.0, 240.0,
+            500.0,
+            500.0,
+            320.0,
+            240.0,
         );
 
         // Far pose should trigger new keyframe
@@ -456,13 +447,13 @@ mod tests {
     #[test]
     fn test_slam_integrator() {
         let mut integrator = SlamIntegrator::new(64, 64);
-        
+
         let color = vec![128u8; 64 * 64 * 3];
         let depth = vec![1.0f32; 64 * 64];
-        
+
         let output = integrator.process(color, depth, SE3::identity());
-        
+
         assert_eq!(output.frame_id, 1);
-        assert!(output.is_keyframe);  // First frame
+        assert!(output.is_keyframe); // First frame
     }
 }

@@ -6,14 +6,14 @@
 //! 3. Gaussian mapping for 3D reconstruction
 //! 4. Mesh extraction and export
 
-use std::path::PathBuf;
-use std::fs;
 use glam::Vec3;
+use std::fs;
+use std::path::PathBuf;
 
 use rustslam::core::SE3;
-use rustslam::tracker::{VisualOdometry, VOState};
-use rustslam::fusion::{GaussianMapper, MeshExtractor, MeshExtractionConfig, TsdfConfig};
-use rustslam::io::{DatasetConfig, Dataset, TumRgbdDataset};
+use rustslam::fusion::{GaussianMapper, MeshExtractionConfig, MeshExtractor, TsdfConfig};
+use rustslam::io::{Dataset, DatasetConfig, TumRgbdDataset};
+use rustslam::tracker::{VOState, VisualOdometry};
 
 /// Main entry point
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -31,8 +31,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Configuration
     let dataset_path = PathBuf::from("../test_data/tum/rgbd_dataset_freiburg1_xyz");
     let output_dir = PathBuf::from("../test_output_tum");
-    let max_frames = 50;  // Process at most 50 frames for demo
-    let keyframe_interval = 3;  // Add keyframe every 3 frames
+    let max_frames = 50; // Process at most 50 frames for demo
+    let keyframe_interval = 3; // Add keyframe every 3 frames
 
     // Create output directory
     fs::create_dir_all(&output_dir)?;
@@ -107,7 +107,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 VOState::TrackingOk => "Tracking OK",
                 VOState::TrackingLost => "Tracking Lost",
             };
-            println!("  Frame {}/{}: {} (inliers: {}/{})",
+            println!(
+                "  Frame {}/{}: {} (inliers: {}/{})",
                 frame_count + 1,
                 dataset.len(),
                 state_str,
@@ -124,10 +125,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let t = pose.translation();
 
                 // Convert color to RGB format
-                let color: Vec<[u8; 3]> = frame.color
-                    .chunks(3)
-                    .map(|c| [c[0], c[1], c[2]])
-                    .collect();
+                let color: Vec<[u8; 3]> =
+                    frame.color.chunks(3).map(|c| [c[0], c[1], c[2]]).collect();
 
                 // Update mapper
                 let result = mapper.update(
@@ -147,8 +146,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 keyframe_indices.push(frame.index);
 
                 if frame_count % 20 == 0 {
-                    println!("    Keyframe added: {} Gaussians (total: {})",
-                        result.added, result.total_gaussians);
+                    println!(
+                        "    Keyframe added: {} Gaussians (total: {})",
+                        result.added, result.total_gaussians
+                    );
                 }
             }
         }
@@ -197,17 +198,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let pose_mat = pose.to_matrix();
                 // Flatten the 4x4 matrix to [f32; 16]
                 let pose_flat: [f32; 16] = [
-                    pose_mat[0][0], pose_mat[0][1], pose_mat[0][2], pose_mat[0][3],
-                    pose_mat[1][0], pose_mat[1][1], pose_mat[1][2], pose_mat[1][3],
-                    pose_mat[2][0], pose_mat[2][1], pose_mat[2][2], pose_mat[2][3],
-                    pose_mat[3][0], pose_mat[3][1], pose_mat[3][2], pose_mat[3][3],
+                    pose_mat[0][0],
+                    pose_mat[0][1],
+                    pose_mat[0][2],
+                    pose_mat[0][3],
+                    pose_mat[1][0],
+                    pose_mat[1][1],
+                    pose_mat[1][2],
+                    pose_mat[1][3],
+                    pose_mat[2][0],
+                    pose_mat[2][1],
+                    pose_mat[2][2],
+                    pose_mat[2][3],
+                    pose_mat[3][0],
+                    pose_mat[3][1],
+                    pose_mat[3][2],
+                    pose_mat[3][3],
                 ];
                 let pose_mat4 = glam::Mat4::from_cols_array(&pose_flat);
 
-                let color: Vec<[u8; 3]> = frame.color
-                    .chunks(3)
-                    .map(|c| [c[0], c[1], c[2]])
-                    .collect();
+                let color: Vec<[u8; 3]> =
+                    frame.color.chunks(3).map(|c| [c[0], c[1], c[2]]).collect();
                 mesh_extractor.integrate_frame(
                     depth,
                     Some(&color),
@@ -225,9 +236,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mesh = mesh_extractor.extract_with_postprocessing();
 
-    println!("  Extracted mesh: {} vertices, {} triangles",
+    println!(
+        "  Extracted mesh: {} vertices, {} triangles",
         mesh.vertices.len(),
-        mesh.triangles.len());
+        mesh.triangles.len()
+    );
 
     // Step 6: Export mesh
     println!("\n[6/6] Exporting mesh...");
@@ -239,18 +252,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Write vertices (mesh.vertices is Vec<MeshVertex>)
     for v in &mesh.vertices {
-        obj_content.push_str(&format!("v {} {} {}\n",
-            v.position.x,
-            v.position.y,
-            v.position.z));
+        obj_content.push_str(&format!(
+            "v {} {} {}\n",
+            v.position.x, v.position.y, v.position.z
+        ));
     }
 
     // Write triangles (OBJ is 1-indexed) (mesh.triangles is Vec<MeshTriangle>)
     for t in &mesh.triangles {
-        obj_content.push_str(&format!("f {} {} {}\n",
+        obj_content.push_str(&format!(
+            "f {} {} {}\n",
             t.indices[0] as u32 + 1,
             t.indices[1] as u32 + 1,
-            t.indices[2] as u32 + 1));
+            t.indices[2] as u32 + 1
+        ));
     }
 
     fs::write(&mesh_output, obj_content)?;
@@ -262,8 +277,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for (i, pose) in trajectory.iter().enumerate() {
         let t = pose.translation();
         let q = pose.quaternion();
-        traj_content.push_str(&format!("{}.000000 {} {} {} {} {} {} {}\n",
-            i as f64, t[0], t[1], t[2], q[0], q[1], q[2], q[3]));
+        traj_content.push_str(&format!(
+            "{}.000000 {} {} {} {} {} {} {}\n",
+            i as f64, t[0], t[1], t[2], q[0], q[1], q[2], q[3]
+        ));
     }
     fs::write(&traj_path, traj_content)?;
     println!("  Trajectory saved to: {}", traj_path.display());

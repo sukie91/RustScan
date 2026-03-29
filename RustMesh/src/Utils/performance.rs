@@ -1,5 +1,5 @@
 //! # High-Performance Mesh Iteration
-//! 
+//!
 //! This module provides zero-overhead iteration primitives for mesh data.
 //! Designed to match or exceed C++ performance while maintaining safety.
 
@@ -32,13 +32,16 @@ pub struct FastVertexIter {
 impl FastVertexIter {
     #[inline]
     pub fn new(n_vertices: usize) -> Self {
-        Self { current: 0, end: n_vertices }
+        Self {
+            current: 0,
+            end: n_vertices,
+        }
     }
 }
 
 impl Iterator for FastVertexIter {
     type Item = usize;
-    
+
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         if self.current < self.end {
@@ -49,7 +52,7 @@ impl Iterator for FastVertexIter {
             None
         }
     }
-    
+
     #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
         let remaining = self.end - self.current;
@@ -67,13 +70,16 @@ pub struct FastFaceIter {
 impl FastFaceIter {
     #[inline]
     pub fn new(n_faces: usize) -> Self {
-        Self { current: 0, end: n_faces }
+        Self {
+            current: 0,
+            end: n_faces,
+        }
     }
 }
 
 impl Iterator for FastFaceIter {
     type Item = usize;
-    
+
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         if self.current < self.end {
@@ -96,13 +102,17 @@ pub struct ChunkedVertexIter<'a> {
 impl<'a> ChunkedVertexIter<'a> {
     #[inline]
     pub fn new(vertices: &'a [PackedVertex], chunk_size: usize) -> Self {
-        Self { vertices, chunk_size, current: 0 }
+        Self {
+            vertices,
+            chunk_size,
+            current: 0,
+        }
     }
 }
 
 impl<'a> Iterator for ChunkedVertexIter<'a> {
     type Item = &'a [PackedVertex];
-    
+
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         if self.current < self.vertices.len() {
@@ -122,11 +132,11 @@ pub fn compute_centroid_simd(vertices: &[PackedVertex]) -> (f32, f32, f32) {
     let sum_x: f32 = 0.0;
     let sum_y: f32 = 0.0;
     let sum_z: f32 = 0.0;
-    
+
     // Process 4 vertices at a time with SIMD
     let _i = 0;
     let _len = vertices.len();
-    
+
     #[cfg(target_arch = "aarch64")]
     unsafe {
         let _acc_x = std::arch::aarch64::vaddq_f32(
@@ -141,12 +151,12 @@ pub fn compute_centroid_simd(vertices: &[PackedVertex]) -> (f32, f32, f32) {
             std::arch::aarch64::vreinterpretq_f32_u32(std::mem::zeroed()),
             std::arch::aarch64::vreinterpretq_f32_u32(std::mem::zeroed()),
         );
-        
+
         // SIMD accumulation would go here
         // For now, fall back to scalar
         (sum_x, sum_y, sum_z)
     }
-    
+
     #[cfg(not(target_arch = "aarch64"))]
     {
         // Scalar fallback - but use pointer arithmetic for speed
@@ -169,29 +179,41 @@ pub fn compute_bbox(vertices: &[PackedVertex]) -> (f32, f32, f32, f32, f32, f32)
     if vertices.is_empty() {
         return (0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
     }
-    
+
     let mut min_x = vertices[0].x;
     let mut min_y = vertices[0].y;
     let mut min_z = vertices[0].z;
     let mut max_x = vertices[0].x;
     let mut max_y = vertices[0].y;
     let mut max_z = vertices[0].z;
-    
+
     for v in vertices {
-        if v.x < min_x { min_x = v.x; }
-        if v.x > max_x { max_x = v.x; }
-        if v.y < min_y { min_y = v.y; }
-        if v.y > max_y { max_y = v.y; }
-        if v.z < min_z { min_z = v.z; }
-        if v.z > max_z { max_z = v.z; }
+        if v.x < min_x {
+            min_x = v.x;
+        }
+        if v.x > max_x {
+            max_x = v.x;
+        }
+        if v.y < min_y {
+            min_y = v.y;
+        }
+        if v.y > max_y {
+            max_y = v.y;
+        }
+        if v.z < min_z {
+            min_z = v.z;
+        }
+        if v.z > max_z {
+            max_z = v.z;
+        }
     }
-    
+
     (min_x, min_y, min_z, max_x, max_y, max_z)
 }
 
 /// Parallel iterator helper (rayon integration ready)
 #[cfg(feature = "parallel")]
-pub use rayon::iter::{ParallelIterator, IntoParallelIterator};
+pub use rayon::iter::{IntoParallelIterator, ParallelIterator};
 
 #[cfg(feature = "parallel")]
 pub fn parallel_vertex_sum(vertices: &[PackedVertex]) -> f32 {
@@ -214,6 +236,12 @@ impl BenchmarkResult {
     pub fn new(name: String, iterations: usize, total_time_ns: f64) -> Self {
         let time_per_iter_ns = total_time_ns / iterations as f64;
         let throughput_mps = iterations as f64 / (total_time_ns / 1_000_000.0);
-        Self { name, iterations, total_time_ns, time_per_iter_ns, throughput_mps }
+        Self {
+            name,
+            iterations,
+            total_time_ns,
+            time_per_iter_ns,
+            throughput_mps,
+        }
     }
 }

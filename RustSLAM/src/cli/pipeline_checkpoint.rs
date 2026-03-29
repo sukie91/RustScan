@@ -12,15 +12,30 @@ const PIPELINE_CHECKPOINT_VERSION: u32 = 1;
 #[derive(Debug, Error)]
 pub enum PipelineCheckpointError {
     #[error("failed to create checkpoint directory {path}: {source}")]
-    CreateDir { path: String, source: std::io::Error },
+    CreateDir {
+        path: String,
+        source: std::io::Error,
+    },
     #[error("failed to read pipeline checkpoint {path}: {source}")]
-    Read { path: String, source: std::io::Error },
+    Read {
+        path: String,
+        source: std::io::Error,
+    },
     #[error("failed to write pipeline checkpoint {path}: {source}")]
-    Write { path: String, source: std::io::Error },
+    Write {
+        path: String,
+        source: std::io::Error,
+    },
     #[error("failed to parse pipeline checkpoint {path}: {source}")]
-    Parse { path: String, source: serde_json::Error },
+    Parse {
+        path: String,
+        source: serde_json::Error,
+    },
     #[error("failed to serialize pipeline checkpoint {path}: {source}")]
-    Serialize { path: String, source: serde_json::Error },
+    Serialize {
+        path: String,
+        source: serde_json::Error,
+    },
     #[error("unsupported pipeline checkpoint version {found}")]
     Version { found: u32 },
 }
@@ -157,10 +172,12 @@ pub fn save_pipeline_checkpoint(
             source,
         }
     })?;
-    writer.flush().map_err(|source| PipelineCheckpointError::Write {
-        path: path.display().to_string(),
-        source,
-    })?;
+    writer
+        .flush()
+        .map_err(|source| PipelineCheckpointError::Write {
+            path: path.display().to_string(),
+            source,
+        })?;
     drop(writer);
 
     fs::rename(&tmp_path, &path).map_err(|source| PipelineCheckpointError::Write {

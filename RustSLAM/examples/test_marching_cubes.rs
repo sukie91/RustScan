@@ -2,10 +2,10 @@
 //!
 //! Tests complete workflows from TSDF volume to mesh extraction.
 
-use rustslam::fusion::tsdf_volume::{TsdfVolume, TsdfConfig};
-use rustslam::fusion::marching_cubes::extract_mesh_from_tsdf;
-use rustslam::test_utils::*;
 use glam::Vec3;
+use rustslam::fusion::marching_cubes::extract_mesh_from_tsdf;
+use rustslam::fusion::tsdf_volume::{TsdfConfig, TsdfVolume};
+use rustslam::test_utils::*;
 
 fn test_sphere_mesh_extraction() {
     // Create sphere TSDF

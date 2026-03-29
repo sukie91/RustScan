@@ -58,11 +58,7 @@ fn test_mock_frame_patterns() {
 
 fn test_frame_dimensions() {
     // Test various resolutions
-    let resolutions = vec![
-        (640, 480),
-        (1280, 720),
-        (1920, 1080),
-    ];
+    let resolutions = vec![(640, 480), (1280, 720), (1920, 1080)];
 
     for (width, height) in resolutions {
         let frame = create_mock_frame(width, height, FramePattern::Solid);

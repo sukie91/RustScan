@@ -1,20 +1,22 @@
 //! ORB feature extractor
-//! 
+//!
 //! This module provides the ORB feature extractor interface.
 //! The actual OpenCV implementation requires opencv-rust with system OpenCV.
 //! For now, this provides a placeholder that can be replaced with actual implementation.
 
-use crate::features::base::{FeatureExtractor, FeatureError, KeyPoint, Descriptors};
+use crate::features::base::{Descriptors, FeatureError, FeatureExtractor, KeyPoint};
 use crate::features::pure_rust::{FastDetector, FastParams, HarrisDetector, HarrisParams};
-use crate::features::utils::{build_brief_descriptors, filter_by_response, select_keypoints_grid, to_grayscale};
+use crate::features::utils::{
+    build_brief_descriptors, filter_by_response, select_keypoints_grid, to_grayscale,
+};
 
 /// ORB (Oriented FAST and Rotated BRIEF) feature extractor
-/// 
+///
 /// This is the interface for ORB feature extraction.
-/// 
+///
 /// To enable OpenCV support, ensure OpenCV 4.x is installed and
 /// compile with the `opencv` feature:
-/// 
+///
 /// ```toml
 /// rustrslam = { version = "0.1", features = ["opencv"] }
 /// ```
@@ -44,17 +46,13 @@ impl OrbExtractor {
             num_levels: 8,
             edge_threshold: 31,
             first_level: 0,
-            wta_k: 2,  // 2 points for each BRIEF comparison
+            wta_k: 2, // 2 points for each BRIEF comparison
             patch_size: 31,
         }
     }
 
     /// Create with custom parameters
-    pub fn with_params(
-        num_features: usize,
-        scale_factor: f64,
-        num_levels: i32,
-    ) -> Self {
+    pub fn with_params(num_features: usize, scale_factor: f64, num_levels: i32) -> Self {
         Self {
             num_features,
             scale_factor,
@@ -88,14 +86,16 @@ impl OrbExtractor {
     }
 
     /// Get parameters as tuple for reference
-    pub fn params(&self) -> (
-        usize,    // num_features
-        f64,      // scale_factor  
-        i32,      // num_levels
-        i32,      // edge_threshold
-        i32,      // first_level
-        i32,      // wta_k
-        i32,      // patch_size
+    pub fn params(
+        &self,
+    ) -> (
+        usize, // num_features
+        f64,   // scale_factor
+        i32,   // num_levels
+        i32,   // edge_threshold
+        i32,   // first_level
+        i32,   // wta_k
+        i32,   // patch_size
     ) {
         (
             self.num_features,
@@ -141,7 +141,8 @@ impl FeatureExtractor for OrbExtractor {
     ) -> Result<Vec<KeyPoint>, FeatureError> {
         #[cfg(feature = "opencv")]
         {
-            let (kps, _desc) = self.detect_and_compute_opencv(image, width as i32, height as i32)?;
+            let (kps, _desc) =
+                self.detect_and_compute_opencv(image, width as i32, height as i32)?;
             return Ok(kps);
         }
 
@@ -187,7 +188,8 @@ impl FeatureExtractor for OrbExtractor {
         let mut selected = select_keypoints_grid(filtered, width, height, self.num_features, 4, 4);
         let half_patch = (self.patch_size.max(3) / 2) as i32;
         for kp in &mut selected {
-            kp.angle = compute_intensity_centroid_angle(&gray, width, height, kp.x(), kp.y(), half_patch);
+            kp.angle =
+                compute_intensity_centroid_angle(&gray, width, height, kp.x(), kp.y(), half_patch);
             kp.size = self.patch_size as f32;
         }
 
@@ -247,7 +249,7 @@ fn compute_intensity_centroid_angle(
 #[cfg(feature = "opencv")]
 mod opencv_impl {
     use super::*;
-    use opencv::core::{Mat, Vector, no_array};
+    use opencv::core::{no_array, Mat, Vector};
     use opencv::features::ORB;
 
     impl OrbExtractor {
@@ -267,7 +269,8 @@ mod opencv_impl {
                     image.as_ptr() as *mut std::ffi::c_void,
                     opencv::core::Mat_AUTO_STEP,
                 )
-            }.map_err(|e| FeatureError::OpenCV(e.to_string()))?;
+            }
+            .map_err(|e| FeatureError::OpenCV(e.to_string()))?;
 
             // Create ORB detector
             let mut orb = ORB::create(
@@ -278,19 +281,16 @@ mod opencv_impl {
                 self.first_level,
                 self.patch_size,
                 self.wta_k,
-                0,  // score_type (0 = HARRIS, 1 = FAST)
-            ).map_err(|e| FeatureError::OpenCV(e.to_string()))?;
+                0, // score_type (0 = HARRIS, 1 = FAST)
+            )
+            .map_err(|e| FeatureError::OpenCV(e.to_string()))?;
 
             // Detect keypoints and compute descriptors
             let mut keypoints = Vector::<opencv::core::KeyPoint>::new();
             let mut descriptors = Mat::new().map_err(|e| FeatureError::OpenCV(e.to_string()))?;
 
-            orb.detect_and_compute(
-                &mat,
-                &no_array(),
-                &mut keypoints,
-                &mut descriptors,
-            ).map_err(|e| FeatureError::OpenCV(e.to_string()))?;
+            orb.detect_and_compute(&mat, &no_array(), &mut keypoints, &mut descriptors)
+                .map_err(|e| FeatureError::OpenCV(e.to_string()))?;
 
             // Convert OpenCV keypoints to our format
             let mut kps = Vec::with_capacity(keypoints.len());
@@ -317,12 +317,15 @@ mod opencv_impl {
                 let rows = descriptors.rows();
                 if rows > 0 {
                     for i in 0..rows {
-                        let row = descriptors.row(i).map_err(|e| FeatureError::OpenCV(e.to_string()))?;
-                        let slice = row.data().map_err(|e| FeatureError::OpenCV(e.to_string()))?;
+                        let row = descriptors
+                            .row(i)
+                            .map_err(|e| FeatureError::OpenCV(e.to_string()))?;
+                        let slice = row
+                            .data()
+                            .map_err(|e| FeatureError::OpenCV(e.to_string()))?;
                         let len = row.elem_size() as usize * row.cols();
-                        des_data.extend_from_slice(unsafe {
-                            std::slice::from_raw_parts(slice, len)
-                        });
+                        des_data
+                            .extend_from_slice(unsafe { std::slice::from_raw_parts(slice, len) });
                     }
                 }
             }
@@ -380,13 +383,13 @@ mod tests {
     #[test]
     fn test_orb_configure() {
         let orb = OrbExtractor::configure(
-            3000,  // num_features
-            1.5,   // scale_factor
-            6,     // num_levels
-            20,    // edge_threshold
-            1,     // first_level
-            3,     // wta_k
-            25,    // patch_size
+            3000, // num_features
+            1.5,  // scale_factor
+            6,    // num_levels
+            20,   // edge_threshold
+            1,    // first_level
+            3,    // wta_k
+            25,   // patch_size
         );
         let (num, scale, levels, edge, first, wta, patch) = orb.params();
         assert_eq!(num, 3000);
@@ -417,7 +420,10 @@ mod tests {
             let row = (kp.y() / cell_h).floor() as i32;
             cells.insert((row, col));
         }
-        assert!(cells.len() >= 4, "expected keypoints in multiple grid cells");
+        assert!(
+            cells.len() >= 4,
+            "expected keypoints in multiple grid cells"
+        );
     }
 
     #[test]
@@ -435,6 +441,9 @@ mod tests {
 
         let angle = compute_intensity_centroid_angle(&img, width, height, 15.0, 15.0, 15);
         assert!(angle.is_finite());
-        assert!(angle.abs() < 0.6, "angle should roughly point to +x, got {angle}");
+        assert!(
+            angle.abs() < 0.6,
+            "angle should roughly point to +x, got {angle}"
+        );
     }
 }

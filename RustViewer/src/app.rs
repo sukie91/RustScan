@@ -1,7 +1,7 @@
 //! Main application struct implementing eframe::App.
 
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{mpsc, Arc, Mutex};
 
 use eframe::egui;
 use eframe::egui_wgpu;
@@ -9,9 +9,9 @@ use eframe::wgpu;
 
 use crate::loader::checkpoint::LoadError;
 use crate::renderer::camera::ArcballCamera;
-use crate::renderer::ViewerCallback;
 use crate::renderer::scene::Scene;
-use crate::ui::panel::{UiState, draw_side_panel};
+use crate::renderer::ViewerCallback;
+use crate::ui::panel::{draw_side_panel, UiState};
 use crate::ui::viewport::{draw_empty_state, draw_viewport_overlay};
 
 pub struct ViewerApp {
@@ -50,15 +50,9 @@ impl ViewerApp {
         while let Ok((kind, path)) = self.file_rx.try_recv() {
             if let Ok(mut scene) = self.scene.lock() {
                 let result: Result<(), LoadError> = match kind.as_str() {
-                    "checkpoint" => {
-                        crate::loader::checkpoint::load_checkpoint(&path, &mut scene)
-                    }
-                    "gaussian" => {
-                        crate::loader::gaussian::load_gaussians(&path, &mut scene)
-                    }
-                    "mesh" => {
-                        crate::loader::mesh::load_mesh(&path, &mut scene)
-                    }
+                    "checkpoint" => crate::loader::checkpoint::load_checkpoint(&path, &mut scene),
+                    "gaussian" => crate::loader::gaussian::load_gaussians(&path, &mut scene),
+                    "mesh" => crate::loader::mesh::load_mesh(&path, &mut scene),
                     _ => Ok(()),
                 };
 
@@ -118,7 +112,7 @@ impl eframe::App for ViewerApp {
             .frame(
                 egui::Frame::new()
                     .fill(egui::Color32::from_rgb(245, 245, 247))
-                    .inner_margin(egui::Margin::same(24))
+                    .inner_margin(egui::Margin::same(24)),
             )
             .show(ctx, |ui| {
                 if let Ok(mut scene) = self.scene.lock() {

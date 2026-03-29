@@ -10,7 +10,7 @@ use crate::loop_closing::Relocalizer;
 use crate::tracker::solver::{EssentialSolver, PnPSolver, Triangulator};
 use glam::Vec3;
 use serde::Serialize;
-use std::collections::{HashSet, VecDeque};
+use std::collections::VecDeque;
 
 const MAX_RELOCALIZATION_KEYFRAMES: usize = 24;
 const RELOCALIZATION_ANCHOR_INTERVAL_FRAMES: u64 = 15;
@@ -119,6 +119,11 @@ pub struct VisualOdometry {
     min_matches: usize,
     /// Min inliers to maintain tracking
     min_inliers: usize,
+    /// Median scene depth (camera-space Z) from the last successful PnP frame.
+    /// Used to restore metric scale when a fresh monocular re-initialisation is
+    /// forced, which would otherwise produce a unit-baseline reconstruction at
+    /// an arbitrary scale relative to the global map.
+    last_good_median_depth: f32,
 }
 
 impl VisualOdometry {
@@ -175,6 +180,7 @@ impl VisualOdometry {
             frame_count: 0,
             min_matches: params.min_matches,
             min_inliers: params.min_inliers,
+            last_good_median_depth: 0.0,
         }
     }
 
@@ -215,6 +221,7 @@ impl VisualOdometry {
             frame_count: 0,
             min_matches: 50,
             min_inliers: 10,
+            last_good_median_depth: 0.0,
         }
     }
 
@@ -347,13 +354,23 @@ impl VisualOdometry {
                     }
                 }
 
+                // Require minimum triangulated points to accept monocular init.
+                // Too few points indicates degenerate geometry (e.g., pure rotation
+                // or insufficient parallax) that will cause unreliable tracking.
+                const MIN_TRIANGULATED_POINTS: usize = 8;
+                if best_count < MIN_TRIANGULATED_POINTS {
+                    self.state = VOState::TrackingLost;
+                    return VOResult::failure();
+                }
+
                 // Map triangulated points to current keypoint indices
                 // (process_frame stores current keypoints as prev_keypoints)
                 let mut kp_3d_points = vec![None; keypoints.len()];
                 for (i, &query_idx) in inlier_query_indices.iter().enumerate() {
                     if query_idx < keypoints.len() && i < best_points.len() {
-                        kp_3d_points[query_idx] = best_points[i]
-                            .map(|point_local_prev| anchor_to_world.transform_point(&point_local_prev));
+                        kp_3d_points[query_idx] = best_points[i].map(|point_local_prev| {
+                            anchor_to_world.transform_point(&point_local_prev)
+                        });
                     }
                 }
                 self.prev_3d_points = kp_3d_points;
@@ -392,7 +409,6 @@ impl VisualOdometry {
 
         // Build PnP problem from 3D-2D correspondences
         let mut pnp_problem = crate::tracker::solver::PnPProblem::new();
-        let mut pnp_correspondences = Vec::new();
 
         for m in &matches {
             let query_idx = m.query_idx as usize;
@@ -402,7 +418,6 @@ impl VisualOdometry {
                 if let Some(pt3d) = self.prev_3d_points[train_idx] {
                     let pt2d = [keypoints[query_idx].x(), keypoints[query_idx].y()];
                     pnp_problem.add_correspondence(pt2d, pt3d);
-                    pnp_correspondences.push((train_idx, query_idx));
                 }
             }
         }
@@ -412,19 +427,34 @@ impl VisualOdometry {
             let inlier_count = inliers.iter().filter(|&&x| x).count();
 
             if inlier_count >= self.min_inliers {
-                let pnp_inlier_pairs: HashSet<(usize, usize)> = pnp_correspondences
-                    .iter()
-                    .zip(inliers.iter())
-                    .filter_map(|(&(train_idx, query_idx), &is_inlier)| {
-                        if is_inlier {
-                            Some((train_idx, query_idx))
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
+                // Sanity check: reject poses implying unrealistically large
+                // inter-frame camera jumps.  Degenerate 3D point configurations
+                // can cause DLT/P3P to produce wildly wrong poses that still
+                // accumulate enough "inliers" via reprojection coincidence.
+                //
+                // Empirical observation from sofa.MOV: normal inter-frame motion
+                // is ~0.07 world units (baseline from E-matrix).  A threshold of
+                // 1.0 units ≈ 14× normal motion, allowing reasonable acceleration
+                // while rejecting clearly degenerate poses.
+                if let Some(prev) = self.prev_frame_pose {
+                    let prev_center = prev.inverse().translation();
+                    let curr_center = pose.inverse().translation();
+                    let jump_sq: f32 = prev_center
+                        .iter()
+                        .zip(curr_center.iter())
+                        .map(|(a, b)| (a - b) * (a - b))
+                        .sum();
+                    if jump_sq > 1.0 {
+                        // Jump > 1.0 world units: this PnP result is suspect
+                        self.state = VOState::TrackingLost;
+                        return VOResult::failure();
+                    }
+                }
 
-                // Update prev_3d_points: propagate existing + triangulate new
+                // Update prev_3d_points: propagate existing + triangulate new.
+                // All matched 3D points are propagated regardless of PnP inlier
+                // status; restricting to inliers caused the pool to starve over
+                // time, leaving too few correspondences for subsequent frames.
                 let prev_pose = self.prev_frame_pose.unwrap_or(SE3::identity());
                 let mut new_3d_points = vec![None; keypoints.len()];
 
@@ -440,12 +470,9 @@ impl VisualOdometry {
                         continue;
                     }
 
-                    // Propagate existing 3D point through match
+                    // Propagate all matched 3D points into the next frame.
                     if train_idx < self.prev_3d_points.len() {
                         if let Some(pt3d) = self.prev_3d_points[train_idx] {
-                            if !pnp_inlier_pairs.contains(&(train_idx, query_idx)) {
-                                continue;
-                            }
                             new_3d_points[query_idx] = Some(pt3d);
                             continue;
                         }
@@ -474,6 +501,22 @@ impl VisualOdometry {
                 }
 
                 self.prev_3d_points = new_3d_points;
+
+                // Record the median camera-space depth so that a subsequent
+                // monocular re-init can restore the correct metric scale.
+                let mut depths: Vec<f32> = self
+                    .prev_3d_points
+                    .iter()
+                    .filter_map(|p| *p)
+                    .filter_map(|pt| {
+                        let z = pose.transform_point(&pt)[2];
+                        (z > 0.01 && z < 100.0 && z.is_finite()).then_some(z)
+                    })
+                    .collect();
+                if depths.len() >= 4 {
+                    depths.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                    self.last_good_median_depth = depths[depths.len() / 2];
+                }
 
                 return VOResult {
                     pose,
@@ -534,10 +577,12 @@ impl VisualOdometry {
         }
 
         // If re-initialization failed, stage the current frame as the new seed.
+        // Keep prev_frame_pose so the next successful initialize() anchors the
+        // new segment at the last known camera position instead of world origin.
         self.prev_keypoints = keypoints;
         self.prev_descriptors = descriptors;
         self.prev_3d_points.clear();
-        self.prev_frame_pose = None;
+        // NOTE: intentionally do NOT clear prev_frame_pose here.
         self.state = VOState::Initializing;
 
         (VOResult::failure(), None)
@@ -591,10 +636,17 @@ impl VisualOdometry {
             }
         }
 
-        let mut frame = Frame::new(frame_id, frame_id as f64, self.camera.width, self.camera.height);
+        let mut frame = Frame::new(
+            frame_id,
+            frame_id as f64,
+            self.camera.width,
+            self.camera.height,
+        );
         frame.set_pose(pose);
         frame.mark_as_keyframe();
-        let keyframe_id = self.relocalization_map.add_keyframe(KeyFrame::new(frame, features));
+        let keyframe_id = self
+            .relocalization_map
+            .add_keyframe(KeyFrame::new(frame, features));
 
         self.relocalization_keyframes.push_back(keyframe_id);
         self.last_relocalization_anchor_frame = Some(frame_id);
@@ -613,8 +665,10 @@ impl VisualOdometry {
             return None;
         }
 
-        let current_keypoints: Vec<[f32; 2]> =
-            keypoints.iter().map(|keypoint| [keypoint.x(), keypoint.y()]).collect();
+        let current_keypoints: Vec<[f32; 2]> = keypoints
+            .iter()
+            .map(|keypoint| [keypoint.x(), keypoint.y()])
+            .collect();
         for &keyframe_id in self.relocalization_keyframes.iter().rev() {
             self.relocalization_stats.anchor_candidates_tested += 1;
             let result = self.relocalizer.relocalize_against_keyframe(
@@ -628,7 +682,7 @@ impl VisualOdometry {
             }
             let seeded_points = self.seed_points_from_anchor(keyframe_id, keypoints, descriptors);
             let seeded_count = seeded_points.iter().filter(|point| point.is_some()).count();
-            if seeded_count < self.min_inliers {
+            if seeded_count < 4 {
                 continue;
             }
 
@@ -669,7 +723,8 @@ impl VisualOdometry {
         for matched in matches {
             let query_idx = matched.query_idx as usize;
             let train_idx = matched.train_idx as usize;
-            if query_idx >= seeded_points.len() || train_idx >= anchor_keyframe.features.map_points.len()
+            if query_idx >= seeded_points.len()
+                || train_idx >= anchor_keyframe.features.map_points.len()
             {
                 continue;
             }
@@ -716,6 +771,7 @@ impl VisualOdometry {
         self.relocalization_keyframes.clear();
         self.last_relocalization_anchor_frame = None;
         self.relocalization_stats = RelocalizationStats::default();
+        self.last_good_median_depth = 0.0;
     }
 
     /// Set minimum matches threshold
@@ -1131,7 +1187,11 @@ mod tests {
             estimated_t
         );
         assert!(
-            vo.prev_3d_points.iter().filter(|point| point.is_some()).count() >= vo.min_inliers
+            vo.prev_3d_points
+                .iter()
+                .filter(|point| point.is_some())
+                .count()
+                >= vo.min_inliers
         );
     }
 

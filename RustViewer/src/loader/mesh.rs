@@ -40,10 +40,9 @@ pub fn load_obj(path: &Path) -> Result<(Vec<MeshGpuVertex>, Vec<u32>, Vec<u32>),
         let mut parts = line.split_whitespace();
         match parts.next() {
             Some("v") => {
-                let vals: Result<Vec<f32>, _> = parts
-                    .map(|s| s.parse::<f32>())
-                    .collect();
-                let vals = vals.map_err(|_| LoadError::ObjParse(format!("bad vertex line: {line}")))?;
+                let vals: Result<Vec<f32>, _> = parts.map(|s| s.parse::<f32>()).collect();
+                let vals =
+                    vals.map_err(|_| LoadError::ObjParse(format!("bad vertex line: {line}")))?;
                 if vals.len() >= 3 {
                     positions.push([vals[0], vals[1], vals[2]]);
                     // Support both with and without color
@@ -54,10 +53,9 @@ pub fn load_obj(path: &Path) -> Result<(Vec<MeshGpuVertex>, Vec<u32>, Vec<u32>),
                 }
             }
             Some("vn") => {
-                let vals: Result<Vec<f32>, _> = parts
-                    .map(|s| s.parse::<f32>())
-                    .collect();
-                let vals = vals.map_err(|_| LoadError::ObjParse(format!("bad normal line: {line}")))?;
+                let vals: Result<Vec<f32>, _> = parts.map(|s| s.parse::<f32>()).collect();
+                let vals =
+                    vals.map_err(|_| LoadError::ObjParse(format!("bad normal line: {line}")))?;
                 if vals.len() >= 3 {
                     normals.push([vals[0], vals[1], vals[2]]);
                 }
@@ -78,7 +76,9 @@ pub fn load_obj(path: &Path) -> Result<(Vec<MeshGpuVertex>, Vec<u32>, Vec<u32>),
                             let v = split
                                 .next()
                                 .and_then(|s| s.parse::<usize>().ok())
-                                .ok_or_else(|| LoadError::ObjParse(format!("bad face vertex: {corner}")))?;
+                                .ok_or_else(|| {
+                                    LoadError::ObjParse(format!("bad face vertex: {corner}"))
+                                })?;
                             let n = split
                                 .next()
                                 .and_then(|s| s.parse::<usize>().ok())
@@ -91,7 +91,9 @@ pub fn load_obj(path: &Path) -> Result<(Vec<MeshGpuVertex>, Vec<u32>, Vec<u32>),
                             let v = parts_vec
                                 .get(0)
                                 .and_then(|s| s.parse::<usize>().ok())
-                                .ok_or_else(|| LoadError::ObjParse(format!("bad face vertex: {corner}")))?;
+                                .ok_or_else(|| {
+                                    LoadError::ObjParse(format!("bad face vertex: {corner}"))
+                                })?;
                             let n = parts_vec
                                 .get(2)
                                 .and_then(|s| s.parse::<usize>().ok())
@@ -100,9 +102,9 @@ pub fn load_obj(path: &Path) -> Result<(Vec<MeshGpuVertex>, Vec<u32>, Vec<u32>),
                             nidx[i] = n.saturating_sub(1);
                         } else {
                             // Format: v (vertex only)
-                            let v = corner
-                                .parse::<usize>()
-                                .map_err(|_| LoadError::ObjParse(format!("bad face vertex: {corner}")))?;
+                            let v = corner.parse::<usize>().map_err(|_| {
+                                LoadError::ObjParse(format!("bad face vertex: {corner}"))
+                            })?;
                             vidx[i] = v.saturating_sub(1);
                             nidx[i] = 0; // Use first normal or default
                         }
@@ -141,8 +143,9 @@ pub fn load_obj(path: &Path) -> Result<(Vec<MeshGpuVertex>, Vec<u32>, Vec<u32>),
 
         // Normalize the computed normal
         let length = (computed_normal[0] * computed_normal[0]
-                    + computed_normal[1] * computed_normal[1]
-                    + computed_normal[2] * computed_normal[2]).sqrt();
+            + computed_normal[1] * computed_normal[1]
+            + computed_normal[2] * computed_normal[2])
+            .sqrt();
         if length > 1e-6 {
             computed_normal[0] /= length;
             computed_normal[1] /= length;
@@ -178,9 +181,12 @@ pub fn load_obj(path: &Path) -> Result<(Vec<MeshGpuVertex>, Vec<u32>, Vec<u32>),
     }
 
     // Build a map from original vertex index to one expanded vertex index
-    let mut orig_to_expanded: std::collections::HashMap<usize, u32> = std::collections::HashMap::new();
+    let mut orig_to_expanded: std::collections::HashMap<usize, u32> =
+        std::collections::HashMap::new();
     for (expanded_idx, &orig_idx) in expanded_to_orig.iter().enumerate() {
-        orig_to_expanded.entry(orig_idx).or_insert(expanded_idx as u32);
+        orig_to_expanded
+            .entry(orig_idx)
+            .or_insert(expanded_idx as u32);
     }
 
     // Convert unique edges to expanded vertex indices
@@ -267,7 +273,10 @@ pub fn load_ply(path: &Path) -> Result<(Vec<MeshGpuVertex>, Vec<u32>, Vec<u32>),
             .map(|s| s.parse::<u32>().unwrap_or(0))
             .collect();
         if vals.len() < 3 {
-            return Err(LoadError::PlyParse(format!("face line too short: {}", line)));
+            return Err(LoadError::PlyParse(format!(
+                "face line too short: {}",
+                line
+            )));
         }
         indices.extend_from_slice(&vals[..3]);
 
@@ -280,10 +289,7 @@ pub fn load_ply(path: &Path) -> Result<(Vec<MeshGpuVertex>, Vec<u32>, Vec<u32>),
         edge_set.insert((i2.min(i0), i2.max(i0)));
     }
 
-    let edge_indices: Vec<u32> = edge_set
-        .into_iter()
-        .flat_map(|(a, b)| [a, b])
-        .collect();
+    let edge_indices: Vec<u32> = edge_set.into_iter().flat_map(|(a, b)| [a, b]).collect();
 
     Ok((vertices, indices, edge_indices))
 }
@@ -352,7 +358,11 @@ mod tests {
         assert_eq!(idxs, vec![0, 1, 2], "indices should be 0,1,2");
         assert_eq!(edge_idxs.len(), 6, "should have 3 edges (6 indices)"); // 3 edges = 6 indices
         let c = verts[0].color;
-        assert!((c[0] - 0.8).abs() < 1e-3, "red component mismatch: {}", c[0]);
+        assert!(
+            (c[0] - 0.8).abs() < 1e-3,
+            "red component mismatch: {}",
+            c[0]
+        );
     }
 
     #[test]

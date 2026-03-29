@@ -1,5 +1,5 @@
 //! # Handles
-//! 
+//!
 //! Handle types for mesh entities (Vertex, Edge, Halfedge, Face).
 //! Handles are lightweight references to mesh elements using integer indices.
 
@@ -347,7 +347,7 @@ mod tests {
     fn test_handle_validity() {
         let valid = VertexHandle::new(0);
         let invalid = VertexHandle::default();
-        
+
         assert!(valid.is_valid());
         assert!(!invalid.is_valid());
     }
@@ -356,7 +356,7 @@ mod tests {
     fn test_halfedge_opposite() {
         let he = HalfedgeHandle::new(5);
         assert_eq!(he.opposite().idx(), 4);
-        
+
         let he2 = HalfedgeHandle::new(4);
         assert_eq!(he2.opposite().idx(), 5);
     }

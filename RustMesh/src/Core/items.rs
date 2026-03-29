@@ -3,7 +3,7 @@
 //! Core mesh data structures: Vertex, Halfedge, Edge, Face.
 //! These represent the fundamental elements stored in the mesh.
 
-use crate::handles::{VertexHandle, HalfedgeHandle, EdgeHandle, FaceHandle};
+use crate::handles::{EdgeHandle, FaceHandle, HalfedgeHandle, VertexHandle};
 use glam::Vec3;
 
 /// A vertex in the mesh
@@ -80,7 +80,7 @@ impl Halfedge {
             next_halfedge_handle: None,
             prev_halfedge_handle: None,
             opposite_halfedge_handle: None,
-            edge_idx: heh.idx() / 2,  // Each edge has 2 halfedges: (2n, 2n+1)
+            edge_idx: heh.idx() / 2, // Each edge has 2 halfedges: (2n, 2n+1)
         }
     }
 
@@ -115,7 +115,7 @@ impl Halfedge {
     pub fn from_vertex_handle(&self) -> VertexHandle {
         // This is a placeholder - actual implementation requires mesh context
         // Use kernel/connectivity to find the opposite halfedge and get its to_vertex
-        // For now, this returns invalid handle and callers should use 
+        // For now, this returns invalid handle and callers should use
         // mesh.from_vertex_handle(halfedge) instead
         VertexHandle::invalid()
     }
@@ -208,9 +208,7 @@ impl Default for Face {
 impl Face {
     /// Create a new face with the given halfedge handle
     pub fn new(halfedge_handle: Option<HalfedgeHandle>) -> Self {
-        Self {
-            halfedge_handle,
-        }
+        Self { halfedge_handle }
     }
 
     /// Get the halfedge handle
@@ -222,7 +220,7 @@ impl Face {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::handles::{VertexHandle, HalfedgeHandle, FaceHandle};
+    use crate::handles::{FaceHandle, HalfedgeHandle, VertexHandle};
 
     #[test]
     fn test_vertex_creation() {

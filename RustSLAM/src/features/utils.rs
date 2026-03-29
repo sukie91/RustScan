@@ -128,21 +128,37 @@ pub fn select_keypoints_grid(
     for kp in keypoints {
         let mut col = (kp.x() / cell_w).floor() as isize;
         let mut row = (kp.y() / cell_h).floor() as isize;
-        if col < 0 { col = 0; }
-        if row < 0 { row = 0; }
-        if col as usize >= cols { col = (cols - 1) as isize; }
-        if row as usize >= rows { row = (rows - 1) as isize; }
+        if col < 0 {
+            col = 0;
+        }
+        if row < 0 {
+            row = 0;
+        }
+        if col as usize >= cols {
+            col = (cols - 1) as isize;
+        }
+        if row as usize >= rows {
+            row = (rows - 1) as isize;
+        }
         cells[row as usize * cols + col as usize].push(kp);
     }
 
     let mut selected = Vec::with_capacity(max_features);
     for cell in &mut cells {
-        cell.sort_by(|a, b| b.response.partial_cmp(&a.response).unwrap_or(std::cmp::Ordering::Equal));
+        cell.sort_by(|a, b| {
+            b.response
+                .partial_cmp(&a.response)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         selected.extend(cell.iter().take(per_cell).cloned());
     }
 
     if selected.len() > max_features {
-        selected.sort_by(|a, b| b.response.partial_cmp(&a.response).unwrap_or(std::cmp::Ordering::Equal));
+        selected.sort_by(|a, b| {
+            b.response
+                .partial_cmp(&a.response)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         selected.truncate(max_features);
     }
 
@@ -248,7 +264,10 @@ mod tests {
         kp.angle = 0.0;
 
         let desc = build_brief_descriptors(&gray, width, height, &[kp]);
-        assert!(desc.data.iter().all(|&b| b == 0), "uniform image should give all-zero descriptor");
+        assert!(
+            desc.data.iter().all(|&b| b == 0),
+            "uniform image should give all-zero descriptor"
+        );
     }
 
     #[test]

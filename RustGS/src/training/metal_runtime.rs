@@ -360,17 +360,28 @@ kernel void tile_backward(
             dl_dsigma_y = dl_dkernel * dk_ddy * (-dy / g.sigma_y);
         }
 
-        // Total depth gradient
-        const float dl_dz = dl_dz_direct;
-
-        // 2D -> 3D chain rule
+        // Total gradient in camera space.
         const float inv_z = 1.0f / max(g.depth, 1e-6f);
-
-        atomic_fetch_add_explicit(&grad_positions[src_idx * 3 + 0], dl_du * camera.fx * inv_z, memory_order_relaxed);
-        atomic_fetch_add_explicit(&grad_positions[src_idx * 3 + 1], dl_dv * camera.fy * inv_z, memory_order_relaxed);
+        const float dl_dx_cam = dl_du * camera.fx * inv_z;
+        const float dl_dy_cam = dl_dv * camera.fy * inv_z;
         const float dl_dz_projected = dl_du * (-(g.u - camera.cx) * inv_z)
                                     + dl_dv * (-(g.v - camera.cy) * inv_z);
-        atomic_fetch_add_explicit(&grad_positions[src_idx * 3 + 2], dl_dz + dl_dz_projected, memory_order_relaxed);
+        const float dl_dz_cam = dl_dz_direct + dl_dz_projected;
+
+        // x_cam = R * x_world + t, so dL/dx_world = R^T * dL/dx_cam.
+        const float dl_dworld_x = camera.rot00 * dl_dx_cam
+                                + camera.rot10 * dl_dy_cam
+                                + camera.rot20 * dl_dz_cam;
+        const float dl_dworld_y = camera.rot01 * dl_dx_cam
+                                + camera.rot11 * dl_dy_cam
+                                + camera.rot21 * dl_dz_cam;
+        const float dl_dworld_z = camera.rot02 * dl_dx_cam
+                                + camera.rot12 * dl_dy_cam
+                                + camera.rot22 * dl_dz_cam;
+
+        atomic_fetch_add_explicit(&grad_positions[src_idx * 3 + 0], dl_dworld_x, memory_order_relaxed);
+        atomic_fetch_add_explicit(&grad_positions[src_idx * 3 + 1], dl_dworld_y, memory_order_relaxed);
+        atomic_fetch_add_explicit(&grad_positions[src_idx * 3 + 2], dl_dworld_z, memory_order_relaxed);
 
         // Scale gradient: propagate through sigma_x and sigma_y back to 3D log-scales.
         // sigma_x² ≈ s_x²*(fx/z)² + s_z²*(fx*|x_cam|/z²)²  (dominant terms, identity rot)

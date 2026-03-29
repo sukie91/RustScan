@@ -2,8 +2,8 @@
 //!
 //! Parses the `pipeline.json` format produced by the RustSLAM pipeline.
 
-use std::path::Path;
 use serde::Deserialize;
+use std::path::Path;
 use thiserror::Error;
 
 use crate::renderer::scene::Scene;
@@ -123,7 +123,11 @@ mod tests {
 
         let mut scene = Scene::default();
         let result = load_checkpoint(tmpfile.path(), &mut scene);
-        assert!(result.is_ok(), "missing slam section should succeed: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "missing slam section should succeed: {:?}",
+            result
+        );
         assert!(scene.trajectory.is_empty());
         assert!(scene.map_points.is_empty());
         assert!(!scene.bounds.is_valid());
@@ -152,7 +156,11 @@ mod tests {
 
         let mut scene = Scene::default();
         let result = load_checkpoint(tmpfile.path(), &mut scene);
-        assert!(result.is_ok(), "checkpoint with keyframes should succeed: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "checkpoint with keyframes should succeed: {:?}",
+            result
+        );
         assert_eq!(scene.trajectory.len(), 2);
         assert_eq!(scene.trajectory[0], [0.0, 0.0, 0.0]);
         assert_eq!(scene.trajectory[1], [1.0, 2.0, 3.0]);
@@ -183,7 +191,11 @@ mod tests {
 
         let mut scene = Scene::default();
         let result = load_checkpoint(tmpfile.path(), &mut scene);
-        assert!(result.is_ok(), "checkpoint with map_points should succeed: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "checkpoint with map_points should succeed: {:?}",
+            result
+        );
         assert_eq!(scene.map_points.len(), 2);
         assert_eq!(scene.map_point_colors.len(), 2);
         // First point has explicit color

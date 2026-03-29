@@ -1,0 +1,14 @@
+# ONNX model files (large, download separately)
+models/*.onnx
+models/*.pth
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+venv/
+.venv/
+
+# Spann3R (external, not tracked)
+spann3r/
+checkpoints/

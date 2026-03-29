@@ -5,8 +5,8 @@
 pub mod config;
 pub mod params;
 
-pub use config::{SlamConfig, CameraConfig, ConfigLoader, ConfigError};
+pub use config::{CameraConfig, ConfigError, ConfigLoader, SlamConfig};
 pub use params::{
-    FeatureType, TrackerParams, MapperParams, OptimizerParams, LoopClosingParams,
-    DatasetParams, ViewerParams, GaussianSplattingParams, TsdfParams, ValidationErrors,
+    DatasetParams, FeatureType, GaussianSplattingParams, LoopClosingParams, MapperParams,
+    OptimizerParams, TrackerParams, TsdfParams, ValidationErrors, ViewerParams,
 };

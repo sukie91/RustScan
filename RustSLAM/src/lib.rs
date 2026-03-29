@@ -7,24 +7,27 @@
 //! ```
 
 // Re-export core types
-pub use core::{Frame, FrameFeatures, KeyFrame, MapPoint, Map, Camera, SE3};
-pub use features::{FeatureExtractor, FeatureMatcher, KeyPoint, Descriptors, Match, OrbExtractor, KnnMatcher, DistanceMetric};
-pub use tracker::{VisualOdometry, VOState, VOResult};
+pub use core::{Camera, Frame, FrameFeatures, KeyFrame, Map, MapPoint, SE3};
+pub use features::{
+    Descriptors, DistanceMetric, FeatureExtractor, FeatureMatcher, KeyPoint, KnnMatcher, Match,
+    OrbExtractor,
+};
+pub use tracker::{VOResult, VOState, VisualOdometry};
 
 // Modules
+#[cfg(feature = "slam-pipeline")]
+pub mod cli;
+pub mod config;
 pub mod core;
+pub mod depth;
 pub mod features;
-pub mod tracker;
-pub mod mapping;
-pub mod optimizer;
-pub mod loop_closing;
 pub mod fusion;
 #[cfg(feature = "slam-pipeline")]
 pub mod io;
-pub mod viewer;
+pub mod loop_closing;
+pub mod mapping;
+pub mod optimizer;
 pub mod pipeline;
-pub mod depth;
-pub mod config;
 pub mod test_utils;
-#[cfg(feature = "slam-pipeline")]
-pub mod cli;
+pub mod tracker;
+pub mod viewer;

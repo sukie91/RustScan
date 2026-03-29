@@ -43,21 +43,30 @@ impl KeyFrameDatabase {
     /// Add a keyframe to the database
     pub fn add_keyframe(&self, entry: KeyFrameEntry) {
         let mut entries = self.entries.write().unwrap_or_else(|e| e.into_inner());
-        let mut inverted = self.inverted_index.write().unwrap_or_else(|e| e.into_inner());
+        let mut inverted = self
+            .inverted_index
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
 
         // Add to entries
         entries.insert(entry.id, entry.clone());
 
         // Update inverted index
         for word_id in &entry.word_ids {
-            inverted.entry(*word_id).or_insert_with(HashSet::new).insert(entry.id);
+            inverted
+                .entry(*word_id)
+                .or_insert_with(HashSet::new)
+                .insert(entry.id);
         }
     }
 
     /// Remove a keyframe from the database
     pub fn remove_keyframe(&self, keyframe_id: u64) {
         let mut entries = self.entries.write().unwrap_or_else(|e| e.into_inner());
-        let mut inverted = self.inverted_index.write().unwrap_or_else(|e| e.into_inner());
+        let mut inverted = self
+            .inverted_index
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
 
         if let Some(entry) = entries.remove(&keyframe_id) {
             // Remove from inverted index
@@ -76,15 +85,18 @@ impl KeyFrameDatabase {
     }
 
     /// Find candidate keyframes that share words with the query
-    /// 
+    ///
     /// # Arguments
     /// * `word_ids` - Word IDs from the query keyframe
     /// * `min_shared_words` - Minimum number of shared words
-    /// 
+    ///
     /// # Returns
     /// Vector of (keyframe_id, shared_word_count) sorted by count
     pub fn get_candidates(&self, word_ids: &[u32], min_shared_words: usize) -> Vec<(u64, usize)> {
-        let inverted = self.inverted_index.read().unwrap_or_else(|e| e.into_inner());
+        let inverted = self
+            .inverted_index
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         let _entries = self.entries.read().unwrap_or_else(|e| e.into_inner());
 
         // Count shared words for each keyframe
@@ -119,13 +131,13 @@ impl KeyFrameDatabase {
     }
 
     /// Detect loops by finding keyframes with high word overlap
-    /// 
+    ///
     /// # Arguments
     /// * `word_ids` - Word IDs from current keyframe
     /// * `current_id` - Current keyframe ID (to exclude)
     /// * `min_shared` - Minimum shared words
     /// * `min_score` - Minimum similarity score
-    /// 
+    ///
     /// # Returns
     /// Vector of (keyframe_id, score)
     pub fn detect_loop(
@@ -174,7 +186,10 @@ impl KeyFrameDatabase {
     /// Clear the database
     pub fn clear(&self) {
         let mut entries = self.entries.write().unwrap_or_else(|e| e.into_inner());
-        let mut inverted = self.inverted_index.write().unwrap_or_else(|e| e.into_inner());
+        let mut inverted = self
+            .inverted_index
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
         entries.clear();
         inverted.clear();
     }
@@ -230,7 +245,7 @@ mod tests {
     #[test]
     fn test_add_keyframe() {
         let db = KeyFrameDatabase::new(100);
-        
+
         let entry = KeyFrameEntry {
             id: 1,
             word_ids: vec![1, 2, 3],
@@ -238,7 +253,7 @@ mod tests {
             timestamp: 0.0,
             connected_ids: vec![],
         };
-        
+
         db.add_keyframe(entry);
         assert_eq!(db.num_keyframes(), 1);
     }
@@ -246,7 +261,7 @@ mod tests {
     #[test]
     fn test_get_candidates() {
         let db = KeyFrameDatabase::new(100);
-        
+
         // Add keyframe 1
         let entry1 = KeyFrameEntry {
             id: 1,
@@ -256,7 +271,7 @@ mod tests {
             connected_ids: vec![],
         };
         db.add_keyframe(entry1);
-        
+
         // Add keyframe 2
         let entry2 = KeyFrameEntry {
             id: 2,
@@ -266,17 +281,17 @@ mod tests {
             connected_ids: vec![],
         };
         db.add_keyframe(entry2);
-        
+
         // Query with word 2 and 3
         let candidates = db.get_candidates(&[2, 3], 1);
-        
+
         assert!(candidates.len() >= 1);
     }
 
     #[test]
     fn test_remove_keyframe() {
         let db = KeyFrameDatabase::new(100);
-        
+
         let entry = KeyFrameEntry {
             id: 1,
             word_ids: vec![1, 2, 3],
@@ -284,10 +299,10 @@ mod tests {
             timestamp: 0.0,
             connected_ids: vec![],
         };
-        
+
         db.add_keyframe(entry);
         assert_eq!(db.num_keyframes(), 1);
-        
+
         db.remove_keyframe(1);
         assert_eq!(db.num_keyframes(), 0);
     }
@@ -295,7 +310,7 @@ mod tests {
     #[test]
     fn test_clear() {
         let db = KeyFrameDatabase::new(100);
-        
+
         let entry = KeyFrameEntry {
             id: 1,
             word_ids: vec![1, 2, 3],
@@ -303,10 +318,10 @@ mod tests {
             timestamp: 0.0,
             connected_ids: vec![],
         };
-        
+
         db.add_keyframe(entry);
         db.clear();
-        
+
         assert_eq!(db.num_keyframes(), 0);
     }
 }

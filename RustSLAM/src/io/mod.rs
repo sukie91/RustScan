@@ -9,9 +9,9 @@ pub mod video_decoder;
 mod video_loader;
 
 pub use dataset::{
-    Dataset, DatasetConfig, DatasetError, DatasetIterator, DatasetMetadata, Frame, Result,
-    TumRgbdDataset, KittiDataset, EurocDataset,
+    Dataset, DatasetConfig, DatasetError, DatasetIterator, DatasetMetadata, EurocDataset, Frame,
+    KittiDataset, Result, TumRgbdDataset,
 };
 
 #[cfg(feature = "opencv")]
-pub use video_loader::{VideoLoader, VideoError};
+pub use video_loader::{VideoError, VideoLoader};

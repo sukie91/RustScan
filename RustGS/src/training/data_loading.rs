@@ -53,6 +53,7 @@ pub(crate) fn load_training_data(
     let expected_depth = width.saturating_mul(height);
 
     let mut frames = Vec::with_capacity(dataset.poses.len());
+    let mut real_depth_frames = 0usize;
     for pose in &dataset.poses {
         let color_u8 = load_color_image(&pose.image_path, width, height)?;
         if color_u8.len() != expected_color {
@@ -65,7 +66,10 @@ pub(crate) fn load_training_data(
         }
 
         let depth = match &pose.depth_path {
-            Some(path) => load_depth_image(path, width, height, dataset.depth_scale)?,
+            Some(path) => {
+                real_depth_frames += 1;
+                load_depth_image(path, width, height, dataset.depth_scale)?
+            }
             None if config.use_synthetic_depth => {
                 synthetic_depth(&color_u8, width, height, config.min_depth, config.max_depth)
             }
@@ -130,6 +134,12 @@ pub(crate) fn load_training_data(
         cameras.push(frame.camera);
         colors.push(frame.color_f32);
         depths.push(frame.depth);
+    }
+
+    if real_depth_frames == 0 && !config.use_synthetic_depth {
+        log::info!(
+            "Training dataset does not provide depth supervision; optimizing RGB loss only."
+        );
     }
 
     Ok(LoadedTrainingData {

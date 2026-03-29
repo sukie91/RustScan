@@ -126,9 +126,7 @@ impl ConfigLoader {
     /// Load configuration from file (with validation)
     pub fn load<P: AsRef<Path>>(path: P) -> Result<SlamConfig, ConfigError> {
         let path = path.as_ref();
-        let extension = path.extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("");
+        let extension = path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
         let config = match extension.to_lowercase().as_str() {
             "yaml" | "yml" => Self::load_yaml_raw(path)?,

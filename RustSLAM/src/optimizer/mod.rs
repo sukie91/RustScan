@@ -2,4 +2,4 @@
 
 pub mod ba;
 
-pub use ba::{BundleAdjuster, BACamera, BALandmark, BAObservation};
+pub use ba::{BACamera, BALandmark, BAObservation, BundleAdjuster};

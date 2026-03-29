@@ -29,7 +29,11 @@ impl StatusFlags {
     /// Set deleted flag
     #[inline]
     pub fn set_deleted(&mut self, deleted: bool) {
-        if deleted { self.0 |= 1; } else { self.0 &= !1; }
+        if deleted {
+            self.0 |= 1;
+        } else {
+            self.0 &= !1;
+        }
     }
 
     /// Check if selected
@@ -41,7 +45,11 @@ impl StatusFlags {
     /// Set selected flag
     #[inline]
     pub fn set_selected(&mut self, selected: bool) {
-        if selected { self.0 |= 2; } else { self.0 &= !2; }
+        if selected {
+            self.0 |= 2;
+        } else {
+            self.0 &= !2;
+        }
     }
 
     /// Check if locked
@@ -53,7 +61,11 @@ impl StatusFlags {
     /// Set locked flag
     #[inline]
     pub fn set_locked(&mut self, locked: bool) {
-        if locked { self.0 |= 4; } else { self.0 &= !4; }
+        if locked {
+            self.0 |= 4;
+        } else {
+            self.0 &= !4;
+        }
     }
 
     /// Check if hidden
@@ -65,7 +77,11 @@ impl StatusFlags {
     /// Set hidden flag
     #[inline]
     pub fn set_hidden(&mut self, hidden: bool) {
-        if hidden { self.0 |= 8; } else { self.0 &= !8; }
+        if hidden {
+            self.0 |= 8;
+        } else {
+            self.0 &= !8;
+        }
     }
 
     /// Check if boundary
@@ -77,7 +93,11 @@ impl StatusFlags {
     /// Set boundary flag
     #[inline]
     pub fn set_boundary(&mut self, boundary: bool) {
-        if boundary { self.0 |= 16; } else { self.0 &= !16; }
+        if boundary {
+            self.0 |= 16;
+        } else {
+            self.0 &= !16;
+        }
     }
 
     /// Check if feature
@@ -89,7 +109,11 @@ impl StatusFlags {
     /// Set feature flag
     #[inline]
     pub fn set_feature(&mut self, feature: bool) {
-        if feature { self.0 |= 32; } else { self.0 &= !32; }
+        if feature {
+            self.0 |= 32;
+        } else {
+            self.0 &= !32;
+        }
     }
 
     /// Check if tagged
@@ -101,7 +125,11 @@ impl StatusFlags {
     /// Set tagged flag
     #[inline]
     pub fn set_tagged(&mut self, tagged: bool) {
-        if tagged { self.0 |= 64; } else { self.0 &= !64; }
+        if tagged {
+            self.0 |= 64;
+        } else {
+            self.0 &= !64;
+        }
     }
 
     /// Check if fixed
@@ -113,7 +141,11 @@ impl StatusFlags {
     /// Set fixed flag
     #[inline]
     pub fn set_fixed(&mut self, fixed: bool) {
-        if fixed { self.0 |= 256; } else { self.0 &= !256; }
+        if fixed {
+            self.0 |= 256;
+        } else {
+            self.0 &= !256;
+        }
     }
 
     /// Check if constrained
@@ -125,7 +157,11 @@ impl StatusFlags {
     /// Set constrained flag
     #[inline]
     pub fn set_constrained(&mut self, constrained: bool) {
-        if constrained { self.0 |= 512; } else { self.0 &= !512; }
+        if constrained {
+            self.0 |= 512;
+        } else {
+            self.0 &= !512;
+        }
     }
 
     /// Check if visited
@@ -137,7 +173,11 @@ impl StatusFlags {
     /// Set visited flag
     #[inline]
     pub fn set_visited(&mut self, visited: bool) {
-        if visited { self.0 |= 128; } else { self.0 &= !128; }
+        if visited {
+            self.0 |= 128;
+        } else {
+            self.0 &= !128;
+        }
     }
 
     /// Get raw bits
@@ -303,16 +343,36 @@ impl StatusSet {
     #[inline]
     pub fn get(&self, idx: usize) -> StatusFlags {
         let mut flags = StatusFlags::new();
-        if self.deleted[idx] { flags.set_deleted(true); }
-        if self.selected[idx] { flags.set_selected(true); }
-        if self.locked[idx] { flags.set_locked(true); }
-        if self.hidden[idx] { flags.set_hidden(true); }
-        if self.boundary[idx] { flags.set_boundary(true); }
-        if self.feature[idx] { flags.set_feature(true); }
-        if self.tagged[idx] { flags.set_tagged(true); }
-        if self.visited[idx] { flags.set_visited(true); }
-        if self.fixed[idx] { flags.set_fixed(true); }
-        if self.constrained[idx] { flags.set_constrained(true); }
+        if self.deleted[idx] {
+            flags.set_deleted(true);
+        }
+        if self.selected[idx] {
+            flags.set_selected(true);
+        }
+        if self.locked[idx] {
+            flags.set_locked(true);
+        }
+        if self.hidden[idx] {
+            flags.set_hidden(true);
+        }
+        if self.boundary[idx] {
+            flags.set_boundary(true);
+        }
+        if self.feature[idx] {
+            flags.set_feature(true);
+        }
+        if self.tagged[idx] {
+            flags.set_tagged(true);
+        }
+        if self.visited[idx] {
+            flags.set_visited(true);
+        }
+        if self.fixed[idx] {
+            flags.set_fixed(true);
+        }
+        if self.constrained[idx] {
+            flags.set_constrained(true);
+        }
         flags
     }
 
@@ -332,50 +392,94 @@ impl StatusSet {
     }
 
     #[inline]
-    pub fn set_deleted(&mut self, idx: usize, deleted: bool) { self.deleted[idx] = deleted; }
+    pub fn set_deleted(&mut self, idx: usize, deleted: bool) {
+        self.deleted[idx] = deleted;
+    }
     #[inline]
-    pub fn is_deleted(&self, idx: usize) -> bool { self.deleted[idx] }
+    pub fn is_deleted(&self, idx: usize) -> bool {
+        self.deleted[idx]
+    }
     #[inline]
-    pub fn set_selected(&mut self, idx: usize, selected: bool) { self.selected[idx] = selected; }
+    pub fn set_selected(&mut self, idx: usize, selected: bool) {
+        self.selected[idx] = selected;
+    }
     #[inline]
-    pub fn is_selected(&self, idx: usize) -> bool { self.selected[idx] }
+    pub fn is_selected(&self, idx: usize) -> bool {
+        self.selected[idx]
+    }
     #[inline]
-    pub fn set_locked(&mut self, idx: usize, locked: bool) { self.locked[idx] = locked; }
+    pub fn set_locked(&mut self, idx: usize, locked: bool) {
+        self.locked[idx] = locked;
+    }
     #[inline]
-    pub fn is_locked(&self, idx: usize) -> bool { self.locked[idx] }
+    pub fn is_locked(&self, idx: usize) -> bool {
+        self.locked[idx]
+    }
     #[inline]
-    pub fn set_hidden(&mut self, idx: usize, hidden: bool) { self.hidden[idx] = hidden; }
+    pub fn set_hidden(&mut self, idx: usize, hidden: bool) {
+        self.hidden[idx] = hidden;
+    }
     #[inline]
-    pub fn is_hidden(&self, idx: usize) -> bool { self.hidden[idx] }
+    pub fn is_hidden(&self, idx: usize) -> bool {
+        self.hidden[idx]
+    }
     #[inline]
-    pub fn set_boundary(&mut self, idx: usize, boundary: bool) { self.boundary[idx] = boundary; }
+    pub fn set_boundary(&mut self, idx: usize, boundary: bool) {
+        self.boundary[idx] = boundary;
+    }
     #[inline]
-    pub fn is_boundary(&self, idx: usize) -> bool { self.boundary[idx] }
+    pub fn is_boundary(&self, idx: usize) -> bool {
+        self.boundary[idx]
+    }
     #[inline]
-    pub fn set_feature(&mut self, idx: usize, feature: bool) { self.feature[idx] = feature; }
+    pub fn set_feature(&mut self, idx: usize, feature: bool) {
+        self.feature[idx] = feature;
+    }
     #[inline]
-    pub fn is_feature(&self, idx: usize) -> bool { self.feature[idx] }
+    pub fn is_feature(&self, idx: usize) -> bool {
+        self.feature[idx]
+    }
     #[inline]
-    pub fn set_tagged(&mut self, idx: usize, tagged: bool) { self.tagged[idx] = tagged; }
+    pub fn set_tagged(&mut self, idx: usize, tagged: bool) {
+        self.tagged[idx] = tagged;
+    }
     #[inline]
-    pub fn is_tagged(&self, idx: usize) -> bool { self.tagged[idx] }
+    pub fn is_tagged(&self, idx: usize) -> bool {
+        self.tagged[idx]
+    }
     #[inline]
-    pub fn set_visited(&mut self, idx: usize, visited: bool) { self.visited[idx] = visited; }
+    pub fn set_visited(&mut self, idx: usize, visited: bool) {
+        self.visited[idx] = visited;
+    }
     #[inline]
-    pub fn is_visited(&self, idx: usize) -> bool { self.visited[idx] }
+    pub fn is_visited(&self, idx: usize) -> bool {
+        self.visited[idx]
+    }
     #[inline]
-    pub fn set_fixed(&mut self, idx: usize, fixed: bool) { self.fixed[idx] = fixed; }
+    pub fn set_fixed(&mut self, idx: usize, fixed: bool) {
+        self.fixed[idx] = fixed;
+    }
     #[inline]
-    pub fn is_fixed(&self, idx: usize) -> bool { self.fixed[idx] }
+    pub fn is_fixed(&self, idx: usize) -> bool {
+        self.fixed[idx]
+    }
     #[inline]
-    pub fn set_constrained(&mut self, idx: usize, constrained: bool) { self.constrained[idx] = constrained; }
+    pub fn set_constrained(&mut self, idx: usize, constrained: bool) {
+        self.constrained[idx] = constrained;
+    }
     #[inline]
-    pub fn is_constrained(&self, idx: usize) -> bool { self.constrained[idx] }
+    pub fn is_constrained(&self, idx: usize) -> bool {
+        self.constrained[idx]
+    }
 
     #[inline]
-    pub fn len(&self) -> usize { self.deleted.len() }
+    pub fn len(&self) -> usize {
+        self.deleted.len()
+    }
     #[inline]
-    pub fn is_empty(&self) -> bool { self.deleted.is_empty() }
+    pub fn is_empty(&self) -> bool {
+        self.deleted.is_empty()
+    }
     #[inline]
     pub fn clear(&mut self) {
         self.deleted.clear();
@@ -392,7 +496,9 @@ impl StatusSet {
 }
 
 impl Default for StatusSet {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(test)]
@@ -423,11 +529,11 @@ mod tests {
         let mut flags1 = StatusFlags::new();
         flags1.set_deleted(true);
         flags1.set_selected(true);
-        
+
         let mut flags2 = StatusFlags::new();
         flags2.set_deleted(true);
         flags2.set_locked(true);
-        
+
         let combined = flags1 | flags2;
         assert!(combined.is_deleted());
         assert!(combined.is_selected());
@@ -440,11 +546,11 @@ mod tests {
         status.add();
         status.add();
         status.add();
-        
+
         status.set_selected(0, true);
         status.set_locked(1, true);
         status.set_deleted(2, true);
-        
+
         assert!(status.is_selected(0));
         assert!(status.is_locked(1));
         assert!(status.is_deleted(2));

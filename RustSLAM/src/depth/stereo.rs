@@ -52,7 +52,10 @@ impl StereoMatcher {
         };
 
         Self {
-            config: StereoConfig { block_size, ..config }
+            config: StereoConfig {
+                block_size,
+                ..config
+            },
         }
     }
 
@@ -155,7 +158,15 @@ impl StereoMatcher {
         let directions = [(-1, 0), (1, 0), (0, -1), (0, 1)];
 
         for (dx, dy) in directions.iter() {
-            self.aggregate_direction(&mut aggregated, cost_volume, width, height, num_disp, *dx, *dy);
+            self.aggregate_direction(
+                &mut aggregated,
+                cost_volume,
+                width,
+                height,
+                num_disp,
+                *dx,
+                *dy,
+            );
         }
 
         aggregated
@@ -186,7 +197,7 @@ impl StereoMatcher {
         let y_range: Vec<usize> = if step_y > 0 {
             (start_y..end_y).collect()
         } else {
-            (end_y+1..=start_y).rev().collect()
+            (end_y + 1..=start_y).rev().collect()
         };
 
         for y in y_range {
@@ -194,7 +205,7 @@ impl StereoMatcher {
             let x_range: Vec<usize> = if step_x > 0 {
                 (start_x..end_x).collect()
             } else {
-                (end_x+1..=start_x).rev().collect()
+                (end_x + 1..=start_x).rev().collect()
             };
 
             for x in x_range {
@@ -212,11 +223,18 @@ impl StereoMatcher {
                     // Get minimum cost from previous pixel
                     let mut min_prev = i32::MAX;
                     for pd in 0..num_disp {
-                        let prev_idx = pd * width * height + (prev_y as usize) * width + (prev_x as usize);
+                        let prev_idx =
+                            pd * width * height + (prev_y as usize) * width + (prev_x as usize);
                         let prev_cost = aggregated[prev_idx];
                         let diff = (d as i32 - pd as i32).abs();
 
-                        let penalty = if diff == 1 { p1 } else if diff > 1 { p2 } else { 0 };
+                        let penalty = if diff == 1 {
+                            p1
+                        } else if diff > 1 {
+                            p2
+                        } else {
+                            0
+                        };
                         let cost = prev_cost + penalty;
 
                         if cost < min_prev {
@@ -278,7 +296,12 @@ impl StereoMatcher {
     /// Convert disparity to depth
     ///
     /// depth = baseline * focal_length / disparity
-    pub fn disparity_to_depth(&self, disparity: &[f32], focal_length: f32, baseline: f32) -> Vec<f32> {
+    pub fn disparity_to_depth(
+        &self,
+        disparity: &[f32],
+        focal_length: f32,
+        baseline: f32,
+    ) -> Vec<f32> {
         disparity
             .iter()
             .map(|&d| {
@@ -301,8 +324,15 @@ pub struct BlockMatcher {
 impl BlockMatcher {
     /// Create a new block matcher
     pub fn new(block_size: usize, num_disparities: usize) -> Self {
-        let block_size = if block_size % 2 == 0 { block_size + 1 } else { block_size };
-        Self { block_size, num_disparities }
+        let block_size = if block_size % 2 == 0 {
+            block_size + 1
+        } else {
+            block_size
+        };
+        Self {
+            block_size,
+            num_disparities,
+        }
     }
 
     /// Compute disparity using block matching (SAD)
@@ -359,14 +389,16 @@ mod tests {
 
         // Right image shifted by 20 pixels
         let right: Vec<u8> = (0..height)
-            .flat_map(|y| (0..width).map(move |x| {
-                let shift = 20;
-                if x >= shift {
-                    ((x - shift + y) % 256) as u8
-                } else {
-                    0
-                }
-            }))
+            .flat_map(|y| {
+                (0..width).map(move |x| {
+                    let shift = 20;
+                    if x >= shift {
+                        ((x - shift + y) % 256) as u8
+                    } else {
+                        0
+                    }
+                })
+            })
             .collect();
 
         (left, right)

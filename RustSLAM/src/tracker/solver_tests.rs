@@ -86,7 +86,10 @@ mod tests {
         }
 
         let (estimated_pose, inliers) = solver.solve(&problem).expect("pnp pose");
-        assert_eq!(inliers.iter().filter(|&&x| x).count(), problem.image_points.len());
+        assert_eq!(
+            inliers.iter().filter(|&&x| x).count(),
+            problem.image_points.len()
+        );
 
         let expected_t = pose.translation();
         let estimated_t = estimated_pose.translation();
@@ -108,7 +111,12 @@ mod tests {
             + expected_q[2] * estimated_q[2]
             + expected_q[3] * estimated_q[3])
             .abs();
-        assert!(dot > 0.99, "expected quaternion {:?}, got {:?}", expected_q, estimated_q);
+        assert!(
+            dot > 0.99,
+            "expected quaternion {:?}, got {:?}",
+            expected_q,
+            estimated_q
+        );
     }
 
     #[test]
@@ -135,7 +143,10 @@ mod tests {
         }
 
         let (estimated_pose, inliers) = solver.solve(&problem).expect("dense pnp pose");
-        assert_eq!(inliers.iter().filter(|&&x| x).count(), problem.image_points.len());
+        assert_eq!(
+            inliers.iter().filter(|&&x| x).count(),
+            problem.image_points.len()
+        );
 
         let expected_t = pose.translation();
         let estimated_t = estimated_pose.translation();

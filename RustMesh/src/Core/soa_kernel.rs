@@ -10,8 +10,8 @@
 //! - halfedge_handles: Vec<Option<HalfedgeHandle>>
 //!
 
-use crate::handles::{VertexHandle, HalfedgeHandle, EdgeHandle, FaceHandle};
-use crate::items::{Halfedge, Edge, Face};
+use crate::handles::{EdgeHandle, FaceHandle, HalfedgeHandle, VertexHandle};
+use crate::items::{Edge, Face, Halfedge};
 use glam::{Vec2, Vec3, Vec4};
 use std::collections::HashMap;
 
@@ -257,7 +257,7 @@ impl SoAKernel {
         } else {
             (end_vh.idx(), start_vh.idx())
         };
-        
+
         // Check if edge already exists
         if let Some(&existing_heh) = self.edge_map.get(&(v0, v1)) {
             // Return the halfedge pointing to end_vh
@@ -266,10 +266,12 @@ impl SoAKernel {
                 return existing_heh;
             } else {
                 // Return opposite halfedge (safe because every halfedge has an opposite)
-                return self.opposite_halfedge_handle(existing_heh).unwrap_or(existing_heh);
+                return self
+                    .opposite_halfedge_handle(existing_heh)
+                    .unwrap_or(existing_heh);
             }
         }
-        
+
         // Create new edge
         let edge_idx = self.edges.len() as u32;
         let he0_idx = self.halfedges.len() as u32;
@@ -302,7 +304,7 @@ impl SoAKernel {
         self.halfedges.push(he1);
         self.next_set.push(false);
         self.next_set.push(false);
-        
+
         // Store edge in map for O(1) lookup
         self.edge_map.insert((v0, v1), he0_handle);
 
@@ -364,7 +366,10 @@ impl SoAKernel {
     /// Get active (non-deleted) face count
     #[inline]
     pub fn n_active_faces(&self) -> usize {
-        self.faces.iter().filter(|f| f.halfedge_handle.is_some()).count()
+        self.faces
+            .iter()
+            .filter(|f| f.halfedge_handle.is_some())
+            .count()
     }
 
     /// Get face by handle
@@ -495,7 +500,7 @@ impl SoAKernel {
         }
         self.halfedge_handles[idx] = Some(heh);
     }
-    
+
     /// Set halfedge's to_vertex (target vertex)
     #[inline]
     pub fn set_halfedge_to_vertex(&mut self, heh: HalfedgeHandle, vh: VertexHandle) {
@@ -505,7 +510,7 @@ impl SoAKernel {
         }
         self.halfedges[idx].vertex_handle = vh;
     }
-    
+
     /// Mark a vertex as deleted
     #[inline]
     pub fn delete_vertex(&mut self, vh: VertexHandle) {
@@ -515,7 +520,7 @@ impl SoAKernel {
         }
         // In a full implementation, we'd also mark position as invalid
     }
-    
+
     /// Mark a face as deleted
     #[inline]
     pub fn delete_face(&mut self, fh: FaceHandle) {
@@ -531,14 +536,14 @@ impl SoAKernel {
                         break;
                     }
                     visited[curr_idx] = true;
-                    
+
                     // IMPORTANT: Save next handle BEFORE clearing it
                     let next_handle = self.next_halfedge_handle(current);
-                    
+
                     if let Some(he) = self.halfedge_mut(current) {
                         he.face_handle = None;
                     }
-                    
+
                     // Move to next before clearing next pointer
                     match next_handle {
                         Some(next) if next.is_valid() => current = next,
@@ -549,7 +554,7 @@ impl SoAKernel {
             self.faces[idx].halfedge_handle = None;
         }
     }
-    
+
     /// Mark an edge as deleted
     #[inline]
     pub fn delete_edge(&mut self, eh: EdgeHandle) {
@@ -572,7 +577,8 @@ impl SoAKernel {
             }
 
             // Mark halfedges as invalid
-            self.edges[idx].halfedges = [HalfedgeHandle::new(u32::MAX), HalfedgeHandle::new(u32::MAX)];
+            self.edges[idx].halfedges =
+                [HalfedgeHandle::new(u32::MAX), HalfedgeHandle::new(u32::MAX)];
         }
     }
 }
@@ -601,12 +607,24 @@ impl SoAKernel {
             let vy = self.y[i];
             let vz = self.z[i];
 
-            if vx < min_x { min_x = vx; }
-            if vx > max_x { max_x = vx; }
-            if vy < min_y { min_y = vy; }
-            if vy > max_y { max_y = vy; }
-            if vz < min_z { min_z = vz; }
-            if vz > max_z { max_z = vz; }
+            if vx < min_x {
+                min_x = vx;
+            }
+            if vx > max_x {
+                max_x = vx;
+            }
+            if vy < min_y {
+                min_y = vy;
+            }
+            if vy > max_y {
+                max_y = vy;
+            }
+            if vz < min_z {
+                min_z = vz;
+            }
+            if vz > max_z {
+                max_z = vz;
+            }
         }
 
         (min_x, max_x, min_y, max_y, min_z, max_z)
@@ -736,12 +754,24 @@ impl SoAKernel {
             let vy = *ptr_y.add(i);
             let vz = *ptr_z.add(i);
 
-            if vx < min_x { min_x = vx; }
-            if vx > max_x { max_x = vx; }
-            if vy < min_y { min_y = vy; }
-            if vy > max_y { max_y = vy; }
-            if vz < min_z { min_z = vz; }
-            if vz > max_z { max_z = vz; }
+            if vx < min_x {
+                min_x = vx;
+            }
+            if vx > max_x {
+                max_x = vx;
+            }
+            if vy < min_y {
+                min_y = vy;
+            }
+            if vy > max_y {
+                max_y = vy;
+            }
+            if vz < min_z {
+                min_z = vz;
+            }
+            if vz > max_z {
+                max_z = vz;
+            }
 
             i += 1;
         }
@@ -829,7 +859,8 @@ impl SoAKernel {
 
     /// Get vertex normal
     pub fn vertex_normal(&self, vh: VertexHandle) -> Option<Vec3> {
-        self.vertex_normals.as_ref()
+        self.vertex_normals
+            .as_ref()
             .and_then(|n| n.get(vh.idx_usize()).copied())
     }
 
@@ -857,7 +888,8 @@ impl SoAKernel {
 
     /// Get vertex color
     pub fn vertex_color(&self, vh: VertexHandle) -> Option<Vec4> {
-        self.vertex_colors.as_ref()
+        self.vertex_colors
+            .as_ref()
             .and_then(|c| c.get(vh.idx_usize()).copied())
     }
 
@@ -885,7 +917,8 @@ impl SoAKernel {
 
     /// Get vertex texcoord
     pub fn vertex_texcoord(&self, vh: VertexHandle) -> Option<Vec2> {
-        self.vertex_texcoords.as_ref()
+        self.vertex_texcoords
+            .as_ref()
             .and_then(|t| t.get(vh.idx_usize()).copied())
     }
 
@@ -915,7 +948,8 @@ impl SoAKernel {
 
     /// Get halfedge normal
     pub fn halfedge_normal(&self, heh: HalfedgeHandle) -> Option<Vec3> {
-        self.halfedge_normals.as_ref()
+        self.halfedge_normals
+            .as_ref()
             .and_then(|n| n.get(heh.idx_usize()).copied())
     }
 
@@ -943,7 +977,8 @@ impl SoAKernel {
 
     /// Get halfedge color
     pub fn halfedge_color(&self, heh: HalfedgeHandle) -> Option<Vec4> {
-        self.halfedge_colors.as_ref()
+        self.halfedge_colors
+            .as_ref()
             .and_then(|c| c.get(heh.idx_usize()).copied())
     }
 
@@ -971,7 +1006,8 @@ impl SoAKernel {
 
     /// Get halfedge texcoord
     pub fn halfedge_texcoord(&self, heh: HalfedgeHandle) -> Option<Vec2> {
-        self.halfedge_texcoords.as_ref()
+        self.halfedge_texcoords
+            .as_ref()
             .and_then(|t| t.get(heh.idx_usize()).copied())
     }
 
@@ -1001,7 +1037,8 @@ impl SoAKernel {
 
     /// Get edge color
     pub fn edge_color(&self, eh: EdgeHandle) -> Option<Vec4> {
-        self.edge_colors.as_ref()
+        self.edge_colors
+            .as_ref()
             .and_then(|c| c.get(eh.idx_usize()).copied())
     }
 
@@ -1031,7 +1068,8 @@ impl SoAKernel {
 
     /// Get face normal
     pub fn face_normal(&self, fh: FaceHandle) -> Option<Vec3> {
-        self.face_normals.as_ref()
+        self.face_normals
+            .as_ref()
             .and_then(|n| n.get(fh.idx_usize()).copied())
     }
 
@@ -1059,7 +1097,8 @@ impl SoAKernel {
 
     /// Get face color
     pub fn face_color(&self, fh: FaceHandle) -> Option<Vec4> {
-        self.face_colors.as_ref()
+        self.face_colors
+            .as_ref()
             .and_then(|c| c.get(fh.idx_usize()).copied())
     }
 

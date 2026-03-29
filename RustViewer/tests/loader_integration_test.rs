@@ -9,14 +9,21 @@ use std::path::Path;
 fn test_load_checkpoint_from_output() {
     let checkpoint_path = Path::new("../RustSLAM/output/checkpoints/pipeline.json");
     if !checkpoint_path.exists() {
-        eprintln!("Skipping test: checkpoint file not found at {:?}", checkpoint_path);
+        eprintln!(
+            "Skipping test: checkpoint file not found at {:?}",
+            checkpoint_path
+        );
         return;
     }
 
     let mut scene = Scene::default();
     let result = checkpoint::load_checkpoint(checkpoint_path, &mut scene);
 
-    assert!(result.is_ok(), "Failed to load checkpoint: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Failed to load checkpoint: {:?}",
+        result.err()
+    );
 
     // Check that we loaded some data
     println!("Loaded {} keyframes", scene.trajectory.len());
@@ -37,7 +44,11 @@ fn test_load_obj_cube() {
     let mut scene = Scene::default();
     let result = mesh::load_mesh(obj_path, &mut scene);
 
-    assert!(result.is_ok(), "Failed to load cube.obj: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Failed to load cube.obj: {:?}",
+        result.err()
+    );
 
     println!("Loaded {} vertices", scene.mesh_vertices.len());
     println!("Loaded {} indices", scene.mesh_indices.len());
@@ -52,14 +63,21 @@ fn test_load_obj_cube() {
 fn test_load_obj_finalbasemesh() {
     let obj_path = Path::new("../test_data/large/FinalBaseMesh.obj");
     if !obj_path.exists() {
-        eprintln!("Skipping test: FinalBaseMesh.obj not found at {:?}", obj_path);
+        eprintln!(
+            "Skipping test: FinalBaseMesh.obj not found at {:?}",
+            obj_path
+        );
         return;
     }
 
     let mut scene = Scene::default();
     let result = mesh::load_mesh(obj_path, &mut scene);
 
-    assert!(result.is_ok(), "Failed to load FinalBaseMesh.obj: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Failed to load FinalBaseMesh.obj: {:?}",
+        result.err()
+    );
 
     println!("Loaded {} vertices", scene.mesh_vertices.len());
     println!("Loaded {} indices", scene.mesh_indices.len());
@@ -69,5 +87,8 @@ fn test_load_obj_finalbasemesh() {
     assert!(scene.mesh_indices.len() > 0, "Should have loaded faces");
 
     // FinalBaseMesh.obj has 24461 vertices and 48918 faces
-    assert!(scene.mesh_vertices.len() >= 24000, "Should have ~24k vertices");
+    assert!(
+        scene.mesh_vertices.len() >= 24000,
+        "Should have ~24k vertices"
+    );
 }

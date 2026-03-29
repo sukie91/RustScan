@@ -6,7 +6,9 @@
 //! Supports both Hamming distance (for binary descriptors like ORB/BRIEF)
 //! and Squared Euclidean distance (for float descriptors like SIFT/SURF).
 
-use crate::features::base::{FeatureMatcher, FeatureError, Descriptors, Match, ORB_DESCRIPTOR_SIZE};
+use crate::features::base::{
+    Descriptors, FeatureError, FeatureMatcher, Match, ORB_DESCRIPTOR_SIZE,
+};
 use kiddo::KdTree;
 use kiddo::SquaredEuclidean;
 use std::collections::HashMap;
@@ -45,10 +47,10 @@ pub struct KnnMatcher {
 
 impl KnnMatcher {
     /// Create a new KnnMatcher with specified number of neighbors
-    /// 
+    ///
     /// # Arguments
     /// * `k` - Number of nearest neighbors to find
-    /// 
+    ///
     /// # Example
     /// ```ignore
     /// let matcher = KnnMatcher::new(2);
@@ -76,10 +78,10 @@ impl KnnMatcher {
     }
 
     /// Build the KD-Tree from training descriptors
-    /// 
+    ///
     /// # Arguments
     /// * `descriptors` - Vector of descriptors, each descriptor is ORB-sized.
-    /// 
+    ///
     /// # Example
     /// ```ignore
     /// let mut matcher = KnnMatcher::new(2);
@@ -95,29 +97,26 @@ impl KnnMatcher {
     }
 
     /// Perform KNN matching for a single query descriptor
-    /// 
+    ///
     /// # Arguments
     /// * `query` - Query descriptor (ORB-sized).
-    /// 
+    ///
     /// # Returns
     /// Vector of (distance, index) pairs for the k nearest neighbors
     pub fn knn_match(&self, query: &[f64; ORB_DESCRIPTOR_SIZE]) -> Vec<(f64, u64)> {
         if !self.built {
             return Vec::new();
         }
-        
+
         let results = self.tree.nearest_n::<SquaredEuclidean>(query, self.k);
-        results
-            .into_iter()
-            .map(|r| (r.distance, r.item))
-            .collect()
+        results.into_iter().map(|r| (r.distance, r.item)).collect()
     }
 
     /// Perform KNN matching for multiple query descriptors
-    /// 
+    ///
     /// # Arguments
     /// * `queries` - Vector of query descriptors
-    /// 
+    ///
     /// # Returns
     /// Vector of vectors, each containing (distance, index) pairs
     pub fn knn_match_batch(&self, queries: &[[f64; ORB_DESCRIPTOR_SIZE]]) -> Vec<Vec<(f64, u64)>> {
@@ -125,19 +124,23 @@ impl KnnMatcher {
     }
 
     /// Match with Lowe's ratio test for filtering ambiguous matches
-    /// 
+    ///
     /// The ratio test filters matches where the best match is significantly
     /// better than the second best match. This helps eliminate ambiguous matches.
-    /// 
+    ///
     /// # Arguments
     /// * `query` - Query descriptor (ORB-sized).
     /// * `ratio_threshold` - Lowe's ratio test threshold (typically 0.7-0.8)
-    /// 
+    ///
     /// # Returns
     /// Vector of (distance, index) pairs that pass the ratio test
-    pub fn match_with_ratio(&self, query: &[f64; ORB_DESCRIPTOR_SIZE], ratio_threshold: f64) -> Vec<(f64, u64)> {
+    pub fn match_with_ratio(
+        &self,
+        query: &[f64; ORB_DESCRIPTOR_SIZE],
+        ratio_threshold: f64,
+    ) -> Vec<(f64, u64)> {
         let matches = self.knn_match(query);
-        
+
         if matches.len() < 2 {
             return matches;
         }
@@ -154,14 +157,18 @@ impl KnnMatcher {
     }
 
     /// Match multiple queries with ratio test
-    /// 
+    ///
     /// # Arguments
     /// * `queries` - Vector of query descriptors
     /// * `ratio_threshold` - Lowe's ratio test threshold
-    /// 
+    ///
     /// # Returns
     /// HashMap mapping query index to matched (distance, index) pairs
-    pub fn match_batch_with_ratio(&self, queries: &[[f64; ORB_DESCRIPTOR_SIZE]], ratio_threshold: f64) -> HashMap<usize, Vec<(f64, u64)>> {
+    pub fn match_batch_with_ratio(
+        &self,
+        queries: &[[f64; ORB_DESCRIPTOR_SIZE]],
+        ratio_threshold: f64,
+    ) -> HashMap<usize, Vec<(f64, u64)>> {
         let mut results = HashMap::new();
         for (idx, query) in queries.iter().enumerate() {
             let matches = self.match_with_ratio(query, ratio_threshold);
@@ -192,7 +199,8 @@ impl KnnMatcher {
         if descriptors.size != ORB_DESCRIPTOR_SIZE {
             return Vec::new();
         }
-        descriptors.data
+        descriptors
+            .data
             .chunks(ORB_DESCRIPTOR_SIZE)
             .map(|chunk| {
                 let mut arr = [0.0; ORB_DESCRIPTOR_SIZE];
@@ -257,7 +265,9 @@ impl KnnMatcher {
                 }
             }
 
-            let Some(best) = best else { continue; };
+            let Some(best) = best else {
+                continue;
+            };
 
             if let Some(ratio) = ratio_threshold {
                 if let Some(second) = second {
@@ -412,7 +422,8 @@ mod tests {
 
         matcher.build_tree(&descriptors);
 
-        let queries: Vec<[f64; ORB_DESCRIPTOR_SIZE]> = vec![descriptors[0], descriptors[5], descriptors[10]];
+        let queries: Vec<[f64; ORB_DESCRIPTOR_SIZE]> =
+            vec![descriptors[0], descriptors[5], descriptors[10]];
         let results = matcher.knn_match_batch(&queries);
 
         assert_eq!(results.len(), 3);
@@ -460,13 +471,20 @@ mod tests {
         // Query with first descriptor
         let matches = matcher.match_with_ratio(&desc1, 0.75);
 
-        let distance_1_2: f64 = desc1.iter().zip(desc2.iter())
-            .map(|(x, y)| (x - y).powi(2)).sum::<f64>().sqrt();
+        let distance_1_2: f64 = desc1
+            .iter()
+            .zip(desc2.iter())
+            .map(|(x, y)| (x - y).powi(2))
+            .sum::<f64>()
+            .sqrt();
         let distance_1_1 = 0.0f64;
 
         let ratio = distance_1_1 / distance_1_2;
         if ratio > 0.75 {
-            assert!(matches.is_empty(), "Expected no match due to ratio test, but got matches");
+            assert!(
+                matches.is_empty(),
+                "Expected no match due to ratio test, but got matches"
+            );
         } else {
             assert!(!matches.is_empty(), "Expected match but got none");
         }
@@ -510,7 +528,10 @@ mod tests {
         train.data.fill(10);
 
         let matches = matcher.match_descriptors(&query, &train).unwrap();
-        assert!(matches.is_empty(), "Expected ratio test to reject ambiguous match");
+        assert!(
+            matches.is_empty(),
+            "Expected ratio test to reject ambiguous match"
+        );
     }
 
     #[test]
@@ -526,7 +547,10 @@ mod tests {
         train.data.fill(10);
 
         let matches = matcher.match_descriptors(&query, &train).unwrap();
-        assert!(matches.is_empty(), "Expected ratio test to reject ambiguous match");
+        assert!(
+            matches.is_empty(),
+            "Expected ratio test to reject ambiguous match"
+        );
     }
 
     #[test]
@@ -536,7 +560,8 @@ mod tests {
 
         matcher.build_tree(&descriptors);
 
-        let queries: Vec<[f64; ORB_DESCRIPTOR_SIZE]> = vec![descriptors[0], descriptors[3], descriptors[7]];
+        let queries: Vec<[f64; ORB_DESCRIPTOR_SIZE]> =
+            vec![descriptors[0], descriptors[3], descriptors[7]];
         let results = matcher.match_batch_with_ratio(&queries, 0.75);
 
         // Should have matches for all 3 queries

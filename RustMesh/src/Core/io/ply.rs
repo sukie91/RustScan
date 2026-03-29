@@ -24,11 +24,7 @@ pub enum PlyFormat {
 }
 
 /// Write mesh to PLY file
-pub fn write_ply(
-    mesh: &RustMesh,
-    path: impl AsRef<Path>,
-    format: PlyFormat,
-) -> io::Result<()> {
+pub fn write_ply(mesh: &RustMesh, path: impl AsRef<Path>, format: PlyFormat) -> io::Result<()> {
     match format {
         PlyFormat::Ascii => write_ply_ascii(mesh, path),
         PlyFormat::BinaryLittleEndian => write_ply_binary(mesh, path, false),
@@ -120,11 +116,7 @@ fn write_ply_ascii(mesh: &RustMesh, path: impl AsRef<Path>) -> io::Result<()> {
 }
 
 /// Write PLY in binary format
-fn write_ply_binary(
-    mesh: &RustMesh,
-    path: impl AsRef<Path>,
-    big_endian: bool,
-) -> io::Result<()> {
+fn write_ply_binary(mesh: &RustMesh, path: impl AsRef<Path>, big_endian: bool) -> io::Result<()> {
     let file = File::create(path)?;
     let mut writer = BufWriter::new(file);
 

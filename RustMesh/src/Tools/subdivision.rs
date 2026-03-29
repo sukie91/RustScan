@@ -20,8 +20,8 @@
 //!
 //! - Kobbelt, L. (2000). "Sqrt(3)-Subdivision". SIGGRAPH 2000.
 
-use crate::handles::{VertexHandle, HalfedgeHandle, FaceHandle};
 use crate::connectivity::RustMesh;
+use crate::handles::{FaceHandle, HalfedgeHandle, VertexHandle};
 use std::collections::HashMap;
 
 /// Error types for subdivision operations
@@ -52,7 +52,9 @@ impl std::fmt::Display for SubdivisionError {
             Self::EdgeNotFound => write!(f, "Edge not found"),
             Self::VertexNotFound => write!(f, "Vertex not found"),
             Self::FaceNotFound => write!(f, "Face not found"),
-            Self::NotTriangular => write!(f, "Mesh is not triangular (required for Loop subdivision)"),
+            Self::NotTriangular => {
+                write!(f, "Mesh is not triangular (required for Loop subdivision)")
+            }
         }
     }
 }
@@ -144,7 +146,7 @@ fn get_face_vertices(mesh: &RustMesh, fh: FaceHandle) -> Vec<VertexHandle> {
 fn get_all_edges(mesh: &RustMesh) -> Vec<(VertexHandle, VertexHandle)> {
     let mut edges = Vec::with_capacity(mesh.n_edges());
     let n_halfedges = mesh.n_halfedges();
-    
+
     // Iterate through halfedges (every pair is an edge)
     for i in (0..n_halfedges).step_by(2) {
         let heh = HalfedgeHandle::new(i as u32);
@@ -152,7 +154,7 @@ fn get_all_edges(mesh: &RustMesh) -> Vec<(VertexHandle, VertexHandle)> {
         let to = mesh.to_vertex_handle(heh);
         edges.push((from, to));
     }
-    
+
     edges
 }
 
@@ -218,10 +220,16 @@ fn get_vertex_valence(mesh: &RustMesh, vh: VertexHandle) -> usize {
 /// # Returns
 /// * `Ok(VertexHandle)` - The handle to the new vertex
 /// * `Err(SubdivisionError)` - If the operation fails
-pub fn split_edge(mesh: &mut RustMesh, v0: VertexHandle, v1: VertexHandle) -> SubdivisionResult<VertexHandle> {
+pub fn split_edge(
+    mesh: &mut RustMesh,
+    v0: VertexHandle,
+    v1: VertexHandle,
+) -> SubdivisionResult<VertexHandle> {
     // Validate vertices
     if !v0.is_valid() || !v1.is_valid() {
-        return Err(SubdivisionError::InvalidHandle("Invalid vertex handle".to_string()));
+        return Err(SubdivisionError::InvalidHandle(
+            "Invalid vertex handle".to_string(),
+        ));
     }
 
     // Get positions
@@ -366,18 +374,18 @@ fn calculate_loop_new_position(mesh: &RustMesh, vh: VertexHandle) -> Subdivision
     let old_pos = mesh.point(vh).ok_or(SubdivisionError::VertexNotFound)?;
     let neighbors = get_vertex_neighbors(mesh, vh);
     let n = neighbors.len();
-    
+
     if n == 0 {
         return Ok(old_pos);
     }
-    
+
     let boundary = is_boundary_vertex(mesh, vh);
-    
+
     if boundary {
         // Boundary vertex: use simplified scheme
         // Find the two boundary neighbors
         let mut boundary_neighbors = Vec::new();
-        
+
         for &nh in &neighbors {
             if let Some(heh) = mesh.halfedge_handle(vh) {
                 let mut current = heh;
@@ -397,12 +405,12 @@ fn calculate_loop_new_position(mesh: &RustMesh, vh: VertexHandle) -> Subdivision
                 }
             }
         }
-        
+
         // Use boundary scheme if we have at least one boundary neighbor
         if boundary_neighbors.len() >= 1 {
             let left = boundary_neighbors[0];
             let left_pos = mesh.point(left).unwrap_or(old_pos);
-            
+
             // Try to find right neighbor
             if boundary_neighbors.len() >= 2 {
                 let right = boundary_neighbors[1];
@@ -413,9 +421,10 @@ fn calculate_loop_new_position(mesh: &RustMesh, vh: VertexHandle) -> Subdivision
                 return Ok(old_pos * 0.75 + left_pos * 0.25);
             }
         }
-        
+
         // Fallback: just average all neighbors
-        let sum: glam::Vec3 = neighbors.iter()
+        let sum: glam::Vec3 = neighbors
+            .iter()
             .filter_map(|&nh| mesh.point(nh))
             .fold(glam::Vec3::ZERO, |a, b| a + b);
         return Ok(old_pos * 0.25 + sum * 0.25);
@@ -423,22 +432,23 @@ fn calculate_loop_new_position(mesh: &RustMesh, vh: VertexHandle) -> Subdivision
         // Interior vertex: full Loop scheme
         // Beta calculation: beta = 1/n * (5/8 - (3/8 + 1/4*cos(2*pi/n))^2)
         let n_f32 = n as f32;
-        
+
         // Calculate cos(2*pi/n) using trig identity
         let theta = std::f32::consts::TAU / n_f32;
         let cos_theta = theta.cos();
-        
+
         // Beta formula
         let beta = (5.0 / 8.0 - (3.0 / 8.0 + 0.25 * cos_theta).powi(2)) / n_f32;
-        
+
         // Sum of neighbor positions
-        let neighbor_sum: glam::Vec3 = neighbors.iter()
+        let neighbor_sum: glam::Vec3 = neighbors
+            .iter()
             .filter_map(|&nh| mesh.point(nh))
             .fold(glam::Vec3::ZERO, |a, b| a + b);
-        
+
         // New position
         let new_pos = old_pos * (1.0 - n_f32 * beta) + neighbor_sum * beta;
-        
+
         Ok(new_pos)
     }
 }
@@ -461,20 +471,20 @@ pub fn loop_subdivide(mesh: &mut RustMesh) -> SubdivisionResult<SubdivisionStats
     if mesh.n_vertices() == 0 {
         return Err(SubdivisionError::EmptyMesh);
     }
-    
+
     if mesh.n_faces() == 0 {
         return Err(SubdivisionError::EmptyMesh);
     }
-    
+
     // Check that mesh is triangular
     if !is_triangular(mesh) {
         return Err(SubdivisionError::NotTriangular);
     }
-    
+
     let original_vertices = mesh.n_vertices();
     let original_edges = mesh.n_edges();
     let original_faces = mesh.n_faces();
-    
+
     // Store original vertex positions for update after splitting
     let mut original_positions: HashMap<u32, glam::Vec3> = HashMap::new();
     for vh in mesh.vertices() {
@@ -482,29 +492,37 @@ pub fn loop_subdivide(mesh: &mut RustMesh) -> SubdivisionResult<SubdivisionStats
             original_positions.insert(vh.idx(), pos);
         }
     }
-    
+
     // Step 1: Collect all edges and their adjacent faces
     // For each edge, we'll create a new vertex
     let mut edge_to_new_vertex: HashMap<(u32, u32), VertexHandle> = HashMap::new();
     let mut edges_processed: Vec<(VertexHandle, VertexHandle, HalfedgeHandle)> = Vec::new();
-    
+
     let n_halfedges = mesh.n_halfedges();
     for i in (0..n_halfedges).step_by(2) {
         let heh = HalfedgeHandle::new(i as u32);
         let v0 = mesh.from_vertex_handle(heh);
         let v1 = mesh.to_vertex_handle(heh);
-        
+
         // Use canonical ordering: (min, max)
-        let (min_v, max_v) = if v0.idx() < v1.idx() { (v0, v1) } else { (v1, v0) };
-        
+        let (min_v, max_v) = if v0.idx() < v1.idx() {
+            (v0, v1)
+        } else {
+            (v1, v0)
+        };
+
         edges_processed.push((v0, v1, heh));
         edge_to_new_vertex.insert((min_v.idx(), max_v.idx()), VertexHandle::invalid());
     }
-    
+
     // Step 2: Split each edge and create new vertices
     for (v0, v1, _heh) in &edges_processed {
-        let (min_v, max_v) = if v0.idx() < v1.idx() { (v0, v1) } else { (v1, v0) };
-        
+        let (min_v, max_v) = if v0.idx() < v1.idx() {
+            (v0, v1)
+        } else {
+            (v1, v0)
+        };
+
         match split_edge(mesh, *min_v, *max_v) {
             Ok(new_vh) => {
                 edge_to_new_vertex.insert((min_v.idx(), max_v.idx()), new_vh);
@@ -515,65 +533,72 @@ pub fn loop_subdivide(mesh: &mut RustMesh) -> SubdivisionResult<SubdivisionStats
             }
         }
     }
-    
-    let _new_vertices_count = edge_to_new_vertex.values().filter(|vh| vh.is_valid()).count();
-    
+
+    let _new_vertices_count = edge_to_new_vertex
+        .values()
+        .filter(|vh| vh.is_valid())
+        .count();
+
     // Step 3: Split each face into 4 triangles
     // For each original face, we need:
     // - 3 new vertices (one for each edge, already created)
     // - Create 4 new faces
-    
+
     // We need to track which faces have been split
     let original_face_handles: Vec<FaceHandle> = mesh.faces().collect();
-    
+
     // Keep a copy for deletion after creating new faces (P0-5 fix)
     let faces_to_delete = original_face_handles.clone();
-    
+
     for fh in original_face_handles {
         let face_verts = get_face_vertices(mesh, fh);
         if face_verts.len() != 3 {
             continue;
         }
-        
+
         let v0 = face_verts[0];
         let v1 = face_verts[1];
         let v2 = face_verts[2];
-        
+
         // Get the new vertices for each edge
         let get_edge_vertex = |v_a: VertexHandle, v_b: VertexHandle| -> Option<VertexHandle> {
-            let (min_v, max_v) = if v_a.idx() < v_b.idx() { (v_a, v_b) } else { (v_b, v_a) };
-            edge_to_new_vertex.get(&(min_v.idx(), max_v.idx())).and_then(|vh| {
-                if vh.is_valid() { Some(*vh) } else { None }
-            })
+            let (min_v, max_v) = if v_a.idx() < v_b.idx() {
+                (v_a, v_b)
+            } else {
+                (v_b, v_a)
+            };
+            edge_to_new_vertex
+                .get(&(min_v.idx(), max_v.idx()))
+                .and_then(|vh| if vh.is_valid() { Some(*vh) } else { None })
         };
-        
+
         let ev01 = get_edge_vertex(v0, v1);
         let ev12 = get_edge_vertex(v1, v2);
         let ev20 = get_edge_vertex(v2, v0);
-        
+
         // All three edge vertices must exist
         if let (Some(e01), Some(e12), Some(e20)) = (ev01, ev12, ev20) {
             // Add 4 new triangles:
             // Original triangle is (v0, v1, v2)
             // New triangles:
             // 1. (v0, e01, e20) - corner at v0
-            // 2. (v1, e12, e01) - corner at v1  
+            // 2. (v1, e12, e01) - corner at v1
             // 3. (v2, e20, e12) - corner at v2
             // 4. (e01, e12, e20) - center triangle
-            
+
             mesh.add_face(&[v0, e01, e20]);
             mesh.add_face(&[v1, e12, e01]);
             mesh.add_face(&[v2, e20, e12]);
             mesh.add_face(&[e01, e12, e20]);
         }
     }
-    
+
     // Step 3.5: Delete the original faces (P0-5 fix)
     // These faces have been subdivided, so delete them
     for fh in &faces_to_delete {
         mesh.delete_face(*fh);
     }
-    
+
     // Step 4: Update original vertex positions using Loop scheme
     // Only update vertices that existed before the subdivision
     for (idx, _pos) in &original_positions {
@@ -584,12 +609,12 @@ pub fn loop_subdivide(mesh: &mut RustMesh) -> SubdivisionResult<SubdivisionStats
             }
         }
     }
-    
+
     // Calculate statistics
     let new_vertices = mesh.n_vertices() - original_vertices;
     let new_edges = mesh.n_edges() - original_edges;
     let new_faces = mesh.n_faces() - original_faces;
-    
+
     let stats = SubdivisionStats {
         original_vertices,
         original_edges,
@@ -598,7 +623,7 @@ pub fn loop_subdivide(mesh: &mut RustMesh) -> SubdivisionResult<SubdivisionStats
         new_edges,
         new_faces,
     };
-    
+
     Ok(stats)
 }
 
@@ -611,14 +636,17 @@ pub fn loop_subdivide(mesh: &mut RustMesh) -> SubdivisionResult<SubdivisionStats
 /// # Returns
 /// * `Ok(Vec<SubdivisionStats>)` - Statistics for each iteration
 /// * `Err(SubdivisionError)` - If any subdivision fails
-pub fn loop_subdivide_iterations(mesh: &mut RustMesh, iterations: usize) -> SubdivisionResult<Vec<SubdivisionStats>> {
+pub fn loop_subdivide_iterations(
+    mesh: &mut RustMesh,
+    iterations: usize,
+) -> SubdivisionResult<Vec<SubdivisionStats>> {
     let mut all_stats = Vec::with_capacity(iterations);
-    
+
     for _ in 0..iterations {
         let stats = loop_subdivide(mesh)?;
         all_stats.push(stats);
     }
-    
+
     Ok(all_stats)
 }
 
@@ -634,30 +662,34 @@ pub fn validate_for_subdivision(mesh: &RustMesh) -> SubdivisionResult<()> {
     if mesh.n_vertices() == 0 {
         return Err(SubdivisionError::EmptyMesh);
     }
-    
+
     if mesh.n_faces() == 0 {
         return Err(SubdivisionError::EmptyMesh);
     }
-    
+
     if !is_triangular(mesh) {
         return Err(SubdivisionError::NotTriangular);
     }
-    
+
     // Check for degenerate faces
     for fh in mesh.faces() {
         let verts = get_face_vertices(mesh, fh);
         if verts.len() != 3 {
             return Err(SubdivisionError::InvalidTopology(format!(
-                "Face {:?} has {} vertices (expected 3)", fh, verts.len()
+                "Face {:?} has {} vertices (expected 3)",
+                fh,
+                verts.len()
             )));
         }
-        
+
         // Check for duplicate vertices
         if verts[0] == verts[1] || verts[1] == verts[2] || verts[0] == verts[2] {
-            return Err(SubdivisionError::InvalidTopology("Degenerate face found".to_string()));
+            return Err(SubdivisionError::InvalidTopology(
+                "Degenerate face found".to_string(),
+            ));
         }
     }
-    
+
     Ok(())
 }
 
@@ -683,16 +715,19 @@ pub fn is_mesh_triangular(mesh: &RustMesh) -> bool {
 
 /// * `Ok(glam::Vec3)` - The new position
 /// * `Err(SubdivisionError)` - If the vertex is invalid
-fn calculate_sqrt3_new_position(mesh: &RustMesh, vh: VertexHandle) -> SubdivisionResult<glam::Vec3> {
+fn calculate_sqrt3_new_position(
+    mesh: &RustMesh,
+    vh: VertexHandle,
+) -> SubdivisionResult<glam::Vec3> {
     let old_pos = mesh.point(vh).ok_or(SubdivisionError::VertexNotFound)?;
     let neighbors = get_vertex_neighbors(mesh, vh);
-    
+
     if neighbors.is_empty() {
         return Ok(old_pos);
     }
-    
+
     let boundary = is_boundary_vertex(mesh, vh);
-    
+
     if boundary {
         // For boundary vertices: just keep the position (or could use boundary scheme)
         // Sqrt3 typically doesn't modify boundary vertices
@@ -700,17 +735,18 @@ fn calculate_sqrt3_new_position(mesh: &RustMesh, vh: VertexHandle) -> Subdivisio
     } else {
         // Interior vertex: apply Sqrt3 smoothing
         // Laplacian = average of neighbors - vertex
-        let neighbor_sum: glam::Vec3 = neighbors.iter()
+        let neighbor_sum: glam::Vec3 = neighbors
+            .iter()
             .filter_map(|&nh| mesh.point(nh))
             .fold(glam::Vec3::ZERO, |a, b| a + b);
-        
+
         let neighbor_count = neighbors.len() as f32;
         let average = neighbor_sum / neighbor_count;
-        
+
         // new_pos = old_pos + (average - old_pos) / 3
         let laplacian = average - old_pos;
         let new_pos = old_pos + laplacian * (1.0 / 3.0);
-        
+
         Ok(new_pos)
     }
 }
@@ -734,20 +770,20 @@ pub fn sqrt3_subdivide(mesh: &mut RustMesh) -> SubdivisionResult<SubdivisionStat
     if mesh.n_vertices() == 0 {
         return Err(SubdivisionError::EmptyMesh);
     }
-    
+
     if mesh.n_faces() == 0 {
         return Err(SubdivisionError::EmptyMesh);
     }
-    
+
     // Check that mesh is triangular
     if !is_triangular(mesh) {
         return Err(SubdivisionError::NotTriangular);
     }
-    
+
     let original_vertices = mesh.n_vertices();
     let original_edges = mesh.n_edges();
     let original_faces = mesh.n_faces();
-    
+
     // Step 1: Collect original vertex handles and their positions
     let original_vertices_list: Vec<VertexHandle> = mesh.vertices().collect();
     let mut original_vertex_positions: Vec<glam::Vec3> = Vec::new();
@@ -758,40 +794,39 @@ pub fn sqrt3_subdivide(mesh: &mut RustMesh) -> SubdivisionResult<SubdivisionStat
             original_vertex_positions.push(glam::Vec3::ZERO);
         }
     }
-    
+
     // Step 2: For each original face, compute edge midpoints and create 3 new faces
     // This is the standard Sqrt3 approach: 1 triangle -> 3 triangles
     // The 3 new faces use the original vertices and edge midpoints
     // IMPORTANT: Collect face handles by index BEFORE adding new faces to avoid iterator issues
-    let original_face_handles: Vec<FaceHandle> = (0..original_faces as u32)
-        .map(FaceHandle::new)
-        .collect();
-    
+    let original_face_handles: Vec<FaceHandle> =
+        (0..original_faces as u32).map(FaceHandle::new).collect();
+
     for fh in &original_face_handles {
         let face_verts = get_face_vertices(mesh, *fh);
         if face_verts.len() != 3 {
             continue;
         }
-        
+
         let v0 = face_verts[0];
         let v1 = face_verts[1];
         let v2 = face_verts[2];
-        
+
         // Get positions
         let p0 = mesh.point(v0).unwrap_or(glam::Vec3::ZERO);
         let p1 = mesh.point(v1).unwrap_or(glam::Vec3::ZERO);
         let p2 = mesh.point(v2).unwrap_or(glam::Vec3::ZERO);
-        
+
         // Compute edge midpoints
         let m01_pos = (p0 + p1) * 0.5;
         let m12_pos = (p1 + p2) * 0.5;
         let m20_pos = (p2 + p0) * 0.5;
-        
+
         // Create vertices at edge midpoints
         let m01 = mesh.add_vertex(m01_pos);
         let m12 = mesh.add_vertex(m12_pos);
         let m20 = mesh.add_vertex(m20_pos);
-        
+
         // Create 3 new faces (the key Sqrt3 pattern):
         // Each new face uses one original vertex and two adjacent edge midpoints
         // Face 1: v0 -> m01 -> m20 (corner at v0)
@@ -801,24 +836,24 @@ pub fn sqrt3_subdivide(mesh: &mut RustMesh) -> SubdivisionResult<SubdivisionStat
         mesh.add_face(&[v1, m12, m01]);
         mesh.add_face(&[v2, m20, m12]);
     }
-    
+
     // Step 3: Delete the original faces (they've been subdivided)
     // Note: delete_face marks them as deleted but doesn't remove from count
     for fh in &original_face_handles {
         mesh.delete_face(*fh);
     }
-    
-    // Since delete_face doesn't actually reduce n_faces(), we need to 
+
+    // Since delete_face doesn't actually reduce n_faces(), we need to
     // calculate the correct count. The mesh has:
-    // - original_faces (some deleted) 
+    // - original_faces (some deleted)
     // - 3 * original_faces new faces
     // Total valid faces = 3 * original_faces
-    
+
     // Calculate statistics - note that n_faces() still includes deleted faces
     // We need to track the new face count properly
     let total_faces_after = original_faces * 3; // 3 new faces per original face
     let _new_faces_count = total_faces_after - original_faces; // new - deleted original
-    
+
     // Step 4: Update original vertex positions using Sqrt3 smoothing
     // new_pos = original_pos + Laplacian * (1/3)
     // Laplacian = average(neighbor positions) - original_position
@@ -827,37 +862,38 @@ pub fn sqrt3_subdivide(mesh: &mut RustMesh) -> SubdivisionResult<SubdivisionStat
         if neighbors.is_empty() {
             continue;
         }
-        
+
         let old_pos = original_vertex_positions[i];
-        
+
         // Check if boundary vertex
         let boundary = is_boundary_vertex(mesh, vh);
-        
+
         if boundary {
             // Boundary vertices stay at their original position
             continue;
         }
-        
+
         // Compute average of neighbors
-        let neighbor_sum: glam::Vec3 = neighbors.iter()
+        let neighbor_sum: glam::Vec3 = neighbors
+            .iter()
             .filter_map(|&nh| mesh.point(nh))
             .fold(glam::Vec3::ZERO, |a, b| a + b);
-        
+
         let neighbor_count = neighbors.len() as f32;
         let average = neighbor_sum / neighbor_count;
-        
+
         // new_pos = old_pos + (average - old_pos) / 3
         let laplacian = average - old_pos;
         let new_pos = old_pos + laplacian * (1.0 / 3.0);
-        
+
         mesh.set_point(vh, new_pos);
     }
-    
+
     // Calculate statistics
     let new_vertices = mesh.n_vertices() - original_vertices;
     let new_edges = mesh.n_edges() - original_edges;
     let new_faces = mesh.n_faces() - original_faces;
-    
+
     let stats = SubdivisionStats {
         original_vertices,
         original_edges,
@@ -866,7 +902,7 @@ pub fn sqrt3_subdivide(mesh: &mut RustMesh) -> SubdivisionResult<SubdivisionStat
         new_edges,
         new_faces,
     };
-    
+
     Ok(stats)
 }
 
@@ -879,14 +915,17 @@ pub fn sqrt3_subdivide(mesh: &mut RustMesh) -> SubdivisionResult<SubdivisionStat
 /// # Returns
 /// * `Ok(Vec<SubdivisionStats>)` - Statistics for each iteration
 /// * `Err(SubdivisionError)` - If any subdivision fails
-pub fn sqrt3_subdivide_iterations(mesh: &mut RustMesh, iterations: usize) -> SubdivisionResult<Vec<SubdivisionStats>> {
+pub fn sqrt3_subdivide_iterations(
+    mesh: &mut RustMesh,
+    iterations: usize,
+) -> SubdivisionResult<Vec<SubdivisionStats>> {
     let mut all_stats = Vec::with_capacity(iterations);
-    
+
     for _ in 0..iterations {
         let stats = sqrt3_subdivide(mesh)?;
         all_stats.push(stats);
     }
-    
+
     Ok(all_stats)
 }
 
@@ -901,11 +940,12 @@ fn compute_face_point(mesh: &RustMesh, fh: FaceHandle) -> glam::Vec3 {
     if vertices.is_empty() {
         return glam::Vec3::ZERO;
     }
-    
-    let sum: glam::Vec3 = vertices.iter()
+
+    let sum: glam::Vec3 = vertices
+        .iter()
         .filter_map(|&vh| mesh.point(vh))
         .fold(glam::Vec3::ZERO, |a, b| a + b);
-    
+
     sum / vertices.len() as f32
 }
 
@@ -926,7 +966,6 @@ fn get_face_halfedges_polygonal(mesh: &RustMesh, fh: FaceHandle) -> Vec<Halfedge
             if current == start_heh || !current.is_valid() {
                 break;
             }
-
         }
     }
     halfedges
@@ -942,13 +981,13 @@ fn get_face_valence(mesh: &RustMesh, fh: FaceHandle) -> usize {
 #[allow(dead_code)]
 fn get_incident_edges(mesh: &RustMesh, vh: VertexHandle) -> Vec<(VertexHandle, VertexHandle)> {
     let mut edges = Vec::new();
-    
+
     if let Some(heh) = mesh.halfedge_handle(vh) {
         let mut current = heh;
         loop {
             let to = mesh.to_vertex_handle(current);
             edges.push((vh, to));
-            
+
             let opp = mesh.opposite_halfedge_handle(current);
             current = mesh.next_halfedge_handle(opp);
             if current == heh || !current.is_valid() {
@@ -956,14 +995,14 @@ fn get_incident_edges(mesh: &RustMesh, vh: VertexHandle) -> Vec<(VertexHandle, V
             }
         }
     }
-    
+
     edges
 }
 
 /// Get all faces incident to a vertex
 fn get_incident_faces(mesh: &RustMesh, vh: VertexHandle) -> Vec<FaceHandle> {
     let mut faces = Vec::new();
-    
+
     if let Some(heh) = mesh.halfedge_handle(vh) {
         let mut current = heh;
         loop {
@@ -1009,10 +1048,10 @@ fn is_boundary_edge(mesh: &RustMesh, v0: VertexHandle, v1: VertexHandle) -> bool
 fn compute_edge_point(mesh: &RustMesh, v0: VertexHandle, v1: VertexHandle) -> glam::Vec3 {
     let p0 = mesh.point(v0).unwrap_or(glam::Vec3::ZERO);
     let p1 = mesh.point(v1).unwrap_or(glam::Vec3::ZERO);
-    
+
     // Get the two faces adjacent to this edge
     let mut adjacent_faces: Vec<FaceHandle> = Vec::new();
-    
+
     // Find halfedge from v0 to v1
     if let Some(heh) = mesh.halfedge_handle(v0) {
         let mut current = heh;
@@ -1036,7 +1075,7 @@ fn compute_edge_point(mesh: &RustMesh, v0: VertexHandle, v1: VertexHandle) -> gl
             }
         }
     }
-    
+
     // Calculate edge point
     if adjacent_faces.is_empty() {
         // Boundary edge: just use midpoint
@@ -1060,34 +1099,38 @@ fn compute_edge_point(mesh: &RustMesh, v0: VertexHandle, v1: VertexHandle) -> gl
 /// - R = average of edge midpoints (or edge points) around the vertex
 /// - P = original vertex position
 /// - n = vertex valence (number of incident edges)
-fn calculate_catmull_clark_new_position(mesh: &RustMesh, vh: VertexHandle) -> SubdivisionResult<glam::Vec3> {
+fn calculate_catmull_clark_new_position(
+    mesh: &RustMesh,
+    vh: VertexHandle,
+) -> SubdivisionResult<glam::Vec3> {
     let p = mesh.point(vh).ok_or(SubdivisionError::VertexNotFound)?;
-    
+
     // Get all incident faces
     let faces = get_incident_faces(mesh, vh);
     let n = faces.len();
-    
+
     if n == 0 {
         return Ok(p);
     }
-    
+
     // Calculate F: average of face points
-    let f_sum: glam::Vec3 = faces.iter()
+    let f_sum: glam::Vec3 = faces
+        .iter()
         .map(|&fh| compute_face_point(mesh, fh))
         .fold(glam::Vec3::ZERO, |a, b| a + b);
     let f = f_sum / n as f32;
-    
+
     // Calculate R: average of edge points
     // Get unique edges incident to this vertex
     let mut edge_points: Vec<glam::Vec3> = Vec::new();
-    
+
     if let Some(heh) = mesh.halfedge_handle(vh) {
         let mut current = heh;
         loop {
             let to = mesh.to_vertex_handle(current);
             let edge_point = compute_edge_point(mesh, vh, to);
             edge_points.push(edge_point);
-            
+
             let opp = mesh.opposite_halfedge_handle(current);
             current = mesh.next_halfedge_handle(opp);
             if current == heh || !current.is_valid() {
@@ -1095,15 +1138,15 @@ fn calculate_catmull_clark_new_position(mesh: &RustMesh, vh: VertexHandle) -> Su
             }
         }
     }
-    
+
     // Calculate average of edge points
     let r_sum: glam::Vec3 = edge_points.iter().fold(glam::Vec3::ZERO, |a, &b| a + b);
     let r = r_sum / edge_points.len() as f32;
-    
+
     // Apply Catmull-Clark formula: (F + 2R + (n-2)P) / n
     let n_f32 = n as f32;
     let new_pos = (f + r * 2.0 + p * (n_f32 - 2.0)) / n_f32;
-    
+
     Ok(new_pos)
 }
 
@@ -1126,21 +1169,20 @@ pub fn catmull_clark_subdivide(mesh: &mut RustMesh) -> SubdivisionResult<Subdivi
     if mesh.n_vertices() == 0 {
         return Err(SubdivisionError::EmptyMesh);
     }
-    
+
     if mesh.n_faces() == 0 {
         return Err(SubdivisionError::EmptyMesh);
     }
-    
+
     let original_vertices = mesh.n_vertices();
     let original_edges = mesh.n_edges();
     let original_faces = mesh.n_faces();
-    
+
     // Collect all original face handles for deletion (P0-5 fix)
     // Note: face_points also collects faces, we reuse that collection
-    let _original_face_handles_for_deletion: Vec<FaceHandle> = (0..original_faces as u32)
-        .map(FaceHandle::new)
-        .collect();
-    
+    let _original_face_handles_for_deletion: Vec<FaceHandle> =
+        (0..original_faces as u32).map(FaceHandle::new).collect();
+
     // Store original positions for vertices
     let mut original_positions: HashMap<u32, glam::Vec3> = HashMap::new();
     for vh in mesh.vertices() {
@@ -1148,51 +1190,55 @@ pub fn catmull_clark_subdivide(mesh: &mut RustMesh) -> SubdivisionResult<Subdivi
             original_positions.insert(vh.idx(), pos);
         }
     }
-    
+
     // Step 1: Compute all face points and store them
     let mut face_points: HashMap<u32, glam::Vec3> = HashMap::new();
     for fh in mesh.faces() {
         let fp = compute_face_point(mesh, fh);
         face_points.insert(fh.idx(), fp);
     }
-    
+
     // Step 2: Compute all edge points and create new vertices
     // We need to track: (v0, v1) -> new_vertex_handle
     let mut edge_to_new_vertex: HashMap<(u32, u32), VertexHandle> = HashMap::new();
     let mut edge_points_map: HashMap<(u32, u32), glam::Vec3> = HashMap::new();
-    
+
     // Iterate through all halfedges to find unique edges
     let n_halfedges = mesh.n_halfedges();
     for i in (0..n_halfedges).step_by(2) {
         let heh = HalfedgeHandle::new(i as u32);
         let v0 = mesh.from_vertex_handle(heh);
         let v1 = mesh.to_vertex_handle(heh);
-        
+
         // Use canonical ordering
-        let (min_v, max_v) = if v0.idx() < v1.idx() { (v0, v1) } else { (v1, v0) };
-        
+        let (min_v, max_v) = if v0.idx() < v1.idx() {
+            (v0, v1)
+        } else {
+            (v1, v0)
+        };
+
         // Skip if already processed
         if edge_to_new_vertex.contains_key(&(min_v.idx(), max_v.idx())) {
             continue;
         }
-        
+
         // Compute edge point
         let edge_point = compute_edge_point(mesh, min_v, max_v);
-        
+
         // Create new vertex at edge point
         let new_vh = mesh.add_vertex(edge_point);
-        
+
         edge_to_new_vertex.insert((min_v.idx(), max_v.idx()), new_vh);
         edge_points_map.insert((min_v.idx(), max_v.idx()), edge_point);
     }
-    
+
     // Step 3: Create face points as new vertices
     // First collect all original face handles (since we can't iterate while modifying mesh)
     let original_face_handles_for_fp: Vec<FaceHandle> = mesh.faces().collect();
-    
+
     // Keep a copy for deletion (P0-5 fix)
     let faces_to_delete = original_face_handles_for_fp.clone();
-    
+
     let mut face_point_vertices: HashMap<u32, VertexHandle> = HashMap::new();
     for fh in original_face_handles_for_fp {
         if let Some(fp) = face_points.get(&fh.idx()) {
@@ -1200,52 +1246,56 @@ pub fn catmull_clark_subdivide(mesh: &mut RustMesh) -> SubdivisionResult<Subdivi
             face_point_vertices.insert(fh.idx(), fp_vh);
         }
     }
-    
+
     // Step 4: Create new faces
     // For each original face, connect the face point to all edge points
     let original_face_handles: Vec<FaceHandle> = mesh.faces().collect();
-    
+
     for fh in original_face_handles {
         let face_verts = get_face_vertices_polygonal(mesh, fh);
         let n = face_verts.len();
-        
+
         // Get the face point vertex
         let fp_vh = match face_point_vertices.get(&fh.idx()) {
             Some(vh) => *vh,
             None => continue,
         };
-        
+
         // Get edge vertices for each edge of the face
         let mut edge_verts: Vec<VertexHandle> = Vec::with_capacity(n);
-        
+
         for i in 0..n {
             let v0 = face_verts[i];
             let v1 = face_verts[(i + 1) % n];
-            
-            let (min_v, max_v) = if v0.idx() < v1.idx() { (v0, v1) } else { (v1, v0) };
-            
+
+            let (min_v, max_v) = if v0.idx() < v1.idx() {
+                (v0, v1)
+            } else {
+                (v1, v0)
+            };
+
             let ev = match edge_to_new_vertex.get(&(min_v.idx(), max_v.idx())) {
                 Some(vh) => *vh,
                 None => continue,
             };
             edge_verts.push(ev);
         }
-        
+
         // Create new faces: for each original vertex vi, create a quad
         // Quad: [face_point, edge_point_prev, vertex_i, edge_point_i]
         // Where edge_point_prev is the edge point before vi in the face order
         // and edge_point_i is the edge point after vi
-        
+
         for i in 0..n {
             let vi = face_verts[i];
             let edge_point_prev = edge_verts[(i + n - 1) % n]; // edge point before vi
             let edge_point_i = edge_verts[i]; // edge point after vi
-            
+
             // Create a quad: fp, edge_point_prev, vi, edge_point_i
             mesh.add_face(&[fp_vh, edge_point_prev, vi, edge_point_i]);
         }
     }
-    
+
     // Step 5: Update original vertex positions using Catmull-Clark weights
     // Only update vertices that existed before the subdivision
     for (idx, _pos) in &original_positions {
@@ -1256,17 +1306,17 @@ pub fn catmull_clark_subdivide(mesh: &mut RustMesh) -> SubdivisionResult<Subdivi
             }
         }
     }
-    
+
     // Calculate statistics
     let new_vertices = mesh.n_vertices() - original_vertices;
     let new_edges = mesh.n_edges() - original_edges;
     let new_faces = mesh.n_faces() - original_faces;
-    
+
     // Step 5: Delete the original faces (P0-5 fix)
     for fh in &faces_to_delete {
         mesh.delete_face(*fh);
     }
-    
+
     let stats = SubdivisionStats {
         original_vertices,
         original_edges,
@@ -1275,7 +1325,7 @@ pub fn catmull_clark_subdivide(mesh: &mut RustMesh) -> SubdivisionResult<Subdivi
         new_edges,
         new_faces,
     };
-    
+
     Ok(stats)
 }
 
@@ -1288,14 +1338,17 @@ pub fn catmull_clark_subdivide(mesh: &mut RustMesh) -> SubdivisionResult<Subdivi
 /// # Returns
 /// * `Ok(Vec<SubdivisionStats>)` - Statistics for each iteration
 /// * `Err(SubdivisionError)` - If any subdivision fails
-pub fn catmull_clark_subdivide_iterations(mesh: &mut RustMesh, iterations: usize) -> SubdivisionResult<Vec<SubdivisionStats>> {
+pub fn catmull_clark_subdivide_iterations(
+    mesh: &mut RustMesh,
+    iterations: usize,
+) -> SubdivisionResult<Vec<SubdivisionStats>> {
     let mut all_stats = Vec::with_capacity(iterations);
-    
+
     for _ in 0..iterations {
         let stats = catmull_clark_subdivide(mesh)?;
         all_stats.push(stats);
     }
-    
+
     Ok(all_stats)
 }
 
@@ -1311,30 +1364,34 @@ pub fn validate_for_catmull_clark(mesh: &RustMesh) -> SubdivisionResult<()> {
     if mesh.n_vertices() == 0 {
         return Err(SubdivisionError::EmptyMesh);
     }
-    
+
     if mesh.n_faces() == 0 {
         return Err(SubdivisionError::EmptyMesh);
     }
-    
+
     // Check all faces have at least 3 vertices
     for fh in mesh.faces() {
         let verts = get_face_vertices_polygonal(mesh, fh);
         if verts.len() < 3 {
             return Err(SubdivisionError::InvalidTopology(format!(
-                "Face {:?} has {} vertices (expected at least 3)", fh, verts.len()
+                "Face {:?} has {} vertices (expected at least 3)",
+                fh,
+                verts.len()
             )));
         }
-        
+
         // Check for duplicate vertices
         for i in 0..verts.len() {
             for j in (i + 1)..verts.len() {
                 if verts[i] == verts[j] {
-                    return Err(SubdivisionError::InvalidTopology("Degenerate face found".to_string()));
+                    return Err(SubdivisionError::InvalidTopology(
+                        "Degenerate face found".to_string(),
+                    ));
                 }
             }
         }
     }
-    
+
     Ok(())
 }
 
@@ -1345,29 +1402,29 @@ mod tests {
 
     fn create_simple_triangle() -> RustMesh {
         let mut mesh = RustMesh::new();
-        
+
         // Create a simple triangle
         let v0 = mesh.add_vertex(glam::vec3(0.0, 0.0, 0.0));
         let v1 = mesh.add_vertex(glam::vec3(1.0, 0.0, 0.0));
         let v2 = mesh.add_vertex(glam::vec3(0.5, 1.0, 0.0));
-        
+
         mesh.add_face(&[v0, v1, v2]);
-        
+
         mesh
     }
 
     fn create_triangle_mesh_with_boundary() -> RustMesh {
         let mut mesh = RustMesh::new();
-        
+
         // Create a quad as two triangles (boundary mesh)
         let v0 = mesh.add_vertex(glam::vec3(0.0, 0.0, 0.0));
         let v1 = mesh.add_vertex(glam::vec3(1.0, 0.0, 0.0));
         let v2 = mesh.add_vertex(glam::vec3(1.0, 1.0, 0.0));
         let v3 = mesh.add_vertex(glam::vec3(0.0, 1.0, 0.0));
-        
+
         mesh.add_face(&[v0, v1, v2]);
         mesh.add_face(&[v0, v2, v3]);
-        
+
         mesh
     }
 
@@ -1400,14 +1457,14 @@ mod tests {
         let mesh = create_simple_triangle();
         let fh = FaceHandle::new(0);
         let verts = get_face_vertices(&mesh, fh);
-        
+
         assert_eq!(verts.len(), 3);
     }
 
     #[test]
     fn test_get_vertex_valence() {
         let mesh = create_simple_triangle();
-        
+
         // All vertices should have valence 2 in a single triangle
         for vh in mesh.vertices() {
             let valence = get_vertex_valence(&mesh, vh);
@@ -1418,7 +1475,7 @@ mod tests {
     #[test]
     fn test_is_boundary_vertex() {
         let mesh = create_triangle_mesh_with_boundary();
-        
+
         // All vertices are on boundary for this mesh
         for vh in mesh.vertices() {
             assert!(is_boundary_vertex(&mesh, vh));
@@ -1449,22 +1506,22 @@ mod tests {
     #[test]
     fn test_split_edge_simple() {
         let mut mesh = create_simple_triangle();
-        
+
         let v0 = VertexHandle::new(0);
         let v1 = VertexHandle::new(1);
-        
+
         let result = split_edge(&mut mesh, v0, v1);
-        
+
         // Should create a new vertex at midpoint
         assert!(result.is_ok());
-        
+
         let new_vh = result.unwrap();
         assert!(new_vh.is_valid());
-        
+
         // Check new vertex position
         let new_pos = mesh.point(new_vh).unwrap();
         let expected = glam::vec3(0.5, 0.0, 0.0); // Midpoint of (0,0,0) and (1,0,0)
-        
+
         assert!((new_pos.x - expected.x).abs() < 0.001);
         assert!((new_pos.y - expected.y).abs() < 0.001);
     }
@@ -1472,13 +1529,13 @@ mod tests {
     #[test]
     fn test_loop_subdivide_single_triangle() {
         let mut mesh = create_simple_triangle();
-        
+
         let stats = loop_subdivide(&mut mesh);
-        
+
         assert!(stats.is_ok());
-        
+
         let stats = stats.unwrap();
-        
+
         // After subdivision:
         // - 1 original triangle -> 4 triangles
         // - Original vertices: 3
@@ -1486,11 +1543,11 @@ mod tests {
         // - Total vertices: 6
         // - Total edges: increases
         // - Total faces: 4
-        
+
         assert_eq!(stats.original_vertices, 3);
         assert_eq!(stats.original_faces, 1);
         assert_eq!(mesh.n_active_faces(), 4);
-        
+
         // Should have 6 vertices (3 original + 3 new edge points)
         // Note: actual count may vary depending on implementation
         assert!(mesh.n_vertices() >= 3);
@@ -1499,13 +1556,13 @@ mod tests {
     #[test]
     fn test_loop_subdivide_tetrahedron() {
         let mut mesh = create_tetrahedron();
-        
+
         let stats = loop_subdivide(&mut mesh);
-        
+
         assert!(stats.is_ok());
-        
+
         let stats = stats.unwrap();
-        
+
         // Original: 4 faces
         // After: 4 * 4 = 16 faces
         assert_eq!(stats.original_faces, 4);
@@ -1515,13 +1572,13 @@ mod tests {
     #[test]
     fn test_loop_subdivide_boundary_mesh() {
         let mut mesh = create_triangle_mesh_with_boundary();
-        
+
         let stats = loop_subdivide(&mut mesh);
-        
+
         assert!(stats.is_ok());
-        
+
         let stats = stats.unwrap();
-        
+
         // Original: 2 triangles
         // After: 2 * 4 = 8 triangles
         assert_eq!(stats.original_faces, 2);
@@ -1531,15 +1588,15 @@ mod tests {
     #[test]
     fn test_loop_subdivide_iterations() {
         let mut mesh = create_tetrahedron();
-        
+
         let all_stats = loop_subdivide_iterations(&mut mesh, 2);
-        
+
         assert!(all_stats.is_ok());
-        
+
         let all_stats = all_stats.unwrap();
-        
+
         assert_eq!(all_stats.len(), 2);
-        
+
         // First iteration: 4 faces -> 16 faces
         assert_eq!(all_stats[0].original_faces, 4);
 
@@ -1551,15 +1608,15 @@ mod tests {
     #[test]
     fn test_subdivision_preserves_manifold() {
         let mut mesh = create_tetrahedron();
-        
+
         // Before subdivision
         let initial_validate = mesh.validate();
         if let Err(e) = initial_validate {
             println!("Warning: Initial mesh validation: {}", e);
         }
-        
+
         loop_subdivide(&mut mesh).expect("Subdivision should succeed");
-        
+
         // After subdivision - check no degenerate faces
         for fh in mesh.faces() {
             let verts = get_face_vertices(&mesh, fh);
@@ -1568,7 +1625,7 @@ mod tests {
                 continue;
             }
             assert_eq!(verts.len(), 3, "Face should be a triangle");
-            
+
             // Check for duplicate vertices
             assert_ne!(verts[0], verts[1], "Duplicate vertex in face");
             assert_ne!(verts[1], verts[2], "Duplicate vertex in face");
@@ -1579,11 +1636,11 @@ mod tests {
     #[test]
     fn test_subdivision_stats() {
         let mut mesh = create_simple_triangle();
-        
+
         let stats = loop_subdivide(&mut mesh).unwrap();
-        
+
         println!("{}", stats);
-        
+
         // Check stats make sense
         assert!(stats.original_vertices > 0);
         assert!(stats.original_faces > 0);
@@ -1594,17 +1651,17 @@ mod tests {
     #[test]
     fn test_calculate_loop_new_position_interior() {
         let mesh = create_tetrahedron();
-        
+
         // Any vertex in a tetrahedron is interior (valence 3)
         let v0 = VertexHandle::new(0);
         let new_pos = calculate_loop_new_position(&mesh, v0);
-        
+
         assert!(new_pos.is_ok());
-        
+
         // The new position should be different from the original
         let old_pos = mesh.point(v0).unwrap();
         let calculated = new_pos.unwrap();
-        
+
         // Should be a weighted average, so slightly different
         let diff = (calculated - old_pos).length();
         assert!(diff >= 0.0);
@@ -1613,7 +1670,7 @@ mod tests {
     #[test]
     fn test_calculate_loop_new_position_boundary() {
         let mesh = create_triangle_mesh_with_boundary();
-        
+
         // All vertices should be boundary vertices
         for vh in mesh.vertices() {
             let new_pos = calculate_loop_new_position(&mesh, vh);
@@ -1625,56 +1682,60 @@ mod tests {
     #[test]
     fn test_subdivision_icosphere_like() {
         let mut mesh = RustMesh::new();
-        
+
         // Create a simple triangulated sphere approximation (icosahedron-like)
         // Using 20 triangles - a simple subdivision test
-        
+
         // Center top
         let v0 = mesh.add_vertex(glam::vec3(0.0, 1.0, 0.0));
-        
+
         // Upper ring (5 vertices)
         let angle_step = std::f32::consts::TAU / 5.0;
-        let upper: Vec<_> = (0..5).map(|i| {
-            let angle = i as f32 * angle_step;
-            mesh.add_vertex(glam::vec3(angle.sin() * 0.8, 0.6, angle.cos() * 0.8))
-        }).collect();
-        
+        let upper: Vec<_> = (0..5)
+            .map(|i| {
+                let angle = i as f32 * angle_step;
+                mesh.add_vertex(glam::vec3(angle.sin() * 0.8, 0.6, angle.cos() * 0.8))
+            })
+            .collect();
+
         // Lower ring (5 vertices)
-        let lower: Vec<_> = (0..5).map(|i| {
-            let angle = (i as f32 + 0.5) * angle_step;
-            mesh.add_vertex(glam::vec3(angle.sin() * 0.8, -0.6, angle.cos() * 0.8))
-        }).collect();
-        
+        let lower: Vec<_> = (0..5)
+            .map(|i| {
+                let angle = (i as f32 + 0.5) * angle_step;
+                mesh.add_vertex(glam::vec3(angle.sin() * 0.8, -0.6, angle.cos() * 0.8))
+            })
+            .collect();
+
         // Bottom
         let _v11 = mesh.add_vertex(glam::vec3(0.0, -1.0, 0.0));
-        
+
         // Add faces (simplified - upper cap)
         for i in 0..5 {
             let next = (i + 1) % 5;
             mesh.add_face(&[v0, upper[i], upper[next]]);
         }
-        
+
         // Add faces (middle band - simplified to 10 triangles)
         for i in 0..5 {
             let next = (i + 1) % 5;
             mesh.add_face(&[upper[i], lower[i], upper[next]]);
             mesh.add_face(&[upper[next], lower[i], lower[next]]);
         }
-        
+
         // Add lower cap
         for i in 0..5 {
             let next = (i + 1) % 5;
             mesh.add_face(&[lower[i], lower[next], lower[next]]);
         }
-        
+
         // Now test subdivision
         let stats = loop_subdivide(&mut mesh);
-        
+
         // Should succeed
         assert!(stats.is_ok());
-        
+
         let _stats = stats.unwrap();
-        
+
         // Count should have increased
         assert!(mesh.n_active_faces() > 20);
         assert!(mesh.n_vertices() > 11);
@@ -1686,7 +1747,7 @@ mod tests {
 
     fn create_simple_quad() -> RustMesh {
         let mut mesh = RustMesh::new();
-        
+
         // Create a simple quad (4 vertices, 1 face)
         // Quad in XY plane:
         // v3 --- v2
@@ -1696,28 +1757,28 @@ mod tests {
         let v1 = mesh.add_vertex(glam::vec3(1.0, 0.0, 0.0));
         let v2 = mesh.add_vertex(glam::vec3(1.0, 1.0, 0.0));
         let v3 = mesh.add_vertex(glam::vec3(0.0, 1.0, 0.0));
-        
+
         mesh.add_face(&[v0, v1, v2, v3]);
-        
+
         mesh
     }
 
     fn create_cube() -> RustMesh {
         let mut mesh = RustMesh::new();
-        
+
         // Create a cube (8 vertices, 6 quad faces)
         // Front face
-        let v0 = mesh.add_vertex(glam::vec3(-1.0, -1.0,  1.0)); // front bottom-left
-        let v1 = mesh.add_vertex(glam::vec3( 1.0, -1.0,  1.0)); // front bottom-right
-        let v2 = mesh.add_vertex(glam::vec3( 1.0,  1.0,  1.0)); // front top-right
-        let v3 = mesh.add_vertex(glam::vec3(-1.0,  1.0,  1.0)); // front top-left
-        
+        let v0 = mesh.add_vertex(glam::vec3(-1.0, -1.0, 1.0)); // front bottom-left
+        let v1 = mesh.add_vertex(glam::vec3(1.0, -1.0, 1.0)); // front bottom-right
+        let v2 = mesh.add_vertex(glam::vec3(1.0, 1.0, 1.0)); // front top-right
+        let v3 = mesh.add_vertex(glam::vec3(-1.0, 1.0, 1.0)); // front top-left
+
         // Back face
         let v4 = mesh.add_vertex(glam::vec3(-1.0, -1.0, -1.0)); // back bottom-left
-        let v5 = mesh.add_vertex(glam::vec3( 1.0, -1.0, -1.0)); // back bottom-right
-        let v6 = mesh.add_vertex(glam::vec3( 1.0,  1.0, -1.0)); // back top-right
-        let v7 = mesh.add_vertex(glam::vec3(-1.0,  1.0, -1.0)); // back top-left
-        
+        let v5 = mesh.add_vertex(glam::vec3(1.0, -1.0, -1.0)); // back bottom-right
+        let v6 = mesh.add_vertex(glam::vec3(1.0, 1.0, -1.0)); // back top-right
+        let v7 = mesh.add_vertex(glam::vec3(-1.0, 1.0, -1.0)); // back top-left
+
         // Front face
         mesh.add_face(&[v0, v1, v2, v3]);
         // Right face
@@ -1730,18 +1791,22 @@ mod tests {
         mesh.add_face(&[v3, v2, v6, v7]);
         // Bottom face
         mesh.add_face(&[v4, v5, v1, v0]);
-        
+
         mesh
     }
 
     #[test]
     fn test_catmull_clark_validate_quad() {
         let mesh = create_simple_quad();
-        
+
         // Should validate successfully
         let result = validate_for_catmull_clark(&mesh);
-        assert!(result.is_ok(), "Quad should validate for Catmull-Clark: {:?}", result);
-        
+        assert!(
+            result.is_ok(),
+            "Quad should validate for Catmull-Clark: {:?}",
+            result
+        );
+
         // Check structure
         assert_eq!(mesh.n_vertices(), 4);
         assert_eq!(mesh.n_active_faces(), 1);
@@ -1750,11 +1815,15 @@ mod tests {
     #[test]
     fn test_catmull_clark_validate_cube() {
         let mesh = create_cube();
-        
+
         // Should validate successfully
         let result = validate_for_catmull_clark(&mesh);
-        assert!(result.is_ok(), "Cube should validate for Catmull-Clark: {:?}", result);
-        
+        assert!(
+            result.is_ok(),
+            "Cube should validate for Catmull-Clark: {:?}",
+            result
+        );
+
         // Check structure
         assert_eq!(mesh.n_vertices(), 8);
         assert_eq!(mesh.n_active_faces(), 6);
@@ -1763,21 +1832,28 @@ mod tests {
     #[test]
     fn test_catmull_clark_subdivide_quad() {
         let mut mesh = create_simple_quad();
-        
+
         let original_vertices = mesh.n_vertices();
         let original_faces = mesh.n_active_faces();
-        
-        println!("Before subdivision: {} vertices, {} faces", original_vertices, original_faces);
-        
+
+        println!(
+            "Before subdivision: {} vertices, {} faces",
+            original_vertices, original_faces
+        );
+
         let stats = catmull_clark_subdivide(&mut mesh);
-        
+
         assert!(stats.is_ok(), "Subdivision should succeed: {:?}", stats);
-        
+
         let stats = stats.unwrap();
-        
-        println!("After subdivision: {} vertices, {} faces", mesh.n_vertices(), mesh.n_active_faces());
+
+        println!(
+            "After subdivision: {} vertices, {} faces",
+            mesh.n_vertices(),
+            mesh.n_active_faces()
+        );
         println!("Stats: {}", stats);
-        
+
         // A quad should subdivide into 4 quads
         // - Original vertices: 4
         // - Face point: 1
@@ -1786,10 +1862,14 @@ mod tests {
         // Note: Original face is kept + 4 new faces = 5 total faces
         assert_eq!(original_faces, 1);
         assert!(mesh.n_active_faces() >= 4, "Should have at least 4 faces");
-        
+
         // Check we have the expected vertices
-        assert_eq!(mesh.n_vertices(), 9, "Should have 9 vertices (4 original + 4 edge + 1 face)");
-        
+        assert_eq!(
+            mesh.n_vertices(),
+            9,
+            "Should have 9 vertices (4 original + 4 edge + 1 face)"
+        );
+
         // Check stats
         assert_eq!(stats.new_vertices, 5); // 4 edge + 1 face point
         assert!(stats.new_faces >= 4); // at least 4 new faces
@@ -1798,26 +1878,36 @@ mod tests {
     #[test]
     fn test_catmull_clark_subdivide_cube() {
         let mut mesh = create_cube();
-        
+
         let original_vertices = mesh.n_vertices();
         let original_faces = mesh.n_active_faces();
-        
-        println!("Before subdivision: {} vertices, {} faces", original_vertices, original_faces);
-        
+
+        println!(
+            "Before subdivision: {} vertices, {} faces",
+            original_vertices, original_faces
+        );
+
         let stats = catmull_clark_subdivide(&mut mesh);
-        
+
         assert!(stats.is_ok(), "Subdivision should succeed: {:?}", stats);
-        
+
         let stats = stats.unwrap();
-        
-        println!("After subdivision: {} vertices, {} faces", mesh.n_vertices(), mesh.n_active_faces());
+
+        println!(
+            "After subdivision: {} vertices, {} faces",
+            mesh.n_vertices(),
+            mesh.n_active_faces()
+        );
         println!("Stats: {}", stats);
-        
+
         // A cube has 6 faces, each quad becomes 4 quads
         // Original faces are kept + 6*4 new faces = 30 total faces
         assert_eq!(original_faces, 6);
-        assert!(mesh.n_active_faces() >= 24, "Cube should have at least 24 quads (6 * 4)");
-        
+        assert!(
+            mesh.n_active_faces() >= 24,
+            "Cube should have at least 24 quads (6 * 4)"
+        );
+
         // Check stats make sense
         assert!(stats.new_vertices > 0);
         assert!(stats.new_faces > 0);
@@ -1826,29 +1916,41 @@ mod tests {
     #[test]
     fn test_catmull_clark_subdivide_iterations() {
         let mut mesh = create_cube();
-        
+
         // First iteration
         let stats1 = catmull_clark_subdivide(&mut mesh);
         assert!(stats1.is_ok());
-        
-        println!("After 1st subdivision: {} vertices, {} faces", mesh.n_vertices(), mesh.n_active_faces());
-        
+
+        println!(
+            "After 1st subdivision: {} vertices, {} faces",
+            mesh.n_vertices(),
+            mesh.n_active_faces()
+        );
+
         let faces_after_1 = mesh.n_active_faces();
-        
+
         // Second iteration
         let stats2 = catmull_clark_subdivide(&mut mesh);
         assert!(stats2.is_ok());
-        
-        println!("After 2nd subdivision: {} vertices, {} faces", mesh.n_vertices(), mesh.n_active_faces());
-        
+
+        println!(
+            "After 2nd subdivision: {} vertices, {} faces",
+            mesh.n_vertices(),
+            mesh.n_active_faces()
+        );
+
         let faces_after_2 = mesh.n_active_faces();
-        
+
         // Third iteration
         let stats3 = catmull_clark_subdivide(&mut mesh);
         assert!(stats3.is_ok());
-        
-        println!("After 3rd subdivision: {} vertices, {} faces", mesh.n_vertices(), mesh.n_active_faces());
-        
+
+        println!(
+            "After 3rd subdivision: {} vertices, {} faces",
+            mesh.n_vertices(),
+            mesh.n_active_faces()
+        );
+
         // Each subdivision multiplies faces by approximately 4
         // 6 -> 24 -> 96 -> 384
         assert!(faces_after_1 >= 24);
@@ -1858,14 +1960,14 @@ mod tests {
     #[test]
     fn test_catmull_clark_mixed_face_mesh() {
         let mut mesh = RustMesh::new();
-        
+
         // Create a mesh with mixed face types: triangle + quad
         //  v2
         //  |\
         //  | \
         //  v0--v1
         //  |
-        //  |   
+        //  |
         //  v3--v4
         //
         let v0 = mesh.add_vertex(glam::vec3(0.0, 0.0, 0.0));
@@ -1873,21 +1975,29 @@ mod tests {
         let v2 = mesh.add_vertex(glam::vec3(0.5, 1.0, 0.0));
         let v3 = mesh.add_vertex(glam::vec3(0.0, -1.0, 0.0));
         let v4 = mesh.add_vertex(glam::vec3(1.0, -1.0, 0.0));
-        
+
         // Triangle face
         mesh.add_face(&[v0, v1, v2]);
         // Quad face
         mesh.add_face(&[v0, v3, v4, v1]);
-        
+
         assert_eq!(mesh.n_active_faces(), 2);
-        
+
         // Subdivide
         let stats = catmull_clark_subdivide(&mut mesh);
-        
-        assert!(stats.is_ok(), "Mixed mesh subdivision should succeed: {:?}", stats);
-        
-        println!("Mixed mesh after subdivision: {} vertices, {} faces", mesh.n_vertices(), mesh.n_active_faces());
-        
+
+        assert!(
+            stats.is_ok(),
+            "Mixed mesh subdivision should succeed: {:?}",
+            stats
+        );
+
+        println!(
+            "Mixed mesh after subdivision: {} vertices, {} faces",
+            mesh.n_vertices(),
+            mesh.n_active_faces()
+        );
+
         // Triangle becomes 3 quads, quad becomes 4 quads
         // Original faces kept: 2 + 3 + 4 = 9 faces
         assert!(mesh.n_active_faces() >= 7);
@@ -1896,41 +2006,46 @@ mod tests {
     #[test]
     fn test_catmull_clark_stats() {
         let mut mesh = create_simple_quad();
-        
+
         let stats = catmull_clark_subdivide(&mut mesh).unwrap();
-        
+
         println!("{}", stats);
-        
+
         // Check stats make sense
         assert!(stats.original_vertices > 0);
         assert!(stats.original_edges > 0);
         assert!(stats.original_faces > 0);
         assert!(stats.new_vertices > 0);
         assert!(stats.new_faces > 0);
-        
+
         // Verify total counts
-        assert_eq!(stats.original_vertices + stats.new_vertices, mesh.n_vertices());
+        assert_eq!(
+            stats.original_vertices + stats.new_vertices,
+            mesh.n_vertices()
+        );
         assert_eq!(stats.original_faces + stats.new_faces, mesh.n_faces());
     }
 
     #[test]
     fn test_catmull_clark_preserves_manifold() {
         let mut mesh = create_cube();
-        
+
         // Validate initial mesh
         let initial_validate = mesh.validate();
         if let Err(e) = initial_validate {
             println!("Warning: Initial mesh validation: {}", e);
         }
-        
+
         catmull_clark_subdivide(&mut mesh).expect("Subdivision should succeed");
-        
+
         // After subdivision - verify all active faces have valid vertices
         for fh in mesh.faces() {
             let verts = get_face_vertices_polygonal(&mesh, fh);
-            if verts.is_empty() { continue; } // skip deleted faces
+            if verts.is_empty() {
+                continue;
+            } // skip deleted faces
             assert!(verts.len() >= 3, "Face should have at least 3 vertices");
-            
+
             // Check for duplicate vertices
             for i in 0..verts.len() {
                 for j in (i + 1)..verts.len() {
@@ -1953,107 +2068,131 @@ mod tests {
     #[test]
     fn test_sqrt3_subdivide_single_triangle() {
         let mut mesh = create_simple_triangle();
-        
+
         // Before: 1 triangle, 3 vertices
         let original_faces = mesh.n_active_faces();
         assert_eq!(original_faces, 1);
-        
+
         let stats = sqrt3_subdivide(&mut mesh);
-        
-        assert!(stats.is_ok(), "Sqrt3 subdivision should succeed: {:?}", stats);
-        
+
+        assert!(
+            stats.is_ok(),
+            "Sqrt3 subdivision should succeed: {:?}",
+            stats
+        );
+
         let stats = stats.unwrap();
-        
+
         // Sqrt3: 1 triangle -> 3 triangles
         assert_eq!(stats.original_faces, 1);
-        assert_eq!(mesh.n_active_faces(), 3, "One triangle should become 3 triangles");
-        
+        assert_eq!(
+            mesh.n_active_faces(),
+            3,
+            "One triangle should become 3 triangles"
+        );
+
         // Vertices: 3 original + 3 edge midpoints = 6
         assert_eq!(mesh.n_vertices(), 6);
-        
+
         println!("Sqrt3 stats: {}", stats);
     }
 
     #[test]
     fn test_sqrt3_subdivide_tetrahedron() {
         let mut mesh = create_tetrahedron();
-        
+
         // Before: 4 triangles
         let original_faces = mesh.n_active_faces();
         assert_eq!(original_faces, 4);
-        
+
         let stats = sqrt3_subdivide(&mut mesh);
-        
-        assert!(stats.is_ok(), "Sqrt3 subdivision should succeed: {:?}", stats);
-        
+
+        assert!(
+            stats.is_ok(),
+            "Sqrt3 subdivision should succeed: {:?}",
+            stats
+        );
+
         let stats = stats.unwrap();
-        
+
         // Sqrt3: 4 triangles -> 12 triangles (4 * 3)
         assert_eq!(stats.original_faces, 4);
-        assert_eq!(mesh.n_active_faces(), 12, "4 triangles should become 12 triangles");
-        
+        assert_eq!(
+            mesh.n_active_faces(),
+            12,
+            "4 triangles should become 12 triangles"
+        );
+
         println!("Sqrt3 tetrahedron stats: {}", stats);
     }
 
     #[test]
     fn test_sqrt3_subdivide_boundary_mesh() {
         let mut mesh = create_triangle_mesh_with_boundary();
-        
+
         // Before: 2 triangles (a quad made of 2 triangles)
         let original_faces = mesh.n_active_faces();
         assert_eq!(original_faces, 2);
-        
+
         let stats = sqrt3_subdivide(&mut mesh);
-        
-        assert!(stats.is_ok(), "Sqrt3 subdivision should succeed: {:?}", stats);
-        
+
+        assert!(
+            stats.is_ok(),
+            "Sqrt3 subdivision should succeed: {:?}",
+            stats
+        );
+
         let stats = stats.unwrap();
-        
+
         // Sqrt3: 2 triangles -> 6 triangles
         assert_eq!(stats.original_faces, 2);
-        assert_eq!(mesh.n_active_faces(), 6, "2 triangles should become 6 triangles");
-        
+        assert_eq!(
+            mesh.n_active_faces(),
+            6,
+            "2 triangles should become 6 triangles"
+        );
+
         println!("Sqrt3 boundary mesh stats: {}", stats);
     }
 
     #[test]
     fn test_sqrt3_subdivide_iterations() {
         let mut mesh = create_tetrahedron();
-        
+
         // First iteration: 4 -> 12
         let stats1 = sqrt3_subdivide(&mut mesh);
         assert!(stats1.is_ok());
         assert_eq!(mesh.n_active_faces(), 12);
-        
+
         println!("After 1st Sqrt3: {} faces", mesh.n_active_faces());
-        
+
         // Second iteration: 12 -> 36
         let stats2 = sqrt3_subdivide(&mut mesh);
         assert!(stats2.is_ok());
         assert_eq!(mesh.n_active_faces(), 36);
-        
+
         println!("After 2nd Sqrt3: {} faces", mesh.n_active_faces());
-        
+
         // Third iteration: 36 -> 108
         let stats3 = sqrt3_subdivide(&mut mesh);
         assert!(stats3.is_ok());
         assert_eq!(mesh.n_active_faces(), 108);
-        
+
         println!("After 3rd Sqrt3: {} faces", mesh.n_active_faces());
     }
 
     #[test]
     fn test_sqrt3_subdivide_using_iterator() {
         let mut mesh = create_tetrahedron();
-        
+
         let all_stats = sqrt3_subdivide_iterations(&mut mesh, 3);
-        
+
         assert!(all_stats.is_ok());
-        
+
         let all_stats = all_stats.unwrap();
-        
+
         assert_eq!(all_stats.len(), 3);
-        
+
         // Check the progression (n_faces includes deleted faces from previous iterations):
         // Iteration 1: 4 active -> 12 active, n_faces = 4 + 12 = 16
         // Iteration 2: 12 active -> 36 active, n_faces = 16 + 36 = 52
@@ -2069,16 +2208,18 @@ mod tests {
     #[test]
     fn test_sqrt3_preserves_triangular() {
         let mut mesh = create_tetrahedron();
-        
+
         sqrt3_subdivide(&mut mesh).expect("Sqrt3 subdivision should succeed");
-        
+
         // Check all active faces are still triangles
         for fh in mesh.faces() {
             let verts = get_face_vertices(&mesh, fh);
-            if verts.is_empty() { continue; } // skip deleted faces
+            if verts.is_empty() {
+                continue;
+            } // skip deleted faces
             assert_eq!(verts.len(), 3, "All faces should still be triangles");
         }
-        
+
         // Check is_mesh_triangular returns true
         assert!(is_mesh_triangular(&mesh));
     }
@@ -2086,82 +2227,89 @@ mod tests {
     #[test]
     fn test_sqrt3_stats() {
         let mut mesh = create_simple_triangle();
-        
+
         let stats = sqrt3_subdivide(&mut mesh).unwrap();
-        
+
         println!("Sqrt3 stats: {}", stats);
-        
+
         // Check stats make sense
         assert_eq!(stats.original_vertices, 3);
         assert_eq!(stats.original_faces, 1);
-        
+
         // New vertices = 3 edge midpoints
         assert_eq!(stats.new_vertices, 3);
-        
+
         // New faces = 3 (added 3 new faces, original is deleted but still counted in n_faces)
         assert_eq!(stats.new_faces, 3);
-        
+
         // Verify totals
-        assert_eq!(stats.original_vertices + stats.new_vertices, mesh.n_vertices());
+        assert_eq!(
+            stats.original_vertices + stats.new_vertices,
+            mesh.n_vertices()
+        );
         assert_eq!(stats.original_faces + stats.new_faces, mesh.n_faces());
     }
 
     #[test]
     fn test_sqrt3_on_larger_mesh() {
         let mut mesh = RustMesh::new();
-        
+
         // Create an icosahedron-like mesh (20 triangles)
         // Center top
         let v0 = mesh.add_vertex(glam::vec3(0.0, 1.0, 0.0));
-        
+
         // Upper ring (5 vertices)
         let angle_step = std::f32::consts::TAU / 5.0;
-        let upper: Vec<_> = (0..5).map(|i| {
-            let angle = i as f32 * angle_step;
-            mesh.add_vertex(glam::vec3(angle.sin() * 0.8, 0.6, angle.cos() * 0.8))
-        }).collect();
-        
+        let upper: Vec<_> = (0..5)
+            .map(|i| {
+                let angle = i as f32 * angle_step;
+                mesh.add_vertex(glam::vec3(angle.sin() * 0.8, 0.6, angle.cos() * 0.8))
+            })
+            .collect();
+
         // Lower ring (5 vertices)
-        let lower: Vec<_> = (0..5).map(|i| {
-            let angle = (i as f32 + 0.5) * angle_step;
-            mesh.add_vertex(glam::vec3(angle.sin() * 0.8, -0.6, angle.cos() * 0.8))
-        }).collect();
-        
+        let lower: Vec<_> = (0..5)
+            .map(|i| {
+                let angle = (i as f32 + 0.5) * angle_step;
+                mesh.add_vertex(glam::vec3(angle.sin() * 0.8, -0.6, angle.cos() * 0.8))
+            })
+            .collect();
+
         // Bottom
         let v11 = mesh.add_vertex(glam::vec3(0.0, -1.0, 0.0));
-        
+
         // Add faces (simplified - upper cap)
         for i in 0..5 {
             let next = (i + 1) % 5;
             mesh.add_face(&[v0, upper[i], upper[next]]);
         }
-        
+
         // Add faces (middle band)
         for i in 0..5 {
             let next = (i + 1) % 5;
             mesh.add_face(&[upper[i], lower[i], upper[next]]);
             mesh.add_face(&[upper[next], lower[i], lower[next]]);
         }
-        
+
         // Add lower cap
         for i in 0..5 {
             let next = (i + 1) % 5;
             mesh.add_face(&[lower[i], lower[next], v11]);
         }
-        
+
         let original_faces = mesh.n_active_faces();
         println!("Icosahedron-like mesh: {} faces", original_faces);
-        
+
         // Sqrt3 subdivision
         let stats = sqrt3_subdivide(&mut mesh);
-        
+
         assert!(stats.is_ok(), "Sqrt3 should succeed on larger mesh");
-        
+
         let stats = stats.unwrap();
-        
+
         // Should be 3x faces
         assert_eq!(mesh.n_active_faces(), original_faces * 3);
-        
+
         println!("After Sqrt3: {} faces", mesh.n_active_faces());
         println!("Stats: {}", stats);
     }
@@ -2170,26 +2318,26 @@ mod tests {
     fn test_sqrt3_not_triangular_error() {
         // Test that Sqrt3 fails on non-triangular mesh
         let mut mesh = RustMesh::new();
-        
+
         // Create a quad (not triangular)
         let v0 = mesh.add_vertex(glam::vec3(0.0, 0.0, 0.0));
         let v1 = mesh.add_vertex(glam::vec3(1.0, 0.0, 0.0));
         let v2 = mesh.add_vertex(glam::vec3(1.0, 1.0, 0.0));
         let v3 = mesh.add_vertex(glam::vec3(0.0, 1.0, 0.0));
-        
+
         mesh.add_face(&[v0, v1, v2, v3]);
-        
+
         let result = sqrt3_subdivide(&mut mesh);
-        
+
         assert!(matches!(result, Err(SubdivisionError::NotTriangular)));
     }
 
     #[test]
     fn test_sqrt3_empty_mesh_error() {
         let mut mesh = RustMesh::new();
-        
+
         let result = sqrt3_subdivide(&mut mesh);
-        
+
         assert!(matches!(result, Err(SubdivisionError::EmptyMesh)));
     }
 }

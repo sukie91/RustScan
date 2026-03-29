@@ -3,7 +3,7 @@
 //! Implements a three-thread architecture for real-time processing:
 //! - Tracking Thread: High priority, processes frames at 30-60 FPS
 //! - Mapping Thread: Medium priority, processes keyframes at 5-10 FPS
-//! - Optimization Thread: Low priority, runs BA and 3DGS training at 1-2 FPS
+//! - Optimization Thread: Low priority, runs BA at 1-2 FPS
 //!
 //! Architecture:
 //! ```text
@@ -14,33 +14,22 @@
 //!    高优先级              中优先级              低优先级
 //! ```
 
-use crossbeam_channel::{bounded, Sender, Receiver};
+use crossbeam_channel::{bounded, Receiver, Sender};
+use std::path::PathBuf;
 use std::sync::{
-    Arc, RwLock,
     atomic::{AtomicBool, Ordering},
+    Arc, RwLock,
 };
 use std::thread;
 use std::time::Duration;
-#[cfg(feature = "gpu")]
-use std::time::Instant;
-use std::path::PathBuf;
 
-use crate::core::{Camera, Frame as CoreFrame, FrameFeatures as CoreFrameFeatures, KeyFrame, Map, MapPoint, SE3};
-#[cfg(feature = "gpu")]
-use crate::fusion::{
-    CompleteTrainer,
-    DiffCamera,
-    GaussianInitConfig,
-    TrainableGaussians,
-    initialize_trainable_gaussians_from_map,
+use crate::core::{
+    Camera, Frame as CoreFrame, FrameFeatures as CoreFrameFeatures, KeyFrame, Map, SE3,
 };
-use crate::fusion::GaussianMapper;
 use crate::io::{Dataset, Frame};
 use crate::mapping::local_mapping::{LocalMapping, LocalMappingConfig};
-use crate::optimizer::ba::{BACamera, BAObservation, BALandmark, BundleAdjuster};
-use crate::pipeline::checkpoint::{CheckpointConfig, CheckpointManager, load_latest_checkpoint};
-#[cfg(feature = "gpu")]
-use candle_core::Device;
+use crate::optimizer::ba::{BACamera, BALandmark, BAObservation, BundleAdjuster};
+use crate::pipeline::checkpoint::{load_latest_checkpoint, CheckpointConfig, CheckpointManager};
 #[cfg(feature = "opencv")]
 use std::path::Path;
 
@@ -68,8 +57,6 @@ pub struct MappingMessage {
     pub pose: SE3,
     /// Keyframe data
     pub frame: Frame,
-    /// Optional map points snapshot for Gaussian initialization
-    pub map_points: Option<Vec<MapPoint>>,
 }
 
 /// Pipeline configuration
@@ -293,7 +280,11 @@ fn tracking_thread_main<D: Dataset>(
 
         let gray = rgb_to_grayscale(&frame.color, frame.width as usize, frame.height as usize);
         let vo_result = vo.process_frame(&gray, frame.width, frame.height);
-        let features = if vo_result.success { vo.last_features() } else { None };
+        let features = if vo_result.success {
+            vo.last_features()
+        } else {
+            None
+        };
 
         let msg = TrackingMessage {
             frame,
@@ -319,10 +310,6 @@ fn mapping_thread_main(
     checkpoint_interval: usize,
     resume_map: Option<Arc<RwLock<Map>>>,
 ) {
-    let mut mapper = GaussianMapper::new(
-        camera.width as usize,
-        camera.height as usize,
-    );
     let mut local_mapping = LocalMapping::new(LocalMappingConfig::default());
     local_mapping.set_camera(camera.clone());
 
@@ -333,10 +320,11 @@ fn mapping_thread_main(
     }
 
     let mut checkpoint_manager = checkpoint_dir
-        .map(|dir| CheckpointConfig { dir, interval: checkpoint_interval })
+        .map(|dir| CheckpointConfig {
+            dir,
+            interval: checkpoint_interval,
+        })
         .and_then(|config| CheckpointManager::new(config).ok());
-
-    let mut sent_gaussian_init = false;
 
     loop {
         // Check for stop signal
@@ -364,50 +352,16 @@ fn mapping_thread_main(
 
                     let frame_index = msg.frame.index;
                     let frame = msg.frame;
-                    if let Some(depth) = &frame.depth {
-                        let color: Vec<[u8; 3]> = frame.color
-                            .chunks(3)
-                            .map(|c| [c[0], c[1], c[2]])
-                            .collect();
-                        let rot = msg.pose.rotation();
-                        let t = msg.pose.translation();
-
-                        let _ = mapper.update(
-                            depth,
-                            &color,
-                            frame.width as usize,
-                            frame.height as usize,
-                            camera.focal.x,
-                            camera.focal.y,
-                            camera.principal.x,
-                            camera.principal.y,
-                            &rot,
-                            &t,
-                        );
-                    }
 
                     let _ = map_tx.send(MappingMessage {
                         keyframe_index: frame_index,
                         pose: msg.pose,
                         frame,
-                        map_points: if !sent_gaussian_init {
-                            if let Some(map) = local_mapping.map() {
-                                let points: Vec<MapPoint> = map.valid_points().cloned().collect();
-                                if !points.is_empty() {
-                                    sent_gaussian_init = true;
-                                    Some(points)
-                                } else {
-                                    None
-                                }
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        },
                     });
 
-                    if let (Some(manager), Some(map)) = (checkpoint_manager.as_mut(), local_mapping.map()) {
+                    if let (Some(manager), Some(map)) =
+                        (checkpoint_manager.as_mut(), local_mapping.map())
+                    {
                         match manager.maybe_save(frame_index, &*map) {
                             Ok(path) => {
                                 if !path.as_os_str().is_empty() {
@@ -432,22 +386,9 @@ fn mapping_thread_main(
 }
 
 /// Optimization thread main function
-fn optimization_thread_main(
-    map_rx: Receiver<MappingMessage>,
-    stop_flag: Arc<AtomicBool>,
-) {
-    #[cfg(feature = "gpu")]
-    let mut trainer: Option<CompleteTrainer> = None;
-    #[cfg(feature = "gpu")]
-    let mut trainer_dims: Option<(usize, usize)> = None;
-    #[cfg(feature = "gpu")]
-    let mut last_train = Instant::now();
-    #[cfg(feature = "gpu")]
-    let mut gaussians: Option<TrainableGaussians> = None;
-
+fn optimization_thread_main(map_rx: Receiver<MappingMessage>, stop_flag: Arc<AtomicBool>) {
     let mut ba = BundleAdjuster::new();
     let mut ba_cameras = 0usize;
-    let mut ba_landmarks = 0usize;
     let mut ba_observations = 0usize;
 
     loop {
@@ -460,77 +401,18 @@ fn optimization_thread_main(
         match map_rx.recv_timeout(Duration::from_secs(1)) {
             Ok(msg) => {
                 let frame = msg.frame;
-                #[cfg(feature = "gpu")]
-                let (width, height) = (frame.width as usize, frame.height as usize);
 
                 // Run lightweight BA (best-effort) on sampled depth points
-                let (c_added, l_added, o_added) = add_ba_observations(
-                    &mut ba,
-                    &msg.pose,
-                    &frame,
-                    20,
-                    200,
-                );
+                let (c_added, _l_added, o_added) =
+                    add_ba_observations(&mut ba, &msg.pose, &frame, 20, 200);
                 ba_cameras += c_added;
-                ba_landmarks += l_added;
                 ba_observations += o_added;
 
                 if ba_cameras >= 2 && ba_observations >= 100 {
                     let _ = ba.optimize(5);
                     ba = BundleAdjuster::new();
                     ba_cameras = 0;
-                    ba_landmarks = 0;
                     ba_observations = 0;
-                }
-
-                // 3DGS training step (best-effort)
-                #[cfg(feature = "gpu")]
-                if last_train.elapsed() >= Duration::from_millis(500) {
-                    if trainer_dims != Some((width, height)) {
-                        trainer = Some(CompleteTrainer::new(
-                            width,
-                            height,
-                            0.00016,
-                            0.005,
-                            0.001,
-                            0.05,
-                            0.0025,
-                        ));
-                        trainer_dims = Some((width, height));
-                    }
-
-                    if let Some(trainer) = trainer.as_mut() {
-                        let device = trainer.device().clone();
-                        if gaussians.is_none() {
-                            if let Some(points) = msg.map_points.as_ref() {
-                                gaussians = initialize_gaussians_from_points(points, &device);
-                            }
-                        }
-
-                        if let Some(gaussians) = gaussians.as_mut() {
-                            if let Some((camera, target_color, target_depth)) =
-                                build_training_targets(&frame, &device)
-                            {
-                                let _ = trainer.training_step(
-                                    gaussians,
-                                    &camera,
-                                    &target_color,
-                                    &target_depth,
-                                );
-                            }
-                        } else if let Some((mut gaussians, camera, target_color, target_depth)) =
-                            build_training_batch(&frame, &device, 4, 5000)
-                        {
-                            let _ = trainer.training_step(
-                                &mut gaussians,
-                                &camera,
-                                &target_color,
-                                &target_depth,
-                            );
-                        }
-                    }
-
-                    last_train = Instant::now();
                 }
             }
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
@@ -541,144 +423,6 @@ fn optimization_thread_main(
             }
         }
     }
-}
-
-#[cfg(feature = "gpu")]
-fn initialize_gaussians_from_points(
-    points: &[MapPoint],
-    device: &Device,
-) -> Option<TrainableGaussians> {
-    if points.is_empty() {
-        return None;
-    }
-
-    let mut map = Map::new();
-    for point in points {
-        map.insert_point_with_id(point.id, point.clone());
-    }
-
-    let config = GaussianInitConfig {
-        opacity: 0.5,
-        ..GaussianInitConfig::default()
-    };
-
-    initialize_trainable_gaussians_from_map(&map, &config, device).ok()
-}
-
-#[cfg(feature = "gpu")]
-fn build_training_targets(
-    frame: &Frame,
-    device: &Device,
-) -> Option<(DiffCamera, Vec<f32>, Vec<f32>)> {
-    let depth = frame.depth.as_ref()?;
-    let width = frame.width as usize;
-    let height = frame.height as usize;
-    if depth.len() != width * height {
-        return None;
-    }
-
-    let fx = frame.camera.focal.x;
-    let fy = frame.camera.focal.y;
-    let cx = frame.camera.principal.x;
-    let cy = frame.camera.principal.y;
-
-    let rotation = [
-        [1.0, 0.0, 0.0],
-        [0.0, 1.0, 0.0],
-        [0.0, 0.0, 1.0],
-    ];
-    let translation = [0.0, 0.0, 0.0];
-    let camera = DiffCamera::new(
-        fx, fy, cx, cy,
-        width, height,
-        &rotation,
-        &translation,
-        device,
-    ).ok()?;
-
-    let target_color: Vec<f32> = frame.color
-        .iter()
-        .map(|v| *v as f32 / 255.0)
-        .collect();
-
-    Some((camera, target_color, depth.clone()))
-}
-
-#[cfg(feature = "gpu")]
-fn build_training_batch(
-    frame: &Frame,
-    device: &Device,
-    sample_step: usize,
-    max_gaussians: usize,
-) -> Option<(TrainableGaussians, DiffCamera, Vec<f32>, Vec<f32>)> {
-    let depth = frame.depth.as_ref()?;
-    let width = frame.width as usize;
-    let height = frame.height as usize;
-    if depth.len() != width * height {
-        return None;
-    }
-
-    let fx = frame.camera.focal.x;
-    let fy = frame.camera.focal.y;
-    let cx = frame.camera.principal.x;
-    let cy = frame.camera.principal.y;
-
-    let mut positions = Vec::new();
-    let mut scales = Vec::new();
-    let mut rotations = Vec::new();
-    let mut opacities = Vec::new();
-    let mut colors = Vec::new();
-
-    for y in (0..height).step_by(sample_step) {
-        for x in (0..width).step_by(sample_step) {
-            let idx = y * width + x;
-            let z = depth[idx];
-            if z <= 0.0 {
-                continue;
-            }
-
-            let x_cam = (x as f32 - cx) * z / fx;
-            let y_cam = (y as f32 - cy) * z / fy;
-
-            positions.extend_from_slice(&[x_cam, y_cam, z]);
-            scales.extend_from_slice(&[-3.0, -3.0, -3.0]);
-            rotations.extend_from_slice(&[1.0, 0.0, 0.0, 0.0]);
-            opacities.push(0.5);
-
-            let cidx = idx * 3;
-            if cidx + 2 < frame.color.len() {
-                colors.push(frame.color[cidx] as f32 / 255.0);
-                colors.push(frame.color[cidx + 1] as f32 / 255.0);
-                colors.push(frame.color[cidx + 2] as f32 / 255.0);
-            } else {
-                colors.extend_from_slice(&[0.5, 0.5, 0.5]);
-            }
-
-            if positions.len() / 3 >= max_gaussians {
-                break;
-            }
-        }
-        if positions.len() / 3 >= max_gaussians {
-            break;
-        }
-    }
-
-    if positions.is_empty() {
-        return None;
-    }
-
-    let gaussians = TrainableGaussians::new(
-        &positions,
-        &scales,
-        &rotations,
-        &opacities,
-        &colors,
-        device,
-    ).ok()?;
-
-    let (camera, target_color, target_depth) = build_training_targets(frame, device)?;
-
-    Some((gaussians, camera, target_color, target_depth))
 }
 
 fn add_ba_observations(
@@ -704,10 +448,8 @@ fn add_ba_observations(
     let cx = frame.camera.principal.x;
     let cy = frame.camera.principal.y;
 
-    let cam_idx = ba.add_camera(
-        BACamera::new(fx as f64, fy as f64, cx as f64, cy as f64)
-            .with_pose(*pose)
-    );
+    let cam_idx =
+        ba.add_camera(BACamera::new(fx as f64, fy as f64, cx as f64, cy as f64).with_pose(*pose));
 
     let rot = pose.rotation();
     let t = pose.translation();
@@ -825,7 +567,6 @@ impl Default for RealtimePipelineBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Instant;
 
     #[test]
     fn test_pipeline_config_default() {
@@ -871,14 +612,7 @@ mod tests {
         let (tx, rx) = bounded::<TrackingMessage>(1);
 
         let camera = Camera::new(100.0, 100.0, 1.0, 1.0, 2, 2);
-        let frame = Frame::new(
-            0,
-            0.0,
-            vec![0u8; 2 * 2 * 3],
-            None,
-            camera,
-            None,
-        );
+        let frame = Frame::new(0, 0.0, vec![0u8; 2 * 2 * 3], None, camera, None);
         let msg = TrackingMessage {
             frame,
             pose: SE3::identity(),
@@ -917,52 +651,14 @@ mod tests {
     }
 
     #[test]
-    fn test_training_throttle() {
-        // Test 500ms training interval logic
-        let mut last_train = Instant::now();
-
-        // Immediately after, should not train
-        assert!(
-            last_train.elapsed() < Duration::from_millis(500),
-            "Should not train immediately"
-        );
-
-        // Wait 600ms
-        std::thread::sleep(Duration::from_millis(600));
-
-        // Now should train
-        assert!(
-            last_train.elapsed() >= Duration::from_millis(500),
-            "Should train after 500ms"
-        );
-
-        // Update last_train
-        last_train = Instant::now();
-
-        // Should not train again immediately
-        assert!(
-            last_train.elapsed() < Duration::from_millis(500),
-            "Should not train immediately after update"
-        );
-    }
-
-    #[test]
     fn test_mapping_message_creation() {
         let camera = Camera::new(100.0, 100.0, 1.0, 1.0, 2, 2);
-        let frame = Frame::new(
-            0,
-            0.0,
-            vec![0u8; 2 * 2 * 3],
-            None,
-            camera,
-            None,
-        );
+        let frame = Frame::new(0, 0.0, vec![0u8; 2 * 2 * 3], None, camera, None);
 
         let msg = MappingMessage {
             keyframe_index: 5,
             pose: SE3::identity(),
             frame,
-            map_points: None,
         };
 
         assert_eq!(msg.keyframe_index, 5);
@@ -1000,7 +696,6 @@ mod tests {
                 keyframe_index: i,
                 pose: SE3::identity(),
                 frame,
-                map_points: None,
             };
             tx.send(msg).unwrap();
         }

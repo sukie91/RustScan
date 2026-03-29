@@ -59,7 +59,10 @@ impl DepthFusion {
 
     /// Add a depth observation for a pixel
     pub fn add_observation(&mut self, pixel_index: usize, observation: DepthObservation) {
-        let observations = self.observations.entry(pixel_index).or_insert_with(Vec::new);
+        let observations = self
+            .observations
+            .entry(pixel_index)
+            .or_insert_with(Vec::new);
 
         if observations.len() < self.config.max_observations {
             observations.push(observation);
@@ -67,23 +70,31 @@ impl DepthFusion {
     }
 
     /// Add depth map from a source
-    pub fn add_depth_map(&mut self, source_id: usize, depth: &[f32], confidence: Option<&[f32]>, width: usize, height: usize) {
+    pub fn add_depth_map(
+        &mut self,
+        source_id: usize,
+        depth: &[f32],
+        confidence: Option<&[f32]>,
+        width: usize,
+        height: usize,
+    ) {
         for y in 0..height {
             for x in 0..width {
                 let idx = y * width + x;
                 let d = depth[idx];
 
                 if d > 0.0 {
-                    let conf = confidence
-                        .map(|c| c[idx])
-                        .unwrap_or(1.0);
+                    let conf = confidence.map(|c| c[idx]).unwrap_or(1.0);
 
                     if conf >= self.config.confidence_threshold {
-                        self.add_observation(idx, DepthObservation {
-                            depth: d,
-                            confidence: conf,
-                            source_id,
-                        });
+                        self.add_observation(
+                            idx,
+                            DepthObservation {
+                                depth: d,
+                                confidence: conf,
+                                source_id,
+                            },
+                        );
                     }
                 }
             }
@@ -206,11 +217,14 @@ mod tests {
     fn test_add_observation() {
         let mut fusion = DepthFusion::default();
 
-        fusion.add_observation(0, DepthObservation {
-            depth: 1.0,
-            confidence: 0.9,
-            source_id: 0,
-        });
+        fusion.add_observation(
+            0,
+            DepthObservation {
+                depth: 1.0,
+                confidence: 0.9,
+                source_id: 0,
+            },
+        );
 
         assert_eq!(fusion.num_observations(0), 1);
     }
@@ -219,16 +233,22 @@ mod tests {
     fn test_fuse() {
         let mut fusion = DepthFusion::default();
 
-        fusion.add_observation(0, DepthObservation {
-            depth: 1.0,
-            confidence: 0.5,
-            source_id: 0,
-        });
-        fusion.add_observation(0, DepthObservation {
-            depth: 2.0,
-            confidence: 0.5,
-            source_id: 1,
-        });
+        fusion.add_observation(
+            0,
+            DepthObservation {
+                depth: 1.0,
+                confidence: 0.5,
+                source_id: 0,
+            },
+        );
+        fusion.add_observation(
+            0,
+            DepthObservation {
+                depth: 2.0,
+                confidence: 0.5,
+                source_id: 1,
+            },
+        );
 
         let fused = fusion.fuse(0);
         assert!(fused.is_some());
@@ -240,16 +260,22 @@ mod tests {
     fn test_fuse_all() {
         let mut fusion = DepthFusion::default();
 
-        fusion.add_observation(0, DepthObservation {
-            depth: 1.0,
-            confidence: 1.0,
-            source_id: 0,
-        });
-        fusion.add_observation(1, DepthObservation {
-            depth: 2.0,
-            confidence: 1.0,
-            source_id: 0,
-        });
+        fusion.add_observation(
+            0,
+            DepthObservation {
+                depth: 1.0,
+                confidence: 1.0,
+                source_id: 0,
+            },
+        );
+        fusion.add_observation(
+            1,
+            DepthObservation {
+                depth: 2.0,
+                confidence: 1.0,
+                source_id: 0,
+            },
+        );
 
         let result = fusion.fuse_all(2, 1);
         assert_eq!(result.len(), 2);

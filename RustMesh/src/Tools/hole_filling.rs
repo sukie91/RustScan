@@ -19,10 +19,10 @@
 //! println!("Filled {} holes", result.holes_filled);
 //! ```
 
-use crate::handles::{VertexHandle, HalfedgeHandle};
+use crate::geometry::triangle_area;
+use crate::handles::{HalfedgeHandle, VertexHandle};
 use crate::RustMesh;
 use crate::Vec3;
-use crate::geometry::triangle_area;
 
 /// Result of a hole filling operation
 #[derive(Debug, Clone)]
@@ -86,7 +86,8 @@ pub fn find_boundary_loops(mesh: &RustMesh) -> Vec<BoundaryLoop> {
 
     // Build a map: from_vertex -> boundary halfedge
     // This allows us to follow boundary loops without relying on next pointers
-    let mut boundary_from: std::collections::HashMap<u32, HalfedgeHandle> = std::collections::HashMap::new();
+    let mut boundary_from: std::collections::HashMap<u32, HalfedgeHandle> =
+        std::collections::HashMap::new();
     for heh_idx in 0..n_halfedges {
         let heh = HalfedgeHandle::new(heh_idx as u32);
         if mesh.is_boundary(heh) {
@@ -112,11 +113,15 @@ pub fn find_boundary_loops(mesh: &RustMesh) -> Vec<BoundaryLoop> {
         let mut count = 0;
 
         loop {
-            if count > max_iter { break; }
+            if count > max_iter {
+                break;
+            }
             count += 1;
 
             let idx = current.idx_usize();
-            if visited[idx] { break; }
+            if visited[idx] {
+                break;
+            }
 
             visited[idx] = true;
             loop_heh.push(current);
@@ -136,7 +141,9 @@ pub fn find_boundary_loops(mesh: &RustMesh) -> Vec<BoundaryLoop> {
                 _ => break,
             }
 
-            if current == heh { break; }
+            if current == heh {
+                break;
+            }
         }
 
         // Only add non-empty loops with at least 3 vertices
@@ -201,7 +208,8 @@ fn is_valid_ear(
     }
 
     // Check 3: Minimum edge length to avoid degenerate triangles
-    let min_edge = (p_curr - p_prev).length()
+    let min_edge = (p_curr - p_prev)
+        .length()
         .min((p_next - p_curr).length())
         .min((p_next - p_prev).length());
     if min_edge < 1e-6 {
@@ -250,7 +258,7 @@ fn point_in_triangle(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> bool {
 pub fn fill_hole(mesh: &mut RustMesh, boundary_heh: HalfedgeHandle) -> Result<usize, &'static str> {
     // First, find the boundary loop containing this halfedge
     let loops = find_boundary_loops(mesh);
-    
+
     // Find the loop containing this halfedge
     let mut target_loop: Option<BoundaryLoop> = None;
     for loop_info in &loops {
@@ -308,7 +316,9 @@ fn fill_boundary_loop(mesh: &mut RustMesh, loop_info: BoundaryLoop) -> Result<us
             let curr_idx = active[pos];
             let next_idx = active[(pos + 1) % active_len];
 
-            if is_valid_ear(mesh, &vertices, &points, prev_idx, curr_idx, next_idx, &active) {
+            if is_valid_ear(
+                mesh, &vertices, &points, prev_idx, curr_idx, next_idx, &active,
+            ) {
                 // Create the ear face
                 let face_vertices = [vertices[prev_idx], vertices[curr_idx], vertices[next_idx]];
 
@@ -338,7 +348,11 @@ fn fill_boundary_loop(mesh: &mut RustMesh, loop_info: BoundaryLoop) -> Result<us
 
     // If we have exactly 3 vertices left, add the final face
     if active.len() == 3 {
-        let face_vertices = [vertices[active[0]], vertices[active[1]], vertices[active[2]]];
+        let face_vertices = [
+            vertices[active[0]],
+            vertices[active[1]],
+            vertices[active[2]],
+        ];
         if mesh.add_face(&face_vertices).is_some() {
             faces_created += 1;
         }
@@ -369,7 +383,7 @@ pub fn fill_all_holes(mesh: &mut RustMesh) -> HoleFillResult {
     // Fill each hole
     for loop_info in loops {
         let loop_size = loop_info.len();
-        
+
         match fill_boundary_loop(mesh, loop_info) {
             Ok(faces) => {
                 result.holes_filled += 1;
@@ -397,7 +411,10 @@ pub fn fill_all_holes(mesh: &mut RustMesh) -> HoleFillResult {
 /// # Returns
 /// * `Ok(usize)` - Number of new faces created
 /// * `Err(&str)` - Error message if filling failed
-pub fn fill_hole_from_halfedge(mesh: &mut RustMesh, start_heh: HalfedgeHandle) -> Result<usize, &'static str> {
+pub fn fill_hole_from_halfedge(
+    mesh: &mut RustMesh,
+    start_heh: HalfedgeHandle,
+) -> Result<usize, &'static str> {
     if !mesh.is_boundary(start_heh) {
         return Err("Halfedge is not a boundary halfedge");
     }
@@ -414,7 +431,7 @@ pub fn fill_hole_from_halfedge(mesh: &mut RustMesh, start_heh: HalfedgeHandle) -
 /// A string describing the hole statistics
 pub fn hole_statistics(mesh: &RustMesh) -> String {
     let loops = find_boundary_loops(mesh);
-    
+
     if loops.is_empty() {
         return "No holes found".to_string();
     }
@@ -462,7 +479,7 @@ mod tests {
         // Faces with consistent CCW orientation (viewed from +Z)
         // The inner triangle [h0, h1, h2] is left as a hole
         mesh.add_face(&[v0, v1, h1]);
-        mesh.add_face(&[v0, h1, h0]);  // fixed: was [v0, h0, h1]
+        mesh.add_face(&[v0, h1, h0]); // fixed: was [v0, h0, h1]
         mesh.add_face(&[v1, v2, h2]);
         mesh.add_face(&[v1, h2, h1]);
         mesh.add_face(&[v2, v3, h2]);
@@ -492,7 +509,7 @@ mod tests {
         mesh.add_face(&[v0, v1, h1, h0]);
         mesh.add_face(&[v1, v2, h2, h1]);
         mesh.add_face(&[v2, v3, h3, h3]); // This will create degenerate triangles
-        // Let's just create triangles instead
+                                          // Let's just create triangles instead
         mesh.add_face(&[v0, v1, h1]);
         mesh.add_face(&[v0, h1, h0]);
         mesh.add_face(&[v1, v2, h2]);
@@ -515,13 +532,13 @@ mod tests {
     #[test]
     fn test_find_boundary_loops_simple_triangle() {
         let mut mesh = RustMesh::new();
-        
+
         // Single triangle - has boundary edges (the 3 outer edges)
         let v0 = mesh.add_vertex(Vec3::new(0.0, 0.0, 0.0));
         let v1 = mesh.add_vertex(Vec3::new(1.0, 0.0, 0.0));
         let v2 = mesh.add_vertex(Vec3::new(0.0, 1.0, 0.0));
         mesh.add_face(&[v0, v1, v2]);
-        
+
         let loops = find_boundary_loops(&mesh);
         // A single triangle has 3 boundary edges forming one loop
         assert!(!loops.is_empty(), "Single triangle should have boundary");
@@ -541,17 +558,17 @@ mod tests {
     #[test]
     fn test_fill_all_holes_triangular() {
         let mut mesh = create_mesh_with_triangular_hole();
-        
+
         let before_faces = mesh.n_faces();
         println!("Before filling: {} faces", before_faces);
-        
+
         let result = fill_all_holes(&mut mesh);
-        
+
         println!(
             "Filled {} holes, created {} faces",
             result.holes_filled, result.faces_created
         );
-        
+
         // Should have filled the triangular hole with 1 face
         assert!(result.holes_filled >= 1);
         assert!(result.faces_created >= 1);
@@ -560,9 +577,9 @@ mod tests {
     #[test]
     fn test_fill_all_holes_empty_mesh() {
         let mut mesh = RustMesh::new();
-        
+
         let result = fill_all_holes(&mut mesh);
-        
+
         assert_eq!(result.holes_filled, 0);
         assert_eq!(result.faces_created, 0);
     }
@@ -572,15 +589,15 @@ mod tests {
         let a = Vec3::new(0.0, 0.0, 0.0);
         let b = Vec3::new(1.0, 0.0, 0.0);
         let c = Vec3::new(0.0, 1.0, 0.0);
-        
+
         // Point inside triangle
         let p_inside = Vec3::new(0.1, 0.1, 0.0);
         assert!(point_in_triangle(p_inside, a, b, c));
-        
+
         // Point outside triangle
         let p_outside = Vec3::new(1.0, 1.0, 0.0);
         assert!(!point_in_triangle(p_outside, a, b, c));
-        
+
         // Point on edge
         let p_edge = Vec3::new(0.5, 0.0, 0.0);
         assert!(point_in_triangle(p_edge, a, b, c));
@@ -592,7 +609,7 @@ mod tests {
         let p0 = Vec3::new(0.0, 0.0, 0.0);
         let p1 = Vec3::new(1.0, 0.0, 0.0);
         let p2 = Vec3::new(0.0, 1.0, 0.0);
-        
+
         let area = triangle_area(p0, p1, p2);
         assert!((area - 0.5).abs() < 1e-6);
     }
@@ -601,7 +618,7 @@ mod tests {
     fn test_boundary_loop_len() {
         let mesh = create_mesh_with_triangular_hole();
         let loops = find_boundary_loops(&mesh);
-        
+
         for loop_info in &loops {
             println!("Boundary loop with {} vertices", loop_info.len());
             assert!(loop_info.len() >= 3);
@@ -611,7 +628,7 @@ mod tests {
     #[test]
     fn test_fill_hole_from_halfedge() {
         let mut mesh = create_mesh_with_triangular_hole();
-        
+
         // Find a boundary halfedge
         let mut boundary_heh = HalfedgeHandle::invalid();
         for heh_idx in 0..mesh.n_halfedges() {
@@ -621,11 +638,11 @@ mod tests {
                 break;
             }
         }
-        
+
         assert!(boundary_heh.is_valid(), "Should find a boundary halfedge");
-        
+
         let result = fill_hole_from_halfedge(&mut mesh, boundary_heh);
-        
+
         match result {
             Ok(faces) => println!("Filled hole with {} faces", faces),
             Err(e) => println!("Error: {}", e),
@@ -635,14 +652,14 @@ mod tests {
     #[test]
     fn test_fill_hole_invalid_halfedge() {
         let mut mesh = RustMesh::new();
-        
+
         // Add a single vertex and try to fill
         let v0 = mesh.add_vertex(Vec3::new(0.0, 0.0, 0.0));
-        
+
         // No boundary edges yet - should fail
         let invalid_heh = HalfedgeHandle::invalid();
         let result = fill_hole(&mut mesh, invalid_heh);
-        
+
         assert!(result.is_err());
     }
 
@@ -667,7 +684,7 @@ mod tests {
         // Create faces around the hole (leaving the inner square as a hole)
         // Bottom
         mesh.add_face(&[v0, v1, h1, h0]);
-        // Right  
+        // Right
         mesh.add_face(&[v1, v2, h2, h1]);
         // Top
         mesh.add_face(&[v2, v3, h3, h2]);
@@ -679,7 +696,7 @@ mod tests {
 
         // The square hole should be detected
         assert!(!loops.is_empty());
-        
+
         // Verify we found the hole
         let mut found_square_hole = false;
         for loop_info in &loops {

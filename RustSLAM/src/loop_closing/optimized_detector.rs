@@ -5,8 +5,8 @@
 //! - Geometric verification with RANSAC + PnP
 //! - SIMD acceleration for descriptor distance
 
-use std::collections::HashMap;
 use std::cmp::Ordering;
+use std::collections::HashMap;
 
 /// Inverted index for efficient BoW-based frame retrieval
 /// Maps word IDs to frames that contain them
@@ -199,11 +199,7 @@ impl GeometricVerifier {
         // In real implementation, use EPnP or similar
 
         // Placeholder: return identity rotation and zero translation
-        let rotation: [[f32; 3]; 3] = [
-            [1.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0],
-            [0.0, 0.0, 1.0],
-        ];
+        let rotation: [[f32; 3]; 3] = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
         let translation = [0.0, 0.0, 0.0];
 
         Some((rotation, translation))
@@ -334,7 +330,6 @@ impl DescriptorDistance {
         distance
     }
 
-
     /// Compute distances between query and train descriptors
     pub fn compute_distances(&self, query: &[u8], train: &[&[u8]]) -> Vec<u32> {
         train
@@ -455,10 +450,7 @@ mod tests {
         let dist = DescriptorDistance::new(false);
 
         let query = vec![0xFF, 0x00];
-        let train = vec![
-            vec![0xFF, 0x00],
-            vec![0x00, 0xFF],
-        ];
+        let train = vec![vec![0xFF, 0x00], vec![0x00, 0xFF]];
 
         let train_refs: Vec<&[u8]> = train.iter().map(|v| v.as_slice()).collect();
         let distances = dist.compute_distances(&query, &train_refs);

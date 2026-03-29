@@ -2,11 +2,11 @@
 
 use crate::config::SlamConfig;
 use crate::core::{Frame, FrameFeatures};
-use crate::features::{
-    Descriptors, FeatureExtractor, FeatureMatcher, HarrisDetector, HarrisParams, Match, OrbExtractor, FastDetector,
-    FastParams, HammingMatcher,
-};
 use crate::features::base::{FeatureError, ORB_DESCRIPTOR_SIZE};
+use crate::features::{
+    Descriptors, FastDetector, FastParams, FeatureExtractor, FeatureMatcher, HammingMatcher,
+    HarrisDetector, HarrisParams, Match, OrbExtractor,
+};
 
 /// 256 pre-computed BRIEF point pairs `(x1, y1, x2, y2)` within a 31×31 patch.
 const NUM_BRIEF_TESTS: usize = 256;
@@ -169,12 +169,16 @@ impl FeatureMatcherEngine {
             return Ok(Vec::new());
         }
 
-        let mut matches = self.matcher.match_descriptors(
-            &current.descriptors,
-            &previous.descriptors,
-        ).map_err(|e| SlamPipelineError::FeatureMatching(e))?;
+        let mut matches = self
+            .matcher
+            .match_descriptors(&current.descriptors, &previous.descriptors)
+            .map_err(|e| SlamPipelineError::FeatureMatching(e))?;
 
-        matches.sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap_or(std::cmp::Ordering::Equal));
+        matches.sort_by(|a, b| {
+            a.distance
+                .partial_cmp(&b.distance)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         Ok(matches)
     }
 }
@@ -211,23 +215,39 @@ fn build_patch_descriptors(
         let cx = kp.x.round() as i32;
         let cy = kp.y.round() as i32;
         let use_rot = kp.angle.is_finite() && kp.angle >= 0.0;
-        let (sin_a, cos_a) = if use_rot { kp.angle.sin_cos() } else { (0.0f32, 1.0f32) };
+        let (sin_a, cos_a) = if use_rot {
+            kp.angle.sin_cos()
+        } else {
+            (0.0f32, 1.0f32)
+        };
         let base = kp_idx * ORB_DESCRIPTOR_SIZE;
         for (i, &(x1, y1, x2, y2)) in BRIEF_PAIRS.iter().enumerate() {
             let (rx1, ry1) = if use_rot {
-                ((x1 as f32 * cos_a - y1 as f32 * sin_a).round() as i32,
-                 (x1 as f32 * sin_a + y1 as f32 * cos_a).round() as i32)
-            } else { (x1 as i32, y1 as i32) };
+                (
+                    (x1 as f32 * cos_a - y1 as f32 * sin_a).round() as i32,
+                    (x1 as f32 * sin_a + y1 as f32 * cos_a).round() as i32,
+                )
+            } else {
+                (x1 as i32, y1 as i32)
+            };
             let (rx2, ry2) = if use_rot {
-                ((x2 as f32 * cos_a - y2 as f32 * sin_a).round() as i32,
-                 (x2 as f32 * sin_a + y2 as f32 * cos_a).round() as i32)
-            } else { (x2 as i32, y2 as i32) };
-            let i1 = if cx+rx1 >= 0 && cx+rx1 < w && cy+ry1 >= 0 && cy+ry1 < h {
-                gray[((cy+ry1)*w + (cx+rx1)) as usize]
-            } else { 0 };
-            let i2 = if cx+rx2 >= 0 && cx+rx2 < w && cy+ry2 >= 0 && cy+ry2 < h {
-                gray[((cy+ry2)*w + (cx+rx2)) as usize]
-            } else { 0 };
+                (
+                    (x2 as f32 * cos_a - y2 as f32 * sin_a).round() as i32,
+                    (x2 as f32 * sin_a + y2 as f32 * cos_a).round() as i32,
+                )
+            } else {
+                (x2 as i32, y2 as i32)
+            };
+            let i1 = if cx + rx1 >= 0 && cx + rx1 < w && cy + ry1 >= 0 && cy + ry1 < h {
+                gray[((cy + ry1) * w + (cx + rx1)) as usize]
+            } else {
+                0
+            };
+            let i2 = if cx + rx2 >= 0 && cx + rx2 < w && cy + ry2 >= 0 && cy + ry2 < h {
+                gray[((cy + ry2) * w + (cx + rx2)) as usize]
+            } else {
+                0
+            };
             if i1 > i2 {
                 descriptors.data[base + i / 8] |= 1 << (i % 8);
             }
@@ -235,4 +255,3 @@ fn build_patch_descriptors(
     }
     descriptors
 }
-

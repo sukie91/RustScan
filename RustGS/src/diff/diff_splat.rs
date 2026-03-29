@@ -279,8 +279,8 @@ impl DiffSplatRenderer {
     /// Project 3D Gaussians to 2D
     fn project_gaussians(
         &self,
-        positions: &Tensor,  // [N, 3]
-        scales: &Tensor,     // [N, 3]
+        positions: &Tensor, // [N, 3]
+        scales: &Tensor,    // [N, 3]
         rotations: &Tensor, // [N, 4]
         camera: &DiffCamera,
     ) -> candle_core::Result<ProjectedGaussiansTensor> {
@@ -1315,7 +1315,12 @@ mod tests {
         let rotated = TrainableGaussians::new(
             &[0.0, 0.0, 2.0],
             &[0.4f32.ln(), 0.05f32.ln(), 0.05f32.ln()],
-            &[std::f32::consts::FRAC_1_SQRT_2, 0.0, 0.0, std::f32::consts::FRAC_1_SQRT_2],
+            &[
+                std::f32::consts::FRAC_1_SQRT_2,
+                0.0,
+                0.0,
+                std::f32::consts::FRAC_1_SQRT_2,
+            ],
             &[0.0],
             &[1.0, 0.0, 0.0],
             &device,

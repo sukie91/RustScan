@@ -1,6 +1,4 @@
 use super::*;
-use crate::fusion::{GaussianCamera, GaussianRenderer};
-use crate::fusion::training_pipeline::compute_psnr;
 use std::path::PathBuf;
 use std::time::Instant;
 use tempfile::tempdir;
@@ -20,13 +18,6 @@ fn env_usize(name: &str, default: usize) -> usize {
 }
 
 fn env_u64(name: &str, default: u64) -> u64 {
-    std::env::var(name)
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(default)
-}
-
-fn env_f32(name: &str, default: f32) -> f32 {
     std::env::var(name)
         .ok()
         .and_then(|value| value.parse().ok())
@@ -64,48 +55,29 @@ fn test_resolved_config(input: PathBuf) -> ResolvedConfig {
             cache_capacity: 4,
             prefer_hardware: false,
         },
-        log_format: LogFormat::Text,
         mesh_voxel_size: None,
     }
 }
 
-fn average_psnr(gaussian: &GaussianStageOutput, samples: usize) -> f32 {
-    if gaussian.keyframes.is_empty() || gaussian.map.is_empty() {
-        return 0.0;
+fn test_slam_stage_output(with_depth: bool) -> SlamStageOutput {
+    let keyframe = KeyframeSample {
+        index: 0,
+        timestamp: 0.0,
+        width: 2,
+        height: 1,
+        color: vec![10, 20, 30, 40, 50, 60],
+        depth: with_depth.then(|| vec![1.0, 2.0]),
+        pose: SE3::identity(),
+    };
+    SlamStageOutput {
+        keyframes: vec![keyframe],
+        camera: Camera::new(525.0, 525.0, 0.5, 0.5, 2, 1),
+        frame_count: 1,
+        map_points: vec![rustscan_types::MapPointData::new(
+            [0.0, 0.0, 1.0],
+            Some([0.1, 0.2, 0.3]),
+        )],
     }
-
-    let width = gaussian.camera.width as usize;
-    let height = gaussian.camera.height as usize;
-    let renderer = GaussianRenderer::new(width, height);
-
-    let total = gaussian.keyframes.len();
-    let samples = samples.max(1).min(total);
-    let step = (total / samples).max(1);
-
-    let mut sum = 0.0f32;
-    let mut count = 0usize;
-
-    for keyframe in gaussian.keyframes.iter().step_by(step).take(samples) {
-        let camera = GaussianCamera::new(
-            gaussian.camera.focal.x,
-            gaussian.camera.focal.y,
-            gaussian.camera.principal.x,
-            gaussian.camera.principal.y,
-        )
-        .with_pose(keyframe.pose.rotation(), keyframe.pose.translation());
-
-        let rendered = renderer.render(&gaussian.map, &camera);
-        let rendered_f32: Vec<f32> = rendered
-            .color
-            .iter()
-            .map(|c| *c as f32 / 255.0)
-            .collect();
-        let psnr = compute_psnr(&rendered_f32, &keyframe.color, rendered.width, rendered.height);
-        sum += psnr;
-        count += 1;
-    }
-
-    if count == 0 { 0.0 } else { sum / count as f32 }
 }
 
 #[test]
@@ -148,7 +120,85 @@ fn test_load_input_source_detects_euroc_dataset() {
 }
 
 #[test]
-fn test_end_to_end_pipeline_video() {
+fn bytes_to_mib_uses_mebibyte_units() {
+    assert!((bytes_to_mib(32 * 1024 * 1024) - 32.0).abs() < f64::EPSILON);
+}
+
+#[test]
+fn export_slam_output_for_rustgs_writes_json_export() {
+    let output_dir = tempdir().unwrap();
+    let slam = test_slam_stage_output(false);
+
+    let path = export_slam_output_for_rustgs(&slam, output_dir.path()).unwrap();
+    assert_eq!(path, output_dir.path().join("slam_output.json"));
+    assert!(path.exists());
+
+    let loaded = rustscan_types::SlamOutput::load(&path).unwrap();
+    assert_eq!(loaded.num_poses(), 1);
+    assert_eq!(loaded.num_points(), 1);
+    assert_eq!(loaded.poses[0].frame_id, 0);
+    assert!(loaded.poses[0].depth_path.is_none());
+}
+
+#[test]
+fn save_slam_checkpoint_clears_downstream_stage_markers() {
+    let output_dir = tempdir().unwrap();
+    let slam = test_slam_stage_output(true);
+    let existing = PipelineCheckpoint {
+        gaussian_completed: true,
+        mesh_completed: true,
+        ..PipelineCheckpoint::default()
+    };
+
+    let saved = save_slam_checkpoint(output_dir.path(), &slam, Some(existing)).unwrap();
+
+    assert!(saved.video_completed);
+    assert!(saved.slam_completed);
+    assert!(!saved.gaussian_completed);
+    assert!(!saved.mesh_completed);
+    assert!(saved.slam.as_ref().is_some());
+    assert!(saved
+        .slam
+        .as_ref()
+        .and_then(|slam| slam.keyframes.first())
+        .and_then(|keyframe| keyframe.depth_path.as_ref())
+        .is_some());
+    assert_eq!(saved.slam.as_ref().unwrap().map_points.len(), 1);
+}
+
+#[test]
+fn reset_post_slam_checkpoint_state_keeps_sparse_points() {
+    let mut checkpoint = PipelineCheckpoint {
+        gaussian_completed: true,
+        mesh_completed: true,
+        slam: Some(SlamCheckpoint {
+            camera: CameraCheckpoint {
+                fx: 525.0,
+                fy: 525.0,
+                cx: 0.5,
+                cy: 0.5,
+                width: 2,
+                height: 1,
+            },
+            frame_count: 1,
+            keyframes: Vec::new(),
+            map_points: vec![MapPointCheckpoint {
+                position: [0.0, 0.0, 1.0],
+                color: Some([0.1, 0.2, 0.3]),
+            }],
+        }),
+        ..PipelineCheckpoint::default()
+    };
+
+    reset_post_slam_checkpoint_state(&mut checkpoint);
+
+    assert!(!checkpoint.gaussian_completed);
+    assert!(!checkpoint.mesh_completed);
+    assert_eq!(checkpoint.slam.as_ref().unwrap().map_points.len(), 1);
+}
+
+#[test]
+fn test_end_to_end_pipeline_video_exports_slam_only_artifacts() {
     if !e2e_enabled() {
         eprintln!("Skipping E2E pipeline test (set RUSTSCAN_E2E=1 to enable)");
         return;
@@ -167,8 +217,8 @@ fn test_end_to_end_pipeline_video() {
     let mut slam = SlamConfig::default();
     slam.dataset.max_frames = env_usize("RUSTSCAN_E2E_MAX_FRAMES", 0);
     slam.dataset.stride = env_usize("RUSTSCAN_E2E_STRIDE", 1).max(1);
-    slam.mapper.max_keyframes = env_usize("RUSTSCAN_E2E_MAX_KEYFRAMES", slam.mapper.max_keyframes)
-        .max(1);
+    slam.mapper.max_keyframes =
+        env_usize("RUSTSCAN_E2E_MAX_KEYFRAMES", slam.mapper.max_keyframes).max(1);
     slam.mapper.keyframe_interval = env_usize(
         "RUSTSCAN_E2E_KEYFRAME_INTERVAL",
         slam.mapper.keyframe_interval,
@@ -184,80 +234,41 @@ fn test_end_to_end_pipeline_video() {
             cache_capacity: env_usize("RUSTSCAN_E2E_CACHE_CAPACITY", 50).max(1),
             prefer_hardware: env_bool("RUSTSCAN_E2E_PREFER_HW", false),
         },
-        log_format: LogFormat::Text,
         mesh_voxel_size: None,
     };
 
     let start = Instant::now();
+    let report = run_pipeline(&resolved).expect("run SLAM-only pipeline");
 
-    let decoded = decode_video(&resolved).expect("decode video");
-    let slam_output = run_slam_stage(InputSource::Video(decoded), &resolved).expect("run SLAM stage");
-    let tracking_ratio = slam_output.tracking_success_ratio.unwrap_or(0.0);
-    let camera_count = slam_output.keyframes.len();
-
-    let gaussian = run_gaussian_stage(slam_output, &resolved).expect("run 3DGS stage");
-    let psnr = average_psnr(&gaussian, env_usize("RUSTSCAN_E2E_PSNR_SAMPLES", 5));
-
-    let mesh_stats = run_mesh_stage(gaussian, &resolved.output, resolved.mesh_voxel_size)
-        .expect("run mesh stage");
-
-    let results = ResultsJson {
-        status: "success".to_string(),
-        input: Some(resolved.input.display().to_string()),
-        output: Some(resolved.output.display().to_string()),
-        processing_time_ms: start.elapsed().as_millis(),
-        camera_count,
-        mesh: MeshStats {
-            vertex_count: mesh_stats.vertex_count,
-            triangle_count: mesh_stats.triangle_count,
-            isolated_triangle_percent: mesh_stats.isolated_triangle_percent,
-        },
-        error: None,
-        diagnostics: build_diagnostics(
-            Some(&resolved.input),
-            Some(&resolved.output),
-            None,
-        ),
-    };
-
-    write_results(&results, &resolved.output, resolved.output_format)
-        .expect("write results.json");
-
-    let obj_path = resolved.output.join("mesh.obj");
-    let ply_path = resolved.output.join("mesh.ply");
-    let results_path = resolved.output.join("results.json");
-
-    assert!(obj_path.exists(), "mesh.obj not found at {}", obj_path.display());
-    assert!(ply_path.exists(), "mesh.ply not found at {}", ply_path.display());
     assert!(
-        results_path.exists(),
-        "results.json not found at {}",
-        results_path.display()
+        report.camera_count > 0,
+        "expected at least one exported pose"
+    );
+    assert_eq!(
+        report.slam_output_path,
+        resolved.output.join("slam_output.json")
+    );
+    assert!(report.slam_output_path.exists());
+
+    let loaded =
+        rustscan_types::SlamOutput::load(&report.slam_output_path).expect("load slam export");
+    assert_eq!(loaded.num_poses(), report.camera_count);
+    assert!(loaded.num_poses() > 0);
+
+    assert!(
+        !resolved.output.join("mesh.obj").exists(),
+        "mesh.obj should not be produced by RustSLAM anymore"
+    );
+    assert!(
+        !resolved.output.join("mesh.ply").exists(),
+        "mesh.ply should not be produced by RustSLAM anymore"
+    );
+    assert!(
+        !resolved.output.join("checkpoints").join("rustgs").exists(),
+        "RustGS training artifacts should not be created by RustSLAM"
     );
 
-    let psnr_threshold = env_f32("RUSTSCAN_E2E_PSNR", 28.0);
-    let tracking_threshold = env_f32("RUSTSCAN_E2E_TRACKING", 0.95);
-    let isolated_threshold = env_f32("RUSTSCAN_E2E_ISOLATED_TRI_PCT", 1.0);
     let max_seconds = env_u64("RUSTSCAN_E2E_MAX_SECONDS", 30 * 60);
-
-    assert!(
-        psnr >= psnr_threshold,
-        "PSNR {:.2} dB below threshold {:.2} dB",
-        psnr,
-        psnr_threshold
-    );
-    assert!(
-        tracking_ratio >= tracking_threshold,
-        "Tracking success {:.2}% below threshold {:.2}%",
-        tracking_ratio * 100.0,
-        tracking_threshold * 100.0
-    );
-    assert!(
-        mesh_stats.isolated_triangle_percent <= isolated_threshold,
-        "Isolated triangles {:.2}% exceeds threshold {:.2}%",
-        mesh_stats.isolated_triangle_percent,
-        isolated_threshold
-    );
     assert!(
         start.elapsed().as_secs() <= max_seconds,
         "Processing time {}s exceeds threshold {}s",

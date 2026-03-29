@@ -1,5 +1,5 @@
 [workspace]
-members = ["rustscan-types", "RustMesh", "RustSLAM", "RustGS", "RustViewer"]
+members = ["rustscan-types", "RustMesh", "RustSLAM", "RustGS", "RustViewer", "RustFF"]
 resolver = "2"
 
 [workspace.dependencies]

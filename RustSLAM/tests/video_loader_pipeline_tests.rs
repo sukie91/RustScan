@@ -5,7 +5,7 @@ use rustslam::pipeline::realtime::RealtimePipeline;
 
 fn sample_video_path() -> std::path::PathBuf {
     let mut path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    path.push(".." );
+    path.push("..");
     path.push("test_data");
     path.push("video");
     path.push("sofa_sample_01.MOV");

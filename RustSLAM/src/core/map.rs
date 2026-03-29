@@ -24,8 +24,9 @@ impl Map {
     }
 
     /// Add a map point
-    pub fn add_point(&mut self, point: MapPoint) -> u64 {
+    pub fn add_point(&mut self, mut point: MapPoint) -> u64 {
         let id = self.next_point_id.fetch_add(1, Ordering::Relaxed);
+        point.id = id;
         self.points.insert(id, point);
         id
     }
@@ -34,6 +35,12 @@ impl Map {
     pub fn insert_point_with_id(&mut self, id: u64, mut point: MapPoint) {
         point.id = id;
         self.points.insert(id, point);
+        self.next_point_id.store(
+            self.next_point_id
+                .load(Ordering::Relaxed)
+                .max(id.saturating_add(1)),
+            Ordering::Relaxed,
+        );
     }
 
     /// Add a keyframe
@@ -48,12 +55,19 @@ impl Map {
     pub fn insert_keyframe_with_id(&mut self, id: u64, mut keyframe: KeyFrame) {
         keyframe.frame.id = id;
         self.keyframes.insert(id, keyframe);
+        self.next_keyframe_id.store(
+            self.next_keyframe_id
+                .load(Ordering::Relaxed)
+                .max(id.saturating_add(1)),
+            Ordering::Relaxed,
+        );
     }
 
     /// Set the next IDs for map points and keyframes
     pub fn set_next_ids(&mut self, next_point_id: u64, next_keyframe_id: u64) {
         self.next_point_id.store(next_point_id, Ordering::Relaxed);
-        self.next_keyframe_id.store(next_keyframe_id, Ordering::Relaxed);
+        self.next_keyframe_id
+            .store(next_keyframe_id, Ordering::Relaxed);
     }
 
     /// Get a map point by ID

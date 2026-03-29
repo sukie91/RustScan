@@ -3,11 +3,11 @@
 //! This module provides interfaces and implementations for loading
 //! standard SLAM datasets (TUM RGB-D, KITTI, EuRoC, etc.)
 
-use std::path::{Path, PathBuf};
 use std::fs::File;
 use std::io::{self, BufRead, BufReader};
+use std::path::{Path, PathBuf};
 
-use glam::{Vec3, Quat};
+use glam::{Quat, Vec3};
 use serde::{Deserialize, Serialize};
 
 use crate::core::{Camera, SE3};
@@ -225,10 +225,14 @@ fn parse_association_file(path: &Path) -> Result<Vec<(f64, String)>> {
             )));
         }
 
-        let timestamp: f64 = parts[0].parse().map_err(|e| DatasetError::Format(format!(
-            "Line {}: invalid timestamp '{}': {}",
-            line_num + 1, parts[0], e
-        )))?;
+        let timestamp: f64 = parts[0].parse().map_err(|e| {
+            DatasetError::Format(format!(
+                "Line {}: invalid timestamp '{}': {}",
+                line_num + 1,
+                parts[0],
+                e
+            ))
+        })?;
 
         let filename = parts[1].to_string();
         entries.push((timestamp, filename));
@@ -258,10 +262,12 @@ fn load_depth_image(path: &Path) -> Result<Vec<f32>> {
                 .map(|p| p.0[0] as f32 / 1000.0) // Convert mm to meters
                 .collect()
         }
-        _ => return Err(DatasetError::Image(format!(
-            "Expected 16-bit grayscale image, got {:?}",
-            img.color()
-        ))),
+        _ => {
+            return Err(DatasetError::Image(format!(
+                "Expected 16-bit grayscale image, got {:?}",
+                img.color()
+            )))
+        }
     };
 
     if depth_data.len() != width * height {
@@ -292,14 +298,14 @@ fn load_color_image(path: &Path) -> Result<Vec<u8>> {
 #[cfg(not(feature = "image"))]
 fn load_depth_image(_path: &Path) -> Result<Vec<f32>> {
     Err(DatasetError::Image(
-        "Depth image loading requires 'image' feature".to_string()
+        "Depth image loading requires 'image' feature".to_string(),
     ))
 }
 
 #[cfg(not(feature = "image"))]
 fn load_color_image(_path: &Path) -> Result<Vec<u8>> {
     Err(DatasetError::Image(
-        "Color image loading requires 'image' feature".to_string()
+        "Color image loading requires 'image' feature".to_string(),
     ))
 }
 
@@ -356,9 +362,9 @@ fn parse_pose_matrix_row(values: &[&str], timestamp: f64) -> Result<(f64, SE3)> 
         .iter()
         .take(12)
         .map(|value| {
-            value.parse::<f32>().map_err(|e| {
-                DatasetError::Format(format!("invalid pose value '{}': {}", value, e))
-            })
+            value
+                .parse::<f32>()
+                .map_err(|e| DatasetError::Format(format!("invalid pose value '{}': {}", value, e)))
         })
         .collect::<Result<Vec<_>>>()?;
 
@@ -368,7 +374,10 @@ fn parse_pose_matrix_row(values: &[&str], timestamp: f64) -> Result<(f64, SE3)> 
         [parsed[8], parsed[9], parsed[10]],
     ];
     let translation = [parsed[3], parsed[7], parsed[11]];
-    Ok((timestamp, SE3::from_rotation_translation(&rotation, &translation)))
+    Ok((
+        timestamp,
+        SE3::from_rotation_translation(&rotation, &translation),
+    ))
 }
 
 fn find_closest_pose(poses: &[(f64, SE3)], timestamp: f64, threshold_seconds: f64) -> Option<SE3> {
@@ -376,7 +385,10 @@ fn find_closest_pose(poses: &[(f64, SE3)], timestamp: f64, threshold_seconds: f6
         return None;
     }
 
-    match poses.binary_search_by(|(ts, _)| ts.partial_cmp(&timestamp).unwrap_or(std::cmp::Ordering::Equal)) {
+    match poses.binary_search_by(|(ts, _)| {
+        ts.partial_cmp(&timestamp)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    }) {
         Ok(idx) => Some(poses[idx].1),
         Err(idx) => {
             let mut best: Option<(f64, SE3)> = None;
@@ -482,7 +494,8 @@ impl TumRgbdDataset {
         // Create metadata
         let metadata = DatasetMetadata {
             name: "TUM RGB-D".to_string(),
-            sequence: root.file_name()
+            sequence: root
+                .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("unknown")
                 .to_string(),
@@ -529,42 +542,74 @@ impl TumRgbdDataset {
                 )));
             }
 
-            let timestamp: f64 = parts[0].parse().map_err(|e| DatasetError::Format(format!(
-                "Line {}: invalid timestamp '{}': {}",
-                line_num + 1, parts[0], e
-            )))?;
+            let timestamp: f64 = parts[0].parse().map_err(|e| {
+                DatasetError::Format(format!(
+                    "Line {}: invalid timestamp '{}': {}",
+                    line_num + 1,
+                    parts[0],
+                    e
+                ))
+            })?;
 
             // Parse translation
-            let tx: f32 = parts[1].parse().map_err(|e| DatasetError::Format(format!(
-                "Line {}: invalid tx '{}': {}",
-                line_num + 1, parts[1], e
-            )))?;
-            let ty: f32 = parts[2].parse().map_err(|e| DatasetError::Format(format!(
-                "Line {}: invalid ty '{}': {}",
-                line_num + 1, parts[2], e
-            )))?;
-            let tz: f32 = parts[3].parse().map_err(|e| DatasetError::Format(format!(
-                "Line {}: invalid tz '{}': {}",
-                line_num + 1, parts[3], e
-            )))?;
+            let tx: f32 = parts[1].parse().map_err(|e| {
+                DatasetError::Format(format!(
+                    "Line {}: invalid tx '{}': {}",
+                    line_num + 1,
+                    parts[1],
+                    e
+                ))
+            })?;
+            let ty: f32 = parts[2].parse().map_err(|e| {
+                DatasetError::Format(format!(
+                    "Line {}: invalid ty '{}': {}",
+                    line_num + 1,
+                    parts[2],
+                    e
+                ))
+            })?;
+            let tz: f32 = parts[3].parse().map_err(|e| {
+                DatasetError::Format(format!(
+                    "Line {}: invalid tz '{}': {}",
+                    line_num + 1,
+                    parts[3],
+                    e
+                ))
+            })?;
 
             // Parse quaternion (xyzw order in TUM, but we use glam's xyzw)
-            let qx: f32 = parts[4].parse().map_err(|e| DatasetError::Format(format!(
-                "Line {}: invalid qx '{}': {}",
-                line_num + 1, parts[4], e
-            )))?;
-            let qy: f32 = parts[5].parse().map_err(|e| DatasetError::Format(format!(
-                "Line {}: invalid qy '{}': {}",
-                line_num + 1, parts[5], e
-            )))?;
-            let qz: f32 = parts[6].parse().map_err(|e| DatasetError::Format(format!(
-                "Line {}: invalid qz '{}': {}",
-                line_num + 1, parts[6], e
-            )))?;
-            let qw: f32 = parts[7].parse().map_err(|e| DatasetError::Format(format!(
-                "Line {}: invalid qw '{}': {}",
-                line_num + 1, parts[7], e
-            )))?;
+            let qx: f32 = parts[4].parse().map_err(|e| {
+                DatasetError::Format(format!(
+                    "Line {}: invalid qx '{}': {}",
+                    line_num + 1,
+                    parts[4],
+                    e
+                ))
+            })?;
+            let qy: f32 = parts[5].parse().map_err(|e| {
+                DatasetError::Format(format!(
+                    "Line {}: invalid qy '{}': {}",
+                    line_num + 1,
+                    parts[5],
+                    e
+                ))
+            })?;
+            let qz: f32 = parts[6].parse().map_err(|e| {
+                DatasetError::Format(format!(
+                    "Line {}: invalid qz '{}': {}",
+                    line_num + 1,
+                    parts[6],
+                    e
+                ))
+            })?;
+            let qw: f32 = parts[7].parse().map_err(|e| {
+                DatasetError::Format(format!(
+                    "Line {}: invalid qw '{}': {}",
+                    line_num + 1,
+                    parts[7],
+                    e
+                ))
+            })?;
 
             // Create SE3 from translation and quaternion
             let translation = Vec3::new(tx, ty, tz);
@@ -616,11 +661,12 @@ impl TumRgbdDataset {
         }
 
         // Simple linear search (entries are small, OK for now)
-        self.depth_entries.iter()
+        self.depth_entries
+            .iter()
             .min_by_key(|(ts, _)| {
                 // Use absolute difference as key
                 let diff = (ts - color_timestamp).abs();
-                (diff * 1e6) as i64  // Convert to microseconds for integer comparison
+                (diff * 1e6) as i64 // Convert to microseconds for integer comparison
             })
             .map(|(ts, path)| (*ts, path))
     }
@@ -633,7 +679,8 @@ impl TumRgbdDataset {
 
         // Binary search for closest timestamp (ground_truth is sorted)
         match self.ground_truth.binary_search_by(|(ts, _)| {
-            ts.partial_cmp(&timestamp).unwrap_or(std::cmp::Ordering::Equal)
+            ts.partial_cmp(&timestamp)
+                .unwrap_or(std::cmp::Ordering::Equal)
         }) {
             Ok(idx) => {
                 // Exact match
@@ -759,7 +806,9 @@ impl KittiDataset {
             let line = calib
                 .lines()
                 .find(|line| line.starts_with("P0:") || line.starts_with("P2:"))
-                .ok_or_else(|| DatasetError::Format("calib.txt missing P0/P2 projection matrix".into()))?;
+                .ok_or_else(|| {
+                    DatasetError::Format("calib.txt missing P0/P2 projection matrix".into())
+                })?;
             parse_projection_camera(line, 1241, 376)?
         } else {
             Camera::new(718.856, 718.856, 607.1928, 185.2157, 1241, 376)
@@ -808,7 +857,11 @@ impl KittiDataset {
 
         let metadata = DatasetMetadata {
             name: "KITTI Odometry".to_string(),
-            sequence: root.file_name().and_then(|n| n.to_str()).unwrap_or("unknown").to_string(),
+            sequence: root
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("unknown")
+                .to_string(),
             total_frames: image_entries.len(),
             has_depth: false,
             has_ground_truth: !poses.is_empty(),
@@ -912,7 +965,9 @@ impl EurocDataset {
                     })
                     .transpose()
                     .map_err(|e| DatasetError::Format(format!("invalid EuRoC intrinsics: {}", e)))?
-                    .and_then(|vals| (vals.len() == 4).then_some((vals[0], vals[1], vals[2], vals[3])))
+                    .and_then(|vals| {
+                        (vals.len() == 4).then_some((vals[0], vals[1], vals[2], vals[3]))
+                    })
                     .unwrap_or((458.654, 457.296, 367.215, 248.375));
 
                 let (width, height) = resolution_line
@@ -960,7 +1015,10 @@ impl EurocDataset {
         }
 
         let ground_truth = if config.load_ground_truth {
-            let gt_path = root.join("mav0").join("state_groundtruth_estimate0").join("data.csv");
+            let gt_path = root
+                .join("mav0")
+                .join("state_groundtruth_estimate0")
+                .join("data.csv");
             if gt_path.exists() {
                 let file = File::open(&gt_path)?;
                 let reader = BufReader::new(file);
@@ -979,18 +1037,39 @@ impl EurocDataset {
                         )));
                     }
                     let timestamp = parts[0].parse::<u64>().map_err(|e| {
-                        DatasetError::Format(format!("invalid EuRoC ground truth timestamp '{}': {}", parts[0], e))
-                    })? as f64 / 1e9;
-                    let tx = parts[1].parse::<f32>().map_err(|e| DatasetError::Format(format!("invalid tx '{}': {}", parts[1], e)))?;
-                    let ty = parts[2].parse::<f32>().map_err(|e| DatasetError::Format(format!("invalid ty '{}': {}", parts[2], e)))?;
-                    let tz = parts[3].parse::<f32>().map_err(|e| DatasetError::Format(format!("invalid tz '{}': {}", parts[3], e)))?;
-                    let qw = parts[4].parse::<f32>().map_err(|e| DatasetError::Format(format!("invalid qw '{}': {}", parts[4], e)))?;
-                    let qx = parts[5].parse::<f32>().map_err(|e| DatasetError::Format(format!("invalid qx '{}': {}", parts[5], e)))?;
-                    let qy = parts[6].parse::<f32>().map_err(|e| DatasetError::Format(format!("invalid qy '{}': {}", parts[6], e)))?;
-                    let qz = parts[7].parse::<f32>().map_err(|e| DatasetError::Format(format!("invalid qz '{}': {}", parts[7], e)))?;
+                        DatasetError::Format(format!(
+                            "invalid EuRoC ground truth timestamp '{}': {}",
+                            parts[0], e
+                        ))
+                    })? as f64
+                        / 1e9;
+                    let tx = parts[1].parse::<f32>().map_err(|e| {
+                        DatasetError::Format(format!("invalid tx '{}': {}", parts[1], e))
+                    })?;
+                    let ty = parts[2].parse::<f32>().map_err(|e| {
+                        DatasetError::Format(format!("invalid ty '{}': {}", parts[2], e))
+                    })?;
+                    let tz = parts[3].parse::<f32>().map_err(|e| {
+                        DatasetError::Format(format!("invalid tz '{}': {}", parts[3], e))
+                    })?;
+                    let qw = parts[4].parse::<f32>().map_err(|e| {
+                        DatasetError::Format(format!("invalid qw '{}': {}", parts[4], e))
+                    })?;
+                    let qx = parts[5].parse::<f32>().map_err(|e| {
+                        DatasetError::Format(format!("invalid qx '{}': {}", parts[5], e))
+                    })?;
+                    let qy = parts[6].parse::<f32>().map_err(|e| {
+                        DatasetError::Format(format!("invalid qy '{}': {}", parts[6], e))
+                    })?;
+                    let qz = parts[7].parse::<f32>().map_err(|e| {
+                        DatasetError::Format(format!("invalid qz '{}': {}", parts[7], e))
+                    })?;
                     poses.push((
                         timestamp,
-                        SE3::from_quat_translation(Quat::from_xyzw(qx, qy, qz, qw), Vec3::new(tx, ty, tz)),
+                        SE3::from_quat_translation(
+                            Quat::from_xyzw(qx, qy, qz, qw),
+                            Vec3::new(tx, ty, tz),
+                        ),
                     ));
                 }
                 poses.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
@@ -1016,7 +1095,11 @@ impl EurocDataset {
 
         let metadata = DatasetMetadata {
             name: "EuRoC MAV".to_string(),
-            sequence: root.file_name().and_then(|n| n.to_str()).unwrap_or("unknown").to_string(),
+            sequence: root
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("unknown")
+                .to_string(),
             total_frames: image_entries.len(),
             has_depth: false,
             has_ground_truth: !ground_truth.is_empty(),
@@ -1159,7 +1242,11 @@ mod tests {
         let dir = tempdir().unwrap();
         let image_dir = dir.path().join("image_0");
         std::fs::create_dir_all(&image_dir).unwrap();
-        std::fs::write(dir.path().join("calib.txt"), "P0: 718.856 0.0 607.1928 0.0 0.0 718.856 185.2157 0.0 0.0 0.0 1.0 0.0\n").unwrap();
+        std::fs::write(
+            dir.path().join("calib.txt"),
+            "P0: 718.856 0.0 607.1928 0.0 0.0 718.856 185.2157 0.0 0.0 0.0 1.0 0.0\n",
+        )
+        .unwrap();
         std::fs::write(dir.path().join("poses.txt"), "1 0 0 0 0 1 0 0 0 0 1 0\n").unwrap();
         std::fs::write(image_dir.join("000000.png"), b"dummy").unwrap();
 
@@ -1169,7 +1256,8 @@ mod tests {
             load_ground_truth: true,
             max_frames: 0,
             stride: 1,
-        }).unwrap();
+        })
+        .unwrap();
 
         assert_eq!(dataset.len(), 1);
         assert!(dataset.metadata().has_ground_truth);
@@ -1187,8 +1275,13 @@ mod tests {
         std::fs::write(
             cam0.join("sensor.yaml"),
             "intrinsics: [458.654, 457.296, 367.215, 248.375]\nresolution: [752, 480]\n",
-        ).unwrap();
-        std::fs::write(cam0.join("data.csv"), "#timestamp,filename\n1403636579763555584,1403636579763555584.png\n").unwrap();
+        )
+        .unwrap();
+        std::fs::write(
+            cam0.join("data.csv"),
+            "#timestamp,filename\n1403636579763555584,1403636579763555584.png\n",
+        )
+        .unwrap();
         std::fs::write(gt_dir.join("data.csv"), "#timestamp,p_RS_R_x,p_RS_R_y,p_RS_R_z,q_RS_w,q_RS_x,q_RS_y,q_RS_z\n1403636579763555584,0,0,0,1,0,0,0\n").unwrap();
         std::fs::write(data_dir.join("1403636579763555584.png"), b"dummy").unwrap();
 
@@ -1198,7 +1291,8 @@ mod tests {
             load_ground_truth: true,
             max_frames: 0,
             stride: 1,
-        }).unwrap();
+        })
+        .unwrap();
 
         assert_eq!(dataset.len(), 1);
         assert!(dataset.metadata().has_ground_truth);

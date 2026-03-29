@@ -9,22 +9,17 @@
 //! 3. Marching Cubes extraction
 //! 4. Post-processing (clustering, floaters removal)
 
-use glam::{Vec3, Mat4};
+use glam::{Mat4, Vec3};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-pub use crate::fusion::tsdf_volume::{TsdfVolume, TsdfConfig};
-pub use crate::fusion::marching_cubes::{Mesh, MeshVertex, MeshTriangle, MarchingCubes};
+pub use crate::fusion::marching_cubes::{MarchingCubes, Mesh, MeshTriangle, MeshVertex};
 use crate::fusion::mesh_io::{export_mesh, MeshIoError};
 use crate::fusion::mesh_metadata::{
-    export_mesh_metadata,
-    BoundingBox,
-    MeshMetadata,
-    MeshMetadataError,
-    MeshTimings,
-    TsdfMetadata,
+    export_mesh_metadata, BoundingBox, MeshMetadata, MeshMetadataError, MeshTimings, TsdfMetadata,
 };
+pub use crate::fusion::tsdf_volume::{TsdfConfig, TsdfVolume};
 
 /// Mesh extraction configuration
 #[derive(Debug, Clone)]
@@ -45,8 +40,8 @@ impl Default for MeshExtractionConfig {
     fn default() -> Self {
         Self {
             tsdf_config: TsdfConfig {
-                voxel_size: 0.01,      // 1cm
-                sdf_trunc: 0.03,       // 3cm truncation
+                voxel_size: 0.01, // 1cm
+                sdf_trunc: 0.03,  // 3cm truncation
                 min_bound: Vec3::new(-1.0, -1.0, -1.0),
                 max_bound: Vec3::new(1.0, 1.0, 1.0),
                 max_weight: 100.0,
@@ -134,15 +129,11 @@ impl MeshExtractor {
         extrinsics: &Mat4,
     ) {
         let start = Instant::now();
-        self.volume.integrate(
-            depth,
-            color,
-            width,
-            height,
-            intrinsics,
-            extrinsics,
-        );
-        self.timings_ms.tsdf_fusion_ms = self.timings_ms.tsdf_fusion_ms
+        self.volume
+            .integrate(depth, color, width, height, intrinsics, extrinsics);
+        self.timings_ms.tsdf_fusion_ms = self
+            .timings_ms
+            .tsdf_fusion_ms
             .saturating_add(start.elapsed().as_millis() as u64);
     }
 
@@ -165,13 +156,17 @@ impl MeshExtractor {
         });
         self.volume.integrate_from_gaussians(
             render_depth_fn,
-            color_fn.as_ref().map(|f| f.as_ref() as &dyn Fn(usize) -> Option<[u8; 3]>),
+            color_fn
+                .as_ref()
+                .map(|f| f.as_ref() as &dyn Fn(usize) -> Option<[u8; 3]>),
             width,
             height,
             intrinsics,
             extrinsics,
         );
-        self.timings_ms.tsdf_fusion_ms = self.timings_ms.tsdf_fusion_ms
+        self.timings_ms.tsdf_fusion_ms = self
+            .timings_ms
+            .tsdf_fusion_ms
             .saturating_add(start.elapsed().as_millis() as u64);
     }
 
@@ -189,7 +184,9 @@ impl MeshExtractor {
     pub fn extract_with_postprocessing_report(&mut self) -> MeshExtractionReport {
         let march_start = Instant::now();
         let mut mesh = self.extract();
-        self.timings_ms.marching_cubes_ms = self.timings_ms.marching_cubes_ms
+        self.timings_ms.marching_cubes_ms = self
+            .timings_ms
+            .marching_cubes_ms
             .saturating_add(march_start.elapsed().as_millis() as u64);
 
         let post_start = Instant::now();
@@ -245,7 +242,9 @@ impl MeshExtractor {
             );
         }
 
-        self.timings_ms.post_process_ms = self.timings_ms.post_process_ms
+        self.timings_ms.post_process_ms = self
+            .timings_ms
+            .post_process_ms
             .saturating_add(post_start.elapsed().as_millis() as u64);
 
         MeshExtractionReport {
@@ -255,7 +254,11 @@ impl MeshExtractor {
     }
 
     /// Export mesh to OBJ and PLY under the output directory.
-    pub fn export_mesh_files(&self, mesh: &Mesh, output_dir: &Path) -> Result<(PathBuf, PathBuf), MeshIoError> {
+    pub fn export_mesh_files(
+        &self,
+        mesh: &Mesh,
+        output_dir: &Path,
+    ) -> Result<(PathBuf, PathBuf), MeshIoError> {
         export_mesh(output_dir, mesh)
     }
 
@@ -408,7 +411,9 @@ impl MeshExtractor {
                 new_indices[i] = mapped;
             }
 
-            new_triangles.push(MeshTriangle { indices: new_indices });
+            new_triangles.push(MeshTriangle {
+                indices: new_indices,
+            });
         }
 
         (
