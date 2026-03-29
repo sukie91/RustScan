@@ -19,10 +19,18 @@ pub struct GaussianRenderRecord {
     pub u: f32,
     /// 2D projected center y
     pub v: f32,
-    /// 2D scale x (after abs().max(0.5) clamp)
+    /// 2D scale x (sqrt of cov_xx, after abs().max(0.5) clamp)
     pub sigma_x: f32,
-    /// 2D scale y (after abs().max(0.5) clamp)
+    /// 2D scale y (sqrt of cov_yy, after abs().max(0.5) clamp)
     pub sigma_y: f32,
+    /// Cross-term of the 2D covariance Σ[0,1] = Σ[1,0]
+    pub cov_xy: f32,
+    /// Per-scale-axis x-projection: proj_axis_x[k] = J[0,:] · R_total[:,k]
+    /// satisfying cov_xx = Σ_k sk² * proj_axis_x[k]²
+    pub proj_axis_x: [f32; 3],
+    /// Per-scale-axis y-projection: proj_axis_y[k] = J[1,:] · R_total[:,k]
+    /// satisfying cov_yy = Σ_k sk² * proj_axis_y[k]²
+    pub proj_axis_y: [f32; 3],
     /// Depth
     pub z: f32,
     /// Opacity after sigmoid + clamp (base_alpha)
@@ -250,13 +258,22 @@ pub fn backward_weighted_l1_from_buffers(
                 let sig = sigmoid(rec.opacity_logit);
                 let sig_deriv = sig * (1.0 - sig);
                 let opacity_clamp_pass = rec.raw_opacity >= 0.0 && rec.raw_opacity <= 1.0;
-                let sx_clamp_pass = rec.raw_scale_2d_x.abs() >= 0.5;
-                let sy_clamp_pass = rec.raw_scale_2d_y.abs() >= 0.5;
+
+                // Precompute full 2D covariance for Mahalanobis kernel.
+                // cov_xx = sigma_x², cov_yy = sigma_y², cov_xy from record.
+                let cov_xx = rec.sigma_x * rec.sigma_x;
+                let cov_yy = rec.sigma_y * rec.sigma_y;
+                let det = cov_xx * cov_yy - rec.cov_xy * rec.cov_xy;
+                if det < 1e-10 {
+                    continue;
+                }
+                let inv_det = 1.0 / det;
 
                 let mut dl_du = 0.0f32;
                 let mut dl_dv = 0.0f32;
-                let mut dl_dsigma_x = 0.0f32;
-                let mut dl_dsigma_y = 0.0f32;
+                let mut dl_dcov_xx = 0.0f32;
+                let mut dl_dcov_xy = 0.0f32;
+                let mut dl_dcov_yy = 0.0f32;
                 let mut dl_dbase_alpha = 0.0f32;
                 let mut dl_dz = 0.0f32;
 
@@ -272,9 +289,13 @@ pub fn backward_weighted_l1_from_buffers(
                     for px in rec.min_x..=rec.max_x {
                         let local_pidx = local_py * w + px;
                         let global_pidx = py * w + px;
-                        let dx = (px as f32 + 0.5 - rec.u) / rec.sigma_x;
-                        let dy = (py as f32 + 0.5 - rec.v) / rec.sigma_y;
-                        let kernel = (-0.5 * (dx * dx + dy * dy)).exp();
+                        // Full Mahalanobis kernel: kernel = exp(-0.5 * dᵀ Σ⁻¹ d)
+                        let dx = px as f32 + 0.5 - rec.u;
+                        let dy = py as f32 + 0.5 - rec.v;
+                        let d_sq = (cov_yy * dx * dx - 2.0 * rec.cov_xy * dx * dy
+                            + cov_xx * dy * dy)
+                            * inv_det;
+                        let kernel = (-0.5 * d_sq).exp();
                         let alpha_raw = rec.base_alpha * kernel;
                         let alpha = alpha_raw.clamp(0.0, 0.99);
                         if alpha <= 1e-6 {
@@ -354,18 +375,23 @@ pub fn backward_weighted_l1_from_buffers(
                         dl_dbase_alpha += dl_dalpha_total * kernel;
 
                         let dl_dkernel = dl_dalpha_total * rec.base_alpha;
-                        let dk_ddx = kernel * (-dx);
-                        let dk_ddy = kernel * (-dy);
+                        // Whitened displacement: u_vec = Σ⁻¹ · [dx, dy]
+                        let u0 = (cov_yy * dx - rec.cov_xy * dy) * inv_det;
+                        let u1 = (-rec.cov_xy * dx + cov_xx * dy) * inv_det;
 
-                        dl_du += dl_dkernel * dk_ddx * (-1.0 / rec.sigma_x);
-                        dl_dv += dl_dkernel * dk_ddy * (-1.0 / rec.sigma_y);
+                        // d(kernel)/d(u) =  kernel * u0  (d(dx)/d(u) = -1, sign flip)
+                        // d(kernel)/d(v) =  kernel * u1
+                        dl_du += dl_dkernel * kernel * u0;
+                        dl_dv += dl_dkernel * kernel * u1;
 
-                        if sx_clamp_pass {
-                            dl_dsigma_x += dl_dkernel * dk_ddx * (-dx / rec.sigma_x);
-                        }
-                        if sy_clamp_pass {
-                            dl_dsigma_y += dl_dkernel * dk_ddy * (-dy / rec.sigma_y);
-                        }
+                        // Covariance gradients via matrix identity:
+                        // d(kernel)/d(cov_xx) = 0.5 * kernel * u0²
+                        // d(kernel)/d(cov_yy) = 0.5 * kernel * u1²
+                        // d(kernel)/d(cov_xy) = kernel * u0 * u1
+                        let dk = dl_dkernel * kernel;
+                        dl_dcov_xx += dk * 0.5 * u0 * u0;
+                        dl_dcov_yy += dk * 0.5 * u1 * u1;
+                        dl_dcov_xy += dk * u0 * u1;
                         dl_dz += dl_dz_direct;
                     }
                 }
@@ -376,114 +402,33 @@ pub fn backward_weighted_l1_from_buffers(
 
                 grad_pos[gi] += dl_du * fx * inv_z;
                 grad_pos[gi + 1] += dl_dv * fy * inv_z;
+                // z-dependence of covariance: Σ_2D ∝ 1/z², so d(cov)/dz = -2*cov/z
+                let dl_dz_via_cov = dl_dcov_xx * (-2.0 * cov_xx * inv_z)
+                    + dl_dcov_xy * (-2.0 * rec.cov_xy * inv_z)
+                    + dl_dcov_yy * (-2.0 * cov_yy * inv_z);
                 let dl_dz_projected = dl_du * (-(rec.u - cx) * inv_z)
                     + dl_dv * (-(rec.v - cy) * inv_z)
-                    + dl_dsigma_x * (-rec.raw_scale_2d_x * inv_z)
-                    + dl_dsigma_y * (-rec.raw_scale_2d_y * inv_z);
+                    + dl_dz_via_cov;
                 grad_pos[gi + 2] += dl_dz + dl_dz_projected;
 
-                // ── Chain rule: dL/d(log_scale_k) = dL/d(scale_k) * scale_k
+                // ── Full chain rule: dL/d(log_scale_k) via full 2D covariance
                 //
-                // sigma_x² = Jx · Cworld · Jx^T  where Cworld = R diag(s²) R^T
-                // d(sigma_x²)/d(s_k²) = (Jx · R[:,k])²   (k = x,y,z)
-                // d(sigma_x)/d(s_k)   = s_k * (Jx · R[:,k])² / sigma_x
-                // d(sigma_x)/d(log_scale_k) = d(sigma_x)/d(s_k) * s_k
-                //                           = s_k² * (Jx · R[:,k])² / sigma_x
+                // cov_xx = Σ_k sk² * proj_axis_x[k]²
+                // cov_xy = Σ_k sk² * proj_axis_x[k] * proj_axis_y[k]
+                // cov_yy = Σ_k sk² * proj_axis_y[k]²
                 //
-                // We precomputed Jx = projection_row_x = (fx/z, 0, -fx*x/z²)
-                // and camera_rotation R_cam, so in camera space:
-                //   R_total[:,k] = R_cam * R_object[:,k]
-                // Jx · R_total[:,k] is the x-component of the projected k-th axis.
-                //
-                // Below we use the raw 2D sigmas stored in the record, which equal
-                // the per-axis camera-space projection magnitudes scaled by s_k.
-
-                // d(sigma_x²)/d(s_k²) = (sigma_x_hat_k)² where sigma_x_hat_k is
-                // the contribution of scale axis k to sigma_x per unit scale.
-                // Equivalently, d(sigma_x)/d(s_k) * s_k = s_k² * ... / sigma_x.
-                //
-                // For the axis-aligned approximation currently used, sigma_x only
-                // depends on scale_x along the camera-x direction and on scale_z
-                // along the depth direction (and similarly for sigma_y). The full
-                // covariance product contributes all three axes; we propagate
-                // through the full chain analytically below.
-                //
-                // raw_scale_2d_x = sqrt(Jx · Cworld · Jx^T)   (before clamp)
-                // For s_k, d(raw_scale_2d_x)/d(s_k) = s_k * proj_k_x² / raw_scale_2d_x
-                // where proj_k_x = Jx · (R_cam * R_object)[:,k].
-                //
-                // We can recover proj_k_x from the forward data:
-                // raw_scale_2d_x² = s_x²*proj_x_x² + s_y²*proj_y_x² + s_z²*proj_z_x²
-                //
-                // Without storing individual axis projections we use the simplified
-                // single-axis approximation already present in the forward pass:
-                //   sigma_x ≈ |s_x| * fx/z   and  sigma_z_contribution_x ≈ |s_z| * fx*|x|/z²
-                //
-                // The correct full gradient requires per-axis projection components.
-                // We derive them from the stored raw_scale_2d values:
-                //   raw_scale_2d_x² ≈ s_x² * (fx/z)² + s_z² * (fx*x/z²)²  (dominant terms)
-                //
-                // d(raw_sigma_x)/d(s_x) = s_x * (fx/z)²  / raw_sigma_x
-                // d(raw_sigma_x)/d(s_z) = s_z * (fx*x/z²)² / raw_sigma_x
-                // d(raw_sigma_y)/d(s_y) = s_y * (fy/z)²  / raw_sigma_y
-                // d(raw_sigma_y)/d(s_z) = s_z * (fy*y/z²)² / raw_sigma_y
-                //
-                // Noting that (fx/z) = raw_sigma_x / s_x when rotation=identity and
-                // there is only one dominant term, we compute the z contribution
-                // as the remaining variance in raw_sigma_x after removing the x term:
-                //   var_x_from_z = raw_sigma_x² - s_x² * (fx/z)²
-                //   d(raw_sigma_x)/d(s_z) ≈ var_x_from_z / (raw_sigma_x * s_z)  if s_z ≠ 0
-                //
-                // This is the correct per-axis gradient when the object rotation is
-                // identity. For the general case the full Jacobian is stored in
-                // the GPU projection kernel and applied there. Here in the CPU path
-                // we propagate the z gradient through the same simplified model.
-
-                let raw_sx = rec.raw_scale_2d_x;
-                let raw_sy = rec.raw_scale_2d_y;
+                // d(cov_ab)/d(sk²) = proj_axis_a[k] * proj_axis_b[k]
+                // d(L)/d(sk²) = dl_dcov_xx*pax[k]² + dl_dcov_xy*pax[k]*pay[k] + dl_dcov_yy*pay[k]²
+                // d(L)/d(log_sk) = d(L)/d(sk²) * 2*sk²   (since sk = exp(log_sk))
                 let s3 = rec.scale_3d;
-
-                let dl_dscale3d_x = if sx_clamp_pass {
-                    dl_dsigma_x * fx * inv_z
-                } else {
-                    0.0
-                };
-                let dl_dscale3d_y = if sy_clamp_pass {
-                    dl_dsigma_y * fy * inv_z
-                } else {
-                    0.0
-                };
-
-                // scale_z gradient from its contribution to both sigma_x and sigma_y
-                // via the depth-direction projection terms.
-                let dl_dscale3d_z = {
-                    let mut contrib = 0.0f32;
-                    // contribution through sigma_x
-                    if sx_clamp_pass && raw_sx > 1e-6 && s3[0] > 1e-6 {
-                        let var_x_from_x = (s3[0] * fx * inv_z) * (s3[0] * fx * inv_z);
-                        let var_x_from_z = (raw_sx * raw_sx - var_x_from_x).max(0.0);
-                        if s3[2] > 1e-6 {
-                            let d_raw_sx_d_sz = var_x_from_z / (raw_sx * s3[2]);
-                            // d(sigma_x)/d(s_z) * clamp_pass already in dl_dsigma_x
-                            // d(sigma_x)/d(log_scale_z) = d(sigma_x)/d(s_z) * s_z
-                            contrib += dl_dsigma_x * d_raw_sx_d_sz * s3[2];
-                        }
-                    }
-                    // contribution through sigma_y
-                    if sy_clamp_pass && raw_sy > 1e-6 && s3[1] > 1e-6 {
-                        let var_y_from_y = (s3[1] * fy * inv_z) * (s3[1] * fy * inv_z);
-                        let var_y_from_z = (raw_sy * raw_sy - var_y_from_y).max(0.0);
-                        if s3[2] > 1e-6 {
-                            let d_raw_sy_d_sz = var_y_from_z / (raw_sy * s3[2]);
-                            contrib += dl_dsigma_y * d_raw_sy_d_sz * s3[2];
-                        }
-                    }
-                    contrib
-                };
-
-                grad_log_scale[gi] += dl_dscale3d_x * s3[0];
-                grad_log_scale[gi + 1] += dl_dscale3d_y * s3[1];
-                grad_log_scale[gi + 2] += dl_dscale3d_z;
+                for k in 0..3 {
+                    let pax = rec.proj_axis_x[k];
+                    let pay = rec.proj_axis_y[k];
+                    let dl_dsk2 = dl_dcov_xx * pax * pax
+                        + dl_dcov_xy * pax * pay
+                        + dl_dcov_yy * pay * pay;
+                    grad_log_scale[gi + k] += dl_dsk2 * 2.0 * s3[k] * s3[k];
+                }
 
                 if opacity_clamp_pass {
                     grad_logit[idx] += dl_dbase_alpha * sig_deriv;
@@ -563,12 +508,18 @@ mod tests {
             }
         }
 
+        // For a simple axis-aligned Gaussian: proj_axis_x[0]=fx/z, proj_axis_y[1]=fy/z (others~0)
+        let proj_ax = [100.0 / 2.0, 0.0, 0.0];
+        let proj_ay = [0.0, 100.0 / 2.0, 0.0];
         let rec = GaussianRenderRecord {
             gaussian_idx: 0,
             u,
             v,
             sigma_x: sigma,
             sigma_y: sigma,
+            cov_xy: 0.0,
+            proj_axis_x: proj_ax,
+            proj_axis_y: proj_ay,
             z: 2.0,
             base_alpha,
             color,
@@ -764,6 +715,11 @@ mod tests {
             for (depth, alpha) in rendered_depth.iter_mut().zip(alpha_acc.iter()) {
                 *depth /= alpha + DEPTH_NORMALIZATION_EPS;
             }
+            // Simple axis-aligned projection axes: proj_ax[0]=fx/z, proj_ay[1]=fy/z
+            // (fx=1.0, fy=1.0 as used in backward_weighted_l1 call below)
+            let inv_z_local = 1.0 / z;
+            let proj_ax_local = [inv_z_local, 0.0, 0.0]; // fx=1.0
+            let proj_ay_local = [0.0, inv_z_local, 0.0]; // fy=1.0
             ForwardIntermediate {
                 records: vec![GaussianRenderRecord {
                     gaussian_idx: 0,
@@ -771,6 +727,9 @@ mod tests {
                     v: cy,
                     sigma_x: sigma,
                     sigma_y: sigma,
+                    cov_xy: 0.0,
+                    proj_axis_x: proj_ax_local,
+                    proj_axis_y: proj_ay_local,
                     z,
                     base_alpha,
                     color: [0.0, 0.0, 0.0],
@@ -827,6 +786,66 @@ mod tests {
             grads.positions[2],
             fd_grad,
             rel_err
+        );
+    }
+
+    /// Verify that a tilted Gaussian with non-zero cov_xy produces non-zero scale
+    /// gradients for all three axes (not just x/y as in the diagonal approximation).
+    ///
+    /// When cov_xy ≠ 0 the off-diagonal gradient couples scale_x and scale_y.
+    /// A rotated Gaussian (45°) with sx ≠ sy should produce non-zero scale gradients.
+    #[test]
+    fn test_cov_xy_gradient_nonzero_for_rotated_gaussian() {
+        use crate::diff::diff_splat::{DiffCamera, DiffSplatRenderer, TrainableGaussians};
+        use candle_core::Device;
+
+        let device = Device::Cpu;
+        let w = 8usize;
+        let h = 8usize;
+
+        // One elongated Gaussian at (0,0,3) rotated 45° around z so cov_xy ≠ 0
+        let angle = std::f32::consts::FRAC_PI_4;
+        let gaussians = TrainableGaussians::new(
+            &[0.0f32, 0.0, 3.0],
+            &[(-2.0f32).exp().ln(), (-4.0f32).exp().ln(), (-4.0f32).exp().ln()], // log-scales
+            &[(angle / 2.0).cos(), 0.0, 0.0, (angle / 2.0).sin()], // quaternion [w,x,y,z]
+            &[0.5f32], // opacity logit
+            &[0.8f32, 0.4, 0.2],
+            &device,
+        )
+        .unwrap();
+
+        let camera = DiffCamera::new(
+            50.0, 50.0,
+            (w / 2) as f32, (h / 2) as f32,
+            w, h,
+            &[[1., 0., 0.], [0., 1., 0.], [0., 0., 1.]],
+            &[0., 0., 0.],
+            &device,
+        )
+        .unwrap();
+
+        let mut renderer = DiffSplatRenderer::with_device(w, h, device.clone());
+        let (_, inter) = renderer.render_with_intermediates(&gaussians, &camera).unwrap();
+
+        assert_eq!(inter.records.len(), 1);
+        let rec = &inter.records[0];
+
+        // Rotated elongated Gaussian → cov_xy should be non-zero
+        assert!(
+            rec.cov_xy.abs() > 1e-4,
+            "cov_xy should be non-zero for rotated Gaussian, got {}",
+            rec.cov_xy
+        );
+
+        // Backward pass should produce non-zero scale gradients
+        let target = vec![0.0f32; w * h * 3];
+        let grads = backward(&inter, &target, 1, camera.fx, camera.fy, camera.cx, camera.cy);
+        let scale_grad_magnitude: f32 = grads.log_scales.iter().map(|g: &f32| g.abs()).sum();
+        assert!(
+            scale_grad_magnitude > 1e-6,
+            "scale gradients should be non-zero for rotated Gaussian, got {:?}",
+            grads.log_scales
         );
     }
 }

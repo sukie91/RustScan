@@ -212,6 +212,8 @@ pub struct RenderCache {
     idx_to_order_pos: Vec<usize>,
     sigma_x: Vec<f32>,
     sigma_y: Vec<f32>,
+    /// Cross-term of 2D covariance (per depth-sorted position)
+    cov_xy: Vec<f32>,
     radius_x: Vec<isize>,
     radius_y: Vec<isize>,
     min_x: Vec<usize>,
@@ -235,6 +237,7 @@ impl RenderCache {
             idx_to_order_pos: vec![0; max_gaussians],
             sigma_x: Vec::with_capacity(max_gaussians),
             sigma_y: Vec::with_capacity(max_gaussians),
+            cov_xy: Vec::with_capacity(max_gaussians),
             radius_x: Vec::with_capacity(max_gaussians),
             radius_y: Vec::with_capacity(max_gaussians),
             min_x: Vec::with_capacity(max_gaussians),
@@ -322,14 +325,18 @@ impl DiffSplatRenderer {
         let z_values = z.to_vec1::<f32>()?;
         let scale_values = scales.to_vec2::<f32>()?;
         let rotation_values = rotations.to_vec2::<f32>()?;
-        let mut scale_2d_x = Vec::with_capacity(z_values.len());
-        let mut scale_2d_y = Vec::with_capacity(z_values.len());
+        let n = z_values.len();
+        let mut scale_2d_x = Vec::with_capacity(n);
+        let mut scale_2d_y = Vec::with_capacity(n);
+        let mut cov_xy_vec = Vec::with_capacity(n);
+        let mut proj_axis_x_vec: Vec<[f32; 3]> = Vec::with_capacity(n);
+        let mut proj_axis_y_vec: Vec<[f32; 3]> = Vec::with_capacity(n);
 
-        for idx in 0..z_values.len() {
+        for idx in 0..n {
             let scale = vec3_from_row(scale_values.get(idx).map(Vec::as_slice).unwrap_or(&[]));
             let rotation =
                 quaternion_from_row(rotation_values.get(idx).map(Vec::as_slice).unwrap_or(&[]));
-            let (sigma_x, sigma_y) = projected_axis_aligned_sigmas(
+            let (sigma_x, sigma_y, cov_xy, pax, pay) = project_covariance_full(
                 x_values.get(idx).copied().unwrap_or(0.0),
                 y_values.get(idx).copied().unwrap_or(0.0),
                 z_values.get(idx).copied().unwrap_or(0.0),
@@ -341,6 +348,9 @@ impl DiffSplatRenderer {
             );
             scale_2d_x.push(sigma_x.clamp(0.5, 256.0));
             scale_2d_y.push(sigma_y.clamp(0.5, 256.0));
+            cov_xy_vec.push(cov_xy);
+            proj_axis_x_vec.push(pax);
+            proj_axis_y_vec.push(pay);
         }
 
         Ok(ProjectedGaussiansTensor {
@@ -349,6 +359,9 @@ impl DiffSplatRenderer {
             scale_x: Tensor::from_slice(&scale_2d_x, scale_2d_x.len(), &self.device)?,
             scale_y: Tensor::from_slice(&scale_2d_y, scale_2d_y.len(), &self.device)?,
             z: z.clone(),
+            cov_xy: cov_xy_vec,
+            proj_axis_x: proj_axis_x_vec,
+            proj_axis_y: proj_axis_y_vec,
         })
     }
 
@@ -376,6 +389,7 @@ impl DiffSplatRenderer {
             self.cache.sorted_order.clear();
             self.cache.sigma_x.clear();
             self.cache.sigma_y.clear();
+            self.cache.cov_xy.clear();
             self.cache.radius_x.clear();
             self.cache.radius_y.clear();
             self.cache.min_x.clear();
@@ -391,6 +405,9 @@ impl DiffSplatRenderer {
                     let ry = (3.0 * sy).ceil() as isize;
                     self.cache.sigma_x.push(sx);
                     self.cache.sigma_y.push(sy);
+                    self.cache
+                        .cov_xy
+                        .push(projected.cov_xy.get(i).copied().unwrap_or(0.0));
                     self.cache.radius_x.push(rx);
                     self.cache.radius_y.push(ry);
                     self.cache
@@ -490,6 +507,14 @@ impl DiffSplatRenderer {
                     let v = projected.v[idx];
                     let sigma_x = cache.sigma_x[order_pos];
                     let sigma_y = cache.sigma_y[order_pos];
+                    let cov_xy_g = cache.cov_xy[order_pos];
+                    let cov_xx = sigma_x * sigma_x;
+                    let cov_yy = sigma_y * sigma_y;
+                    let det = cov_xx * cov_yy - cov_xy_g * cov_xy_g;
+                    if det < 1e-10 {
+                        continue;
+                    }
+                    let inv_det = 1.0 / det;
                     let base_alpha = opacities[idx].clamp(0.0, 1.0);
                     let rgb = colors[idx];
 
@@ -501,9 +526,12 @@ impl DiffSplatRenderer {
                     for py in g_min_y..=g_max_y {
                         for px in g_min_x..=g_max_x {
                             let li = (py - py_start) * tw + (px - px_start);
-                            let dx = (px as f32 + 0.5 - u) / sigma_x;
-                            let dy = (py as f32 + 0.5 - v) / sigma_y;
-                            let kernel = fast_exp(-0.5 * (dx * dx + dy * dy));
+                            let dx = px as f32 + 0.5 - u;
+                            let dy = py as f32 + 0.5 - v;
+                            let d_sq = (cov_yy * dx * dx - 2.0 * cov_xy_g * dx * dy
+                                + cov_xx * dy * dy)
+                                * inv_det;
+                            let kernel = fast_exp(-0.5 * d_sq);
                             let alpha = (base_alpha * kernel).clamp(0.0, 0.99);
                             if alpha <= 1e-6 {
                                 continue;
@@ -614,6 +642,7 @@ impl DiffSplatRenderer {
             scale_x: proj_scale_x,
             scale_y: proj_scale_y,
             z: proj_z,
+            cov_xy: projected.cov_xy,
         };
 
         let (mut color, mut depth, _alpha) =
@@ -669,6 +698,9 @@ impl DiffSplatRenderer {
         let proj_scale_x: Vec<f32> = projected.scale_x.to_vec1()?;
         let proj_scale_y: Vec<f32> = projected.scale_y.to_vec1()?;
         let proj_z: Vec<f32> = projected.z.to_vec1()?;
+        let proj_cov_xy = projected.cov_xy;
+        let proj_axis_x = projected.proj_axis_x;
+        let proj_axis_y = projected.proj_axis_y;
 
         // Single GPU→CPU copy for other parameters
         let opacity_data = gaussians.opacities()?.to_vec1::<f32>()?;
@@ -736,6 +768,9 @@ impl DiffSplatRenderer {
                 v: v_val,
                 sigma_x,
                 sigma_y,
+                cov_xy: proj_cov_xy.get(idx).copied().unwrap_or(0.0),
+                proj_axis_x: proj_axis_x.get(idx).copied().unwrap_or([0.0; 3]),
+                proj_axis_y: proj_axis_y.get(idx).copied().unwrap_or([0.0; 3]),
                 z,
                 base_alpha,
                 color: rgb,
@@ -758,6 +793,7 @@ impl DiffSplatRenderer {
             scale_x: proj_scale_x,
             scale_y: proj_scale_y,
             z: proj_z,
+            cov_xy: proj_cov_xy,
         };
 
         // Prepare color data
@@ -935,6 +971,12 @@ struct ProjectedGaussiansTensor {
     scale_x: Tensor,
     scale_y: Tensor,
     z: Tensor,
+    /// Cross-term of 2D covariance (one per Gaussian, CPU-side only)
+    cov_xy: Vec<f32>,
+    /// Per-scale-axis x-projection vectors for backward pass
+    proj_axis_x: Vec<[f32; 3]>,
+    /// Per-scale-axis y-projection vectors for backward pass
+    proj_axis_y: Vec<[f32; 3]>,
 }
 
 struct ProjectedGaussiansCpu {
@@ -943,6 +985,8 @@ struct ProjectedGaussiansCpu {
     scale_x: Vec<f32>,
     scale_y: Vec<f32>,
     z: Vec<f32>,
+    /// Cross-term of 2D covariance; empty = use diagonal approximation
+    cov_xy: Vec<f32>,
 }
 
 // Helper functions
@@ -980,7 +1024,20 @@ fn quat_from_wxyz(rotation: [f32; 4]) -> Quat {
     Quat::from_xyzw(rotation[1], rotation[2], rotation[3], rotation[0]).normalize()
 }
 
-fn projected_axis_aligned_sigmas(
+/// Project 3D covariance to 2D and return the full 2×2 covariance elements plus
+/// per-scale-axis projection vectors needed for the backward pass.
+///
+/// Returns `(sigma_x, sigma_y, cov_xy, proj_axis_x, proj_axis_y)` where:
+/// - `sigma_x = sqrt(cov_xx)`, `sigma_y = sqrt(cov_yy)` for bounding-box use
+/// - `cov_xy` is the cross-term of the 2D covariance matrix
+/// - `proj_axis_x[k] = J[0,:] · R_total[:,k]` (Jacobian row 0 projected onto scale axis k)
+/// - `proj_axis_y[k] = J[1,:] · R_total[:,k]` (Jacobian row 1 projected onto scale axis k)
+///
+/// These projection axes satisfy:
+///   cov_xx = Σ_k sk² * proj_axis_x[k]²
+///   cov_xy = Σ_k sk² * proj_axis_x[k] * proj_axis_y[k]
+///   cov_yy = Σ_k sk² * proj_axis_y[k]²
+fn project_covariance_full(
     x: f32,
     y: f32,
     z: f32,
@@ -989,24 +1046,51 @@ fn projected_axis_aligned_sigmas(
     camera_rotation: &[[f32; 3]; 3],
     fx: f32,
     fy: f32,
-) -> (f32, f32) {
+) -> (f32, f32, f32, [f32; 3], [f32; 3]) {
     let inv_z = 1.0 / z.max(1e-4);
     let object_rotation = Mat3::from_quat(quat_from_wxyz(rotation));
-    let scale_cov = Mat3::from_diagonal(Vec3::new(
-        scale[0] * scale[0],
-        scale[1] * scale[1],
-        scale[2] * scale[2],
-    ));
-    let covariance_world = object_rotation * scale_cov * object_rotation.transpose();
-    let camera_rotation = mat3_from_row_major(camera_rotation);
-    let covariance_camera = camera_rotation * covariance_world * camera_rotation.transpose();
+    let camera_rot = mat3_from_row_major(camera_rotation);
 
-    let projection_row_x = Vec3::new(fx * inv_z, 0.0, -fx * x * inv_z * inv_z);
-    let projection_row_y = Vec3::new(0.0, fy * inv_z, -fy * y * inv_z * inv_z);
-    let covariance_x = projection_row_x.dot(covariance_camera * projection_row_x);
-    let covariance_y = projection_row_y.dot(covariance_camera * projection_row_y);
+    // Combined rotation: R_total = R_cam * R_obj, columns are world→scale axes in camera space
+    let r_total = camera_rot * object_rotation;
 
-    (covariance_x.max(1e-6).sqrt(), covariance_y.max(1e-6).sqrt())
+    // Jacobian rows: J[0,:] = [fx/z, 0, -fx*x/z²], J[1,:] = [0, fy/z, -fy*y/z²]
+    let jx = Vec3::new(fx * inv_z, 0.0, -fx * x * inv_z * inv_z);
+    let jy = Vec3::new(0.0, fy * inv_z, -fy * y * inv_z * inv_z);
+
+    // Per-axis projection vectors: p_kx = jx · R_total[:,k], p_ky = jy · R_total[:,k]
+    let proj_axis_x = [
+        jx.dot(r_total.col(0)),
+        jx.dot(r_total.col(1)),
+        jx.dot(r_total.col(2)),
+    ];
+    let proj_axis_y = [
+        jy.dot(r_total.col(0)),
+        jy.dot(r_total.col(1)),
+        jy.dot(r_total.col(2)),
+    ];
+
+    // 2D covariance: cov_ab = Σ_k sk² * p_kx * p_ky
+    let s0 = scale[0];
+    let s1 = scale[1];
+    let s2 = scale[2];
+    let cov_xx = s0 * s0 * proj_axis_x[0] * proj_axis_x[0]
+        + s1 * s1 * proj_axis_x[1] * proj_axis_x[1]
+        + s2 * s2 * proj_axis_x[2] * proj_axis_x[2];
+    let cov_xy = s0 * s0 * proj_axis_x[0] * proj_axis_y[0]
+        + s1 * s1 * proj_axis_x[1] * proj_axis_y[1]
+        + s2 * s2 * proj_axis_x[2] * proj_axis_y[2];
+    let cov_yy = s0 * s0 * proj_axis_y[0] * proj_axis_y[0]
+        + s1 * s1 * proj_axis_y[1] * proj_axis_y[1]
+        + s2 * s2 * proj_axis_y[2] * proj_axis_y[2];
+
+    (
+        cov_xx.max(1e-6).sqrt(),
+        cov_yy.max(1e-6).sqrt(),
+        cov_xy,
+        proj_axis_x,
+        proj_axis_y,
+    )
 }
 
 fn tensor_to_vec(tensor: &Tensor) -> candle_core::Result<Vec<f32>> {
