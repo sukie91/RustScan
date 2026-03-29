@@ -292,8 +292,11 @@ pub struct TrainingConfig {
     pub backend: TrainingBackend,
     /// Number of training iterations
     pub iterations: usize,
-    /// Learning rate for positions
+    /// Learning rate for positions (initial)
     pub lr_position: f32,
+    /// Learning rate for positions (final) – exponential decay target.
+    /// Default is 1/100 of lr_position. Set to 0 to disable decay.
+    pub lr_pos_final: f32,
     /// Learning rate for scales
     pub lr_scale: f32,
     /// Learning rate for rotations
@@ -356,6 +359,7 @@ impl Default for TrainingConfig {
             backend: TrainingBackend::default(),
             iterations: 30000,
             lr_position: 0.00016,
+            lr_pos_final: 0.0000016,
             lr_scale: 0.005,
             lr_rotation: 0.001,
             lr_opacity: 0.05,

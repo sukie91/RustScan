@@ -205,6 +205,8 @@ struct BwdProjectedGaussian {
 struct BwdLossScalars {
     float color_scale;
     float depth_scale;
+    float ssim_scale;
+    float _pad;
 };
 
 kernel void tile_backward(
@@ -222,6 +224,7 @@ kernel void tile_backward(
     device atomic_float* grad_opacity_logits [[buffer(11)]],
     device atomic_float* grad_colors        [[buffer(12)]],
     constant BwdLossScalars& loss_scalars   [[buffer(13)]],
+    device const float* ssim_color_grad     [[buffer(14)]],
     uint2 gid                               [[thread_position_in_grid]]
 ) {
     if (gid.x >= camera.width || gid.y >= camera.height) return;
@@ -240,13 +243,16 @@ kernel void tile_backward(
     const float final_alpha = rendered_alpha[pixel_idx];
     const float depth_denom = final_alpha + 1e-6f;
 
-    // dL/dC_p from weighted mean-L1
-    const float dc_r = (final_color_r > target_color[c3 + 0]) ? loss_scalars.color_scale
-                      : (final_color_r < target_color[c3 + 0]) ? -loss_scalars.color_scale : 0.0f;
-    const float dc_g = (final_color_g > target_color[c3 + 1]) ? loss_scalars.color_scale
-                      : (final_color_g < target_color[c3 + 1]) ? -loss_scalars.color_scale : 0.0f;
-    const float dc_b = (final_color_b > target_color[c3 + 2]) ? loss_scalars.color_scale
-                      : (final_color_b < target_color[c3 + 2]) ? -loss_scalars.color_scale : 0.0f;
+    // dL/dC_p = weighted L1 gradient + SSIM gradient
+    const float dc_r = ((final_color_r > target_color[c3 + 0]) ? loss_scalars.color_scale
+                      : (final_color_r < target_color[c3 + 0]) ? -loss_scalars.color_scale : 0.0f)
+                      + ssim_color_grad[c3 + 0] * loss_scalars.ssim_scale;
+    const float dc_g = ((final_color_g > target_color[c3 + 1]) ? loss_scalars.color_scale
+                      : (final_color_g < target_color[c3 + 1]) ? -loss_scalars.color_scale : 0.0f)
+                      + ssim_color_grad[c3 + 1] * loss_scalars.ssim_scale;
+    const float dc_b = ((final_color_b > target_color[c3 + 2]) ? loss_scalars.color_scale
+                      : (final_color_b < target_color[c3 + 2]) ? -loss_scalars.color_scale : 0.0f)
+                      + ssim_color_grad[c3 + 2] * loss_scalars.ssim_scale;
 
     float dd_depth = 0.0f;
     if (loss_scalars.depth_scale > 0.0f && target_depth[pixel_idx] > 0.0f) {
@@ -1236,6 +1242,8 @@ pub(crate) enum MetalBufferSlot {
     AdamVColor,
     AdamParamColor,
     AdamHyperparams,
+    /// Per-pixel SSIM gradient (H×W×3 floats) for the backward pass.
+    SsimColorGrad,
 }
 
 impl MetalBufferSlot {
@@ -1281,6 +1289,7 @@ impl MetalBufferSlot {
             Self::AdamVColor => "adam_v_color",
             Self::AdamParamColor => "adam_param_color",
             Self::AdamHyperparams => "adam_hyperparams",
+            Self::SsimColorGrad => "ssim_color_grad",
         }
     }
 }
@@ -2306,7 +2315,7 @@ impl MetalRuntime {
             MetalBufferSlot::TargetDepth,
             pixel_count.saturating_mul(size_of::<f32>()),
         )?;
-        self.ensure_buffer(MetalBufferSlot::LossScalars, 2 * size_of::<f32>())?;
+        self.ensure_buffer(MetalBufferSlot::LossScalars, 4 * size_of::<f32>())?;
         self.ensure_buffer(
             MetalBufferSlot::GradPositions,
             gaussian_count
@@ -2336,12 +2345,31 @@ impl MetalRuntime {
         Ok(())
     }
 
+    /// Ensure the SSIM gradient buffer exists for the given pixel count.
+    pub(crate) fn reserve_ssim_grad_buffer(
+        &mut self,
+        pixel_count: usize,
+    ) -> candle_core::Result<()> {
+        self.ensure_buffer(
+            MetalBufferSlot::SsimColorGrad,
+            pixel_count
+                .saturating_mul(3)
+                .saturating_mul(size_of::<f32>()),
+        )
+    }
+
+    /// Upload pre-computed per-pixel SSIM gradient (H×W×3) to the GPU buffer.
+    pub(crate) fn write_ssim_grad(&mut self, ssim_grad: &[f32]) -> candle_core::Result<()> {
+        self.write_slice(MetalBufferSlot::SsimColorGrad, ssim_grad)
+    }
+
     pub(crate) fn write_target_data(
         &mut self,
         target_color: &[f32],
         target_depth: &[f32],
         color_scale: f32,
         depth_scale: f32,
+        ssim_scale: f32,
     ) -> candle_core::Result<()> {
         self.write_slice(MetalBufferSlot::TargetColor, target_color)?;
         self.write_slice(MetalBufferSlot::TargetDepth, target_depth)?;
@@ -2350,12 +2378,16 @@ impl MetalRuntime {
         struct LossScalars {
             color: f32,
             depth: f32,
+            ssim: f32,
+            _pad: f32,
         }
         self.write_struct(
             MetalBufferSlot::LossScalars,
             &LossScalars {
                 color: color_scale,
                 depth: depth_scale,
+                ssim: ssim_scale,
+                _pad: 0.0,
             },
         )
     }
@@ -2372,6 +2404,7 @@ impl MetalRuntime {
 
         // Ensure all buffers exist
         self.reserve_backward_buffers(gaussian_count, pixel_count)?;
+        self.reserve_ssim_grad_buffer(pixel_count)?;
         self.ensure_buffer(
             MetalBufferSlot::TileMetadata,
             self.tile_windows
@@ -2536,6 +2569,14 @@ impl MetalRuntime {
                     .ok_or_else(|| candle_core::Error::Msg("missing loss scalars".into()))?
                     .as_ref(),
             ),
+            0,
+        );
+
+        // ssim_color_grad(14)
+        encoder.set_buffer(
+            14,
+            self.buffer_handle(MetalBufferSlot::SsimColorGrad)?
+                .map(|b| b.as_ref()),
             0,
         );
 

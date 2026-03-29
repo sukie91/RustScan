@@ -178,14 +178,74 @@ impl TiledRenderer {
             let px = fx * cx / cz;
             let py = fy * cy / cz;
 
-            // Compute 2D covariance (simplified)
-            // Full implementation: transform 3D covariance by Jacobian
-            let scale_x = g.scale[0].abs();
-            let scale_y = g.scale[1].abs();
+            // Compute full 2D covariance via Jacobian projection.
+            //
+            // 1. Build rotation matrix R_g from the Gaussian's quaternion [w, x, y, z].
+            let [qw, qx, qy, qz] = g.rotation;
+            let r00 = 1.0 - 2.0 * (qy * qy + qz * qz);
+            let r01 = 2.0 * (qx * qy - qw * qz);
+            let r02 = 2.0 * (qx * qz + qw * qy);
+            let r10 = 2.0 * (qx * qy + qw * qz);
+            let r11 = 1.0 - 2.0 * (qx * qx + qz * qz);
+            let r12 = 2.0 * (qy * qz - qw * qx);
+            let r20 = 2.0 * (qx * qz - qw * qy);
+            let r21 = 2.0 * (qy * qz + qw * qx);
+            let r22 = 1.0 - 2.0 * (qx * qx + qy * qy);
 
-            let cov_xx = (scale_x * fx / cz).powi(2);
-            let cov_yy = (scale_y * fy / cz).powi(2);
-            let cov_xy = 0.0; // Simplified
+            // 2. World-space covariance: Σ_world = (R_g * S)(R_g * S)^T, S = diag(sx, sy, sz).
+            let sx = g.scale[0].abs();
+            let sy = g.scale[1].abs();
+            let sz = g.scale[2].abs();
+            let sxx = sx * sx;
+            let syy = sy * sy;
+            let szz = sz * sz;
+            let cw00 = r00 * r00 * sxx + r01 * r01 * syy + r02 * r02 * szz;
+            let cw01 = r00 * r10 * sxx + r01 * r11 * syy + r02 * r12 * szz;
+            let cw02 = r00 * r20 * sxx + r01 * r21 * syy + r02 * r22 * szz;
+            let cw11 = r10 * r10 * sxx + r11 * r11 * syy + r12 * r12 * szz;
+            let cw12 = r10 * r20 * sxx + r11 * r21 * syy + r12 * r22 * szz;
+            let cw22 = r20 * r20 * sxx + r21 * r21 * syy + r22 * r22 * szz;
+
+            // 3. Camera-space covariance: Σ_cam = C_rot * Σ_world * C_rot^T.
+            //    Only the upper-left 3×3 is needed; compute the 6 unique entries.
+            let c = r; // camera rotation matrix (world-to-camera)
+            // Intermediate: M = C_rot * Σ_world  (3×3)
+            let m00 = c[0][0] * cw00 + c[0][1] * cw01 + c[0][2] * cw02;
+            let m01 = c[0][0] * cw01 + c[0][1] * cw11 + c[0][2] * cw12;
+            let m02 = c[0][0] * cw02 + c[0][1] * cw12 + c[0][2] * cw22;
+            let m10 = c[1][0] * cw00 + c[1][1] * cw01 + c[1][2] * cw02;
+            let m11 = c[1][0] * cw01 + c[1][1] * cw11 + c[1][2] * cw12;
+            let m12 = c[1][0] * cw02 + c[1][1] * cw12 + c[1][2] * cw22;
+            let m20 = c[2][0] * cw00 + c[2][1] * cw01 + c[2][2] * cw02;
+            let m21 = c[2][0] * cw01 + c[2][1] * cw11 + c[2][2] * cw12;
+            let m22 = c[2][0] * cw02 + c[2][1] * cw12 + c[2][2] * cw22;
+            // Σ_cam = M * C_rot^T – symmetric, compute only 6 entries needed.
+            let cc00 = m00 * c[0][0] + m01 * c[0][1] + m02 * c[0][2];
+            let cc01 = m00 * c[1][0] + m01 * c[1][1] + m02 * c[1][2];
+            let cc02 = m00 * c[2][0] + m01 * c[2][1] + m02 * c[2][2];
+            let cc11 = m10 * c[1][0] + m11 * c[1][1] + m12 * c[1][2];
+            let cc12 = m10 * c[2][0] + m11 * c[2][1] + m12 * c[2][2];
+            let cc22 = m20 * c[2][0] + m21 * c[2][1] + m22 * c[2][2];
+
+            // 4. Jacobian of perspective projection at (cx, cy, cz):
+            //    J = [[fx/cz, 0,      -fx*cx/cz²],
+            //         [0,     fy/cz,  -fy*cy/cz²]]
+            let inv_z = 1.0 / cz;
+            let inv_z2 = inv_z * inv_z;
+            let jx0 = fx * inv_z;
+            let jx2 = -fx * cx * inv_z2;
+            let jy1 = fy * inv_z;
+            let jy2 = -fy * cy * inv_z2;
+
+            // 5. 2D covariance: Σ_2D = J * Σ_cam * J^T  (2×2, symmetric).
+            //    Σ_2D[0,0] = J[0,:] * Σ_cam * J[0,:]^T
+            //    Σ_2D[0,1] = J[0,:] * Σ_cam * J[1,:]^T
+            //    Σ_2D[1,1] = J[1,:] * Σ_cam * J[1,:]^T
+            //
+            //    J[0,:] = [jx0, 0, jx2],  J[1,:] = [0, jy1, jy2]
+            let cov_xx = jx0 * (cc00 * jx0 + cc02 * jx2) + jx2 * (cc02 * jx0 + cc22 * jx2);
+            let cov_xy = jx0 * (cc01 * jy1 + cc02 * jy2) + jx2 * (cc12 * jy1 + cc22 * jy2);
+            let cov_yy = jy1 * (cc11 * jy1 + cc12 * jy2) + jy2 * (cc12 * jy1 + cc22 * jy2);
 
             projected.push(ProjectedGaussian {
                 x: px,
@@ -454,6 +514,85 @@ mod tests {
 
         assert!(!projected.is_empty());
         assert!(projected[0].depth > 0.0);
+    }
+
+    /// Verify that the full 2D covariance projection is correct.
+    ///
+    /// For an axis-aligned Gaussian (identity rotation) at [0,0,z] the cross-term
+    /// cov_xy should be zero.  For a tilted Gaussian it should be non-zero.
+    #[test]
+    fn test_full_2d_covariance_identity_rotation() {
+        let renderer = TiledRenderer::new(64, 64);
+
+        // Identity rotation quaternion: [w=1, x=0, y=0, z=0]
+        let g = Gaussian::new(
+            [0.0, 0.0, 2.0],
+            [0.1, 0.05, 0.02],
+            [1.0, 0.0, 0.0, 0.0], // identity
+            0.8,
+            [1.0, 0.0, 0.0],
+        );
+
+        let rotation = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        let projected = renderer.project_gaussians(
+            &[g],
+            500.0,
+            500.0,
+            0.0,
+            0.0,
+            &rotation,
+            &[0.0, 0.0, 0.0],
+        );
+
+        assert!(!projected.is_empty());
+        let p = &projected[0];
+        // With identity rotation and centered projection, cov_xy should be ~0.
+        assert!(
+            p.cov_xy.abs() < 1e-4,
+            "cov_xy should be ~0 for identity rotation at origin, got {}",
+            p.cov_xy
+        );
+        // cov_xx and cov_yy must be positive.
+        assert!(p.cov_xx > 0.0, "cov_xx must be positive, got {}", p.cov_xx);
+        assert!(p.cov_yy > 0.0, "cov_yy must be positive, got {}", p.cov_yy);
+    }
+
+    #[test]
+    fn test_full_2d_covariance_rotated_gaussian() {
+        let renderer = TiledRenderer::new(64, 64);
+
+        // 45-degree rotation around Z axis: quaternion = [cos(π/8), 0, 0, sin(π/8)]
+        let angle = std::f32::consts::PI / 4.0;
+        let (sin_half, cos_half) = ((angle / 2.0).sin(), (angle / 2.0).cos());
+
+        // Off-center point so cov_xy won't cancel by symmetry.
+        let g = Gaussian::new(
+            [0.5, 0.5, 2.0],
+            [0.3, 0.05, 0.01],
+            [cos_half, 0.0, 0.0, sin_half], // 45° around Z
+            0.8,
+            [0.0, 1.0, 0.0],
+        );
+
+        let rotation = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        let projected = renderer.project_gaussians(
+            &[g],
+            500.0,
+            500.0,
+            0.0,
+            0.0,
+            &rotation,
+            &[0.0, 0.0, 0.0],
+        );
+
+        assert!(!projected.is_empty());
+        let p = &projected[0];
+        // For a rotated elongated Gaussian with asymmetric scales, cov_xy != 0.
+        assert!(
+            p.cov_xy.abs() > 1e-6,
+            "cov_xy should be non-zero for a rotated Gaussian, got {}",
+            p.cov_xy
+        );
     }
 
     #[test]

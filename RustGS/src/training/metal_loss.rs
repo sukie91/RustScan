@@ -1,6 +1,106 @@
 use candle_core::op::BackpropOp;
 use candle_core::{CpuStorage, CustomOp2, Layout, MetalStorage, Shape, Storage, Tensor};
 
+/// Compute per-pixel SSIM gradient (dSSIM/d_rendered) for RGB images.
+///
+/// Uses an 11×11 uniform box-filter window.  Returns `(ssim_mean, grad)` where
+/// `grad` has the same layout as `rendered` (H×W×3 interleaved RGB floats).
+///
+/// C1 = (0.01)², C2 = (0.03)² follow the standard SSIM definition assuming
+/// pixel values in [0, 1].
+pub(crate) fn ssim_gradient(
+    rendered: &[f32],
+    target: &[f32],
+    width: usize,
+    height: usize,
+) -> (f32, Vec<f32>) {
+    const WINDOW_RADIUS: isize = 5; // 11×11 window
+    const C1: f32 = 0.0001; // (0.01)²
+    const C2: f32 = 0.0009; // (0.03)²
+
+    let pixel_count = width * height;
+    let mut ssim_sum = 0.0f32;
+    let mut grad = vec![0.0f32; pixel_count * 3];
+
+    for ch in 0..3usize {
+        for py in 0..height {
+            for px in 0..width {
+                let mut sum_x = 0.0f32;
+                let mut sum_y = 0.0f32;
+                let mut sum_xx = 0.0f32;
+                let mut sum_yy = 0.0f32;
+                let mut sum_xy = 0.0f32;
+                let mut count = 0usize;
+                let cx_val;
+                let cy_val;
+
+                for dy in -WINDOW_RADIUS..=WINDOW_RADIUS {
+                    let qy = py as isize + dy;
+                    if qy < 0 || qy >= height as isize {
+                        continue;
+                    }
+                    for dx in -WINDOW_RADIUS..=WINDOW_RADIUS {
+                        let qx = px as isize + dx;
+                        if qx < 0 || qx >= width as isize {
+                            continue;
+                        }
+                        let qi = (qy as usize * width + qx as usize) * 3 + ch;
+                        let xv = rendered[qi];
+                        let yv = target[qi];
+                        sum_x += xv;
+                        sum_y += yv;
+                        sum_xx += xv * xv;
+                        sum_yy += yv * yv;
+                        sum_xy += xv * yv;
+                        count += 1;
+                    }
+                }
+
+                let cnt = count as f32;
+                let mu_x = sum_x / cnt;
+                let mu_y = sum_y / cnt;
+                let sigma_x2 = (sum_xx / cnt - mu_x * mu_x).max(0.0);
+                let sigma_y2 = (sum_yy / cnt - mu_y * mu_y).max(0.0);
+                let sigma_xy = sum_xy / cnt - mu_x * mu_y;
+
+                let a = 2.0 * mu_x * mu_y + C1;
+                let b = 2.0 * sigma_xy + C2;
+                let c = mu_x * mu_x + mu_y * mu_y + C1;
+                let d = sigma_x2 + sigma_y2 + C2;
+                let cd = c * d;
+
+                let ssim_p = if cd > 1e-10 { (a * b) / cd } else { 1.0 };
+                ssim_sum += ssim_p;
+
+                // Current pixel's contribution to gradient:
+                //   dSSIM/dx_p = (da/dx_p * b * cd + a * db/dx_p * cd - a*b*(dc/dx_p*d + c*dd/dx_p)) / cd²
+                // where:
+                //   da/dx_p = 2*mu_y / cnt
+                //   db/dx_p = 2*(y_p - mu_y) / cnt
+                //   dc/dx_p = 2*mu_x / cnt
+                //   dd/dx_p = 2*(x_p - mu_x) / cnt
+                if cd > 1e-10 {
+                    let pi = (py * width + px) * 3 + ch;
+                    cx_val = rendered[pi];
+                    cy_val = target[pi];
+
+                    let da = 2.0 * mu_y / cnt;
+                    let db = 2.0 * (cy_val - mu_y) / cnt;
+                    let dc = 2.0 * mu_x / cnt;
+                    let dd = 2.0 * (cx_val - mu_x) / cnt;
+
+                    let numerator = da * b * cd + a * db * cd - a * b * (dc * d + c * dd);
+                    let grad_p = numerator / (cd * cd);
+                    grad[pi] = grad_p;
+                }
+            }
+        }
+    }
+
+    let ssim_mean = ssim_sum / (pixel_count * 3) as f32;
+    (ssim_mean, grad)
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 struct MeanAbsDiff;
 
@@ -252,5 +352,47 @@ mod tests {
         let loss = masked_mean_abs_diff(&predicted, &target, &mask)?;
         assert_close_scalar(loss.to_vec0::<f32>()?, 0.0, 1e-6);
         Ok(())
+    }
+
+    #[test]
+    fn ssim_gradient_identical_images_returns_one_and_zero_grad() {
+        use super::ssim_gradient;
+        // Identical rendered and target → SSIM = 1, gradient ≈ 0.
+        let width: usize = 8;
+        let height: usize = 8;
+        let pixel_count = width * height * 3;
+        let image: Vec<f32> = (0..pixel_count)
+            .map(|i| (i as f32 % 256.0) / 255.0)
+            .collect();
+
+        let (ssim, grad) = ssim_gradient(&image, &image, width, height);
+        assert!(
+            (ssim - 1.0f32).abs() < 1e-4,
+            "SSIM of identical images should be ~1.0, got {ssim}"
+        );
+        let max_grad: f32 = grad.iter().cloned().fold(f32::NEG_INFINITY, f32::max).abs();
+        assert!(
+            max_grad < 1e-4,
+            "gradient of identical images should be ~0, max abs = {max_grad}"
+        );
+    }
+
+    #[test]
+    fn ssim_gradient_different_images_has_nonzero_grad() {
+        use super::ssim_gradient;
+        let width: usize = 8;
+        let height: usize = 8;
+        let pixel_count = width * height * 3;
+        let rendered: Vec<f32> = (0..pixel_count).map(|i| i as f32 / pixel_count as f32).collect();
+        let target: Vec<f32> = (0..pixel_count)
+            .map(|i| 1.0f32 - i as f32 / pixel_count as f32)
+            .collect();
+
+        let (ssim, grad) = ssim_gradient(&rendered, &target, width, height);
+        // SSIM < 1 for different images.
+        assert!(ssim < 1.0f32, "SSIM should be < 1.0 for different images, got {ssim}");
+        // At least some gradients should be non-zero.
+        let any_nonzero = grad.iter().any(|g: &f32| g.abs() > 1e-8);
+        assert!(any_nonzero, "gradient should have non-zero entries for different images");
     }
 }

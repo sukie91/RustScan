@@ -17,7 +17,7 @@ use super::data_loading::{
     load_training_data, map_from_trainable, trainable_from_map, LoadedTrainingData,
 };
 use super::metal_backward::MetalBackwardGrads;
-use super::metal_loss::{masked_mean_abs_diff, mean_abs_diff};
+use super::metal_loss::{masked_mean_abs_diff, mean_abs_diff, ssim_gradient};
 use super::metal_runtime::{
     ChunkPixelWindow, MetalBufferSlot, MetalProjectionRecord, MetalRuntime, MetalTileBins,
     NativeForwardProfile,
@@ -273,6 +273,8 @@ pub struct MetalTrainer {
     max_gaussian_budget: usize,
     topology_memory_budget: Option<MetalMemoryBudget>,
     lr_pos: f32,
+    lr_pos_final: f32,
+    max_iterations: usize,
     lr_scale: f32,
     lr_opacity: f32,
     lr_color: f32,
@@ -1250,6 +1252,8 @@ impl MetalTrainer {
             max_gaussian_budget: config.max_initial_gaussians.max(1),
             topology_memory_budget: Some(training_memory_budget(config)),
             lr_pos: config.lr_position,
+            lr_pos_final: config.lr_pos_final,
+            max_iterations: config.iterations,
             lr_scale: config.lr_scale,
             lr_opacity: config.lr_opacity,
             lr_color: config.lr_color,
@@ -1409,18 +1413,40 @@ impl MetalTrainer {
         let color_loss = mean_abs_diff(&rendered.color, &frame.target_color)?;
         let depth_loss =
             masked_mean_abs_diff(&rendered.depth, &frame.target_depth, &frame.target_depth)?;
-        let total = color_loss.broadcast_add(&depth_loss.affine(0.1, 0.0)?)?;
+
+        // Compute SSIM gradient on CPU using the rendered output.
+        let rendered_color_cpu = rendered.color.flatten_all()?.to_vec1::<f32>()?;
+        let (ssim_value, ssim_grads) = ssim_gradient(
+            &rendered_color_cpu,
+            &frame.target_color_cpu,
+            self.render_width,
+            self.render_height,
+        );
+
+        // Combined forward loss: 0.8×L1 + 0.2×(1 – SSIM) + 0.1×depth
+        let l1_weighted = color_loss.affine(0.8, 0.0)?;
+        let ssim_loss_term = 1.0 - ssim_value;
+        let total = l1_weighted
+            .broadcast_add(&Tensor::new(0.2 * ssim_loss_term, color_loss.device())?)?
+            .broadcast_add(&depth_loss.affine(0.1, 0.0)?)?;
         let loss_value = total.to_vec0::<f32>()?;
         self.synchronize_if_needed(should_profile)?;
         profile.loss = loss_start.elapsed();
 
         let backward_start = Instant::now();
+        // Write SSIM gradient every step (depends on rendered output which changes each step).
+        self.runtime.write_ssim_grad(&ssim_grads)?;
+
         if self.cached_target_frame_idx != Some(frame_idx) {
+            // color_scale weights the L1 contribution in the backward pass (0.8 factor).
+            // ssim_scale weights the per-pixel SSIM gradient contribution (0.2 factor).
+            let pixel_count = frame.target_color_cpu.len().max(1) as f32;
             self.runtime.write_target_data(
                 &frame.target_color_cpu,
                 &frame.target_depth_cpu,
-                1.0 / frame.target_color_cpu.len().max(1) as f32,
+                0.8 / pixel_count,
                 0.1 / frame.target_depth_cpu.len().max(1) as f32,
+                0.2 / pixel_count,
             )?;
             self.cached_target_frame_idx = Some(frame_idx);
         }
@@ -1433,7 +1459,8 @@ impl MetalTrainer {
         profile.backward = backward_start.elapsed();
 
         let optimizer_start = Instant::now();
-        self.apply_backward_grads(gaussians, &backward.grads)?;
+        let effective_lr_pos = self.compute_lr_pos();
+        self.apply_backward_grads(gaussians, &backward.grads, effective_lr_pos)?;
         self.update_gaussian_stats(
             &backward.grad_magnitudes,
             &projected,
@@ -1454,10 +1481,25 @@ impl MetalTrainer {
         })
     }
 
+    /// Compute the current effective position learning rate using exponential decay.
+    ///
+    /// η(t) = η₀ × (η_end / η₀)^(t / T)
+    fn compute_lr_pos(&self) -> f32 {
+        let lr0 = self.lr_pos;
+        let lr_end = self.lr_pos_final;
+        let t = self.iteration as f32;
+        let total = self.max_iterations as f32;
+        if total <= 0.0 || lr0 <= 0.0 || lr_end <= 0.0 {
+            return lr0;
+        }
+        lr0 * (lr_end / lr0).powf(t / total)
+    }
+
     fn apply_backward_grads(
         &mut self,
         gaussians: &mut TrainableGaussians,
         grads: &MetalBackwardGrads,
+        effective_lr_pos: f32,
     ) -> candle_core::Result<()> {
         let adam = self
             .adam
@@ -1473,7 +1515,7 @@ impl MetalTrainer {
             &mut adam.m_pos,
             &mut adam.v_pos,
             &mut self.runtime,
-            self.lr_pos,
+            effective_lr_pos,
             beta1,
             beta2,
             eps,
@@ -3721,5 +3763,52 @@ mod tests {
         assert_eq!(adam.v_pos.dim(0).unwrap(), 2);
         let m_pos = adam.m_pos.to_vec2::<f32>().unwrap();
         assert!(m_pos[1].iter().all(|value| value.abs() < 1e-6));
+    }
+
+    #[test]
+    fn lr_pos_exponential_decay_is_correct() {
+        let mut trainer = MetalTrainer::new(
+            32,
+            16,
+            &TrainingConfig {
+                lr_position: 0.001,
+                lr_pos_final: 0.00001,
+                iterations: 1000,
+                ..TrainingConfig::default()
+            },
+            Device::Cpu,
+        )
+        .unwrap();
+
+        // At iteration 0, effective LR equals initial LR.
+        let lr_init = trainer.compute_lr_pos();
+        assert!(
+            (lr_init - 0.001).abs() < 1e-7,
+            "at t=0 expected 0.001, got {lr_init}"
+        );
+
+        // At iteration = max, effective LR equals final LR.
+        trainer.iteration = 1000;
+        let lr_end = trainer.compute_lr_pos();
+        assert!(
+            (lr_end - 0.00001).abs() < 1e-9,
+            "at t=T expected 0.00001, got {lr_end}"
+        );
+
+        // At t = T/2, effective LR is geometric mean of init and final.
+        trainer.iteration = 500;
+        let lr_mid = trainer.compute_lr_pos();
+        let expected_mid = (0.001f32 * 0.00001f32).sqrt();
+        assert!(
+            (lr_mid - expected_mid).abs() < expected_mid * 1e-4,
+            "at t=T/2 expected {expected_mid}, got {lr_mid}"
+        );
+
+        // LR must strictly decrease over time.
+        trainer.iteration = 100;
+        let lr_100 = trainer.compute_lr_pos();
+        trainer.iteration = 900;
+        let lr_900 = trainer.compute_lr_pos();
+        assert!(lr_100 > lr_900, "LR should decrease: {lr_100} > {lr_900}");
     }
 }
