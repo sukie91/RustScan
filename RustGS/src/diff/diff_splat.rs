@@ -21,6 +21,49 @@ fn fast_exp(x: f32) -> f32 {
     f32::from_bits(i.max(0) as u32)
 }
 
+/// LiteGS SH DC constant shared by RGB<->SH conversion.
+pub const SH_C0: f32 = 0.282_094_8;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrainableColorRepresentation {
+    Rgb,
+    SphericalHarmonics { degree: usize },
+}
+
+impl Default for TrainableColorRepresentation {
+    fn default() -> Self {
+        Self::Rgb
+    }
+}
+
+impl TrainableColorRepresentation {
+    pub fn sh_degree(self) -> usize {
+        match self {
+            Self::Rgb => 0,
+            Self::SphericalHarmonics { degree } => degree,
+        }
+    }
+
+    pub fn sh_rest_coeff_count(self) -> usize {
+        sh_coeff_count_for_degree(self.sh_degree()).saturating_sub(1)
+    }
+}
+
+pub const fn sh_coeff_count_for_degree(degree: usize) -> usize {
+    let degree_plus_one = degree + 1;
+    degree_plus_one * degree_plus_one
+}
+
+#[inline]
+pub fn rgb_to_sh0_value(rgb: f32) -> f32 {
+    (rgb - 0.5) / SH_C0
+}
+
+#[inline]
+pub fn sh0_to_rgb_value(sh: f32) -> f32 {
+    sh * SH_C0 + 0.5
+}
+
 /// Trainable Gaussian parameters (with gradients)
 pub struct TrainableGaussians {
     /// Positions: [N, 3] - learnable
@@ -31,10 +74,16 @@ pub struct TrainableGaussians {
     pub rotations: Var,
     /// Opacities: [N] - learnable (sigmoid)
     pub opacities: Var,
-    /// Colors (SH coefficients): [N, 3] - learnable
+    /// Base color parameters: [N, 3].
+    ///
+    /// `LegacyMetal` stores RGB here, while LiteGS-compatible paths store the
+    /// SH DC coefficient (`sh_0`) here and derive render RGB on demand.
     pub colors: Var,
+    /// Higher-order SH coefficients: [N, coeffs, 3].
+    pub sh_rest: Var,
     /// Number of Gaussians
     pub n: usize,
+    color_representation: TrainableColorRepresentation,
     /// Device
     device: Device,
 }
@@ -79,7 +128,57 @@ impl TrainableGaussians {
             rotations: Var::from_tensor(&Tensor::from_slice(rotations, (n, 4), device)?)?,
             opacities: Var::from_tensor(&Tensor::from_slice(opacities, (n,), device)?)?,
             colors: Var::from_tensor(&Tensor::from_slice(colors, (n, 3), device)?)?,
+            sh_rest: Var::from_tensor(&Tensor::zeros((n, 0usize, 3usize), DType::F32, device)?)?,
             n,
+            color_representation: TrainableColorRepresentation::Rgb,
+            device: device.clone(),
+        })
+    }
+
+    /// Create trainable Gaussians whose color representation matches LiteGS.
+    pub fn new_with_sh(
+        positions: &[f32],
+        scales: &[f32],
+        rotations: &[f32],
+        opacities: &[f32],
+        sh_0: &[f32],
+        sh_rest: &[f32],
+        sh_degree: usize,
+        device: &Device,
+    ) -> candle_core::Result<Self> {
+        let n = positions.len() / 3;
+        let color_representation =
+            TrainableColorRepresentation::SphericalHarmonics { degree: sh_degree };
+        let sh_rest_coeff_count = color_representation.sh_rest_coeff_count();
+        let expected_sh0 = n * 3;
+        let expected_sh_rest = n * sh_rest_coeff_count * 3;
+
+        if sh_0.len() != expected_sh0 {
+            candle_core::bail!(
+                "expected {expected_sh0} SH DC values for {n} gaussians, got {}",
+                sh_0.len()
+            );
+        }
+        if sh_rest.len() != expected_sh_rest {
+            candle_core::bail!(
+                "expected {expected_sh_rest} SH-rest values for degree {sh_degree}, got {}",
+                sh_rest.len()
+            );
+        }
+
+        Ok(Self {
+            positions: Var::from_tensor(&Tensor::from_slice(positions, (n, 3), device)?)?,
+            scales: Var::from_tensor(&Tensor::from_slice(scales, (n, 3), device)?)?,
+            rotations: Var::from_tensor(&Tensor::from_slice(rotations, (n, 4), device)?)?,
+            opacities: Var::from_tensor(&Tensor::from_slice(opacities, (n,), device)?)?,
+            colors: Var::from_tensor(&Tensor::from_slice(sh_0, (n, 3), device)?)?,
+            sh_rest: Var::from_tensor(&Tensor::from_slice(
+                sh_rest,
+                (n, sh_rest_coeff_count, 3),
+                device,
+            )?)?,
+            n,
+            color_representation,
             device: device.clone(),
         })
     }
@@ -107,6 +206,52 @@ impl TrainableGaussians {
     /// Get colors
     pub fn colors(&self) -> &Tensor {
         self.colors.as_tensor()
+    }
+
+    /// Get the SH DC term (`sh_0`) or the legacy RGB tensor for compatibility.
+    pub fn sh_0(&self) -> &Tensor {
+        self.colors()
+    }
+
+    /// Get higher-order SH coefficients.
+    pub fn sh_rest(&self) -> &Tensor {
+        self.sh_rest.as_tensor()
+    }
+
+    pub fn color_representation(&self) -> TrainableColorRepresentation {
+        self.color_representation
+    }
+
+    pub fn uses_spherical_harmonics(&self) -> bool {
+        matches!(
+            self.color_representation,
+            TrainableColorRepresentation::SphericalHarmonics { .. }
+        )
+    }
+
+    pub fn sh_degree(&self) -> usize {
+        self.color_representation.sh_degree()
+    }
+
+    pub fn render_colors(&self) -> candle_core::Result<Tensor> {
+        match self.color_representation {
+            TrainableColorRepresentation::Rgb => Ok(self.colors().clone()),
+            TrainableColorRepresentation::SphericalHarmonics { .. } => {
+                self.colors().affine(SH_C0 as f64, 0.5)
+            }
+        }
+    }
+
+    pub fn render_color_grads_to_parameter_grads(
+        &self,
+        render_color_grads: &Tensor,
+    ) -> candle_core::Result<Tensor> {
+        match self.color_representation {
+            TrainableColorRepresentation::Rgb => Ok(render_color_grads.clone()),
+            TrainableColorRepresentation::SphericalHarmonics { .. } => {
+                render_color_grads.affine(SH_C0 as f64, 0.0)
+            }
+        }
     }
 
     /// Get rotations (normalize)
@@ -624,7 +769,7 @@ impl DiffSplatRenderer {
         let proj_z: Vec<f32> = projected.z.to_vec1()?;
 
         let opacity_data = gaussians.opacities()?.to_vec1::<f32>()?;
-        let color_vecs = gaussians.colors().to_vec2::<f32>()?;
+        let color_vecs = gaussians.render_colors()?.to_vec2::<f32>()?;
         let color_data: Vec<[f32; 3]> = color_vecs
             .iter()
             .map(|c| {
@@ -705,7 +850,7 @@ impl DiffSplatRenderer {
         // Single GPU→CPU copy for other parameters
         let opacity_data = gaussians.opacities()?.to_vec1::<f32>()?;
         let opacity_logits_raw = gaussians.opacities.as_tensor().to_vec1::<f32>()?;
-        let color_vecs = gaussians.colors().to_vec2::<f32>()?;
+        let color_vecs = gaussians.render_colors()?.to_vec2::<f32>()?;
         let scales_3d = scales.to_vec2::<f32>()?;
 
         // Build per-Gaussian records
@@ -1232,6 +1377,59 @@ mod tests {
         if let Ok(g) = gaussians {
             assert_eq!(g.len(), 2);
         }
+    }
+
+    #[test]
+    fn test_trainable_gaussians_with_sh_round_trip_dc_rgb() {
+        let device = Device::Cpu;
+        let rgb = [0.2f32, 0.6, 0.8];
+        let sh_0: Vec<f32> = rgb.into_iter().map(rgb_to_sh0_value).collect();
+        let gaussians = TrainableGaussians::new_with_sh(
+            &[0.0, 0.0, 1.0],
+            &[-2.0, -2.0, -2.0],
+            &[1.0, 0.0, 0.0, 0.0],
+            &[0.0],
+            &sh_0,
+            &vec![0.0; 15 * 3],
+            3,
+            &device,
+        )
+        .unwrap();
+
+        assert!(gaussians.uses_spherical_harmonics());
+        assert_eq!(gaussians.sh_degree(), 3);
+        assert_eq!(gaussians.sh_rest().dims(), &[1, 15, 3]);
+
+        let rendered_rgb = gaussians.render_colors().unwrap().to_vec2::<f32>().unwrap();
+        for (actual, expected) in rendered_rgb[0].iter().zip(rgb) {
+            assert!((actual - expected).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn test_sh_render_gradients_scale_to_sh_dc_parameters() {
+        let device = Device::Cpu;
+        let gaussians = TrainableGaussians::new_with_sh(
+            &[0.0, 0.0, 1.0],
+            &[-2.0, -2.0, -2.0],
+            &[1.0, 0.0, 0.0, 0.0],
+            &[0.0],
+            &[0.0, 0.0, 0.0],
+            &vec![0.0; 15 * 3],
+            3,
+            &device,
+        )
+        .unwrap();
+        let render_grads = Tensor::from_slice(&[1.0f32, -2.0, 0.5], (1, 3), &device).unwrap();
+        let parameter_grads = gaussians
+            .render_color_grads_to_parameter_grads(&render_grads)
+            .unwrap()
+            .to_vec2::<f32>()
+            .unwrap();
+
+        assert!((parameter_grads[0][0] - SH_C0).abs() < 1e-6);
+        assert!((parameter_grads[0][1] + 2.0 * SH_C0).abs() < 1e-6);
+        assert!((parameter_grads[0][2] - 0.5 * SH_C0).abs() < 1e-6);
     }
 
     #[test]

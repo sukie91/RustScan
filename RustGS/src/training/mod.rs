@@ -8,6 +8,7 @@
 pub mod training_pipeline;
 
 pub mod chunk_planner;
+pub mod parity_harness;
 
 #[cfg(feature = "gpu")]
 mod data_loading;
@@ -35,6 +36,12 @@ pub use chunk_planner::{
     materialize_chunk_dataset, plan_spatial_chunks, ChunkBounds, ChunkBoundsSource,
     ChunkDisposition, ChunkPlan, MaterializedChunkDataset, PlannedChunk,
 };
+pub use parity_harness::{
+    default_litegs_parity_fixtures, default_parity_report_path, parity_fixture_id_for_input_path,
+    ParityFixtureKind, ParityFixtureSpec, ParityHarnessReport, ParityLossTerms,
+    ParityMetricSnapshot, ParityThresholds, ParityTimingMetrics, ParityTopologyMetrics,
+    DEFAULT_CONVERGENCE_FIXTURE_ID, DEFAULT_TINY_FIXTURE_ID,
+};
 
 #[cfg(feature = "gpu")]
 pub use metal_trainer::{
@@ -46,6 +53,7 @@ use crate::{GaussianMap, TrainingDataset};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 #[cfg(feature = "gpu")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -283,6 +291,222 @@ impl std::fmt::Display for TrainingBackend {
     }
 }
 
+/// Public training profile selection.
+///
+/// `LegacyMetal` preserves the existing RustGS behavior. `LiteGsMacV1` reserves
+/// a dedicated LiteGS-compatible path for Apple Silicon parity work.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TrainingProfile {
+    LegacyMetal,
+    LiteGsMacV1,
+}
+
+impl Default for TrainingProfile {
+    fn default() -> Self {
+        Self::LegacyMetal
+    }
+}
+
+impl std::fmt::Display for TrainingProfile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::LegacyMetal => write!(f, "legacy-metal"),
+            Self::LiteGsMacV1 => write!(f, "litegs-mac-v1"),
+        }
+    }
+}
+
+impl FromStr for TrainingProfile {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match normalize_config_token(value).as_str() {
+            "legacy-metal" => Ok(Self::LegacyMetal),
+            "litegs-mac-v1" => Ok(Self::LiteGsMacV1),
+            other => Err(format!(
+                "unsupported training profile '{other}'. Expected one of: legacy-metal, litegs-mac-v1"
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LiteGsTileSize {
+    pub width: usize,
+    pub height: usize,
+}
+
+impl LiteGsTileSize {
+    pub const fn new(width: usize, height: usize) -> Self {
+        Self { width, height }
+    }
+}
+
+impl Default for LiteGsTileSize {
+    fn default() -> Self {
+        Self::new(8, 16)
+    }
+}
+
+impl std::fmt::Display for LiteGsTileSize {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}x{}", self.width, self.height)
+    }
+}
+
+impl FromStr for LiteGsTileSize {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let token = value.trim();
+        let parts: Vec<&str> = token
+            .split(|ch| matches!(ch, 'x' | 'X' | ',' | ':'))
+            .filter(|part| !part.is_empty())
+            .collect();
+        if parts.len() != 2 {
+            return Err(format!(
+                "invalid LiteGS tile size '{token}'. Expected formats like 8x16 or 8,16"
+            ));
+        }
+
+        let width = parts[0]
+            .parse::<usize>()
+            .map_err(|_| format!("invalid tile width in '{token}'"))?;
+        let height = parts[1]
+            .parse::<usize>()
+            .map_err(|_| format!("invalid tile height in '{token}'"))?;
+        if width == 0 || height == 0 {
+            return Err(format!(
+                "invalid LiteGS tile size '{token}'. Width and height must both be > 0"
+            ));
+        }
+
+        Ok(Self::new(width, height))
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LiteGsOpacityResetMode {
+    Decay,
+    Reset,
+}
+
+impl Default for LiteGsOpacityResetMode {
+    fn default() -> Self {
+        Self::Decay
+    }
+}
+
+impl std::fmt::Display for LiteGsOpacityResetMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Decay => write!(f, "decay"),
+            Self::Reset => write!(f, "reset"),
+        }
+    }
+}
+
+impl FromStr for LiteGsOpacityResetMode {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match normalize_config_token(value).as_str() {
+            "decay" => Ok(Self::Decay),
+            "reset" => Ok(Self::Reset),
+            other => Err(format!(
+                "unsupported LiteGS opacity reset mode '{other}'. Expected one of: decay, reset"
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LiteGsPruneMode {
+    Threshold,
+    Weight,
+}
+
+impl Default for LiteGsPruneMode {
+    fn default() -> Self {
+        Self::Weight
+    }
+}
+
+impl std::fmt::Display for LiteGsPruneMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Threshold => write!(f, "threshold"),
+            Self::Weight => write!(f, "weight"),
+        }
+    }
+}
+
+impl FromStr for LiteGsPruneMode {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match normalize_config_token(value).as_str() {
+            "threshold" => Ok(Self::Threshold),
+            "weight" => Ok(Self::Weight),
+            other => Err(format!(
+                "unsupported LiteGS prune mode '{other}'. Expected one of: threshold, weight"
+            )),
+        }
+    }
+}
+
+/// Nested LiteGS-compatible configuration surface.
+///
+/// The defaults are chosen for the phased Apple Silicon parity plan:
+/// non-clustered by default, sparse-grad off, and camera optimization deferred.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LiteGsConfig {
+    pub sh_degree: usize,
+    pub cluster_size: usize,
+    pub tile_size: LiteGsTileSize,
+    pub sparse_grad: bool,
+    pub reg_weight: f32,
+    pub enable_transmittance: bool,
+    pub enable_depth: bool,
+    pub densify_from: usize,
+    pub densify_until: Option<usize>,
+    pub densification_interval: usize,
+    pub opacity_reset_interval: usize,
+    pub opacity_reset_mode: LiteGsOpacityResetMode,
+    pub prune_mode: LiteGsPruneMode,
+    pub target_primitives: usize,
+    pub learnable_viewproj: bool,
+}
+
+impl Default for LiteGsConfig {
+    fn default() -> Self {
+        Self {
+            sh_degree: 3,
+            cluster_size: 0,
+            tile_size: LiteGsTileSize::default(),
+            sparse_grad: false,
+            reg_weight: 0.0,
+            enable_transmittance: false,
+            enable_depth: false,
+            densify_from: 3,
+            densify_until: None,
+            densification_interval: 5,
+            opacity_reset_interval: 10,
+            opacity_reset_mode: LiteGsOpacityResetMode::Decay,
+            prune_mode: LiteGsPruneMode::Weight,
+            target_primitives: 1_000_000,
+            learnable_viewproj: false,
+        }
+    }
+}
+
+fn normalize_config_token(value: &str) -> String {
+    value.trim().to_ascii_lowercase().replace('_', "-")
+}
+
 /// Training configuration.
 #[derive(Debug, Clone)]
 pub struct TrainingConfig {
@@ -290,6 +514,10 @@ pub struct TrainingConfig {
     ///
     /// Only `Metal` is supported for the top-level training flow.
     pub backend: TrainingBackend,
+    /// Public training profile used to route the top-level trainer.
+    pub training_profile: TrainingProfile,
+    /// Nested LiteGS-compatible configuration surface.
+    pub litegs: LiteGsConfig,
     /// Number of training iterations
     pub iterations: usize,
     /// Learning rate for positions (initial)
@@ -357,6 +585,8 @@ impl Default for TrainingConfig {
     fn default() -> Self {
         Self {
             backend: TrainingBackend::default(),
+            training_profile: TrainingProfile::default(),
+            litegs: LiteGsConfig::default(),
             iterations: 30000,
             lr_position: 0.00016,
             lr_pos_final: 0.0000016,
@@ -409,7 +639,48 @@ pub fn train(
     dataset: &TrainingDataset,
     config: &TrainingConfig,
 ) -> Result<GaussianMap, TrainingError> {
+    match config.training_profile {
+        TrainingProfile::LegacyMetal => train_legacy_metal(dataset, config),
+        TrainingProfile::LiteGsMacV1 => train_litegs_mac_v1(dataset, config),
+    }
+}
+
+#[cfg(feature = "gpu")]
+fn train_legacy_metal(
+    dataset: &TrainingDataset,
+    config: &TrainingConfig,
+) -> Result<GaussianMap, TrainingError> {
     let plan = select_training_execution_plan(dataset, config)?;
+    execute_training_plan(dataset, config, plan)
+}
+
+#[cfg(feature = "gpu")]
+fn train_litegs_mac_v1(
+    dataset: &TrainingDataset,
+    config: &TrainingConfig,
+) -> Result<GaussianMap, TrainingError> {
+    validate_litegs_mac_v1_config(config)?;
+    log::info!(
+        "Training with LiteGS Mac V1 profile | sh_degree={} | cluster_size={} | tile_size={} | sparse_grad={} | reg_weight={:.4} | enable_transmittance={} | enable_depth={}",
+        config.litegs.sh_degree,
+        config.litegs.cluster_size,
+        config.litegs.tile_size,
+        config.litegs.sparse_grad,
+        config.litegs.reg_weight,
+        config.litegs.enable_transmittance,
+        config.litegs.enable_depth,
+    );
+
+    let plan = select_training_execution_plan(dataset, config)?;
+    execute_training_plan(dataset, config, plan)
+}
+
+#[cfg(feature = "gpu")]
+fn execute_training_plan(
+    dataset: &TrainingDataset,
+    config: &TrainingConfig,
+    plan: TrainingExecutionPlan,
+) -> Result<GaussianMap, TrainingError> {
     match plan.route {
         TrainingExecutionRoute::Standard => metal_trainer::train(dataset, config),
         TrainingExecutionRoute::ChunkedSingleChunk => {
@@ -441,6 +712,103 @@ pub fn train(
             train_chunked_sequentially(dataset, config, chunk_plan)
         }
     }
+}
+
+fn validate_litegs_mac_v1_config(config: &TrainingConfig) -> Result<(), TrainingError> {
+    let defaults = LiteGsConfig::default();
+    let mut unsupported = Vec::new();
+
+    if config.litegs.learnable_viewproj {
+        unsupported.push(
+            "learnable_viewproj is reserved but deferred for LiteGsMacV1 on Mac (future story, currently unsupported)"
+                .to_string(),
+        );
+    }
+    if config.litegs.cluster_size != defaults.cluster_size {
+        unsupported.push(format!(
+            "cluster_size={} requires Epic 19 clustered parity; LiteGsMacV1 currently supports only non-clustered training",
+            config.litegs.cluster_size
+        ));
+    }
+    if config.litegs.sparse_grad != defaults.sparse_grad {
+        unsupported.push(
+            "sparse_grad=true requires Epic 19 sparse-gradient parity and is not available in LiteGsMacV1 yet"
+                .to_string(),
+        );
+    }
+    if config.litegs.tile_size != defaults.tile_size {
+        unsupported.push(format!(
+            "tile_size={} overrides are reserved for later LiteGS parity work; bootstrap profile currently expects {}",
+            config.litegs.tile_size, defaults.tile_size
+        ));
+    }
+    if (config.litegs.reg_weight - defaults.reg_weight).abs() > f32::EPSILON {
+        unsupported.push(format!(
+            "reg_weight={} requires LiteGS loss parity work (Epic 18.4) and is not wired yet",
+            config.litegs.reg_weight
+        ));
+    }
+    if config.litegs.enable_transmittance != defaults.enable_transmittance {
+        unsupported.push(
+            "enable_transmittance=true requires LiteGS transmittance loss parity (Epic 18.4)"
+                .to_string(),
+        );
+    }
+    if config.litegs.enable_depth != defaults.enable_depth {
+        unsupported
+            .push("enable_depth=true requires LiteGS depth loss parity (Epic 18.4)".to_string());
+    }
+    if config.litegs.densify_from != defaults.densify_from {
+        unsupported.push(format!(
+            "densify_from={} requires LiteGS densify parity (Epic 20)",
+            config.litegs.densify_from
+        ));
+    }
+    if config.litegs.densify_until != defaults.densify_until {
+        unsupported.push(format!(
+            "densify_until={:?} requires LiteGS densify parity (Epic 20)",
+            config.litegs.densify_until
+        ));
+    }
+    if config.litegs.densification_interval != defaults.densification_interval {
+        unsupported.push(format!(
+            "densification_interval={} requires LiteGS densify parity (Epic 20)",
+            config.litegs.densification_interval
+        ));
+    }
+    if config.litegs.opacity_reset_interval != defaults.opacity_reset_interval {
+        unsupported.push(format!(
+            "opacity_reset_interval={} requires LiteGS opacity reset parity (Epic 20)",
+            config.litegs.opacity_reset_interval
+        ));
+    }
+    if config.litegs.opacity_reset_mode != defaults.opacity_reset_mode {
+        unsupported.push(format!(
+            "opacity_reset_mode={} requires LiteGS opacity reset parity (Epic 20)",
+            config.litegs.opacity_reset_mode
+        ));
+    }
+    if config.litegs.prune_mode != defaults.prune_mode {
+        unsupported.push(format!(
+            "prune_mode={} requires LiteGS/TamingGS prune parity (Epic 20)",
+            config.litegs.prune_mode
+        ));
+    }
+    if config.litegs.target_primitives != defaults.target_primitives {
+        unsupported.push(format!(
+            "target_primitives={} requires TamingGS target schedule parity (Epic 20)",
+            config.litegs.target_primitives
+        ));
+    }
+
+    if unsupported.is_empty() {
+        return Ok(());
+    }
+
+    Err(TrainingError::TrainingFailed(format!(
+        "LiteGsMacV1 bootstrap profile rejected unsupported overrides: {}",
+        unsupported.join("; ")
+    )))
 }
 
 #[cfg(feature = "gpu")]
@@ -719,13 +1087,18 @@ fn adapt_chunk_training_config(
 
 #[cfg(test)]
 mod tests {
-    use super::{TrainingBackend, TrainingConfig};
+    use super::{
+        validate_litegs_mac_v1_config, LiteGsConfig, LiteGsOpacityResetMode, LiteGsPruneMode,
+        LiteGsTileSize, TrainingBackend, TrainingConfig, TrainingProfile,
+    };
+    use std::str::FromStr;
 
     #[test]
     fn default_training_backend_is_metal() {
         assert_eq!(TrainingBackend::default(), TrainingBackend::Metal);
         let config = TrainingConfig::default();
         assert_eq!(config.backend, TrainingBackend::Metal);
+        assert_eq!(config.training_profile, TrainingProfile::LegacyMetal);
         assert!(config.metal_use_native_forward);
         assert_eq!(config.prune_interval, 100);
         assert!(!config.chunked_training);
@@ -735,6 +1108,79 @@ mod tests {
         assert_eq!(config.max_chunks, 0);
         assert!(config.merge_core_only);
         assert!(config.chunk_artifact_dir.is_none());
+        assert_eq!(config.litegs, LiteGsConfig::default());
+    }
+
+    #[test]
+    fn litegs_config_defaults_match_mac_bootstrap_plan() {
+        let litegs = LiteGsConfig::default();
+        assert_eq!(litegs.sh_degree, 3);
+        assert_eq!(litegs.cluster_size, 0);
+        assert_eq!(litegs.tile_size, LiteGsTileSize::new(8, 16));
+        assert!(!litegs.sparse_grad);
+        assert_eq!(litegs.reg_weight, 0.0);
+        assert!(!litegs.enable_transmittance);
+        assert!(!litegs.enable_depth);
+        assert_eq!(litegs.densify_from, 3);
+        assert_eq!(litegs.densify_until, None);
+        assert_eq!(litegs.densification_interval, 5);
+        assert_eq!(litegs.opacity_reset_interval, 10);
+        assert_eq!(litegs.opacity_reset_mode, LiteGsOpacityResetMode::Decay);
+        assert_eq!(litegs.prune_mode, LiteGsPruneMode::Weight);
+        assert_eq!(litegs.target_primitives, 1_000_000);
+        assert!(!litegs.learnable_viewproj);
+    }
+
+    #[test]
+    fn training_profile_and_litegs_enums_parse_cli_tokens() {
+        assert_eq!(
+            TrainingProfile::from_str("legacy-metal").unwrap(),
+            TrainingProfile::LegacyMetal
+        );
+        assert_eq!(
+            TrainingProfile::from_str("litegs_mac_v1").unwrap(),
+            TrainingProfile::LiteGsMacV1
+        );
+        assert_eq!(
+            LiteGsTileSize::from_str("16x8").unwrap(),
+            LiteGsTileSize::new(16, 8)
+        );
+        assert_eq!(
+            LiteGsTileSize::from_str("16,8").unwrap(),
+            LiteGsTileSize::new(16, 8)
+        );
+        assert_eq!(
+            LiteGsOpacityResetMode::from_str("reset").unwrap(),
+            LiteGsOpacityResetMode::Reset
+        );
+        assert_eq!(
+            LiteGsPruneMode::from_str("threshold").unwrap(),
+            LiteGsPruneMode::Threshold
+        );
+    }
+
+    #[test]
+    fn litegs_mac_v1_accepts_bootstrap_defaults() {
+        let config = TrainingConfig {
+            training_profile: TrainingProfile::LiteGsMacV1,
+            ..TrainingConfig::default()
+        };
+        validate_litegs_mac_v1_config(&config).unwrap();
+    }
+
+    #[test]
+    fn litegs_mac_v1_rejects_clustered_override_before_epic_19() {
+        let config = TrainingConfig {
+            training_profile: TrainingProfile::LiteGsMacV1,
+            litegs: LiteGsConfig {
+                cluster_size: 128,
+                ..LiteGsConfig::default()
+            },
+            ..TrainingConfig::default()
+        };
+
+        let err = validate_litegs_mac_v1_config(&config).unwrap_err();
+        assert!(err.to_string().contains("cluster_size=128"));
     }
 }
 

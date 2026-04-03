@@ -1599,19 +1599,21 @@ impl MetalRuntime {
     pub(crate) fn bind_gaussians<'a>(
         &self,
         gaussians: &'a TrainableGaussians,
+        render_colors: &'a Tensor,
     ) -> candle_core::Result<MetalGaussianBindings<'a>> {
         Ok(MetalGaussianBindings {
             positions: self.bind_tensor(gaussians.positions())?,
             scales: self.bind_tensor(gaussians.scales.as_tensor())?,
             rotations: self.bind_tensor(gaussians.rotations.as_tensor())?,
             opacities: self.bind_tensor(gaussians.opacities.as_tensor())?,
-            colors: self.bind_tensor(gaussians.colors())?,
+            colors: self.bind_tensor(render_colors)?,
         })
     }
 
     pub(crate) fn project_gaussians(
         &mut self,
         gaussians: &TrainableGaussians,
+        render_colors: &Tensor,
         extract_visible_source_indices: bool,
     ) -> candle_core::Result<ProjectedGpuBatch> {
         let gaussian_count = gaussians.len();
@@ -1628,7 +1630,7 @@ impl MetalRuntime {
         )?;
         self.ensure_buffer(MetalBufferSlot::VisibleCount, size_of::<u32>())?;
         let pipeline = self.ensure_pipeline(MetalKernel::ProjectGaussians)?.clone();
-        let bindings = self.bind_gaussians(gaussians)?;
+        let bindings = self.bind_gaussians(gaussians, render_colors)?;
         let metal = self.device.as_metal_device()?.clone();
         let encoder = metal.command_encoder()?;
         encoder.set_label(MetalKernel::ProjectGaussians.function_name());

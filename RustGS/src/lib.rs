@@ -55,6 +55,13 @@ pub use crate::render::{
 };
 
 // Re-export training types
+pub use crate::training::{
+    default_litegs_parity_fixtures, default_parity_report_path, parity_fixture_id_for_input_path,
+    LiteGsConfig, LiteGsOpacityResetMode, LiteGsPruneMode, LiteGsTileSize, ParityFixtureKind,
+    ParityFixtureSpec, ParityHarnessReport, ParityLossTerms, ParityMetricSnapshot,
+    ParityThresholds, ParityTimingMetrics, ParityTopologyMetrics, TrainingProfile,
+    DEFAULT_CONVERGENCE_FIXTURE_ID, DEFAULT_TINY_FIXTURE_ID,
+};
 #[cfg(feature = "gpu")]
 pub use crate::training::{
     estimate_chunk_capacity, ChunkCapacityDisposition, ChunkCapacityEstimate,

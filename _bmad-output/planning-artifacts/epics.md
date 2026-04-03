@@ -169,6 +169,26 @@ RustViewer需求 → Epic 8: RustViewer 3D可视化GUI
 开发者可以基于文档 frontmatter 和每条 Story 状态字段持续推进长期开发，并在更换电脑或中断后快速恢复上下文
 **FRs covered:** FR13, NFR4, NFR8
 
+### Epic 17: LiteGS 对齐分析与验收 Harness
+为 LiteGS-on-RustGS Mac 方案建立权威差异矩阵、固定 fixtures 和统一验收阈值，确保后续开发围绕同一套 parity 标准推进
+**FRs covered:** FR8, FR9, FR10, NFR1, NFR2
+
+### Epic 18: LiteGS Mac MVP 训练路径
+在保留现有 LegacyMetal 行为的前提下，为 Apple Silicon 引入 LiteGS 兼容训练 profile、配置面和 Metal 训练入口
+**FRs covered:** FR8, FR9, FR10, NFR1, NFR2
+
+### Epic 19: LiteGS Cluster 与 Sparse-Gradient 路径
+将 LiteGS 的 cluster、稀疏梯度和空间重排机制引入 RustGS Metal 运行时，实现 clustered parity
+**FRs covered:** FR8, FR9, FR10, NFR1, NFR2
+
+### Epic 20: LiteGS Densify/Prune/Opacity Reset 对齐
+实现 LiteGS/TamingGS 的统计、densify、prune 与优化器状态变更语义，使拓扑编辑与上游保持一致
+**FRs covered:** FR8, FR9, FR10, NFR1, NFR2
+
+### Epic 21: 运行时对齐、导出恢复与默认切换
+补齐 LiteGS 兼容路径的评估、checkpoint、PLY 往返、Mac 操作文档，并在验收通过后升级默认 profile
+**FRs covered:** FR8, FR9, FR10, NFR1, NFR2, FR20, FR21
+
 ## Epic 12: 分块训练入口与预算控制
 
 让 RustGS 具备正式的 chunked training 入口、预算模型和模式路由，使 16GB 机器能够以可预期方式启动分块训练。
@@ -492,3 +512,319 @@ So that implementation, review, and status maintenance stay consistent over a lo
 **Given** the chunked-training epic section
 **When** documentation is finalized
 **Then** it defines the required story lifecycle, status values, and completion/update rules
+
+## Epic 17: LiteGS 对齐分析与验收 Harness
+
+让 RustGS 的 LiteGS-on-Mac 开发以统一的差异矩阵、固定 fixture 和可复用验收阈值为依据，而不是在实现过程中临时解释“什么叫对齐”。
+
+### Story 17.1: Full LiteGS-vs-RustGS Parity Matrix
+
+Status: done
+
+As a RustGS maintainer,
+I want one authoritative subsystem-by-subsystem parity matrix,
+So that every later LiteGS story has an explicit source of truth, mismatch statement, migration decision, acceptance metric, and owner.
+
+**Acceptance Criteria:**
+
+**Given** the LiteGS mirror and current RustGS implementation
+**When** the parity document is written
+**Then** it contains sections for training loop, dataset/camera model, Gaussian parameterization, render preprocess, loss, optimizer, densify/prune/reset, clustering/sparse-grad, evaluation/export, and Mac-specific constraints
+
+**Given** a mismatch row in the matrix
+**When** a maintainer reads it
+**Then** the row points to both LiteGS and RustGS source files and names the owning story
+
+### Story 17.2: Fixed Reference Fixtures for Parity Work
+
+Status: done
+
+As a parity harness owner,
+I want two named reference fixtures with stable metadata,
+So that correctness and convergence checks do not drift as implementation changes.
+
+**Acceptance Criteria:**
+
+**Given** the parity harness registry
+**When** fixtures are enumerated
+**Then** it defines one tiny correctness fixture and one Apple Silicon convergence fixture with stable IDs and notes
+
+**Given** the canonical small COLMAP fixture is not yet checked in
+**When** the harness is bootstrapped locally
+**Then** the registry still records the intended COLMAP path and the temporary bootstrap dataset used meanwhile
+
+### Story 17.3: Parity Harness Metrics Schema
+
+Status: in_progress
+
+As a LiteGS parity developer,
+I want a reusable harness report format,
+So that later training runs can record the same initialization, loss, topology, export, and timing metrics across every story.
+
+**Acceptance Criteria:**
+
+**Given** a parity run
+**When** metrics are persisted
+**Then** the schema can record initialization counts, active SH degree, loss terms, PSNR, Gaussian counts, densify/prune events, export outputs, checkpoint/export round-trips, and wall-clock timing
+
+**Given** a stored parity report
+**When** it is loaded back
+**Then** the JSON round-trip is deterministic
+
+### Story 17.4: Shared Acceptance Thresholds
+
+Status: done
+
+As a project maintainer,
+I want one shared set of pass/fail thresholds,
+So that every later LiteGS story validates against the same rules.
+
+**Acceptance Criteria:**
+
+**Given** the parity harness defaults
+**When** thresholds are read
+**Then** they require no NaNs, no OOM on Apple Silicon, non-clustered PSNR delta ≤ 0.5 dB, non-clustered Gaussian-count delta ≤ 10%, clustered PSNR delta ≤ 0.7 dB, and deterministic export/load round-trip
+
+## Epic 18: LiteGS Mac MVP 训练路径
+
+让 RustGS 在 Apple Silicon 上拥有一条显式的 LiteGS 兼容训练入口，先实现可运行、可验证的 non-clustered MVP，再继续追 cluster/sparse-grad 与 densify parity。
+
+### Story 18.1: Public LiteGS Mac Training Profile and CLI Surface
+
+Status: done
+
+As a RustGS user,
+I want a new LiteGS-compatible training profile and nested config surface,
+So that I can opt into parity work without silently changing existing LegacyMetal behavior.
+
+**Acceptance Criteria:**
+
+**Given** the RustGS public training API
+**When** I inspect `TrainingConfig`
+**Then** it includes `training_profile` plus nested `litegs` config rather than scattering LiteGS-only knobs across the top level
+
+**Given** the `rustgs train` CLI
+**When** I pass `--training-profile` and `--litegs-*` options
+**Then** the values parse and map into the nested config surface
+
+**Given** I do not opt into the new profile
+**When** I train with default config
+**Then** the existing LegacyMetal path remains the default behavior
+
+### Story 18.2: LiteGS-Compatible Initialization Defaults
+
+Status: done
+
+As a LiteGS parity developer,
+I want initialization to match LiteGS defaults,
+So that RustGS starts from comparable xyz/scale/opacity/SH state on Mac.
+
+**Acceptance Criteria:**
+
+**Given** COLMAP sparse points are available
+**When** LiteGsMacV1 initialization runs
+**Then** it prefers sparse-point initialization over frame-sampling fallback
+
+**Given** a point-initialized Gaussian
+**When** scale and opacity are initialized
+**Then** scale uses distance-based log scale and opacity uses inverse-sigmoid(0.1)
+
+### Story 18.3: LiteGS Activation and SH-Based Rendering Inputs
+
+Status: in_progress
+
+As a LiteGS parity developer,
+I want Metal-side activation to consume LiteGS-style trainable tensors,
+So that rendering derives RGB from SH instead of storing trained RGB directly.
+
+**Acceptance Criteria:**
+
+**Given** LiteGsMacV1 trainable Gaussians
+**When** a render step begins
+**Then** rotations are normalized, scales are exponentiated, opacities are sigmoided, and per-view color is derived from `sh_0/sh_rest`
+
+### Story 18.4: LiteGS Loss Semantics for Mac V1
+
+Status: todo
+
+As a LiteGS parity developer,
+I want Mac V1 to use LiteGS-style objective terms,
+So that optimization pressure matches LiteGS more closely.
+
+**Acceptance Criteria:**
+
+**Given** LiteGsMacV1 default training
+**When** loss is computed
+**Then** the primary objective is L1+SSIM, scale regularization is optional, transmittance penalty is optional, and depth is disabled by default
+
+### Story 18.5: LiteGS Parameter Groups and XYZ LR Decay
+
+Status: todo
+
+As a LiteGS parity developer,
+I want optimizer groups to match LiteGS naming and learning-rate behavior,
+So that parameter updates follow the same coarse schedule as the reference.
+
+**Acceptance Criteria:**
+
+**Given** LiteGsMacV1 optimizer setup
+**When** parameter groups are built
+**Then** groups exist for `xyz`, `sh_0`, `sh_rest`, `opacity`, `scale`, and `rot`
+
+**Given** learning-rate scheduling runs
+**When** the schedule advances
+**Then** only xyz learning rate decays exponentially while other groups retain their initial learning rates
+
+### Story 18.6: Rotation-Learning Guardrail
+
+Status: todo
+
+As a RustGS maintainer,
+I want rotation learning disabled unless the backward path is truly correct,
+So that the LiteGS profile never fakes rotation updates.
+
+**Acceptance Criteria:**
+
+**Given** rotation backward parity is incomplete
+**When** LiteGsMacV1 trains
+**Then** rotation learning remains explicitly disabled or inert rather than pretending to update correctly
+
+## Epic 19: LiteGS Cluster 与 Sparse-Gradient 路径
+
+让 RustGS 的 Metal runtime 具备 LiteGS clustered training 所需的数据表示、可见性压缩和稀疏优化语义。
+
+### Story 19.1: Cluster Representation and AABB Frustum Culling
+
+Status: todo
+
+As a LiteGS parity developer,
+I want clustered Gaussian representation and cluster-level frustum culling,
+So that Apple Silicon can follow LiteGS visibility behavior without depending on RustGS chunk orchestration.
+
+### Story 19.2: Visible-Chunk and Visible-Primitive Compaction
+
+Status: todo
+
+As a LiteGS parity developer,
+I want compacted visibility bookkeeping,
+So that sparse-grad mode can update only visible data.
+
+### Story 19.3: Morton-Order Spatial Refine
+
+Status: todo
+
+As a LiteGS parity developer,
+I want Morton-order reordering and cluster-bound refresh scheduling,
+So that clustered topology and cache locality stay aligned with LiteGS expectations.
+
+### Story 19.4: Sparse-Adam Parity on Metal
+
+Status: todo
+
+As a LiteGS parity developer,
+I want sparse-Adam semantics equivalent to LiteGS for clustered and non-clustered paths,
+So that visibility-gated updates match the reference optimizer.
+
+### Story 19.5: Clustered Apple Silicon Parity Validation
+
+Status: todo
+
+As a project maintainer,
+I want clustered parity runs validated with harness thresholds,
+So that clustered PSNR and topology behavior stay within agreed tolerances on Apple Silicon.
+
+## Epic 20: LiteGS Densify/Prune/Opacity Reset 对齐
+
+让 RustGS 在拓扑编辑时收集与 LiteGS/TamingGS 对应的统计信息，并在 append/prune/reorder/recluster 过程中正确维护优化器状态。
+
+### Story 20.1: Statistics Helper Equivalent
+
+Status: todo
+
+As a LiteGS parity developer,
+I want Rust-side statistic accumulation equivalent to LiteGS,
+So that densify and prune logic can consume the same high-level signals.
+
+### Story 20.2: Official Density Controller Behavior
+
+Status: todo
+
+As a LiteGS parity developer,
+I want clone/split/prune/reset behavior matching the official controller,
+So that non-clustered topology work behaves like LiteGS before TamingGS extensions.
+
+### Story 20.3: TamingGS Target Primitive and Weighted Prune Behavior
+
+Status: todo
+
+As a LiteGS parity developer,
+I want TamingGS-specific target scheduling and weighted pruning,
+So that RustGS can follow the full LiteGS densification strategy rather than only the official subset.
+
+### Story 20.4: Optimizer-State Mutation Parity
+
+Status: todo
+
+As a LiteGS parity developer,
+I want optimizer state to survive append/replace/prune/reorder/recluster edits,
+So that topology work remains numerically stable across long training runs.
+
+### Story 20.5: Mac-Safe Topology Guardrails
+
+Status: todo
+
+As a RustGS maintainer,
+I want deterministic and explicitly timed topology mutations on Mac,
+So that parity work remains debuggable on 16 GB Apple Silicon hardware.
+
+## Epic 21: 运行时对齐、导出恢复与默认切换
+
+让 LiteGS 兼容训练路径具备可持续运维能力，包括评估、checkpoint、PLY 往返、Mac 操作文档，以及验收通过后的默认 profile 升级。
+
+### Story 21.1: LiteGS-Style Evaluation and Progress Reporting
+
+Status: todo
+
+As a RustGS operator,
+I want stable PSNR evaluation and progress reporting from LiteGsMacV1,
+So that fixture runs produce comparable outputs to the LiteGS reference.
+
+### Story 21.2: Checkpoint Save/Resume Parity
+
+Status: todo
+
+As a LiteGS parity developer,
+I want checkpoint save and resume to preserve SH tensors and optimizer state,
+So that long Mac runs can be resumed without losing LiteGS-compatible state.
+
+### Story 21.3: PLY Export/Import Parity
+
+Status: todo
+
+As a RustGS maintainer,
+I want LiteGS-compatible PLY export/import to round-trip without data loss,
+So that RustGS IO remains stable as the trainable parameter set expands.
+
+### Story 21.4: Mac Operator Workflow Documentation
+
+Status: todo
+
+As a Mac operator,
+I want one document that explains supported hardware, memory envelope, known gaps, and recommended flags,
+So that I can run LiteGsMacV1 predictably on Apple Silicon.
+
+### Story 21.5: Default Promotion Gate
+
+Status: todo
+
+As a project maintainer,
+I want LiteGsMacV1 promoted only after the fixture suite passes the Epic 17 thresholds,
+So that the default switch is backed by measured parity rather than optimism.
+
+### Story 21.6: Simplified Training Pipeline Retirement
+
+Status: todo
+
+As a RustGS maintainer,
+I want `training_pipeline` removed from production-path ownership,
+So that the intended algorithm is defined by the LiteGS-compatible Metal path instead of the simplified reference implementation.

@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use candle_core::{DType, Device, Tensor, Var};
 use glam::{Mat3, Quat, Vec3};
 
-use crate::diff::diff_splat::{DiffCamera, TrainableGaussians};
+use crate::diff::diff_splat::{DiffCamera, TrainableColorRepresentation, TrainableGaussians};
 use crate::{GaussianMap, TrainingDataset, TrainingError};
 
 use super::data_loading::{
@@ -143,6 +143,8 @@ struct GaussianParameterSnapshot {
     rotations: Vec<f32>,
     opacity_logits: Vec<f32>,
     colors: Vec<f32>,
+    sh_rest: Vec<f32>,
+    color_representation: TrainableColorRepresentation,
 }
 
 impl GaussianParameterSnapshot {
@@ -187,6 +189,14 @@ impl GaussianParameterSnapshot {
         ]
     }
 
+    fn sh_rest_row_width(&self) -> usize {
+        self.color_representation.sh_rest_coeff_count() * 3
+    }
+
+    fn sh_rest(&self, idx: usize) -> &[f32] {
+        row_slice(&self.sh_rest, self.sh_rest_row_width(), idx)
+    }
+
     fn scale(&self, idx: usize) -> [f32; 3] {
         let log = self.log_scale(idx);
         [log[0].exp(), log[1].exp(), log[2].exp()]
@@ -199,12 +209,22 @@ impl GaussianParameterSnapshot {
         rotation: [f32; 4],
         opacity_logit: f32,
         color: [f32; 3],
+        sh_rest: &[f32],
     ) {
         self.positions.extend_from_slice(&position);
         self.log_scales.extend_from_slice(&log_scale);
         self.rotations.extend_from_slice(&rotation);
         self.opacity_logits.push(opacity_logit);
         self.colors.extend_from_slice(&color);
+        let sh_rest_row_width = self.sh_rest_row_width();
+        if sh_rest_row_width > 0 {
+            let copied = sh_rest.len().min(sh_rest_row_width);
+            self.sh_rest.extend_from_slice(&sh_rest[..copied]);
+            if copied < sh_rest_row_width {
+                self.sh_rest
+                    .resize(self.sh_rest.len() + (sh_rest_row_width - copied), 0.0);
+            }
+        }
     }
 }
 
@@ -604,6 +624,8 @@ impl MetalTrainer {
             rotations: flatten_rows(gaussians.rotations.as_tensor().to_vec2::<f32>()?),
             opacity_logits: gaussians.opacities.as_tensor().to_vec1::<f32>()?,
             colors: flatten_rows(gaussians.colors().to_vec2::<f32>()?),
+            sh_rest: flatten_3d(gaussians.sh_rest().to_vec3::<f32>()?),
+            color_representation: gaussians.color_representation(),
         })
     }
 
@@ -828,11 +850,19 @@ impl MetalTrainer {
             let log_scale = snapshot.log_scale(idx);
             let rotation = snapshot.rotation(idx);
             let color = snapshot.color(idx);
+            let sh_rest = snapshot.sh_rest(idx).to_vec();
             let opacity_logit = snapshot.opacity_logits[idx];
             let axis = rank % 3;
             let mut cloned_position = position;
             cloned_position[axis] += scale[axis].max(0.01) * 0.5;
-            snapshot.push(cloned_position, log_scale, rotation, opacity_logit, color);
+            snapshot.push(
+                cloned_position,
+                log_scale,
+                rotation,
+                opacity_logit,
+                color,
+                &sh_rest,
+            );
             stats.push(MetalGaussianStats::default());
             origins.push(None);
             added += 1;
@@ -856,6 +886,7 @@ impl MetalTrainer {
             split_scale[0] = (max_scale * 0.5).max(1e-6).ln();
             let rotation = snapshot.rotation(idx);
             let color = snapshot.color(idx);
+            let sh_rest = snapshot.sh_rest(idx).to_vec();
             let opacity_logit = snapshot.opacity_logits[idx];
             for direction in [1.0f32, -1.0] {
                 if available == 0 {
@@ -863,7 +894,14 @@ impl MetalTrainer {
                 }
                 let mut split_position = position;
                 split_position[0] += direction * max_scale * 0.1;
-                snapshot.push(split_position, split_scale, rotation, opacity_logit, color);
+                snapshot.push(
+                    split_position,
+                    split_scale,
+                    rotation,
+                    opacity_logit,
+                    color,
+                    &sh_rest,
+                );
                 stats.push(MetalGaussianStats::default());
                 origins.push(None);
                 added += 1;
@@ -940,6 +978,8 @@ impl MetalTrainer {
             rotations: Vec::with_capacity((snapshot.len() - pruned) * 4),
             opacity_logits: Vec::with_capacity(snapshot.len() - pruned),
             colors: Vec::with_capacity((snapshot.len() - pruned) * 3),
+            sh_rest: Vec::with_capacity((snapshot.len() - pruned) * snapshot.sh_rest_row_width()),
+            color_representation: snapshot.color_representation,
         };
         let mut kept_stats = Vec::with_capacity(snapshot.len() - pruned);
         let mut kept_origins = Vec::with_capacity(snapshot.len() - pruned);
@@ -952,6 +992,7 @@ impl MetalTrainer {
                     snapshot.rotation(idx),
                     snapshot.opacity_logits[idx],
                     snapshot.color(idx),
+                    snapshot.sh_rest(idx),
                 );
                 kept_stats.push(stats[idx]);
                 kept_origins.push(origins[idx]);
@@ -1171,14 +1212,28 @@ impl MetalTrainer {
             return Ok(());
         }
 
-        let rebuilt = TrainableGaussians::new(
-            &snapshot.positions,
-            &snapshot.log_scales,
-            &snapshot.rotations,
-            &snapshot.opacity_logits,
-            &snapshot.colors,
-            &self.device,
-        )?;
+        let rebuilt = match snapshot.color_representation {
+            TrainableColorRepresentation::Rgb => TrainableGaussians::new(
+                &snapshot.positions,
+                &snapshot.log_scales,
+                &snapshot.rotations,
+                &snapshot.opacity_logits,
+                &snapshot.colors,
+                &self.device,
+            )?,
+            TrainableColorRepresentation::SphericalHarmonics { degree } => {
+                TrainableGaussians::new_with_sh(
+                    &snapshot.positions,
+                    &snapshot.log_scales,
+                    &snapshot.rotations,
+                    &snapshot.opacity_logits,
+                    &snapshot.colors,
+                    &snapshot.sh_rest,
+                    degree,
+                    &self.device,
+                )?
+            }
+        };
         let new_adam = match self.adam.take() {
             Some(old_state) => self.rebuild_adam_state(&old_state, &origins)?,
             None => MetalAdamState::new(&rebuilt)?,
@@ -1557,9 +1612,11 @@ impl MetalTrainer {
             MetalBufferSlot::AdamVOpacity,
             MetalBufferSlot::AdamParamOpacity,
         )?;
+        let color_parameter_grads =
+            gaussians.render_color_grads_to_parameter_grads(&grads.colors)?;
         adam_step_var_fused(
             &gaussians.colors,
-            &grads.colors,
+            &color_parameter_grads,
             &mut adam.m_color,
             &mut adam.v_color,
             &mut self.runtime,
@@ -1598,7 +1655,8 @@ impl MetalTrainer {
 
         // Camera will be staged inside project_gaussians, no need to stage here
         if should_profile && self.device.is_metal() {
-            let gaussian_bindings = self.runtime.bind_gaussians(gaussians)?;
+            let render_colors = gaussians.render_colors()?;
+            let gaussian_bindings = self.runtime.bind_gaussians(gaussians, &render_colors)?;
             let _ = (
                 gaussian_bindings.positions.byte_offset(),
                 gaussian_bindings.positions.element_count(),
@@ -1658,7 +1716,7 @@ impl MetalTrainer {
         let pos = gaussians.positions().detach();
         let scales = gaussians.scales.as_tensor().detach().exp()?;
         let opacity_logits = gaussians.opacities.as_tensor().detach();
-        let colors = gaussians.colors().detach();
+        let colors = gaussians.render_colors()?.detach();
         let rotations = gaussians.rotations()?.detach();
 
         let px = pos.narrow(1, 0, 1)?.squeeze(1)?;
@@ -1689,9 +1747,9 @@ impl MetalTrainer {
         let mut projected_cpu = Vec::with_capacity(gaussians.len());
         let mut visible_source_indices = Vec::new();
         if self.device.is_metal() {
-            let gpu_batch = self
-                .runtime
-                .project_gaussians(gaussians, collect_visible_indices)?;
+            let gpu_batch =
+                self.runtime
+                    .project_gaussians(gaussians, &colors, collect_visible_indices)?;
             visible_source_indices = gpu_batch.visible_source_indices;
             profile.visible_gaussians = gpu_batch.visible_count;
             if !self.use_native_forward || should_profile {
@@ -2352,7 +2410,7 @@ pub fn train(
             )));
         }
     }
-    let mut gaussians = trainable_from_map(&loaded.initial_map, &trainer.device)?;
+    let mut gaussians = trainable_from_map(&loaded.initial_map, &trainer.device, config)?;
 
     if gaussians.len() == 0 {
         return Err(TrainingError::InvalidInput(
@@ -2808,6 +2866,10 @@ fn adam_step_var(
 
 fn flatten_rows(rows: Vec<Vec<f32>>) -> Vec<f32> {
     rows.into_iter().flatten().collect()
+}
+
+fn flatten_3d(rows: Vec<Vec<Vec<f32>>>) -> Vec<f32> {
+    rows.into_iter().flatten().flatten().collect()
 }
 
 fn row_slice(values: &[f32], width: usize, idx: usize) -> &[f32] {
@@ -3700,6 +3762,52 @@ mod tests {
             .unwrap();
 
         assert!(gaussians.len() > 2);
+    }
+
+    #[test]
+    fn topology_updates_preserve_sh_representation_for_litegs_trainables() {
+        let device = Device::Cpu;
+        let trainer_config = TrainingConfig {
+            densify_interval: 1,
+            prune_interval: 0,
+            topology_warmup: 0,
+            prune_threshold: 0.05,
+            max_initial_gaussians: 2,
+            metal_render_scale: 1.0,
+            ..TrainingConfig::default()
+        };
+        let mut trainer = MetalTrainer::new(32, 16, &trainer_config, device.clone()).unwrap();
+        trainer.topology_memory_budget = None;
+        let mut gaussians = TrainableGaussians::new_with_sh(
+            &[0.0, 0.0, 1.0],
+            &[0.05f32.ln(), 0.05f32.ln(), 0.05f32.ln()],
+            &[1.0, 0.0, 0.0, 0.0],
+            &[2.0],
+            &[
+                crate::diff::diff_splat::rgb_to_sh0_value(0.2),
+                crate::diff::diff_splat::rgb_to_sh0_value(0.4),
+                crate::diff::diff_splat::rgb_to_sh0_value(0.6),
+            ],
+            &vec![0.0; 15 * 3],
+            3,
+            &device,
+        )
+        .unwrap();
+        trainer.adam = Some(MetalAdamState::new(&gaussians).unwrap());
+        trainer.gaussian_stats = vec![MetalGaussianStats {
+            grad_accum: 1.0,
+            age: 1,
+        }];
+        trainer.iteration = 1;
+
+        trainer
+            .maybe_apply_topology_updates(&mut gaussians, 1)
+            .unwrap();
+
+        assert!(gaussians.len() > 1);
+        assert!(gaussians.uses_spherical_harmonics());
+        assert_eq!(gaussians.sh_degree(), 3);
+        assert_eq!(gaussians.sh_rest().dims()[0], gaussians.len());
     }
 
     #[test]

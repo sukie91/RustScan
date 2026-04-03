@@ -11,7 +11,7 @@ use image::{DynamicImage, GenericImageView, ImageReader};
 #[cfg(feature = "gpu")]
 use crate::core::{Gaussian3D, GaussianMap, GaussianState};
 #[cfg(feature = "gpu")]
-use crate::diff::diff_splat::{DiffCamera, TrainableGaussians};
+use crate::diff::diff_splat::{rgb_to_sh0_value, DiffCamera, TrainableGaussians};
 #[cfg(feature = "gpu")]
 use crate::init::{initialize_gaussian3d_from_points, GaussianInitConfig};
 #[cfg(feature = "gpu")]
@@ -108,9 +108,14 @@ pub(crate) fn load_training_data(
     }
 
     let initial_map = if dataset.initial_points.is_empty() {
+        if config.training_profile == super::TrainingProfile::LiteGsMacV1 {
+            log::warn!(
+                "LiteGsMacV1 did not receive sparse-point initialization; falling back to frame-based initialization for this dataset"
+            );
+        }
         build_initial_map_from_frames(dataset, &frames, config)?
     } else {
-        let init_config = GaussianInitConfig::default();
+        let init_config = gaussian_init_config_for_training(config);
         let mut gaussians =
             initialize_gaussian3d_from_points(&dataset.initial_points, &init_config);
         let max_initial = config.max_initial_gaussians.max(1);
@@ -151,6 +156,18 @@ pub(crate) fn load_training_data(
 }
 
 #[cfg(feature = "gpu")]
+fn gaussian_init_config_for_training(config: &super::TrainingConfig) -> GaussianInitConfig {
+    let mut init = GaussianInitConfig::default();
+    if config.training_profile == super::TrainingProfile::LiteGsMacV1 {
+        init.min_scale = 0.000_316_227_76;
+        init.max_scale = 10_000.0;
+        init.scale_factor = 1.0;
+        init.opacity = 0.1;
+    }
+    init
+}
+
+#[cfg(feature = "gpu")]
 fn diff_camera_from_scene_pose(
     pose: &SE3,
     fx: f32,
@@ -185,12 +202,24 @@ fn diff_camera_from_scene_pose(
 pub(crate) fn trainable_from_map(
     map: &GaussianMap,
     device: &Device,
+    config: &super::TrainingConfig,
 ) -> candle_core::Result<TrainableGaussians> {
     let mut positions = Vec::with_capacity(map.len() * 3);
     let mut scales = Vec::with_capacity(map.len() * 3);
     let mut rotations = Vec::with_capacity(map.len() * 4);
     let mut opacities = Vec::with_capacity(map.len());
-    let mut colors = Vec::with_capacity(map.len() * 3);
+    let mut base_color_params = Vec::with_capacity(map.len() * 3);
+    let use_litegs_sh = config.training_profile == super::TrainingProfile::LiteGsMacV1;
+    let sh_degree = if use_litegs_sh {
+        config.litegs.sh_degree
+    } else {
+        0
+    };
+    let sh_rest_coeff_count = if use_litegs_sh {
+        super::super::diff::diff_splat::sh_coeff_count_for_degree(sh_degree).saturating_sub(1)
+    } else {
+        0
+    };
 
     for gaussian in map.gaussians() {
         positions.extend_from_slice(&[
@@ -210,10 +239,35 @@ pub(crate) fn trainable_from_map(
             gaussian.rotation.z,
         ]);
         opacities.push(opacity_to_logit(gaussian.opacity));
-        colors.extend_from_slice(&gaussian.color);
+        if use_litegs_sh {
+            base_color_params.extend(gaussian.color.iter().copied().map(rgb_to_sh0_value));
+        } else {
+            base_color_params.extend_from_slice(&gaussian.color);
+        }
     }
 
-    TrainableGaussians::new(&positions, &scales, &rotations, &opacities, &colors, device)
+    if use_litegs_sh {
+        let sh_rest = vec![0.0; map.len() * sh_rest_coeff_count * 3];
+        TrainableGaussians::new_with_sh(
+            &positions,
+            &scales,
+            &rotations,
+            &opacities,
+            &base_color_params,
+            &sh_rest,
+            sh_degree,
+            device,
+        )
+    } else {
+        TrainableGaussians::new(
+            &positions,
+            &scales,
+            &rotations,
+            &opacities,
+            &base_color_params,
+            device,
+        )
+    }
 }
 
 #[cfg(feature = "gpu")]
@@ -224,7 +278,7 @@ pub(crate) fn map_from_trainable(
     let scales = gaussians.scales()?.to_vec2::<f32>()?;
     let rotations = gaussians.rotations()?.to_vec2::<f32>()?;
     let opacities = gaussians.opacities()?.to_vec1::<f32>()?;
-    let colors = gaussians.colors().to_vec2::<f32>()?;
+    let colors = gaussians.render_colors()?.to_vec2::<f32>()?;
 
     let mut output = Vec::with_capacity(gaussians.len());
     for idx in 0..gaussians.len() {
@@ -575,5 +629,70 @@ mod tests {
         assert!((camera.translation[0] + 1.0).abs() < 1e-6);
         assert!((camera.translation[1] - 2.0).abs() < 1e-6);
         assert!((camera.translation[2] + 3.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn litegs_profile_uses_litegs_point_init_defaults() {
+        let legacy = gaussian_init_config_for_training(&super::super::TrainingConfig::default());
+        assert_eq!(legacy.opacity, 0.5);
+        assert_eq!(legacy.scale_factor, 0.5);
+
+        let litegs = gaussian_init_config_for_training(&super::super::TrainingConfig {
+            training_profile: super::super::TrainingProfile::LiteGsMacV1,
+            ..super::super::TrainingConfig::default()
+        });
+        assert!((litegs.min_scale - 0.000_316_227_76).abs() < 1e-9);
+        assert_eq!(litegs.scale_factor, 1.0);
+        assert_eq!(litegs.opacity, 0.1);
+    }
+
+    #[test]
+    fn litegs_profile_initializes_trainable_gaussians_with_sh_dc() {
+        let device = Device::Cpu;
+        let mut map = GaussianMap::new(1);
+        let gaussian = Gaussian3D::from_depth_point(0.0, 0.0, 1.0, [64, 128, 255]);
+        let _ = map.add(gaussian);
+        map.update_states();
+
+        let config = super::super::TrainingConfig {
+            training_profile: super::super::TrainingProfile::LiteGsMacV1,
+            ..super::super::TrainingConfig::default()
+        };
+        let trainable = trainable_from_map(&map, &device, &config).unwrap();
+
+        assert!(trainable.uses_spherical_harmonics());
+        assert_eq!(trainable.sh_degree(), 3);
+        assert_eq!(trainable.sh_rest().dims(), &[1, 15, 3]);
+
+        let rendered_rgb = trainable.render_colors().unwrap().to_vec2::<f32>().unwrap();
+        assert!((rendered_rgb[0][0] - (64.0 / 255.0)).abs() < 1e-5);
+        assert!((rendered_rgb[0][1] - (128.0 / 255.0)).abs() < 1e-5);
+        assert!((rendered_rgb[0][2] - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn map_export_restores_rgb_from_sh_dc_trainables() {
+        let device = Device::Cpu;
+        let trainable = TrainableGaussians::new_with_sh(
+            &[0.0, 0.0, 1.0],
+            &[0.1f32.ln(), 0.2f32.ln(), 0.3f32.ln()],
+            &[1.0, 0.0, 0.0, 0.0],
+            &[opacity_to_logit(0.25)],
+            &[
+                rgb_to_sh0_value(0.2),
+                rgb_to_sh0_value(0.4),
+                rgb_to_sh0_value(0.6),
+            ],
+            &vec![0.0; 15 * 3],
+            3,
+            &device,
+        )
+        .unwrap();
+
+        let map = map_from_trainable(&trainable).unwrap();
+        let gaussian = &map.gaussians()[0];
+        assert!((gaussian.color[0] - 0.2).abs() < 1e-5);
+        assert!((gaussian.color[1] - 0.4).abs() < 1e-5);
+        assert!((gaussian.color[2] - 0.6).abs() < 1e-5);
     }
 }
