@@ -514,7 +514,7 @@ fn maybe_write_litegs_parity_report(
         );
     }
     report.notes.push(
-        "LiteGsMacV1 now stores SH-compatible trainables and reports the configured SH degree, but the Metal renderer still evaluates the DC term only until full view-dependent SH shading lands."
+        "LiteGsMacV1 now evaluates the active SH degree for view-dependent color during Metal training and can apply rotation-aware projection gradients when rotation learning is enabled."
             .to_string(),
     );
     if training_telemetry.is_none() {
