@@ -330,6 +330,9 @@ struct MetalGaussianStats {
     fragment_err: RunningMoments,
     visible_count: usize,
     age: usize,
+    /// Number of consecutive epochs where this Gaussian was not visible.
+    /// Reset to 0 when visible, incremented when not rendered.
+    consecutive_invisible_epochs: usize,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -849,6 +852,8 @@ impl MetalTrainer {
 
         for stats in &mut self.gaussian_stats {
             stats.age = stats.age.saturating_add(1);
+            stats.consecutive_invisible_epochs =
+                stats.consecutive_invisible_epochs.saturating_add(1);
         }
 
         if !self.is_litegs_mode() {
@@ -860,6 +865,7 @@ impl MetalTrainer {
             for source_idx in projected.visible_source_indices().iter().copied() {
                 if let Some(stats) = self.gaussian_stats.get_mut(source_idx as usize) {
                     stats.visible_count = stats.visible_count.saturating_add(1);
+                    stats.consecutive_invisible_epochs = 0; // Reset on visibility
                 }
             }
             return Ok(());
@@ -878,6 +884,9 @@ impl MetalTrainer {
             let Some(stats) = self.gaussian_stats.get_mut(source_idx as usize) else {
                 continue;
             };
+            // Reset consecutive invisibility when visible
+            stats.consecutive_invisible_epochs = 0;
+
             let grad_mag = grad_magnitudes
                 .get(source_idx as usize)
                 .copied()
@@ -1079,14 +1088,28 @@ impl MetalTrainer {
                     * opacity
                     * opacity
             };
-            let invisible = gaussian_stats.visible_count == 0;
+
+            // LiteGS mode: use age-aware and consecutive invisibility pruning
+            let (invisible_for_prune, age_eligible) = if self.is_litegs_mode() {
+                let min_age = self.litegs.prune_min_age.max(1);
+                let min_invisible = self.litegs.prune_invisible_epochs.max(1);
+                let age_ok = gaussian_stats.age >= min_age;
+                let invisible_long_enough =
+                    gaussian_stats.consecutive_invisible_epochs >= min_invisible;
+                (age_ok && invisible_long_enough, age_ok)
+            } else {
+                // Legacy mode: simple invisibility check
+                let invisible = gaussian_stats.visible_count == 0;
+                (invisible, true)
+            };
+
             analysis.infos.push(TopologyCandidateInfo {
                 max_scale,
                 opacity,
                 mean2d_grad,
                 fragment_weight,
                 fragment_err_score,
-                invisible,
+                invisible: invisible_for_prune,
             });
             if mean2d_grad > LITEGS_DENSIFY_GRAD_THRESHOLD {
                 analysis.active_grad_stats += 1;
@@ -1110,9 +1133,11 @@ impl MetalTrainer {
                     }
                 }
                 let should_prune = match self.litegs.prune_mode {
-                    super::LiteGsPruneMode::Weight => invisible || fragment_weight <= 0.0,
+                    super::LiteGsPruneMode::Weight => {
+                        invisible_for_prune || (age_eligible && fragment_weight <= 0.0)
+                    }
                     super::LiteGsPruneMode::Threshold => {
-                        invisible || opacity < LITEGS_OPACITY_THRESHOLD
+                        invisible_for_prune || (age_eligible && opacity < LITEGS_OPACITY_THRESHOLD)
                     }
                 };
                 if should_prune {
@@ -1652,9 +1677,18 @@ impl MetalTrainer {
             let active_window = epoch >= self.litegs.densify_from && epoch < densify_until;
             should_reset_opacity =
                 active_window && epoch % self.litegs.opacity_reset_interval.max(1) == 0;
-            let densify_prune =
-                active_window && epoch % self.litegs.densification_interval.max(1) == 0;
-            (densify_prune, densify_prune)
+
+            // Decoupled triggers: densify and prune fire at different epochs
+            let should_densify = active_window
+                && epoch % self.litegs.densification_interval.max(1) == 0;
+
+            // Prune happens offset_epochs after each densify trigger point
+            let prune_epoch = epoch.saturating_sub(self.litegs.prune_offset_epochs);
+            let should_prune = active_window
+                && prune_epoch % self.litegs.densification_interval.max(1) == 0
+                && epoch >= self.litegs.densify_from.saturating_add(self.litegs.prune_offset_epochs);
+
+            (should_densify, should_prune)
         } else {
             (
                 self.should_densify_at(self.iteration),
@@ -1842,7 +1876,11 @@ impl MetalTrainer {
             self.apply_litegs_opacity_reset(gaussians)?;
         }
         if self.is_litegs_mode() {
-            self.reset_gaussian_stats(gaussians.len());
+            // Resize stats array to match new gaussian count
+            // Newly-added Gaussians get default stats (age=0, visible_count=0)
+            // Existing Gaussians retain their accumulated stats (age, visibility, etc.)
+            self.gaussian_stats
+                .resize(gaussians.len(), MetalGaussianStats::default());
         }
         self.topology_metrics.final_gaussians = Some(gaussians.len());
         if added > 0 {

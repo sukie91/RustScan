@@ -476,6 +476,15 @@ pub struct LiteGsConfig {
     pub densify_until: Option<usize>,
     pub densification_interval: usize,
     pub opacity_reset_interval: usize,
+    /// How many epochs to wait AFTER densify epoch before pruning.
+    /// This decouples densify and prune triggers to prevent churn.
+    pub prune_offset_epochs: usize,
+    /// Minimum age (iterations) before a Gaussian is eligible for pruning.
+    /// Protects newly-added Gaussians from immediate removal.
+    pub prune_min_age: usize,
+    /// Number of consecutive invisible epochs required before pruning.
+    /// Prevents pruning based on single-frame invisibility.
+    pub prune_invisible_epochs: usize,
     pub opacity_reset_mode: LiteGsOpacityResetMode,
     pub prune_mode: LiteGsPruneMode,
     pub target_primitives: usize,
@@ -496,6 +505,9 @@ impl Default for LiteGsConfig {
             densify_until: None,
             densification_interval: 5,
             opacity_reset_interval: 10,
+            prune_offset_epochs: 2,      // Prune 2 epochs after densify
+            prune_min_age: 3,            // Must survive 3 iterations
+            prune_invisible_epochs: 2,   // Must be invisible for 2+ epochs
             opacity_reset_mode: LiteGsOpacityResetMode::Decay,
             prune_mode: LiteGsPruneMode::Weight,
             target_primitives: 1_000_000,
@@ -759,6 +771,15 @@ fn validate_litegs_mac_v1_config(config: &TrainingConfig) -> Result<(), Training
     }
     if config.litegs.target_primitives == 0 {
         unsupported.push("target_primitives must be >= 1".to_string());
+    }
+    if config.litegs.prune_offset_epochs == 0 {
+        unsupported.push("prune_offset_epochs must be >= 1 to decouple from densify".to_string());
+    }
+    if config.litegs.prune_min_age == 0 {
+        unsupported.push("prune_min_age must be >= 1 to protect newly-added Gaussians".to_string());
+    }
+    if config.litegs.prune_invisible_epochs == 0 {
+        unsupported.push("prune_invisible_epochs must be >= 1".to_string());
     }
 
     if unsupported.is_empty() {
@@ -1085,6 +1106,9 @@ mod tests {
         assert_eq!(litegs.densify_until, None);
         assert_eq!(litegs.densification_interval, 5);
         assert_eq!(litegs.opacity_reset_interval, 10);
+        assert_eq!(litegs.prune_offset_epochs, 2);
+        assert_eq!(litegs.prune_min_age, 3);
+        assert_eq!(litegs.prune_invisible_epochs, 2);
         assert_eq!(litegs.opacity_reset_mode, LiteGsOpacityResetMode::Decay);
         assert_eq!(litegs.prune_mode, LiteGsPruneMode::Weight);
         assert_eq!(litegs.target_primitives, 1_000_000);

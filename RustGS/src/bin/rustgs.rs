@@ -130,6 +130,18 @@ struct TrainArgs {
     #[arg(long, default_value_t = rustgs::LiteGsPruneMode::Weight)]
     litegs_prune_mode: rustgs::LiteGsPruneMode,
 
+    /// LiteGS prune offset epochs - how many epochs to wait after densify before pruning
+    #[arg(long, default_value = "2")]
+    litegs_prune_offset_epochs: usize,
+
+    /// LiteGS prune minimum age - minimum iterations before Gaussian is prune-eligible
+    #[arg(long, default_value = "3")]
+    litegs_prune_min_age: usize,
+
+    /// LiteGS prune invisible epochs - consecutive invisibility required before pruning
+    #[arg(long, default_value = "2")]
+    litegs_prune_invisible_epochs: usize,
+
     /// LiteGS target primitive budget
     #[arg(long, default_value = "1000000")]
     litegs_target_primitives: usize,
@@ -382,6 +394,9 @@ fn build_training_config(args: &TrainArgs) -> anyhow::Result<rustgs::TrainingCon
         opacity_reset_interval: args.litegs_opacity_reset_interval,
         opacity_reset_mode: args.litegs_opacity_reset_mode,
         prune_mode: args.litegs_prune_mode,
+        prune_offset_epochs: args.litegs_prune_offset_epochs,
+        prune_min_age: args.litegs_prune_min_age,
+        prune_invisible_epochs: args.litegs_prune_invisible_epochs,
         target_primitives: args.litegs_target_primitives,
         learnable_viewproj: false,
     };
@@ -728,6 +743,9 @@ mod tests {
             rustgs::LiteGsOpacityResetMode::Reset
         );
         assert_eq!(config.litegs.prune_mode, rustgs::LiteGsPruneMode::Threshold);
+        assert_eq!(config.litegs.prune_offset_epochs, 2); // default value
+        assert_eq!(config.litegs.prune_min_age, 3); // default value
+        assert_eq!(config.litegs.prune_invisible_epochs, 2); // default value
         assert_eq!(config.litegs.target_primitives, 200_000);
     }
 
