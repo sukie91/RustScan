@@ -519,8 +519,8 @@ impl RustMesh {
             return false;
         }
 
-        let v0 = self.to_vertex_handle(heh); // Vertex to be removed
-        let v1 = self.from_vertex_handle(heh); // Remaining vertex
+        let v0 = self.from_vertex_handle(heh); // Vertex to be removed
+        let v1 = self.to_vertex_handle(heh); // Remaining vertex
 
         // Both vertices must have valid halfedges
         if self.halfedge_handle(v0).is_none() || self.halfedge_handle(v1).is_none() {
@@ -711,8 +711,8 @@ impl RustMesh {
             return Err("Collapse not legal");
         }
 
-        let v_removed = self.to_vertex_handle(heh);
-        let v_kept = self.from_vertex_handle(heh);
+        let v_removed = self.from_vertex_handle(heh);
+        let v_kept = self.to_vertex_handle(heh);
 
         let mut rebuilt_faces = Vec::new();
         let mut seen_faces = HashSet::new();

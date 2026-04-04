@@ -183,9 +183,9 @@ impl<'a> ModQuadricT<'a> {
         }
     }
 
-    pub fn collapse_priority(&self, v0: VertexHandle, v1: VertexHandle) -> (f32, bool) {
-        let idx0 = v0.idx_usize();
-        let idx1 = v1.idx_usize();
+    pub fn collapse_priority(&self, v_removed: VertexHandle, v_kept: VertexHandle) -> (f32, bool) {
+        let idx0 = v_removed.idx_usize();
+        let idx1 = v_kept.idx_usize();
 
         let q0 = match self.vertex_quadrics.get(idx0) {
             Some(Some(q)) => q,
@@ -198,7 +198,7 @@ impl<'a> ModQuadricT<'a> {
         };
 
         let q = q0.add_values(*q1);
-        let kept_pos = self.mesh.point(v0).unwrap_or(Vec3::ZERO);
+        let kept_pos = self.mesh.point(v_kept).unwrap_or(Vec3::ZERO);
         let error = q.value(kept_pos);
 
         if self.max_err > 0.0 && error > self.max_err {
@@ -208,18 +208,18 @@ impl<'a> ModQuadricT<'a> {
         (error, true)
     }
 
-    pub fn optimal_position(&self, v0: VertexHandle, v1: VertexHandle) -> Vec3 {
-        let idx0 = v0.idx_usize();
-        let idx1 = v1.idx_usize();
+    pub fn optimal_position(&self, v_removed: VertexHandle, v_kept: VertexHandle) -> Vec3 {
+        let idx0 = v_removed.idx_usize();
+        let idx1 = v_kept.idx_usize();
 
         let q0 = match self.vertex_quadrics.get(idx0) {
             Some(Some(q)) => q,
-            _ => return self.mesh.point(v1).unwrap_or(Vec3::ZERO),
+            _ => return self.mesh.point(v_kept).unwrap_or(Vec3::ZERO),
         };
 
         let q1 = match self.vertex_quadrics.get(idx1) {
             Some(Some(q)) => q,
-            _ => return self.mesh.point(v1).unwrap_or(Vec3::ZERO),
+            _ => return self.mesh.point(v_kept).unwrap_or(Vec3::ZERO),
         };
 
         let q = q0.add_values(*q1);
@@ -278,8 +278,8 @@ impl<'a> Decimater<'a> {
     }
 
     pub fn collapse_info(&mut self, heh: HalfedgeHandle) -> Option<CollapseInfo> {
-        let to_vh = self.mesh.to_vertex_handle(heh); // v_removed
-        let from_vh = self.mesh.from_vertex_handle(heh); // v_kept
+        let from_vh = self.mesh.from_vertex_handle(heh); // v_removed
+        let to_vh = self.mesh.to_vertex_handle(heh); // v_kept
 
         // Create a temporary quadric module for this query
         let mut qm = ModQuadricT::new(&*self.mesh);
@@ -305,8 +305,8 @@ impl<'a> Decimater<'a> {
 
         let mut info = CollapseInfo::new();
         info.halfedge = heh;
-        info.v_removed = to_vh; // to_vertex is removed in collapse()
-        info.v_kept = from_vh; // from_vertex is kept
+        info.v_removed = from_vh; // from_vertex is removed in OpenMesh collapse()
+        info.v_kept = to_vh; // to_vertex is kept
         info.faces_removed = faces_removed;
         info.new_position = optimal_pos;
         info.error = error;
@@ -461,8 +461,8 @@ impl<'a> Decimater<'a> {
                 continue;
             }
 
-            let v_removed = self.mesh.to_vertex_handle(heh);
-            let v_kept = self.mesh.from_vertex_handle(heh);
+            let v_removed = self.mesh.from_vertex_handle(heh);
+            let v_kept = self.mesh.to_vertex_handle(heh);
             let idx_removed = v_removed.idx_usize();
             let idx_kept = v_kept.idx_usize();
 
@@ -599,8 +599,8 @@ fn is_collapse_ok_with_topology(
         return false;
     }
 
-    let v0 = mesh.to_vertex_handle(heh);
-    let v1 = mesh.from_vertex_handle(heh);
+    let v0 = mesh.from_vertex_handle(heh);
+    let v1 = mesh.to_vertex_handle(heh);
     if mesh.halfedge_handle(v0).is_none() || mesh.halfedge_handle(v1).is_none() {
         return false;
     }
