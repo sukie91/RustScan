@@ -8,6 +8,7 @@
 pub mod training_pipeline;
 
 pub mod chunk_planner;
+pub mod density_controller;
 pub mod morton;
 pub mod parity_harness;
 pub mod pose_embedding;

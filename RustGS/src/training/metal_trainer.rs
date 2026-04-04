@@ -1416,48 +1416,91 @@ impl MetalTrainer {
         }
 
         let clone_scale_threshold = self.litegs_clone_scale_threshold();
+
+        // Collect candidates with their scores (TamingGS multinomial-style)
         let mut candidates: Vec<(usize, f32)> = infos
             .iter()
             .enumerate()
             .filter_map(|(idx, info)| {
                 let score = info.fragment_err_score;
-                (score.is_finite() && score > 0.0).then_some((idx, score))
+                (score.is_finite() && score > 0.0 && info.opacity > LITEGS_OPACITY_THRESHOLD)
+                    .then_some((idx, score))
             })
             .collect();
+
+        // Sort by score descending (TamingGS: multinomial sampling approximated by top-k)
         candidates.sort_by(|lhs, rhs| rhs.1.partial_cmp(&lhs.1).unwrap_or(Ordering::Equal));
 
         let available = max_gaussians.saturating_sub(snapshot.len());
         let limit = budget.min(available).min(candidates.len());
-        let mut added = 0usize;
+
+        // Separate into clone and split candidates (LiteGS semantics)
+        let mut clone_indices = Vec::new();
+        let mut split_indices = Vec::new();
 
         for (idx, _) in candidates.into_iter().take(limit) {
-            let info = infos[idx];
-            let mut position = snapshot.position(idx);
-            let mut log_scale = snapshot.log_scale(idx);
-            let rotation = snapshot.rotation(idx);
-            let opacity_logit = snapshot.opacity_logits[idx];
-            let color = snapshot.color(idx);
-            let sh_rest = snapshot.sh_rest(idx).to_vec();
+            let info = &infos[idx];
+            if info.max_scale <= clone_scale_threshold {
+                clone_indices.push(idx);
+            } else {
+                split_indices.push(idx);
+            }
+        }
 
-            if info.max_scale > clone_scale_threshold {
-                let scale = snapshot.scale(idx);
-                let (axis, axis_scale) = scale
-                    .into_iter()
-                    .enumerate()
-                    .max_by(|lhs, rhs| lhs.1.partial_cmp(&rhs.1).unwrap_or(Ordering::Equal))
-                    .unwrap_or((0, 0.0));
-                position[axis] += axis_scale * 0.5;
-                log_scale[axis] = (axis_scale / (0.8 * 2.0)).max(1e-6).ln();
+        let mut added = 0usize;
+
+        // Process split candidates (LiteGS: sample offset from Gaussian distribution)
+        // split_xyz = xyz + random_shift ~ N(0, scale) @ rotation_matrix
+        // split_scale = scale / (0.8 * 2) = scale / 1.6
+        for idx in &split_indices {
+            if snapshot.len() >= max_gaussians {
+                break;
             }
 
-            snapshot.push(
-                position,
-                log_scale,
-                rotation,
-                opacity_logit,
-                color,
-                &sh_rest,
-            );
+            let mut position = snapshot.position(*idx);
+            let mut log_scale = snapshot.log_scale(*idx);
+            let rotation = snapshot.rotation(*idx);
+            let opacity_logit = snapshot.opacity_logits[*idx];
+            let color = snapshot.color(*idx);
+            let sh_rest = snapshot.sh_rest(*idx).to_vec();
+            let scale = snapshot.scale(*idx);
+
+            // LiteGS: find the axis with maximum scale
+            let (max_axis, max_axis_scale) = scale
+                .into_iter()
+                .enumerate()
+                .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal))
+                .unwrap_or((0, 0.0f32));
+
+            // LiteGS: position offset along the max scale axis
+            // This approximates the random sampling from N(0, scale) @ rotation
+            // by placing the new Gaussian at +offset along the dominant axis
+            position[max_axis] += max_axis_scale * 0.5;
+
+            // LiteGS: split_scale = scale / (0.8 * 2) = scale / 1.6
+            // log_scale = ln(scale / 1.6) = ln(scale) - ln(1.6)
+            log_scale[max_axis] = (max_axis_scale / 1.6).max(1e-6).ln();
+
+            snapshot.push(position, log_scale, rotation, opacity_logit, color, &sh_rest);
+            stats.push(MetalGaussianStats::default());
+            origins.push(None);
+            added = added.saturating_add(1);
+        }
+
+        // Process clone candidates (LiteGS: copy directly)
+        for idx in &clone_indices {
+            if snapshot.len() >= max_gaussians {
+                break;
+            }
+
+            let position = snapshot.position(*idx);
+            let log_scale = snapshot.log_scale(*idx);
+            let rotation = snapshot.rotation(*idx);
+            let opacity_logit = snapshot.opacity_logits[*idx];
+            let color = snapshot.color(*idx);
+            let sh_rest = snapshot.sh_rest(*idx).to_vec();
+
+            snapshot.push(position, log_scale, rotation, opacity_logit, color, &sh_rest);
             stats.push(MetalGaussianStats::default());
             origins.push(None);
             added = added.saturating_add(1);
@@ -1479,20 +1522,27 @@ impl MetalTrainer {
 
         let mut keep_mask = vec![true; snapshot.len()];
         for (idx, info) in infos.iter().enumerate() {
-            // LiteGS semantics: prune based on mode-specific conditions
-            // weight mode: weight_sum == 0 (fragment_weight * visible_count)
-            // threshold mode: opacity < threshold
+            // LiteGS Official: prune_mask = transparent | invisible
+            // transparent = opacity < min_opacity
+            // invisible = global_culling (never visible)
+            //
+            // LiteGS TamingGS weight mode: prune when weight_sum == 0
+            // weight_sum = fragment_weight * fragment_count
             let prune_opacity = match self.litegs.prune_mode {
                 super::LiteGsPruneMode::Weight => {
-                    // Match LiteGS TamingGS: only prune when truly no contribution
-                    info.fragment_weight <= 0.0 && !info.invisible
+                    // TamingGS: weight_sum == 0 means no contribution
+                    // This is computed as fragment_weight * visible_count
+                    // We use fragment_weight from stats which already tracks this
+                    let weight_sum = info.fragment_weight;
+                    weight_sum <= 0.0
                 }
                 super::LiteGsPruneMode::Threshold => {
+                    // Official: transparent (low opacity) or invisible
                     info.opacity < LITEGS_OPACITY_THRESHOLD || info.invisible
                 }
             };
 
-            // Check scale-based pruning (Gausplat-style)
+            // Gausplat-style scale pruning (optional)
             let prune_scale = if self.litegs.prune_scale_threshold > 0.0 {
                 info.max_scale > self.litegs.prune_scale_threshold
             } else {
@@ -1504,6 +1554,7 @@ impl MetalTrainer {
             }
         }
 
+        // Safety: keep at least one Gaussian
         if !keep_mask.iter().any(|keep| *keep) {
             if let Some((best_idx, _)) = infos.iter().enumerate().max_by(|lhs, rhs| {
                 lhs.1
