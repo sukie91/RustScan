@@ -36,7 +36,8 @@ pub use soa_kernel::SoAKernel;
 pub use status::{StatusFlags, StatusSet};
 pub use subdivision::{
     catmull_clark_subdivide, catmull_clark_subdivide_iterations, loop_subdivide,
-    loop_subdivide_iterations, split_edge, validate_for_catmull_clark, validate_for_subdivision,
+    loop_subdivide_iterations, sqrt3_subdivide, sqrt3_subdivide_iterations, split_edge,
+    validate_for_catmull_clark, validate_for_subdivision,
     SubdivisionError, SubdivisionStats,
 };
 pub use test_data::*;

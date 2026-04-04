@@ -764,10 +764,6 @@ impl<'a> Decimater<'a> {
                 } else {
                     self.heap.insert(vh, &mut self.vertex_props);
                 }
-                // Debug for vertex 0
-                if vh.idx_usize() == 0 {
-                    eprintln!("DEBUG: vh=0 inserted, priority={:.6}, target={:?}", best_prio, collapse_target);
-                }
             } else {
                 // No valid collapse - remove from heap
                 if self.heap.is_stored(vh, &self.vertex_props) {
@@ -775,10 +771,6 @@ impl<'a> Decimater<'a> {
                 }
                 self.vertex_props[idx].collapse_target = None;
                 self.vertex_props[idx].priority = -1.0;
-                // Debug for vertex 0
-                if vh.idx_usize() == 0 {
-                    eprintln!("DEBUG: vh=0 no valid target");
-                }
             }
         }
     }

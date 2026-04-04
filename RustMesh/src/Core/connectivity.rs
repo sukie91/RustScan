@@ -704,51 +704,60 @@ impl RustMesh {
             return false;
         }
 
-        for heh_idx in 0..self.n_halfedges() {
-            let heh = HalfedgeHandle::new(heh_idx as u32);
-            if self.is_halfedge_deleted(heh) || self.is_edge_deleted(self.edge_handle(heh)) {
-                continue;
-            }
-            if self.from_vertex_handle(heh) != vh && self.to_vertex_handle(heh) != vh {
-                continue;
-            }
-
-            let opp = self.opposite_halfedge_handle(heh);
-            if self.face_handle(heh).is_none() || self.face_handle(opp).is_none() {
-                return true;
+        // A vertex is on boundary if ANY incident halfedge has no face
+        // Use circulator approach (same as subdivision.rs)
+        if let Some(heh) = self.halfedge_handle(vh) {
+            let mut current = heh;
+            let max_iterations = 100; // Valence is typically small
+            for _ in 0..max_iterations {
+                // Check both the outgoing halfedge and its opposite
+                if self.is_boundary(current) {
+                    return true;
+                }
+                let opp = self.opposite_halfedge_handle(current);
+                if self.is_boundary(opp) {
+                    return true;
+                }
+                current = self.next_halfedge_handle(opp);
+                if current == heh || !current.is_valid() {
+                    break;
+                }
             }
         }
-
         false
     }
 
     fn collect_vertex_neighbors(&self, vh: VertexHandle) -> Vec<VertexHandle> {
         let mut neighbors = Vec::new();
 
-        for fh in self.faces() {
-            if self.is_face_deleted(fh) || self.face_halfedge_handle(fh).is_none() {
-                continue;
-            }
+        // Use circulator for O(valence) instead of O(n_faces)
+        if let Some(heh) = self.halfedge_handle(vh) {
+            let start_heh = heh;
+            let mut current_heh = heh;
+            let max_iterations = 100; // Valence is typically small
 
-            let vertices = self.face_vertices_vec(fh);
-            let n = vertices.len();
-            if n < 2 {
-                continue;
-            }
-
-            for (idx, &candidate) in vertices.iter().enumerate() {
-                if candidate != vh {
-                    continue;
+            for _ in 0..max_iterations {
+                // Get the neighbor vertex from current outgoing halfedge
+                let neighbor = self.to_vertex_handle(current_heh);
+                if !neighbors.contains(&neighbor) {
+                    neighbors.push(neighbor);
                 }
 
-                let prev = vertices[(idx + n - 1) % n];
-                let next = vertices[(idx + 1) % n];
-                if prev != vh && !neighbors.contains(&prev) {
-                    neighbors.push(prev);
+                // Move to next outgoing halfedge: opposite -> next
+                let opp = self.opposite_halfedge_handle(current_heh);
+                let next_heh = self.next_halfedge_handle(opp);
+
+                // Check if we've completed the cycle or hit invalid halfedge
+                if !next_heh.is_valid() || next_heh == start_heh {
+                    break;
                 }
-                if next != vh && !neighbors.contains(&next) {
-                    neighbors.push(next);
+
+                // Critical: verify the next halfedge is still from our vertex
+                if self.from_vertex_handle(next_heh) != vh {
+                    break; // Prevent jumping to wrong vertex's halfedge at boundary
                 }
+
+                current_heh = next_heh;
             }
         }
 
