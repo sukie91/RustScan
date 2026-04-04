@@ -301,6 +301,7 @@ fn main() -> anyhow::Result<()> {
                         .and_then(|telemetry| telemetry.loss_terms.total)
                         .unwrap_or(0.0),
                     gaussian_count: gaussians.len(),
+                    sh_degree: config.litegs.sh_degree,
                 };
                 rustgs::save_scene_ply(&args.output, &gaussians, &metadata)?;
                 log::info!("Saved scene to {:?}", args.output);
@@ -438,6 +439,7 @@ fn build_training_config(args: &TrainArgs) -> anyhow::Result<rustgs::TrainingCon
         prune_invisible_epochs: args.litegs_prune_invisible_epochs,
         target_primitives: args.litegs_target_primitives,
         learnable_viewproj: false,
+        lr_pose: rustgs::LiteGsConfig::default().lr_pose,
         morton_sort_on_densify: args.litegs_morton_sort_on_densify,
         prune_scale_threshold: args.litegs_prune_scale_threshold,
     };
@@ -893,6 +895,7 @@ mod tests {
                 iterations: 1,
                 final_loss: 0.0,
                 gaussian_count: gaussians.len(),
+                sh_degree: 0,
             },
         )
         .unwrap();
@@ -952,6 +955,7 @@ mod tests {
                 iterations: 1,
                 final_loss: 0.0,
                 gaussian_count: gaussians.len(),
+                sh_degree: 0,
             },
         )
         .unwrap();

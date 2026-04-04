@@ -759,7 +759,9 @@ impl MetalTrainer {
         let total_epochs = self.litegs_total_epochs(frame_count);
         let reset_interval = self.litegs.opacity_reset_interval.max(1);
         let scaled = ((total_epochs as f32) * 0.8).floor() as usize;
-        (scaled / reset_interval) * reset_interval + 1
+        let computed = (scaled / reset_interval) * reset_interval + 1;
+        // Ensure densify_until > densify_from for valid active_window
+        computed.max(self.litegs.densify_from.saturating_add(1))
     }
 
     fn litegs_completed_epoch(&self, frame_idx: usize, frame_count: usize) -> Option<usize> {
@@ -1133,11 +1135,18 @@ impl MetalTrainer {
                     }
                 }
                 let should_prune = match self.litegs.prune_mode {
+                    // LiteGS weight mode: prune when weight_sum == 0
+                    // weight_sum = fragment_weight * fragment_count (approx visible_count)
+                    // Match LiteGS: invisible_for_prune is too aggressive here
                     super::LiteGsPruneMode::Weight => {
-                        invisible_for_prune || (age_eligible && fragment_weight <= 0.0)
+                        let weight_sum = fragment_weight * gaussian_stats.visible_count as f32;
+                        age_eligible && weight_sum == 0.0
                     }
+                    // LiteGS threshold mode: prune when opacity < threshold
+                    // Only use invisible_for_prune as extra protection for truly dead Gaussians
                     super::LiteGsPruneMode::Threshold => {
-                        invisible_for_prune || (age_eligible && opacity < LITEGS_OPACITY_THRESHOLD)
+                        (age_eligible && opacity < LITEGS_OPACITY_THRESHOLD)
+                            || invisible_for_prune
                     }
                 };
                 if should_prune {
@@ -1470,11 +1479,16 @@ impl MetalTrainer {
 
         let mut keep_mask = vec![true; snapshot.len()];
         for (idx, info) in infos.iter().enumerate() {
-            // Check opacity/visibility-based pruning
+            // LiteGS semantics: prune based on mode-specific conditions
+            // weight mode: weight_sum == 0 (fragment_weight * visible_count)
+            // threshold mode: opacity < threshold
             let prune_opacity = match self.litegs.prune_mode {
-                super::LiteGsPruneMode::Weight => info.invisible || info.fragment_weight <= 0.0,
+                super::LiteGsPruneMode::Weight => {
+                    // Match LiteGS TamingGS: only prune when truly no contribution
+                    info.fragment_weight <= 0.0 && !info.invisible
+                }
                 super::LiteGsPruneMode::Threshold => {
-                    info.invisible || info.opacity < LITEGS_OPACITY_THRESHOLD
+                    info.opacity < LITEGS_OPACITY_THRESHOLD || info.invisible
                 }
             };
 
@@ -1687,15 +1701,15 @@ impl MetalTrainer {
             should_reset_opacity =
                 active_window && epoch % self.litegs.opacity_reset_interval.max(1) == 0;
 
-            // Decoupled triggers: densify and prune fire at different epochs
+            // LiteGS semantics: densify and prune fire together at same epoch
+            // This matches DensityControllerOfficial.step() which calls
+            // split_and_clone() and prune() in the same epoch
             let should_densify = active_window
                 && epoch % self.litegs.densification_interval.max(1) == 0;
 
-            // Prune happens offset_epochs after each densify trigger point
-            let prune_epoch = epoch.saturating_sub(self.litegs.prune_offset_epochs);
-            let should_prune = active_window
-                && prune_epoch % self.litegs.densification_interval.max(1) == 0
-                && epoch >= self.litegs.densify_from.saturating_add(self.litegs.prune_offset_epochs);
+            // Prune fires at same epoch as densify (no offset)
+            // TamingGS and Official both densify+prune together
+            let should_prune = should_densify;
 
             (should_densify, should_prune)
         } else {
