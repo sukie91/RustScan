@@ -201,9 +201,7 @@ pub fn generate_sphere(radius: f32, segments: usize, rings: usize) -> RustMesh {
             let v3 = vertices[r + 1][s];
 
             mesh.add_face(&[v0, v1, v2]);
-            if r < rings - 1 || s < segments - 1 {
-                mesh.add_face(&[v0, v2, v3]);
-            }
+            mesh.add_face(&[v0, v2, v3]);
         }
     }
 

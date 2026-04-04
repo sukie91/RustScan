@@ -152,19 +152,65 @@ impl<'a> Iterator for VertexHalfedgeIter<'a> {
         let heh = self.current_heh;
 
         // Move to next outgoing halfedge around the vertex:
-        // opposite() gives the incoming twin, next() gives the next outgoing
-        let opp = self.mesh.opposite_halfedge_handle(self.current_heh);
-        let next_outgoing = self.mesh.next_halfedge_handle(opp);
+        // For a vertex v with outgoing halfedge h (v->w), the next outgoing halfedge
+        // is found by going: opposite(h) -> next(opposite(h)) -> opposite of that
+        // This is because: opposite(h) is the halfedge w->v (incoming to v),
+        // next(opposite(h)) is the next halfedge in the face, which goes from v to some other vertex.
+        // But for boundary halfedges, we need a different approach.
 
-        // Check if next_outgoing is valid and different from opp
-        if next_outgoing == opp || !next_outgoing.is_valid() {
-            return None;
+        let opp = self.mesh.opposite_halfedge_handle(self.current_heh);
+
+        // Check if opp is a boundary halfedge (no face)
+        let opp_face = self.mesh.face_handle(opp);
+        let next_outgoing = if opp_face.is_none() {
+            // Boundary halfedge: need to find the next non-boundary halfedge
+            // The approach: iterate through all halfedges and find those from this vertex
+            // This is a fallback for boundary cases
+            self.find_next_outgoing_from_vertex()
+        } else {
+            // Normal case: next(opposite) gives the next outgoing
+            self.mesh.next_halfedge_handle(opp)
+        };
+
+        // Check if we've completed the cycle
+        if !self.first && next_outgoing == self.start_heh {
+            self.current_heh = next_outgoing;
+            self.first = false;
+            return Some(heh);
+        }
+
+        // Check if next_outgoing is valid
+        if !next_outgoing.is_valid() {
+            return Some(heh); // Return current but don't advance further
         }
 
         self.first = false;
         self.current_heh = next_outgoing;
 
         Some(heh)
+    }
+}
+
+impl<'a> VertexHalfedgeIter<'a> {
+    /// Fallback method to find next outgoing halfedge when we hit a boundary
+    fn find_next_outgoing_from_vertex(&self) -> HalfedgeHandle {
+        // Get the vertex we're iterating around
+        let vh = self.mesh.from_vertex_handle(self.start_heh);
+
+        // Search for another halfedge from this vertex that we haven't visited
+        for heh_idx in 0..self.mesh.n_halfedges() {
+            let heh = HalfedgeHandle::new(heh_idx as u32);
+            if self.mesh.is_halfedge_deleted(heh) {
+                continue;
+            }
+            if self.mesh.from_vertex_handle(heh) == vh && heh != self.current_heh {
+                // Found another outgoing halfedge
+                return heh;
+            }
+        }
+
+        // No more outgoing halfedges found
+        HalfedgeHandle::new(u32::MAX) // Invalid handle
     }
 }
 

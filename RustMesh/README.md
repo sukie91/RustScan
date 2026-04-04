@@ -11,6 +11,7 @@ A high-performance mesh processing library in pure Rust, inspired by OpenMesh wi
 
 ### IO Support
 - **OBJ**: Complete read/write support with normals and texcoords ✅
+- **OFF**: Read/write support for polygon meshes ✅
 - **PLY**: Export (ASCII/Binary) ✅, import (planned)
 - **Conversion API**: `from_triangle_mesh()` for easy integration ✅
 
@@ -87,6 +88,21 @@ cargo run --example e2e_export
 
 # Smart handles demo
 cargo run --example smart_handles_demo
+
+# OpenMesh benchmark parity
+cargo run --release --example openmesh_compare_benchmark
+
+# OpenMesh tutorial parity
+cargo run --release --example openmesh_compare_examples
+
+# OpenMesh smoothing comparison
+cargo run --release --example openmesh_compare_smoothing
+
+# OpenMesh decimation comparison
+cargo run --release --example openmesh_compare_decimation
+
+# OpenMesh VectorT benchmark parity
+cargo run --release --example openmesh_compare_vector_benchmark
 ```
 
 ## Testing
@@ -134,6 +150,7 @@ src/
 | Smart Handles | ❌ | ✅ |
 | Iterator Ranges | Limited | ✅ |
 | OBJ I/O | ✅ | ✅ |
+| OFF I/O | ✅ | ✅ |
 | PLY I/O | ✅ | ⚠️ Export only |
 
 ## File Format Support
@@ -143,7 +160,7 @@ src/
 | OBJ    | ✅   | ✅    | Normals, texcoords, colors |
 | PLY    | ⏳   | ✅    | ASCII/Binary export |
 | STL    | ⏳   | ⏳    | Placeholder created |
-| OFF    | ⏳   | ⏳    | Placeholder created |
+| OFF    | ✅   | ✅    | Polygon mesh roundtrip |
 
 ## Status
 
@@ -152,15 +169,17 @@ src/
 ✅ **Complete**:
 - Half-edge data structure with SoA kernel
 - OBJ read/write (normals, texcoords, colors)
+- OFF read/write
 - PLY export (ASCII/Binary)
 - Conversion API (`from_triangle_mesh`)
 - Mesh algorithms (decimation, subdivision, smoothing, hole filling, repair)
 - Smart handles with type-safe navigation
+- OpenMesh comparison examples and benchmark parity harnesses
 - All core tests passing (129/129) ✅
 
 ⏳ **In Progress**:
 - PLY import
-- STL/OFF format support
+- STL format support
 - Performance optimizations
 - Advanced attribute system
 

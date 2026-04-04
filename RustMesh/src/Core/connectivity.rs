@@ -5,6 +5,7 @@
 
 use crate::handles::{EdgeHandle, FaceHandle, HalfedgeHandle, VertexHandle};
 use crate::soa_kernel::SoAKernel;
+use std::collections::{HashMap, VecDeque};
 
 // ============================================================================
 // High-Performance Index Iterators (no Handle overhead)
@@ -125,6 +126,33 @@ impl RustMesh {
     #[inline]
     pub fn n_vertices(&self) -> usize {
         self.kernel.n_vertices()
+    }
+
+    /// Get the number of active vertices referenced by at least one face.
+    pub fn active_vertex_count(&self) -> usize {
+        let mut used = vec![false; self.n_vertices()];
+
+        for fh in self.faces() {
+            if self.face_halfedge_handle(fh).is_none() {
+                continue;
+            }
+
+            for vh in self.face_vertices_vec(fh) {
+                let idx = vh.idx_usize();
+                if idx < used.len() {
+                    used[idx] = true;
+                }
+            }
+        }
+
+        let active = used.into_iter().filter(|used| *used).count();
+        if active == 0 {
+            self.vertices()
+                .filter(|&vh| self.halfedge_handle(vh).is_some())
+                .count()
+        } else {
+            active
+        }
     }
 
     /// Get vertex position by handle
@@ -321,6 +349,26 @@ impl RustMesh {
         self.kernel.face_handle(heh)
     }
 
+    #[inline]
+    pub fn is_vertex_deleted(&self, vh: VertexHandle) -> bool {
+        self.kernel.is_vertex_deleted(vh)
+    }
+
+    #[inline]
+    pub fn is_halfedge_deleted(&self, heh: HalfedgeHandle) -> bool {
+        self.kernel.is_halfedge_deleted(heh)
+    }
+
+    #[inline]
+    pub fn is_edge_deleted(&self, eh: EdgeHandle) -> bool {
+        self.kernel.is_edge_deleted(eh)
+    }
+
+    #[inline]
+    pub fn is_face_deleted(&self, fh: FaceHandle) -> bool {
+        self.kernel.is_face_deleted(fh)
+    }
+
     /// Check if a halfedge is a boundary
     #[inline]
     pub fn is_boundary(&self, heh: HalfedgeHandle) -> bool {
@@ -443,6 +491,21 @@ impl RustMesh {
         self.kernel.face_halfedge_handle(fh)
     }
 
+    #[inline]
+    fn set_face_halfedge_handle(&mut self, fh: FaceHandle, heh: Option<HalfedgeHandle>) {
+        self.kernel.set_face_halfedge_handle(fh, heh);
+    }
+
+    #[inline]
+    fn clear_face_handle(&mut self, heh: HalfedgeHandle) {
+        self.kernel.clear_face_handle(heh);
+    }
+
+    #[inline]
+    fn clear_halfedge_handle(&mut self, vh: VertexHandle) {
+        self.kernel.clear_halfedge_handle(vh);
+    }
+
     // --- SIMD-optimized operations ---
 
     /// Compute bounding box (optimized)
@@ -490,9 +553,19 @@ impl RustMesh {
         if !heh.is_valid() {
             return false;
         }
+        if self.is_halfedge_deleted(heh) || self.is_edge_deleted(self.edge_handle(heh)) {
+            return false;
+        }
 
-        let v0 = self.to_vertex_handle(heh); // Vertex to be removed
-        let v1 = self.from_vertex_handle(heh); // Remaining vertex
+        let v0 = self.from_vertex_handle(heh); // Vertex to be removed
+        let v1 = self.to_vertex_handle(heh); // Remaining vertex
+        if !v0.is_valid()
+            || !v1.is_valid()
+            || self.is_vertex_deleted(v0)
+            || self.is_vertex_deleted(v1)
+        {
+            return false;
+        }
 
         // Both vertices must have valid halfedges
         if self.halfedge_handle(v0).is_none() || self.halfedge_handle(v1).is_none() {
@@ -510,17 +583,41 @@ impl RustMesh {
             return false;
         }
 
+        // Match OpenMesh TriConnectivity: collapsing through a boundary wedge
+        // would create invalid local boundary topology.
+        if fh_left.is_some() {
+            let h1 = self.next_halfedge_handle(heh);
+            let h2 = self.next_halfedge_handle(h1);
+            if self.is_boundary(self.opposite_halfedge_handle(h1))
+                && self.is_boundary(self.opposite_halfedge_handle(h2))
+            {
+                return false;
+            }
+        }
+
+        if fh_right.is_some() {
+            let h1 = self.next_halfedge_handle(heh_opp);
+            let h2 = self.next_halfedge_handle(h1);
+            if self.is_boundary(self.opposite_halfedge_handle(h1))
+                && self.is_boundary(self.opposite_halfedge_handle(h2))
+            {
+                return false;
+            }
+        }
+
         // Collect neighbors of v0 (excluding v1)
         let neighbors_v0: Vec<VertexHandle> = self
-            .vertex_vertices(v0)
-            .map(|c| c.filter(|&v| v != v1).collect())
-            .unwrap_or_default();
+            .collect_vertex_neighbors(v0)
+            .into_iter()
+            .filter(|&v| v != v1)
+            .collect();
 
         // Collect neighbors of v1 (excluding v0)
         let neighbors_v1: Vec<VertexHandle> = self
-            .vertex_vertices(v1)
-            .map(|c| c.filter(|&v| v != v0).collect())
-            .unwrap_or_default();
+            .collect_vertex_neighbors(v1)
+            .into_iter()
+            .filter(|&v| v != v0)
+            .collect();
 
         // Check for duplicate edges: after collapse, v0's neighbors become v1's neighbors.
         // If any neighbor of v0 is already a neighbor of v1 (and not in an adjacent face),
@@ -568,15 +665,52 @@ impl RustMesh {
             return false;
         }
 
+        // Match OpenMesh PolyConnectivity: prevent collapses that would
+        // degenerate a backside polygon sharing both adjacent opposite edges.
+        if let Some(fh) = fh_left {
+            if self.face_vertices_vec(fh).len() == 3 {
+                let one = self.opposite_halfedge_handle(self.next_halfedge_handle(heh));
+                let two = self.opposite_halfedge_handle(self.next_halfedge_handle(
+                    self.next_halfedge_handle(heh),
+                ));
+                if let (Some(face_one), Some(face_two)) = (self.face_handle(one), self.face_handle(two)) {
+                    if face_one == face_two && self.face_vertices_vec(face_one).len() != 3 {
+                        return false;
+                    }
+                }
+            }
+        }
+
+        if let Some(fh) = fh_right {
+            if self.face_vertices_vec(fh).len() == 3 {
+                let one = self.opposite_halfedge_handle(self.next_halfedge_handle(heh_opp));
+                let two = self.opposite_halfedge_handle(self.next_halfedge_handle(
+                    self.next_halfedge_handle(heh_opp),
+                ));
+                if let (Some(face_one), Some(face_two)) = (self.face_handle(one), self.face_handle(two)) {
+                    if face_one == face_two && self.face_vertices_vec(face_one).len() != 3 {
+                        return false;
+                    }
+                }
+            }
+        }
+
         true
     }
 
     /// Check if a vertex is on the boundary (has at least one boundary halfedge)
-    fn is_boundary_vertex(&self, vh: VertexHandle) -> bool {
-        if let Some(start_heh) = self.halfedge_handle(vh) {
-            let mut current = start_heh;
-            let max_iter = self.n_halfedges().max(64);
-            for _ in 0..max_iter {
+    pub fn is_boundary_vertex(&self, vh: VertexHandle) -> bool {
+        if !vh.is_valid() || self.is_vertex_deleted(vh) {
+            return false;
+        }
+
+        // A vertex is on boundary if ANY incident halfedge has no face
+        // Use circulator approach (same as subdivision.rs)
+        if let Some(heh) = self.halfedge_handle(vh) {
+            let mut current = heh;
+            let max_iterations = 100; // Valence is typically small
+            for _ in 0..max_iterations {
+                // Check both the outgoing halfedge and its opposite
                 if self.is_boundary(current) {
                     return true;
                 }
@@ -584,15 +718,52 @@ impl RustMesh {
                 if self.is_boundary(opp) {
                     return true;
                 }
-                let next = self.next_halfedge_handle(opp);
-                if next == start_heh || !next.is_valid() {
+                current = self.next_halfedge_handle(opp);
+                if current == heh || !current.is_valid() {
                     break;
                 }
-                current = next;
             }
         }
         false
     }
+
+    fn collect_vertex_neighbors(&self, vh: VertexHandle) -> Vec<VertexHandle> {
+        let mut neighbors = Vec::new();
+
+        // Use circulator for O(valence) instead of O(n_faces)
+        if let Some(heh) = self.halfedge_handle(vh) {
+            let start_heh = heh;
+            let mut current_heh = heh;
+            let max_iterations = 100; // Valence is typically small
+
+            for _ in 0..max_iterations {
+                // Get the neighbor vertex from current outgoing halfedge
+                let neighbor = self.to_vertex_handle(current_heh);
+                if !neighbors.contains(&neighbor) {
+                    neighbors.push(neighbor);
+                }
+
+                // Move to next outgoing halfedge: opposite -> next
+                let opp = self.opposite_halfedge_handle(current_heh);
+                let next_heh = self.next_halfedge_handle(opp);
+
+                // Check if we've completed the cycle or hit invalid halfedge
+                if !next_heh.is_valid() || next_heh == start_heh {
+                    break;
+                }
+
+                // Critical: verify the next halfedge is still from our vertex
+                if self.from_vertex_handle(next_heh) != vh {
+                    break; // Prevent jumping to wrong vertex's halfedge at boundary
+                }
+
+                current_heh = next_heh;
+            }
+        }
+
+        neighbors
+    }
+
 
     /// Collapse a halfedge: move v0 to v1 and remove v0 and adjacent faces
     /// Returns Ok if successful, Err with message if failed
@@ -601,46 +772,158 @@ impl RustMesh {
             return Err("Collapse not legal");
         }
 
-        let v0 = self.to_vertex_handle(heh); // Vertex to be removed
-        let v1 = self.from_vertex_handle(heh); // Remaining vertex
+        let h0 = heh;
+        let h1 = self.next_halfedge_handle(h0);
+        let o0 = self.opposite_halfedge_handle(h0);
+        let o1 = self.next_halfedge_handle(o0);
 
-        // Get the opposite halfedge
-        let heh_opp = self.opposite_halfedge_handle(heh);
+        self.collapse_edge_local(h0);
 
-        // Get adjacent faces to delete
-        let fh_left = self.face_handle(heh);
-        let fh_right = self.face_handle(heh_opp);
-
-        // Get the halfedges that need to be reconnected after collapse
-        // These are the halfedges around v0 that will form the new ring
-        let heh_prev = self.prev_halfedge_handle(heh);
-        let heh_opp_next = self.next_halfedge_handle(heh_opp);
-
-        // Step 1: Update all halfedges that point to v0 to point to v1 instead
-        self.redirect_halfedges(v0, v1)?;
-
-        // Step 2: Delete the adjacent faces
-        if let Some(fh) = fh_left {
-            self.delete_face(fh);
+        if !self.is_halfedge_deleted(h1)
+            && !self.is_edge_deleted(self.edge_handle(h1))
+            && self.next_halfedge_handle(self.next_halfedge_handle(h1)) == h1
+        {
+            self.collapse_loop_local(self.next_halfedge_handle(h1));
         }
-        if let Some(fh) = fh_right {
-            self.delete_face(fh);
+        if !self.is_halfedge_deleted(o1)
+            && !self.is_edge_deleted(self.edge_handle(o1))
+            && self.next_halfedge_handle(self.next_halfedge_handle(o1)) == o1
+        {
+            self.collapse_loop_local(o1);
         }
-
-        // Step 3: Reconnect the halfedge ring
-        // Connect heh_prev -> heh_opp_next to form a continuous loop
-        if heh_prev.is_valid() && heh_opp_next.is_valid() {
-            self.kernel.set_next_halfedge_handle(heh_prev, heh_opp_next);
-        }
-
-        // Step 4: Delete vertex v0
-        self.delete_vertex(v0);
-
-        // Step 5: Delete the edge (both halfedges)
-        let eh = self.edge_handle(heh);
-        self.delete_edge(eh);
 
         Ok(())
+    }
+
+    fn collapse_edge_local(&mut self, heh: HalfedgeHandle) {
+        let h = heh;
+        let hn = self.next_halfedge_handle(h);
+        let hp = self.prev_halfedge_handle(h);
+
+        let o = self.opposite_halfedge_handle(h);
+        let on = self.next_halfedge_handle(o);
+        let op = self.prev_halfedge_handle(o);
+
+        let fh = self.face_handle(h);
+        let fo = self.face_handle(o);
+
+        let vh = self.to_vertex_handle(h);
+        let vo = self.to_vertex_handle(o);
+
+        for heh_idx in 0..self.n_halfedges() {
+            let incoming = HalfedgeHandle::new(heh_idx as u32);
+            if self.is_halfedge_deleted(incoming) || self.is_edge_deleted(self.edge_handle(incoming)) {
+                continue;
+            }
+            if self.to_vertex_handle(incoming) == vo {
+                self.kernel.set_halfedge_to_vertex(incoming, vh);
+            }
+        }
+
+        self.kernel.set_next_halfedge_handle(hp, hn);
+        self.kernel.set_next_halfedge_handle(op, on);
+
+        if let Some(fh) = fh {
+            self.set_face_halfedge_handle(fh, Some(hn));
+        }
+        if let Some(fo) = fo {
+            self.set_face_halfedge_handle(fo, Some(on));
+        }
+
+        if self.halfedge_handle(vh) == Some(o) {
+            self.kernel.set_halfedge_handle(vh, hn);
+        }
+        self.adjust_outgoing_halfedge(vh);
+        self.clear_halfedge_handle(vo);
+
+        self.kernel.mark_edge_deleted(self.edge_handle(h), true);
+        self.kernel.mark_vertex_deleted(vo, true);
+        self.kernel.mark_halfedge_deleted(h, true);
+        self.kernel.mark_halfedge_deleted(o, true);
+    }
+
+    fn collapse_loop_local(&mut self, heh: HalfedgeHandle) {
+        if !heh.is_valid() || self.is_halfedge_deleted(heh) || self.is_edge_deleted(self.edge_handle(heh)) {
+            return;
+        }
+
+        let h0 = heh;
+        let h1 = self.next_halfedge_handle(h0);
+
+        let o0 = self.opposite_halfedge_handle(h0);
+        let o1 = self.opposite_halfedge_handle(h1);
+
+        let v0 = self.to_vertex_handle(h0);
+        let v1 = self.to_vertex_handle(h1);
+
+        let fh = self.face_handle(h0);
+        let fo = self.face_handle(o0);
+
+        if self.next_halfedge_handle(h1) != h0 || h1 == o0 {
+            return;
+        }
+
+        self.kernel
+            .set_next_halfedge_handle(h1, self.next_halfedge_handle(o0));
+        self.kernel
+            .set_next_halfedge_handle(self.prev_halfedge_handle(o0), h1);
+
+        match fo {
+            Some(fo) => self.kernel.set_face_handle(h1, fo),
+            None => self.clear_face_handle(h1),
+        }
+
+        self.kernel.set_halfedge_handle(v0, h1);
+        self.adjust_outgoing_halfedge(v0);
+        self.kernel.set_halfedge_handle(v1, o1);
+        self.adjust_outgoing_halfedge(v1);
+
+        if let Some(fo) = fo {
+            if self.face_halfedge_handle(fo) == Some(o0) {
+                self.set_face_halfedge_handle(fo, Some(h1));
+            }
+        }
+
+        if let Some(fh) = fh {
+            self.set_face_halfedge_handle(fh, None);
+            self.kernel.mark_face_deleted(fh, true);
+        }
+        self.kernel.mark_edge_deleted(self.edge_handle(h0), true);
+        self.kernel.mark_halfedge_deleted(h0, true);
+        self.kernel.mark_halfedge_deleted(o0, true);
+    }
+
+    fn adjust_outgoing_halfedge(&mut self, vh: VertexHandle) {
+        if !vh.is_valid() || self.is_vertex_deleted(vh) {
+            self.clear_halfedge_handle(vh);
+            return;
+        }
+
+        let mut first = None;
+        let mut boundary = None;
+
+        for heh_idx in 0..self.n_halfedges() {
+            let heh = HalfedgeHandle::new(heh_idx as u32);
+            if self.is_halfedge_deleted(heh) || self.is_edge_deleted(self.edge_handle(heh)) {
+                continue;
+            }
+            if self.from_vertex_handle(heh) != vh {
+                continue;
+            }
+
+            if first.is_none() {
+                first = Some(heh);
+            }
+            if self.is_boundary(heh) {
+                boundary = Some(heh);
+                break;
+            }
+        }
+
+        match boundary.or(first) {
+            Some(heh) => self.kernel.set_halfedge_handle(vh, heh),
+            None => self.clear_halfedge_handle(vh),
+        }
     }
 
     /// Redirect all halfedges that reference from_vertex to reference to_vertex
@@ -701,6 +984,184 @@ impl RustMesh {
     /// Delete an edge from the mesh
     pub fn delete_edge(&mut self, eh: EdgeHandle) {
         self.kernel.delete_edge(eh);
+    }
+
+    /// Rebuild the mesh from currently active faces and vertices.
+    ///
+    /// This mirrors OpenMesh's `garbage_collection()` at a higher level:
+    /// deleted elements are discarded and a clean connectivity structure is rebuilt.
+    pub fn garbage_collection(&mut self) {
+        let old_vertex_count = self.n_vertices();
+        if old_vertex_count == 0 {
+            return;
+        }
+
+        let preserve_normals = self.has_vertex_normals();
+        let preserve_colors = self.has_vertex_colors();
+        let preserve_texcoords = self.has_vertex_texcoords();
+
+        let mut used_vertices = vec![false; old_vertex_count];
+        let mut face_loops: Vec<Vec<VertexHandle>> = Vec::new();
+
+        for fh in self.faces() {
+            let vertices = self.sanitized_face_vertices(fh);
+            if vertices.len() < 3 {
+                continue;
+            }
+
+            for vh in &vertices {
+                let idx = vh.idx_usize();
+                if idx < used_vertices.len() {
+                    used_vertices[idx] = true;
+                }
+            }
+            face_loops.push(vertices);
+        }
+
+        if face_loops.is_empty() {
+            self.clear();
+            return;
+        }
+
+        let mut remap: Vec<Option<usize>> = vec![None; old_vertex_count];
+        let mut positions: Vec<glam::Vec3> = Vec::new();
+        let mut normals: Vec<glam::Vec3> = Vec::new();
+        let mut colors: Vec<glam::Vec4> = Vec::new();
+        let mut texcoords: Vec<glam::Vec2> = Vec::new();
+
+        for (idx, &used) in used_vertices.iter().enumerate() {
+            if !used {
+                continue;
+            }
+
+            let Some(point) = self.point_by_index(idx) else {
+                continue;
+            };
+
+            remap[idx] = Some(positions.len());
+            positions.push(point);
+
+            if preserve_normals {
+                normals.push(self.vertex_normal_by_index(idx).unwrap_or(glam::Vec3::ZERO));
+            }
+            if preserve_colors {
+                colors.push(
+                    self.vertex_color_by_index(idx)
+                        .unwrap_or(glam::Vec4::new(1.0, 1.0, 1.0, 1.0)),
+                );
+            }
+            if preserve_texcoords {
+                texcoords.push(self.vertex_texcoord_by_index(idx).unwrap_or(glam::Vec2::ZERO));
+            }
+        }
+
+        let mut rebuilt = RustMesh::new();
+        for point in &positions {
+            rebuilt.add_vertex(*point);
+        }
+
+        if preserve_normals {
+            rebuilt.request_vertex_normals();
+            for (idx, normal) in normals.iter().enumerate() {
+                rebuilt.set_vertex_normal_by_index(idx, *normal);
+            }
+        }
+        if preserve_colors {
+            rebuilt.request_vertex_colors();
+            for (idx, color) in colors.iter().enumerate() {
+                rebuilt.set_vertex_color_by_index(idx, *color);
+            }
+        }
+        if preserve_texcoords {
+            rebuilt.request_vertex_texcoords();
+            for (idx, texcoord) in texcoords.iter().enumerate() {
+                rebuilt.set_vertex_texcoord_by_index(idx, *texcoord);
+            }
+        }
+
+        let remapped_faces: Vec<Vec<VertexHandle>> = face_loops
+            .into_iter()
+            .map(|face| {
+                dedupe_face_vertices(
+                    face.into_iter()
+                        .filter_map(|vh| remap.get(vh.idx_usize()).and_then(|idx| *idx))
+                        .map(VertexHandle::from_usize)
+                        .collect(),
+                )
+            })
+            .filter(|face: &Vec<VertexHandle>| face.len() >= 3)
+            .collect();
+
+        if remapped_faces.iter().all(|face| face.len() == 3) {
+            rebuild_oriented_triangles(&mut rebuilt, &remapped_faces);
+        } else {
+            rebuild_polygon_faces(&mut rebuilt, &remapped_faces);
+        }
+
+        *self = rebuilt;
+    }
+
+    fn rebuild_preserving_vertex_indices(&mut self, faces: &[Vec<VertexHandle>]) {
+        let old_vertex_count = self.n_vertices();
+        let preserve_normals = self.has_vertex_normals();
+        let preserve_colors = self.has_vertex_colors();
+        let preserve_texcoords = self.has_vertex_texcoords();
+
+        let positions: Vec<glam::Vec3> = (0..old_vertex_count)
+            .map(|idx| self.point_by_index(idx).unwrap_or(glam::Vec3::ZERO))
+            .collect();
+        let normals: Vec<glam::Vec3> = if preserve_normals {
+            (0..old_vertex_count)
+                .map(|idx| self.vertex_normal_by_index(idx).unwrap_or(glam::Vec3::ZERO))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let colors: Vec<glam::Vec4> = if preserve_colors {
+            (0..old_vertex_count)
+                .map(|idx| {
+                    self.vertex_color_by_index(idx)
+                        .unwrap_or(glam::Vec4::new(1.0, 1.0, 1.0, 1.0))
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let texcoords: Vec<glam::Vec2> = if preserve_texcoords {
+            (0..old_vertex_count)
+                .map(|idx| self.vertex_texcoord_by_index(idx).unwrap_or(glam::Vec2::ZERO))
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        let mut rebuilt = RustMesh::new();
+        for point in positions {
+            rebuilt.add_vertex(point);
+        }
+
+        if preserve_normals {
+            rebuilt.request_vertex_normals();
+            for (idx, normal) in normals.iter().enumerate() {
+                rebuilt.set_vertex_normal_by_index(idx, *normal);
+            }
+        }
+        if preserve_colors {
+            rebuilt.request_vertex_colors();
+            for (idx, color) in colors.iter().enumerate() {
+                rebuilt.set_vertex_color_by_index(idx, *color);
+            }
+        }
+        if preserve_texcoords {
+            rebuilt.request_vertex_texcoords();
+            for (idx, texcoord) in texcoords.iter().enumerate() {
+                rebuilt.set_vertex_texcoord_by_index(idx, *texcoord);
+            }
+        }
+
+        rebuild_polygon_faces(&mut rebuilt, faces);
+
+        *self = rebuilt;
     }
 
     // =========================================================================
@@ -966,14 +1427,27 @@ impl RustMesh {
         // Get the first halfedge of the face
         if let Some(first_heh) = self.kernel.face_halfedge_handle(fh) {
             let mut current_heh = first_heh;
+            let mut steps = 0usize;
+            let max_steps = self.n_halfedges().max(1);
 
             loop {
+                if steps >= max_steps || !current_heh.is_valid() {
+                    break;
+                }
+                steps += 1;
+
                 // Get the target vertex of this halfedge
                 let to_vh = self.kernel.to_vertex_handle(current_heh);
+                if !to_vh.is_valid() {
+                    break;
+                }
                 vertices.push(to_vh);
 
                 // Move to next halfedge
                 if let Some(next_heh) = self.kernel.next_halfedge_handle(current_heh) {
+                    if !next_heh.is_valid() || next_heh == current_heh {
+                        break;
+                    }
                     current_heh = next_heh;
                     if current_heh == first_heh {
                         break;
@@ -985,6 +1459,10 @@ impl RustMesh {
         }
 
         vertices
+    }
+
+    fn sanitized_face_vertices(&self, fh: FaceHandle) -> Vec<VertexHandle> {
+        dedupe_face_vertices(self.face_vertices_vec(fh))
     }
 
     // =========================================================================
@@ -1043,6 +1521,178 @@ impl RustMesh {
 
         mesh
     }
+}
+
+fn dedupe_face_vertices(vertices: Vec<VertexHandle>) -> Vec<VertexHandle> {
+    if vertices.is_empty() {
+        return vertices;
+    }
+
+    let mut deduped: Vec<VertexHandle> = Vec::with_capacity(vertices.len());
+    for vh in vertices {
+        if deduped.last().copied() != Some(vh) {
+            deduped.push(vh);
+        }
+    }
+
+    while deduped.len() >= 2 && deduped.first() == deduped.last() {
+        deduped.pop();
+    }
+
+    let mut unique = Vec::with_capacity(deduped.len());
+    for vh in deduped {
+        if !unique.contains(&vh) {
+            unique.push(vh);
+        }
+    }
+    unique
+}
+
+fn canonical_face_key(vertices: &[VertexHandle]) -> Vec<usize> {
+    let ids: Vec<usize> = vertices.iter().map(|vh| vh.idx_usize()).collect();
+    if ids.is_empty() {
+        return ids;
+    }
+
+    let mut best: Option<Vec<usize>> = None;
+    for base in [ids.clone(), ids.iter().copied().rev().collect()] {
+        for shift in 0..base.len() {
+            let rotated: Vec<usize> = base
+                .iter()
+                .cycle()
+                .skip(shift)
+                .take(base.len())
+                .copied()
+                .collect();
+
+            if best.as_ref().is_none_or(|current| rotated < *current) {
+                best = Some(rotated);
+            }
+        }
+    }
+
+    best.unwrap_or_default()
+}
+
+fn try_add_face_with_rotations(mesh: &mut RustMesh, vertices: &[VertexHandle]) -> bool {
+    if vertices.len() < 3 {
+        return false;
+    }
+
+    let len = vertices.len();
+    let mut candidate = vertices.to_vec();
+    for _ in 0..len {
+        if mesh.add_face(&candidate).is_some() {
+            return true;
+        }
+        candidate.rotate_left(1);
+    }
+
+    candidate = vertices.iter().copied().rev().collect();
+    for _ in 0..len {
+        if mesh.add_face(&candidate).is_some() {
+            return true;
+        }
+        candidate.rotate_left(1);
+    }
+
+    false
+}
+
+fn rebuild_polygon_faces(mesh: &mut RustMesh, faces: &[Vec<VertexHandle>]) {
+    for face in faces {
+        let _ = try_add_face_with_rotations(mesh, face);
+    }
+}
+
+fn rebuild_oriented_triangles(mesh: &mut RustMesh, faces: &[Vec<VertexHandle>]) {
+    let triangles: Vec<[usize; 3]> = faces
+        .iter()
+        .map(|face| [face[0].idx_usize(), face[1].idx_usize(), face[2].idx_usize()])
+        .collect();
+
+    let flips = orient_triangle_faces(&triangles);
+    for (triangle, flip) in triangles.iter().zip(flips.iter()) {
+        let mut face = vec![
+            VertexHandle::from_usize(triangle[0]),
+            VertexHandle::from_usize(triangle[1]),
+            VertexHandle::from_usize(triangle[2]),
+        ];
+        if *flip {
+            face.swap(1, 2);
+        }
+        let _ = try_add_face_with_rotations(mesh, &face);
+    }
+}
+
+fn orient_triangle_faces(triangles: &[[usize; 3]]) -> Vec<bool> {
+    #[derive(Clone, Copy)]
+    struct EdgeUse {
+        triangle_idx: usize,
+        sign: i8,
+    }
+
+    let mut edge_map: HashMap<(usize, usize), Vec<EdgeUse>> = HashMap::new();
+    for (triangle_idx, triangle) in triangles.iter().enumerate() {
+        for (from, to) in [
+            (triangle[0], triangle[1]),
+            (triangle[1], triangle[2]),
+            (triangle[2], triangle[0]),
+        ] {
+            let key = if from < to { (from, to) } else { (to, from) };
+            let sign = if from < to { 1 } else { -1 };
+            edge_map
+                .entry(key)
+                .or_default()
+                .push(EdgeUse { triangle_idx, sign });
+        }
+    }
+
+    let mut flips: Vec<Option<bool>> = vec![None; triangles.len()];
+    for start in 0..triangles.len() {
+        if flips[start].is_some() {
+            continue;
+        }
+
+        flips[start] = Some(false);
+        let mut queue = VecDeque::new();
+        queue.push_back(start);
+
+        while let Some(current_idx) = queue.pop_front() {
+            let current_flip = flips[current_idx].unwrap_or(false);
+            let triangle = triangles[current_idx];
+
+            for (from, to) in [
+                (triangle[0], triangle[1]),
+                (triangle[1], triangle[2]),
+                (triangle[2], triangle[0]),
+            ] {
+                let key = if from < to { (from, to) } else { (to, from) };
+                let current_sign = if from < to { 1 } else { -1 };
+
+                let Some(uses) = edge_map.get(&key) else {
+                    continue;
+                };
+                for other in uses {
+                    if other.triangle_idx == current_idx {
+                        continue;
+                    }
+
+                    let should_flip_other = current_flip ^ (current_sign == other.sign);
+                    match flips[other.triangle_idx] {
+                        Some(existing) if existing != should_flip_other => {}
+                        Some(_) => {}
+                        None => {
+                            flips[other.triangle_idx] = Some(should_flip_other);
+                            queue.push_back(other.triangle_idx);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    flips.into_iter().map(|flip| flip.unwrap_or(false)).collect()
 }
 
 #[cfg(test)]
