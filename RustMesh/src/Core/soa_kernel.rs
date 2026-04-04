@@ -57,6 +57,12 @@ pub struct SoAKernel {
     // Face attributes
     face_normals: Option<Vec<Vec3>>,
     face_colors: Option<Vec<Vec4>>,
+
+    // Deleted-state flags used by local topology edits before garbage collection.
+    vertex_deleted: Vec<bool>,
+    halfedge_deleted: Vec<bool>,
+    edge_deleted: Vec<bool>,
+    face_deleted: Vec<bool>,
 }
 
 impl SoAKernel {
@@ -83,6 +89,10 @@ impl SoAKernel {
             edge_colors: None,
             face_normals: None,
             face_colors: None,
+            vertex_deleted: Vec::new(),
+            halfedge_deleted: Vec::new(),
+            edge_deleted: Vec::new(),
+            face_deleted: Vec::new(),
         }
     }
 
@@ -108,6 +118,10 @@ impl SoAKernel {
         self.edge_colors = None;
         self.face_normals = None;
         self.face_colors = None;
+        self.vertex_deleted.clear();
+        self.halfedge_deleted.clear();
+        self.edge_deleted.clear();
+        self.face_deleted.clear();
     }
 
     // --- Vertex operations ---
@@ -120,6 +134,7 @@ impl SoAKernel {
         self.y.push(point.y);
         self.z.push(point.z);
         self.halfedge_handles.push(None);
+        self.vertex_deleted.push(false);
 
         // Resize attribute arrays if they exist
         if let Some(ref mut normals) = self.vertex_normals {
@@ -299,11 +314,14 @@ impl SoAKernel {
         let he0_handle = HalfedgeHandle::new(he0_idx);
         let he1_handle = HalfedgeHandle::new(he1_idx);
         self.edges.push(Edge::new(he0_handle, he1_handle));
+        self.edge_deleted.push(false);
 
         self.halfedges.push(he0);
         self.halfedges.push(he1);
         self.next_set.push(false);
         self.next_set.push(false);
+        self.halfedge_deleted.push(false);
+        self.halfedge_deleted.push(false);
 
         // Store edge in map for O(1) lookup
         self.edge_map.insert((v0, v1), he0_handle);
@@ -354,6 +372,7 @@ impl SoAKernel {
     pub fn add_face(&mut self, halfedge_handle: Option<HalfedgeHandle>) -> FaceHandle {
         let idx = self.faces.len() as u32;
         self.faces.push(Face::new(halfedge_handle));
+        self.face_deleted.push(false);
         FaceHandle::new(idx)
     }
 
@@ -368,7 +387,8 @@ impl SoAKernel {
     pub fn n_active_faces(&self) -> usize {
         self.faces
             .iter()
-            .filter(|f| f.halfedge_handle.is_some())
+            .zip(self.face_deleted.iter())
+            .filter(|(f, deleted)| f.halfedge_handle.is_some() && !**deleted)
             .count()
     }
 
@@ -387,7 +407,17 @@ impl SoAKernel {
     /// Get the halfedge handle associated with a face
     #[inline]
     pub fn face_halfedge_handle(&self, fh: FaceHandle) -> Option<HalfedgeHandle> {
+        if self.is_face_deleted(fh) {
+            return None;
+        }
         self.face(fh).map(|f| f.halfedge_handle).flatten()
+    }
+
+    #[inline]
+    pub fn set_face_halfedge_handle(&mut self, fh: FaceHandle, heh: Option<HalfedgeHandle>) {
+        if let Some(face) = self.face_mut(fh) {
+            face.halfedge_handle = heh;
+        }
     }
 
     // --- Connectivity queries ---
@@ -395,6 +425,9 @@ impl SoAKernel {
     /// Get the to-vertex of a halfedge
     #[inline]
     pub fn to_vertex_handle(&self, heh: HalfedgeHandle) -> VertexHandle {
+        if self.is_halfedge_deleted(heh) {
+            return VertexHandle::invalid();
+        }
         self.halfedge(heh)
             .map(|he| he.vertex_handle)
             .unwrap_or(VertexHandle::invalid())
@@ -431,6 +464,9 @@ impl SoAKernel {
     /// Get the face handle from a halfedge
     #[inline]
     pub fn face_handle(&self, heh: HalfedgeHandle) -> Option<FaceHandle> {
+        if self.is_halfedge_deleted(heh) {
+            return None;
+        }
         self.halfedge(heh).and_then(|he| he.face_handle)
     }
 
@@ -439,6 +475,13 @@ impl SoAKernel {
     pub fn set_face_handle(&mut self, heh: HalfedgeHandle, fh: FaceHandle) {
         if let Some(he) = self.halfedge_mut(heh) {
             he.face_handle = Some(fh);
+        }
+    }
+
+    #[inline]
+    pub fn clear_face_handle(&mut self, heh: HalfedgeHandle) {
+        if let Some(he) = self.halfedge_mut(heh) {
+            he.face_handle = None;
         }
     }
 
@@ -488,6 +531,9 @@ impl SoAKernel {
     /// Get vertex halfedge handle
     #[inline]
     pub fn halfedge_handle(&self, vh: VertexHandle) -> Option<HalfedgeHandle> {
+        if self.is_vertex_deleted(vh) {
+            return None;
+        }
         self.halfedge_handles.get(vh.idx_usize()).copied().flatten()
     }
 
@@ -501,6 +547,14 @@ impl SoAKernel {
         self.halfedge_handles[idx] = Some(heh);
     }
 
+    #[inline]
+    pub fn clear_halfedge_handle(&mut self, vh: VertexHandle) {
+        let idx = vh.idx_usize();
+        if idx < self.halfedge_handles.len() {
+            self.halfedge_handles[idx] = None;
+        }
+    }
+
     /// Set halfedge's to_vertex (target vertex)
     #[inline]
     pub fn set_halfedge_to_vertex(&mut self, heh: HalfedgeHandle, vh: VertexHandle) {
@@ -511,14 +565,77 @@ impl SoAKernel {
         self.halfedges[idx].vertex_handle = vh;
     }
 
+    #[inline]
+    pub fn is_vertex_deleted(&self, vh: VertexHandle) -> bool {
+        self.vertex_deleted
+            .get(vh.idx_usize())
+            .copied()
+            .unwrap_or(true)
+    }
+
+    #[inline]
+    pub fn is_halfedge_deleted(&self, heh: HalfedgeHandle) -> bool {
+        self.halfedge_deleted
+            .get(heh.idx_usize())
+            .copied()
+            .unwrap_or(true)
+    }
+
+    #[inline]
+    pub fn is_edge_deleted(&self, eh: EdgeHandle) -> bool {
+        self.edge_deleted.get(eh.idx_usize()).copied().unwrap_or(true)
+    }
+
+    #[inline]
+    pub fn is_face_deleted(&self, fh: FaceHandle) -> bool {
+        self.face_deleted.get(fh.idx_usize()).copied().unwrap_or(true)
+    }
+
+    #[inline]
+    pub fn mark_vertex_deleted(&mut self, vh: VertexHandle, deleted: bool) {
+        let idx = vh.idx_usize();
+        if idx < self.vertex_deleted.len() {
+            self.vertex_deleted[idx] = deleted;
+        }
+        if deleted {
+            self.clear_halfedge_handle(vh);
+        }
+    }
+
+    #[inline]
+    pub fn mark_halfedge_deleted(&mut self, heh: HalfedgeHandle, deleted: bool) {
+        let idx = heh.idx_usize();
+        if idx < self.halfedge_deleted.len() {
+            self.halfedge_deleted[idx] = deleted;
+        }
+        if deleted {
+            self.clear_face_handle(heh);
+        }
+    }
+
+    #[inline]
+    pub fn mark_edge_deleted(&mut self, eh: EdgeHandle, deleted: bool) {
+        let idx = eh.idx_usize();
+        if idx < self.edge_deleted.len() {
+            self.edge_deleted[idx] = deleted;
+        }
+    }
+
+    #[inline]
+    pub fn mark_face_deleted(&mut self, fh: FaceHandle, deleted: bool) {
+        let idx = fh.idx_usize();
+        if idx < self.face_deleted.len() {
+            self.face_deleted[idx] = deleted;
+        }
+        if deleted {
+            self.set_face_halfedge_handle(fh, None);
+        }
+    }
+
     /// Mark a vertex as deleted
     #[inline]
     pub fn delete_vertex(&mut self, vh: VertexHandle) {
-        let idx = vh.idx_usize();
-        if idx < self.halfedge_handles.len() {
-            self.halfedge_handles[idx] = None;
-        }
-        // In a full implementation, we'd also mark position as invalid
+        self.mark_vertex_deleted(vh, true);
     }
 
     /// Mark a face as deleted
@@ -552,6 +669,7 @@ impl SoAKernel {
                 }
             }
             self.faces[idx].halfedge_handle = None;
+            self.face_deleted[idx] = true;
         }
     }
 
@@ -564,17 +682,11 @@ impl SoAKernel {
             let he0 = self.edges[idx].halfedges[0];
             let he1 = self.edges[idx].halfedges[1];
 
-            // Get the vertices from the halfedges to remove from edge_map
-            if he0.is_valid() && he1.is_valid() {
-                if let (Some(h0), Some(h1)) = (self.halfedge(he0), self.halfedge(he1)) {
-                    let v0 = h0.vertex_handle.idx();
-                    let v1 = h1.vertex_handle.idx();
-
-                    // Remove from edge_map using canonical ordering
-                    let (min_v, max_v) = if v0 < v1 { (v0, v1) } else { (v1, v0) };
-                    self.edge_map.remove(&(min_v, max_v));
-                }
-            }
+            self.edge_map
+                .retain(|_, stored_heh| *stored_heh != he0 && *stored_heh != he1);
+            self.edge_deleted[idx] = true;
+            self.mark_halfedge_deleted(he0, true);
+            self.mark_halfedge_deleted(he1, true);
 
             // Mark halfedges as invalid
             self.edges[idx].halfedges =

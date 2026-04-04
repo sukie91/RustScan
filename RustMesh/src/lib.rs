@@ -18,7 +18,10 @@
 pub use attrib_soa_kernel::AttribSoAKernel;
 pub use circulators::*;
 pub use connectivity::RustMesh;
-pub use decimation::{decimate_mesh, CollapseInfo, Decimater, DecimationConfig, ModQuadricT};
+pub use decimation::{
+    decimate_mesh, CollapseInfo, Decimater, DecimationConfig, DecimationTrace,
+    DecimationTraceStep, ModQuadricT,
+};
 pub use dualizer::*;
 pub use geometry::*;
 pub use handles::{BaseHandle, EdgeHandle, FaceHandle, HalfedgeHandle, VertexHandle};

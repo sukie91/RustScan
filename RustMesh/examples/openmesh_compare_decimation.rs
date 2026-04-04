@@ -58,7 +58,12 @@ fn main() {
 
     let (rust_time, rust_digest) = measure(|| {
         let mut mesh = read_off(&input_path).expect("read OFF for RustMesh");
-        let collapsed = Decimater::new(&mut mesh).decimate_to(target_vertices);
+        let mut decimater = Decimater::new(&mut mesh);
+        let collapsed = decimater.decimate_to(target_vertices);
+        let boundary_collapses = decimater.boundary_collapses();
+        let interior_collapses = decimater.interior_collapses();
+        let faces_removed_estimate = decimater.faces_removed_estimate();
+        drop(decimater);
         let (raw_faces, raw_degenerate, raw_non_manifold_edges) = raw_face_diagnostics(&mesh);
         println!(
             "RustMesh raw decimation: active_faces={raw_faces}, degenerate_faces={raw_degenerate}, non_manifold_edges={raw_non_manifold_edges}"
@@ -66,6 +71,12 @@ fn main() {
         mesh.garbage_collection();
         write_off(&mesh, &rust_output).expect("write RustMesh OFF");
         println!("RustMesh collapsed edges: {collapsed}");
+        println!(
+            "RustMesh collapse mix: boundary={}, interior={}, estimated_faces_removed={}",
+            boundary_collapses,
+            interior_collapses,
+            faces_removed_estimate
+        );
         mesh_digest(&mesh)
     });
     print_mesh_digest("RustMesh output", rust_digest);

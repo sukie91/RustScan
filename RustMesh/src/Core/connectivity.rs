@@ -5,7 +5,7 @@
 
 use crate::handles::{EdgeHandle, FaceHandle, HalfedgeHandle, VertexHandle};
 use crate::soa_kernel::SoAKernel;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 
 // ============================================================================
 // High-Performance Index Iterators (no Handle overhead)
@@ -349,6 +349,26 @@ impl RustMesh {
         self.kernel.face_handle(heh)
     }
 
+    #[inline]
+    pub fn is_vertex_deleted(&self, vh: VertexHandle) -> bool {
+        self.kernel.is_vertex_deleted(vh)
+    }
+
+    #[inline]
+    pub fn is_halfedge_deleted(&self, heh: HalfedgeHandle) -> bool {
+        self.kernel.is_halfedge_deleted(heh)
+    }
+
+    #[inline]
+    pub fn is_edge_deleted(&self, eh: EdgeHandle) -> bool {
+        self.kernel.is_edge_deleted(eh)
+    }
+
+    #[inline]
+    pub fn is_face_deleted(&self, fh: FaceHandle) -> bool {
+        self.kernel.is_face_deleted(fh)
+    }
+
     /// Check if a halfedge is a boundary
     #[inline]
     pub fn is_boundary(&self, heh: HalfedgeHandle) -> bool {
@@ -471,6 +491,21 @@ impl RustMesh {
         self.kernel.face_halfedge_handle(fh)
     }
 
+    #[inline]
+    fn set_face_halfedge_handle(&mut self, fh: FaceHandle, heh: Option<HalfedgeHandle>) {
+        self.kernel.set_face_halfedge_handle(fh, heh);
+    }
+
+    #[inline]
+    fn clear_face_handle(&mut self, heh: HalfedgeHandle) {
+        self.kernel.clear_face_handle(heh);
+    }
+
+    #[inline]
+    fn clear_halfedge_handle(&mut self, vh: VertexHandle) {
+        self.kernel.clear_halfedge_handle(vh);
+    }
+
     // --- SIMD-optimized operations ---
 
     /// Compute bounding box (optimized)
@@ -518,9 +553,19 @@ impl RustMesh {
         if !heh.is_valid() {
             return false;
         }
+        if self.is_halfedge_deleted(heh) || self.is_edge_deleted(self.edge_handle(heh)) {
+            return false;
+        }
 
         let v0 = self.from_vertex_handle(heh); // Vertex to be removed
         let v1 = self.to_vertex_handle(heh); // Remaining vertex
+        if !v0.is_valid()
+            || !v1.is_valid()
+            || self.is_vertex_deleted(v0)
+            || self.is_vertex_deleted(v1)
+        {
+            return false;
+        }
 
         // Both vertices must have valid halfedges
         if self.halfedge_handle(v0).is_none() || self.halfedge_handle(v1).is_none() {
@@ -654,9 +699,16 @@ impl RustMesh {
     }
 
     /// Check if a vertex is on the boundary (has at least one boundary halfedge)
-    fn is_boundary_vertex(&self, vh: VertexHandle) -> bool {
+    pub fn is_boundary_vertex(&self, vh: VertexHandle) -> bool {
+        if !vh.is_valid() || self.is_vertex_deleted(vh) {
+            return false;
+        }
+
         for heh_idx in 0..self.n_halfedges() {
             let heh = HalfedgeHandle::new(heh_idx as u32);
+            if self.is_halfedge_deleted(heh) || self.is_edge_deleted(self.edge_handle(heh)) {
+                continue;
+            }
             if self.from_vertex_handle(heh) != vh && self.to_vertex_handle(heh) != vh {
                 continue;
             }
@@ -674,7 +726,7 @@ impl RustMesh {
         let mut neighbors = Vec::new();
 
         for fh in self.faces() {
-            if self.face_halfedge_handle(fh).is_none() {
+            if self.is_face_deleted(fh) || self.face_halfedge_handle(fh).is_none() {
                 continue;
             }
 
@@ -711,36 +763,158 @@ impl RustMesh {
             return Err("Collapse not legal");
         }
 
-        let v_removed = self.from_vertex_handle(heh);
-        let v_kept = self.to_vertex_handle(heh);
+        let h0 = heh;
+        let h1 = self.next_halfedge_handle(h0);
+        let o0 = self.opposite_halfedge_handle(h0);
+        let o1 = self.next_halfedge_handle(o0);
 
-        let mut rebuilt_faces = Vec::new();
-        let mut seen_faces = HashSet::new();
+        self.collapse_edge_local(h0);
 
-        for fh in self.faces() {
-            if self.face_halfedge_handle(fh).is_none() {
+        if !self.is_halfedge_deleted(h1)
+            && !self.is_edge_deleted(self.edge_handle(h1))
+            && self.next_halfedge_handle(self.next_halfedge_handle(h1)) == h1
+        {
+            self.collapse_loop_local(self.next_halfedge_handle(h1));
+        }
+        if !self.is_halfedge_deleted(o1)
+            && !self.is_edge_deleted(self.edge_handle(o1))
+            && self.next_halfedge_handle(self.next_halfedge_handle(o1)) == o1
+        {
+            self.collapse_loop_local(o1);
+        }
+
+        Ok(())
+    }
+
+    fn collapse_edge_local(&mut self, heh: HalfedgeHandle) {
+        let h = heh;
+        let hn = self.next_halfedge_handle(h);
+        let hp = self.prev_halfedge_handle(h);
+
+        let o = self.opposite_halfedge_handle(h);
+        let on = self.next_halfedge_handle(o);
+        let op = self.prev_halfedge_handle(o);
+
+        let fh = self.face_handle(h);
+        let fo = self.face_handle(o);
+
+        let vh = self.to_vertex_handle(h);
+        let vo = self.to_vertex_handle(o);
+
+        for heh_idx in 0..self.n_halfedges() {
+            let incoming = HalfedgeHandle::new(heh_idx as u32);
+            if self.is_halfedge_deleted(incoming) || self.is_edge_deleted(self.edge_handle(incoming)) {
                 continue;
             }
-
-            let updated = dedupe_face_vertices(
-                self.face_vertices_vec(fh)
-                    .into_iter()
-                    .map(|vh| if vh == v_removed { v_kept } else { vh })
-                    .collect(),
-            );
-
-            if updated.len() < 3 {
-                continue;
-            }
-
-            let key = canonical_face_key(&updated);
-            if seen_faces.insert(key) {
-                rebuilt_faces.push(updated);
+            if self.to_vertex_handle(incoming) == vo {
+                self.kernel.set_halfedge_to_vertex(incoming, vh);
             }
         }
 
-        self.rebuild_preserving_vertex_indices(&rebuilt_faces);
-        Ok(())
+        self.kernel.set_next_halfedge_handle(hp, hn);
+        self.kernel.set_next_halfedge_handle(op, on);
+
+        if let Some(fh) = fh {
+            self.set_face_halfedge_handle(fh, Some(hn));
+        }
+        if let Some(fo) = fo {
+            self.set_face_halfedge_handle(fo, Some(on));
+        }
+
+        if self.halfedge_handle(vh) == Some(o) {
+            self.kernel.set_halfedge_handle(vh, hn);
+        }
+        self.adjust_outgoing_halfedge(vh);
+        self.clear_halfedge_handle(vo);
+
+        self.kernel.mark_edge_deleted(self.edge_handle(h), true);
+        self.kernel.mark_vertex_deleted(vo, true);
+        self.kernel.mark_halfedge_deleted(h, true);
+        self.kernel.mark_halfedge_deleted(o, true);
+    }
+
+    fn collapse_loop_local(&mut self, heh: HalfedgeHandle) {
+        if !heh.is_valid() || self.is_halfedge_deleted(heh) || self.is_edge_deleted(self.edge_handle(heh)) {
+            return;
+        }
+
+        let h0 = heh;
+        let h1 = self.next_halfedge_handle(h0);
+
+        let o0 = self.opposite_halfedge_handle(h0);
+        let o1 = self.opposite_halfedge_handle(h1);
+
+        let v0 = self.to_vertex_handle(h0);
+        let v1 = self.to_vertex_handle(h1);
+
+        let fh = self.face_handle(h0);
+        let fo = self.face_handle(o0);
+
+        if self.next_halfedge_handle(h1) != h0 || h1 == o0 {
+            return;
+        }
+
+        self.kernel
+            .set_next_halfedge_handle(h1, self.next_halfedge_handle(o0));
+        self.kernel
+            .set_next_halfedge_handle(self.prev_halfedge_handle(o0), h1);
+
+        match fo {
+            Some(fo) => self.kernel.set_face_handle(h1, fo),
+            None => self.clear_face_handle(h1),
+        }
+
+        self.kernel.set_halfedge_handle(v0, h1);
+        self.adjust_outgoing_halfedge(v0);
+        self.kernel.set_halfedge_handle(v1, o1);
+        self.adjust_outgoing_halfedge(v1);
+
+        if let Some(fo) = fo {
+            if self.face_halfedge_handle(fo) == Some(o0) {
+                self.set_face_halfedge_handle(fo, Some(h1));
+            }
+        }
+
+        if let Some(fh) = fh {
+            self.set_face_halfedge_handle(fh, None);
+            self.kernel.mark_face_deleted(fh, true);
+        }
+        self.kernel.mark_edge_deleted(self.edge_handle(h0), true);
+        self.kernel.mark_halfedge_deleted(h0, true);
+        self.kernel.mark_halfedge_deleted(o0, true);
+    }
+
+    fn adjust_outgoing_halfedge(&mut self, vh: VertexHandle) {
+        if !vh.is_valid() || self.is_vertex_deleted(vh) {
+            self.clear_halfedge_handle(vh);
+            return;
+        }
+
+        let mut first = None;
+        let mut boundary = None;
+
+        for heh_idx in 0..self.n_halfedges() {
+            let heh = HalfedgeHandle::new(heh_idx as u32);
+            if self.is_halfedge_deleted(heh) || self.is_edge_deleted(self.edge_handle(heh)) {
+                continue;
+            }
+            if self.from_vertex_handle(heh) != vh {
+                continue;
+            }
+
+            if first.is_none() {
+                first = Some(heh);
+            }
+            if self.is_boundary(heh) {
+                boundary = Some(heh);
+                break;
+            }
+        }
+
+        match boundary.or(first) {
+            Some(heh) => self.kernel.set_halfedge_handle(vh, heh),
+            None => self.clear_halfedge_handle(vh),
+        }
     }
 
     /// Redirect all halfedges that reference from_vertex to reference to_vertex

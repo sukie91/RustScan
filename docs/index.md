@@ -1,6 +1,6 @@
 # RustScan Documentation Index
 
-**Version:** 0.1.0 | **Updated:** 2026-03-01 | **Status:** Active Development
+**Version:** 0.1.0 | **Updated:** 2026-04-04 | **Status:** Active Development
 
 ---
 
@@ -59,6 +59,7 @@ Mesh Export (OBJ/PLY + JSON Metadata)
 | Document | Description |
 |----------|-------------|
 | [RustMesh README](RustMesh-README.md) | RustMesh-specific documentation |
+| [RustMesh OpenMesh Progress 2026-04-04](RustMesh-OpenMesh-Progress-2026-04-04.md) | RustMesh 对齐 OpenMesh 的最新进展、benchmark 与 trace 结论 |
 | [RustSLAM README](RustSLAM-README.md) | RustSLAM-specific documentation |
 | [RustSLAM Design](RustSLAM-DESIGN.md) | Detailed design decisions |
 | [RustSLAM ToDo](RustSLAM-ToDo.md) | Development roadmap |

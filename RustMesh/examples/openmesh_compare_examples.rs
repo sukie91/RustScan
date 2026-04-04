@@ -4,8 +4,32 @@ use openmesh_compare_common::{
     active_faces, active_vertices, bench_ns_per_iter, cleanup_paths, load_mesh, measure,
     mesh_digest, print_header, print_mesh_digest, write_temp_off,
 };
-use rustmesh::{generate_cube, generate_sphere, read_obj, write_off, VertexHandle};
+use rustmesh::{generate_cube, generate_sphere, read_obj, write_off, FaceHandle, RustMesh, VertexHandle};
 use std::path::Path;
+
+fn build_tutorial08_cube() -> RustMesh {
+    let mut mesh = RustMesh::new();
+
+    let v = [
+        mesh.add_vertex(glam::vec3(-1.0, -1.0, 1.0)),
+        mesh.add_vertex(glam::vec3(1.0, -1.0, 1.0)),
+        mesh.add_vertex(glam::vec3(1.0, 1.0, 1.0)),
+        mesh.add_vertex(glam::vec3(-1.0, 1.0, 1.0)),
+        mesh.add_vertex(glam::vec3(-1.0, -1.0, -1.0)),
+        mesh.add_vertex(glam::vec3(1.0, -1.0, -1.0)),
+        mesh.add_vertex(glam::vec3(1.0, 1.0, -1.0)),
+        mesh.add_vertex(glam::vec3(-1.0, 1.0, -1.0)),
+    ];
+
+    mesh.add_face(&[v[0], v[1], v[2], v[3]]).unwrap();
+    mesh.add_face(&[v[7], v[6], v[5], v[4]]).unwrap();
+    mesh.add_face(&[v[1], v[0], v[4], v[5]]).unwrap();
+    mesh.add_face(&[v[2], v[1], v[5], v[6]]).unwrap();
+    mesh.add_face(&[v[3], v[2], v[6], v[7]]).unwrap();
+    mesh.add_face(&[v[0], v[3], v[7], v[4]]).unwrap();
+
+    mesh
+}
 
 fn main() {
     print_header("RustMesh Example Parity with OpenMesh Tutorials");
@@ -14,6 +38,7 @@ fn main() {
     println!("  - Mirror/OpenMesh-11.0.0/Doc/Examples/iterators.cc");
     println!("  - Mirror/OpenMesh-11.0.0/Doc/Examples/circulators.cc");
     println!("  - Mirror/OpenMesh-11.0.0/Doc/Examples/mesh_io.cc");
+    println!("  - Mirror/OpenMesh-11.0.0/src/OpenMesh/Examples/Tutorial08/delete_geometry.cc");
 
     print_header("Tutorial01: Cube Build + OFF Roundtrip");
     let (build_time, cube) = measure(generate_cube);
@@ -121,4 +146,39 @@ fn main() {
         write_time.as_secs_f64() * 1_000.0
     );
     cleanup_paths(&[output_off]);
+
+    print_header("Tutorial08: Delete Geometry + Garbage Collection");
+    let (delete_time, mut delete_mesh) = measure(|| {
+        let mut mesh = build_tutorial08_cube();
+        for face_idx in [0_u32, 2, 3, 4, 5] {
+            mesh.delete_face(FaceHandle::new(face_idx));
+        }
+        for vertex_idx in [0_u32, 1, 2, 3] {
+            mesh.delete_vertex(VertexHandle::new(vertex_idx));
+        }
+        mesh
+    });
+    println!("OpenMesh tutorial expectation: keep only face [7, 6, 5, 4], so active V=4 and active F=1.");
+    println!(
+        "RustMesh before GC: active_vertices={}, active_faces={}",
+        active_vertices(&delete_mesh),
+        active_faces(&delete_mesh)
+    );
+    print_mesh_digest("RustMesh marked-deleted digest", mesh_digest(&delete_mesh));
+    let (gc_time, ()) = measure(|| delete_mesh.garbage_collection());
+    let delete_digest = mesh_digest(&delete_mesh);
+    print_mesh_digest("RustMesh post-GC digest", delete_digest);
+    println!(
+        "OpenMesh post-GC expectation: V=4, F=1, centroid=(0.0, 0.0, -1.0). RustMesh: V={}, F={}, centroid=({:.4}, {:.4}, {:.4})",
+        delete_digest.vertices,
+        delete_digest.faces,
+        delete_digest.centroid.x,
+        delete_digest.centroid.y,
+        delete_digest.centroid.z
+    );
+    println!(
+        "Timings: mark_deleted={:.3} ms, garbage_collection={:.3} ms",
+        delete_time.as_secs_f64() * 1_000.0,
+        gc_time.as_secs_f64() * 1_000.0
+    );
 }
