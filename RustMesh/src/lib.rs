@@ -116,6 +116,7 @@ pub mod tools {
     pub mod dualizer;
     pub mod hole_filling;
     pub mod mesh_repair;
+    pub mod remeshing;
     pub mod smoother;
     pub mod subdivision;
     pub mod vdpm;
@@ -124,6 +125,9 @@ pub mod tools {
 // Re-export Tools
 mod decimation {
     pub use crate::tools::decimation::*;
+}
+mod remeshing {
+    pub use crate::tools::remeshing::*;
 }
 mod smoother {
     pub use crate::tools::smoother::*;

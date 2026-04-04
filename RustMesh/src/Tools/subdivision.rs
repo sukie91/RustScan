@@ -1395,6 +1395,234 @@ pub fn validate_for_catmull_clark(mesh: &RustMesh) -> SubdivisionResult<()> {
     Ok(())
 }
 
+// ============================================================================
+// Midpoint Subdivision (Simplest subdivision scheme)
+// ============================================================================
+
+/// Perform one iteration of Midpoint subdivision on the mesh.
+///
+/// Midpoint subdivision is the simplest subdivision scheme:
+/// 1. Split each edge at its midpoint (create new vertex at midpoint)
+/// 2. For each triangular face, split into 4 triangles
+/// 3. For each quadrilateral face, split into 4 quads
+///
+/// Unlike Loop or Catmull-Clark, midpoint subdivision does not smooth
+/// the original vertex positions - it only inserts new vertices at edge midpoints.
+///
+/// # Arguments
+/// * `mesh` - The mesh to subdivide (will be modified in place)
+///
+/// # Returns
+/// * `Ok(SubdivisionStats)` - Statistics about the subdivision
+/// * `Err(SubdivisionError)` - If the mesh cannot be subdivided
+pub fn midpoint_subdivide(mesh: &mut RustMesh) -> SubdivisionResult<SubdivisionStats> {
+    // Validate mesh
+    if mesh.n_vertices() == 0 {
+        return Err(SubdivisionError::EmptyMesh);
+    }
+
+    if mesh.n_faces() == 0 {
+        return Err(SubdivisionError::EmptyMesh);
+    }
+
+    let original_vertices = mesh.n_vertices();
+    let original_edges = mesh.n_edges();
+    let original_faces = mesh.n_faces();
+
+    // Step 1: Create edge midpoint vertices
+    // Map: (min_vertex_idx, max_vertex_idx) -> new_vertex_handle
+    let mut edge_to_midpoint: HashMap<(u32, u32), VertexHandle> = HashMap::new();
+
+    // Collect all edges first
+    let n_halfedges = mesh.n_halfedges();
+    for i in (0..n_halfedges).step_by(2) {
+        let heh = HalfedgeHandle::new(i as u32);
+        let v0 = mesh.from_vertex_handle(heh);
+        let v1 = mesh.to_vertex_handle(heh);
+
+        // Use canonical ordering
+        let (min_v, max_v) = if v0.idx() < v1.idx() {
+            (v0, v1)
+        } else {
+            (v1, v0)
+        };
+
+        // Skip if already processed
+        if edge_to_midpoint.contains_key(&(min_v.idx(), max_v.idx())) {
+            continue;
+        }
+
+        // Create midpoint vertex
+        let p0 = mesh.point(min_v).unwrap_or(glam::Vec3::ZERO);
+        let p1 = mesh.point(max_v).unwrap_or(glam::Vec3::ZERO);
+        let midpoint = (p0 + p1) * 0.5;
+
+        let new_vh = mesh.add_vertex(midpoint);
+        edge_to_midpoint.insert((min_v.idx(), max_v.idx()), new_vh);
+    }
+
+    // Step 2: Split each face using the edge midpoints
+    // Collect original face handles before modification
+    let original_face_handles: Vec<FaceHandle> = mesh.faces().collect();
+    let faces_to_delete = original_face_handles.clone();
+
+    for fh in original_face_handles {
+        let face_verts = get_face_vertices_polygonal(mesh, fh);
+        let n = face_verts.len();
+
+        if n < 3 {
+            continue;
+        }
+
+        // Get edge midpoint vertices for each edge of the face
+        let mut edge_midpoints: Vec<VertexHandle> = Vec::with_capacity(n);
+
+        for i in 0..n {
+            let v0 = face_verts[i];
+            let v1 = face_verts[(i + 1) % n];
+
+            let (min_v, max_v) = if v0.idx() < v1.idx() {
+                (v0, v1)
+            } else {
+                (v1, v0)
+            };
+
+            let midpoint_vh = edge_to_midpoint
+                .get(&(min_v.idx(), max_v.idx()))
+                .copied()
+                .unwrap_or_else(VertexHandle::invalid);
+
+            edge_midpoints.push(midpoint_vh);
+        }
+
+        // Create new faces based on face type
+        if n == 3 {
+            // Triangle -> 4 triangles
+            // Original triangle: (v0, v1, v2)
+            // Edge midpoints: m01, m12, m20
+            // New faces:
+            // 1. (v0, m01, m20) - corner at v0
+            // 2. (v1, m12, m01) - corner at v1
+            // 3. (v2, m20, m12) - corner at v2
+            // 4. (m01, m12, m20) - center triangle
+
+            let v0 = face_verts[0];
+            let v1 = face_verts[1];
+            let v2 = face_verts[2];
+
+            let m01 = edge_midpoints[0];
+            let m12 = edge_midpoints[1];
+            let m20 = edge_midpoints[2];
+
+            if m01.is_valid() && m12.is_valid() && m20.is_valid() {
+                mesh.add_face(&[v0, m01, m20]);
+                mesh.add_face(&[v1, m12, m01]);
+                mesh.add_face(&[v2, m20, m12]);
+                mesh.add_face(&[m01, m12, m20]);
+            }
+        } else if n == 4 {
+            // Quad -> 4 quads
+            // Original quad: (v0, v1, v2, v3)
+            // Edge midpoints: m01, m12, m23, m30
+            // Face center: average of all 4 vertices
+            // New faces:
+            // 1. (v0, m01, center, m30) - corner at v0
+            // 2. (v1, m12, center, m01) - corner at v1
+            // 3. (v2, m23, center, m12) - corner at v2
+            // 4. (v3, m30, center, m23) - corner at v3
+
+            let v0 = face_verts[0];
+            let v1 = face_verts[1];
+            let v2 = face_verts[2];
+            let v3 = face_verts[3];
+
+            let m01 = edge_midpoints[0];
+            let m12 = edge_midpoints[1];
+            let m23 = edge_midpoints[2];
+            let m30 = edge_midpoints[3];
+
+            // Compute face center
+            let p0 = mesh.point(v0).unwrap_or(glam::Vec3::ZERO);
+            let p1 = mesh.point(v1).unwrap_or(glam::Vec3::ZERO);
+            let p2 = mesh.point(v2).unwrap_or(glam::Vec3::ZERO);
+            let p3 = mesh.point(v3).unwrap_or(glam::Vec3::ZERO);
+            let center_pos = (p0 + p1 + p2 + p3) * 0.25;
+            let center = mesh.add_vertex(center_pos);
+
+            if m01.is_valid() && m12.is_valid() && m23.is_valid() && m30.is_valid() {
+                mesh.add_face(&[v0, m01, center, m30]);
+                mesh.add_face(&[v1, m12, center, m01]);
+                mesh.add_face(&[v2, m23, center, m12]);
+                mesh.add_face(&[v3, m30, center, m23]);
+            }
+        } else {
+            // General n-gon: create center vertex and n new faces
+            // Compute face center
+            let mut center_sum = glam::Vec3::ZERO;
+            for &v in &face_verts {
+                center_sum += mesh.point(v).unwrap_or(glam::Vec3::ZERO);
+            }
+            let center_pos = center_sum / n as f32;
+            let center = mesh.add_vertex(center_pos);
+
+            // Create n new faces
+            for i in 0..n {
+                let vi = face_verts[i];
+                let mi = edge_midpoints[i];
+                let mi_prev = edge_midpoints[(i + n - 1) % n];
+
+                if mi.is_valid() && mi_prev.is_valid() {
+                    mesh.add_face(&[vi, mi, center, mi_prev]);
+                }
+            }
+        }
+    }
+
+    // Step 3: Delete original faces
+    for fh in &faces_to_delete {
+        mesh.delete_face(*fh);
+    }
+
+    // Calculate statistics
+    let new_vertices = mesh.n_vertices() - original_vertices;
+    let new_edges = mesh.n_edges() - original_edges;
+    let new_faces = mesh.n_faces() - original_faces;
+
+    let stats = SubdivisionStats {
+        original_vertices,
+        original_edges,
+        original_faces,
+        new_vertices,
+        new_edges,
+        new_faces,
+    };
+
+    Ok(stats)
+}
+
+/// Perform multiple iterations of Midpoint subdivision.
+///
+/// # Arguments
+/// * `mesh` - The mesh to subdivide
+/// * `iterations` - Number of subdivision iterations
+///
+/// # Returns
+/// * `Ok(Vec<SubdivisionStats>)` - Statistics for each iteration
+/// * `Err(SubdivisionError)` - If any subdivision fails
+pub fn midpoint_subdivide_iterations(
+    mesh: &mut RustMesh,
+    iterations: usize,
+) -> SubdivisionResult<Vec<SubdivisionStats>> {
+    let mut all_stats = Vec::with_capacity(iterations);
+
+    for _ in 0..iterations {
+        let stats = midpoint_subdivide(mesh)?;
+        all_stats.push(stats);
+    }
+
+    Ok(all_stats)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2339,5 +2567,285 @@ mod tests {
         let result = sqrt3_subdivide(&mut mesh);
 
         assert!(matches!(result, Err(SubdivisionError::EmptyMesh)));
+    }
+
+    // ========================================================================
+    // Midpoint Subdivision Tests
+    // ========================================================================
+
+    #[test]
+    fn test_midpoint_subdivide_single_triangle() {
+        let mut mesh = create_simple_triangle();
+
+        // Before: 1 triangle, 3 vertices
+        let original_faces = mesh.n_active_faces();
+        let original_vertices = mesh.n_vertices();
+        assert_eq!(original_faces, 1);
+        assert_eq!(original_vertices, 3);
+
+        let stats = midpoint_subdivide(&mut mesh);
+
+        assert!(
+            stats.is_ok(),
+            "Midpoint subdivision should succeed: {:?}",
+            stats
+        );
+
+        let stats = stats.unwrap();
+
+        // Midpoint: 1 triangle -> 4 triangles
+        // Vertices: 3 original + 3 edge midpoints = 6
+        assert_eq!(stats.original_faces, 1);
+        assert_eq!(
+            mesh.n_active_faces(),
+            4,
+            "One triangle should become 4 triangles"
+        );
+        assert_eq!(mesh.n_vertices(), 6, "Should have 6 vertices (3 + 3)");
+
+        println!("Midpoint stats: {}", stats);
+    }
+
+    #[test]
+    fn test_midpoint_subdivide_tetrahedron() {
+        let mut mesh = create_tetrahedron();
+
+        // Before: 4 triangles
+        let original_faces = mesh.n_active_faces();
+        assert_eq!(original_faces, 4);
+
+        let stats = midpoint_subdivide(&mut mesh);
+
+        assert!(
+            stats.is_ok(),
+            "Midpoint subdivision should succeed: {:?}",
+            stats
+        );
+
+        let stats = stats.unwrap();
+
+        // Midpoint: 4 triangles -> 16 triangles (4 * 4)
+        // Vertices: 4 original + 6 edge midpoints = 10
+        // (tetrahedron has 6 edges)
+        assert_eq!(stats.original_faces, 4);
+        assert_eq!(
+            mesh.n_active_faces(),
+            16,
+            "4 triangles should become 16 triangles"
+        );
+        assert_eq!(mesh.n_vertices(), 10, "Should have 10 vertices (4 + 6)");
+
+        println!("Midpoint tetrahedron stats: {}", stats);
+    }
+
+    #[test]
+    fn test_midpoint_subdivide_quad() {
+        let mut mesh = create_simple_quad();
+
+        // Before: 1 quad, 4 vertices
+        let original_faces = mesh.n_active_faces();
+        let original_vertices = mesh.n_vertices();
+        assert_eq!(original_faces, 1);
+        assert_eq!(original_vertices, 4);
+
+        let stats = midpoint_subdivide(&mut mesh);
+
+        assert!(
+            stats.is_ok(),
+            "Midpoint subdivision should succeed: {:?}",
+            stats
+        );
+
+        let stats = stats.unwrap();
+
+        // Midpoint: 1 quad -> 4 quads
+        // Vertices: 4 original + 4 edge midpoints + 1 center = 9
+        assert_eq!(stats.original_faces, 1);
+        assert_eq!(
+            mesh.n_active_faces(),
+            4,
+            "One quad should become 4 quads"
+        );
+        assert_eq!(mesh.n_vertices(), 9, "Should have 9 vertices (4 + 4 + 1)");
+
+        println!("Midpoint quad stats: {}", stats);
+    }
+
+    #[test]
+    fn test_midpoint_subdivide_cube() {
+        let mut mesh = create_cube();
+
+        // Before: 6 quads, 8 vertices
+        let original_faces = mesh.n_active_faces();
+        let original_vertices = mesh.n_vertices();
+        assert_eq!(original_faces, 6);
+        assert_eq!(original_vertices, 8);
+
+        let stats = midpoint_subdivide(&mut mesh);
+
+        assert!(
+            stats.is_ok(),
+            "Midpoint subdivision should succeed: {:?}",
+            stats
+        );
+
+        let stats = stats.unwrap();
+
+        // Midpoint: 6 quads -> 24 quads (6 * 4)
+        // Vertices: 8 original + 12 edge midpoints + 6 face centers = 26
+        // (cube has 12 edges)
+        assert_eq!(stats.original_faces, 6);
+        assert_eq!(
+            mesh.n_active_faces(),
+            24,
+            "6 quads should become 24 quads"
+        );
+        assert_eq!(mesh.n_vertices(), 26, "Should have 26 vertices (8 + 12 + 6)");
+
+        println!("Midpoint cube stats: {}", stats);
+    }
+
+    #[test]
+    fn test_midpoint_subdivide_iterations() {
+        let mut mesh = create_tetrahedron();
+
+        // First iteration: 4 -> 16
+        let stats1 = midpoint_subdivide(&mut mesh);
+        assert!(stats1.is_ok());
+        assert_eq!(mesh.n_active_faces(), 16);
+
+        println!("After 1st Midpoint: {} faces", mesh.n_active_faces());
+
+        // Second iteration: 16 -> 64
+        let stats2 = midpoint_subdivide(&mut mesh);
+        assert!(stats2.is_ok());
+        assert_eq!(mesh.n_active_faces(), 64);
+
+        println!("After 2nd Midpoint: {} faces", mesh.n_active_faces());
+
+        // Third iteration: 64 -> 256
+        let stats3 = midpoint_subdivide(&mut mesh);
+        assert!(stats3.is_ok());
+        assert_eq!(mesh.n_active_faces(), 256);
+
+        println!("After 3rd Midpoint: {} faces", mesh.n_active_faces());
+    }
+
+    #[test]
+    fn test_midpoint_subdivide_boundary_mesh() {
+        let mut mesh = create_triangle_mesh_with_boundary();
+
+        // Before: 2 triangles
+        let original_faces = mesh.n_active_faces();
+        assert_eq!(original_faces, 2);
+
+        let stats = midpoint_subdivide(&mut mesh);
+
+        assert!(
+            stats.is_ok(),
+            "Midpoint subdivision should succeed: {:?}",
+            stats
+        );
+
+        let stats = stats.unwrap();
+
+        // Midpoint: 2 triangles -> 8 triangles (2 * 4)
+        assert_eq!(stats.original_faces, 2);
+        assert_eq!(
+            mesh.n_active_faces(),
+            8,
+            "2 triangles should become 8 triangles"
+        );
+
+        println!("Midpoint boundary mesh stats: {}", stats);
+    }
+
+    #[test]
+    fn test_midpoint_preserves_triangular() {
+        let mut mesh = create_tetrahedron();
+
+        midpoint_subdivide(&mut mesh).expect("Midpoint subdivision should succeed");
+
+        // Check all active faces are still triangles
+        for fh in mesh.faces() {
+            let verts = get_face_vertices(&mesh, fh);
+            if verts.is_empty() {
+                continue;
+            } // skip deleted faces
+            assert_eq!(verts.len(), 3, "All faces should still be triangles");
+        }
+    }
+
+    #[test]
+    fn test_midpoint_preserves_quad() {
+        let mut mesh = create_simple_quad();
+
+        midpoint_subdivide(&mut mesh).expect("Midpoint subdivision should succeed");
+
+        // Check all active faces are still quads
+        for fh in mesh.faces() {
+            let verts = get_face_vertices_polygonal(&mesh, fh);
+            if verts.is_empty() {
+                continue;
+            } // skip deleted faces
+            assert_eq!(verts.len(), 4, "All faces should still be quads");
+        }
+    }
+
+    #[test]
+    fn test_midpoint_empty_mesh_error() {
+        let mut mesh = RustMesh::new();
+
+        let result = midpoint_subdivide(&mut mesh);
+
+        assert!(matches!(result, Err(SubdivisionError::EmptyMesh)));
+    }
+
+    #[test]
+    fn test_midpoint_subdivide_using_iterator() {
+        let mut mesh = create_tetrahedron();
+
+        let all_stats = midpoint_subdivide_iterations(&mut mesh, 2);
+
+        assert!(all_stats.is_ok());
+
+        let all_stats = all_stats.unwrap();
+
+        assert_eq!(all_stats.len(), 2);
+
+        // After 2 iterations: 4 -> 16 -> 64
+        assert_eq!(mesh.n_active_faces(), 64);
+
+        println!("Midpoint iterations: {} stats collected", all_stats.len());
+    }
+
+    #[test]
+    fn test_midpoint_vertex_positions() {
+        let mut mesh = create_simple_triangle();
+
+        let original_v0 = mesh.point(VertexHandle::new(0)).unwrap();
+        let original_v1 = mesh.point(VertexHandle::new(1)).unwrap();
+        let original_v2 = mesh.point(VertexHandle::new(2)).unwrap();
+
+        midpoint_subdivide(&mut mesh).unwrap();
+
+        // Check original vertex positions are unchanged
+        // (Midpoint doesn't smooth original vertices)
+        let v0_after = mesh.point(VertexHandle::new(0)).unwrap();
+        let v1_after = mesh.point(VertexHandle::new(1)).unwrap();
+        let v2_after = mesh.point(VertexHandle::new(2)).unwrap();
+
+        assert_eq!(v0_after, original_v0, "Original vertex should not move");
+        assert_eq!(v1_after, original_v1, "Original vertex should not move");
+        assert_eq!(v2_after, original_v2, "Original vertex should not move");
+
+        // Check midpoint positions
+        // Edge 0-1 midpoint should be at (0.5, 0, 0)
+        let midpoint_01 = mesh.point(VertexHandle::new(3)).unwrap();
+        let expected_midpoint_01 = (original_v0 + original_v1) * 0.5;
+        assert!(
+            (midpoint_01 - expected_midpoint_01).length() < 0.001,
+            "Midpoint should be at edge center"
+        );
     }
 }

@@ -926,6 +926,172 @@ impl RustMesh {
         }
     }
 
+    /// Flip an edge in a triangular mesh.
+    ///
+    /// This operation rotates an edge by flipping it to connect the opposite
+    /// vertices of the two adjacent triangles. The edge must have exactly two
+    /// adjacent triangular faces.
+    ///
+    /// Before flip:
+    /// ```
+    ///     v2                v2
+    ///     /|\              / | \
+    ///    / | \            /  |  \
+    ///   /  |  \          /   |   \
+    ///  v0--e--v1   =>   v0---+---v1
+    ///   \  |  /          \   |   /
+    ///    \ | /            \  |  /
+    ///     \|/              \ | /
+    ///     v3                v3
+    /// ```
+    ///
+    /// After flip:
+    /// ```
+    ///     v2                v2
+    ///     / \              /|\
+    ///    /   \            / | \
+    ///   /     \          /  |  \
+    ///  v0--e---v1   =>   v0--+--v1
+    ///   \     /          \  |  /
+    ///    \   /            \ | /
+    ///     \ /              \|/
+    ///     v3                v3
+    /// ```
+    ///
+    /// The edge `e` now connects v2 and v3 instead of v0 and v1.
+    ///
+    /// # Arguments
+    /// * `eh` - The edge to flip
+    ///
+    /// # Returns
+    /// * `Ok(())` if the flip was successful
+    /// * `Err(&'static str)` if the flip is not possible
+    ///
+    /// # Conditions for flipping
+    /// 1. The edge must have exactly two adjacent faces (not a boundary edge)
+    /// 2. Both adjacent faces must be triangles
+    /// 3. The resulting edge must not already exist (would create a non-manifold)
+    pub fn flip_edge(&mut self, eh: EdgeHandle) -> Result<(), &'static str> {
+        // Get the two halfedges of the edge
+        let h0 = self.edge_halfedge_handle(eh, 0);
+        let h1 = self.edge_halfedge_handle(eh, 1);
+
+        // Get the two faces adjacent to this edge
+        let fh0 = self.face_handle(h0);
+        let fh1 = self.face_handle(h1);
+
+        // Both faces must exist (no boundary edge)
+        let fh0 = fh0.ok_or("Cannot flip boundary edge")?;
+        let fh1 = fh1.ok_or("Cannot flip boundary edge")?;
+
+        // Check that both faces are triangles
+        let verts0 = self.face_vertices_vec(fh0);
+        let verts1 = self.face_vertices_vec(fh1);
+
+        if verts0.len() != 3 || verts1.len() != 3 {
+            return Err("Can only flip edge between two triangles");
+        }
+
+        // Get the vertices
+        // h0: v0 -> v1 (edge from v0 to v1)
+        // h1: v1 -> v0 (opposite direction)
+        let v0 = self.from_vertex_handle(h0);
+        let v1 = self.to_vertex_handle(h0);
+
+        // Get the opposite vertices in the two triangles
+        // For triangle (v0, v1, v2), v2 is opposite to edge h0
+        // For triangle (v1, v0, v3), v3 is opposite to edge h1
+        let h0_next = self.next_halfedge_handle(h0);
+        let h1_next = self.next_halfedge_handle(h1);
+
+        let v2 = self.to_vertex_handle(h0_next);
+        let v3 = self.to_vertex_handle(h1_next);
+
+        // Check that the new edge (v2, v3) doesn't already exist
+        // This would create a non-manifold configuration
+        if self.vertices_connected(v2, v3) {
+            return Err("Cannot flip: resulting edge already exists");
+        }
+
+        // Get more halfedge handles we need
+        let h0_prev = self.prev_halfedge_handle(h0);
+        let h1_prev = self.prev_halfedge_handle(h1);
+        let h0_next_next = self.next_halfedge_handle(h0_next);
+        let h1_next_next = self.next_halfedge_handle(h1_next);
+
+        // Now perform the flip:
+        // The edge now connects v2 to v3 instead of v0 to v1
+        //
+        // We need to rewire the halfedge connections:
+        // h0 now goes from v2 to v3
+        // h1 now goes from v3 to v2
+
+        // Set the new vertex endpoints
+        self.kernel.set_halfedge_to_vertex(h0, v3);
+        self.kernel.set_halfedge_to_vertex(h1, v2);
+
+        // Rewire the next/prev pointers
+        // Face 0 (originally v0-v1-v2, now v0-v3-v2):
+        // h0_prev -> h1_next -> h0 (forms face 0)
+        self.kernel.set_next_halfedge_handle(h0_prev, h1_next);
+        self.kernel.set_next_halfedge_handle(h1_next, h0);
+        self.kernel.set_next_halfedge_handle(h0, h0_prev);
+
+        // Face 1 (originally v1-v0-v3, now v1-v2-v3):
+        // h1_prev -> h0_next -> h1 (forms face 1)
+        self.kernel.set_next_halfedge_handle(h1_prev, h0_next);
+        self.kernel.set_next_halfedge_handle(h0_next, h1);
+        self.kernel.set_next_halfedge_handle(h1, h1_prev);
+
+        // Update face handles
+        // h1_next now belongs to face 0
+        self.kernel.set_face_handle(h1_next, fh0);
+        // h0_next now belongs to face 1
+        self.kernel.set_face_handle(h0_next, fh1);
+
+        // Update vertex halfedge handles
+        // v0's outgoing halfedge might have been h0, update if needed
+        if let Some(vh) = self.kernel.halfedge_handle(v0) {
+            if vh == h0 {
+                self.kernel.set_halfedge_handle(v0, h0_prev);
+            }
+        }
+        // v1's outgoing halfedge might have been h1, update if needed
+        if let Some(vh) = self.kernel.halfedge_handle(v1) {
+            if vh == h1 {
+                self.kernel.set_halfedge_handle(v1, h1_prev);
+            }
+        }
+        // v2's outgoing halfedge should point to the flipped edge
+        self.kernel.set_halfedge_handle(v2, h1);
+        // v3's outgoing halfedge should point to the flipped edge
+        self.kernel.set_halfedge_handle(v3, h0);
+
+        // Update face halfedge handles
+        self.kernel.set_face_halfedge_handle(fh0, Some(h0));
+        self.kernel.set_face_halfedge_handle(fh1, Some(h1));
+
+        Ok(())
+    }
+
+    /// Check if two vertices are connected by an edge
+    fn vertices_connected(&self, v0: VertexHandle, v1: VertexHandle) -> bool {
+        if let Some(heh) = self.kernel.halfedge_handle(v0) {
+            let mut current = heh;
+            loop {
+                if self.to_vertex_handle(current) == v1 {
+                    return true;
+                }
+                let opp = self.opposite_halfedge_handle(current);
+                current = self.next_halfedge_handle(opp);
+                if current == heh || !current.is_valid() {
+                    break;
+                }
+            }
+        }
+        false
+    }
+
     /// Redirect all halfedges that reference from_vertex to reference to_vertex
     fn redirect_halfedges(
         &mut self,

@@ -1,0 +1,636 @@
+//! # Isotropic Remeshing
+//!
+//! Implementation of the isotropic remeshing algorithm by Botsch & Kobbelt.
+//!
+//! The algorithm produces a mesh with approximately uniform edge lengths
+//! while preserving the shape and topology of the original mesh.
+//!
+//! ## Algorithm Overview
+//!
+//! 1. **Split long edges**: Edges longer than 4/3 * target are split
+//! 2. **Collapse short edges**: Edges shorter than 4/5 * target are collapsed
+//! 3. **Flip edges for valence**: Flip edges to improve vertex valence
+//! 4. **Tangential smoothing**: Smooth vertices while preserving shape
+//!
+//! ## References
+//!
+//! - Botsch, M., & Kobbelt, L. (2004). "A Remeshing Approach to Multiresolution Modeling".
+//!   Symposium on Geometry Processing.
+
+use crate::handles::{EdgeHandle, HalfedgeHandle, VertexHandle};
+use crate::smoother::{tangential_smooth, SmootherConfig};
+use crate::RustMesh;
+
+/// Edge length statistics for a mesh
+#[derive(Debug, Clone)]
+pub struct EdgeLengthStats {
+    /// Minimum edge length
+    pub min_length: f32,
+    /// Maximum edge length
+    pub max_length: f32,
+    /// Mean edge length
+    pub mean_length: f32,
+    /// Number of edges
+    pub n_edges: usize,
+}
+
+/// Compute edge length statistics for a mesh
+pub fn edge_length_statistics(mesh: &RustMesh) -> EdgeLengthStats {
+    let n_edges = mesh.n_edges();
+
+    if n_edges == 0 {
+        return EdgeLengthStats {
+            min_length: 0.0,
+            max_length: 0.0,
+            mean_length: 0.0,
+            n_edges: 0,
+        };
+    }
+
+    let mut min_length = f32::MAX;
+    let mut max_length = 0.0f32;
+    let mut total_length = 0.0f32;
+
+    for i in 0..n_edges {
+        let eh = EdgeHandle::new(i as u32);
+        if mesh.is_edge_deleted(eh) {
+            continue;
+        }
+
+        let h0 = mesh.edge_halfedge_handle(eh, 0);
+        let v0 = mesh.from_vertex_handle(h0);
+        let v1 = mesh.to_vertex_handle(h0);
+
+        if let (Some(p0), Some(p1)) = (mesh.point(v0), mesh.point(v1)) {
+            let length = (p1 - p0).length();
+            min_length = min_length.min(length);
+            max_length = max_length.max(length);
+            total_length += length;
+        }
+    }
+
+    let active_edges = mesh.n_edges(); // Approximation; could be refined
+
+    EdgeLengthStats {
+        min_length: if min_length == f32::MAX { 0.0 } else { min_length },
+        max_length,
+        mean_length: if active_edges > 0 {
+            total_length / active_edges as f32
+        } else {
+            0.0
+        },
+        n_edges,
+    }
+}
+
+/// Split all edges longer than a threshold
+///
+/// For each edge longer than `max_length`, insert a new vertex at the midpoint
+/// and split the adjacent faces.
+///
+/// # Returns
+/// Number of edges split
+pub fn split_long_edges(mesh: &mut RustMesh, max_length: f32) -> usize {
+    let mut split_count = 0;
+
+    // Collect edges to split (we can't modify while iterating)
+    let mut edges_to_split: Vec<(EdgeHandle, glam::Vec3)> = Vec::new();
+
+    for i in 0..mesh.n_edges() {
+        let eh = EdgeHandle::new(i as u32);
+        if mesh.is_edge_deleted(eh) {
+            continue;
+        }
+
+        let h0 = mesh.edge_halfedge_handle(eh, 0);
+        let v0 = mesh.from_vertex_handle(h0);
+        let v1 = mesh.to_vertex_handle(h0);
+
+        if let (Some(p0), Some(p1)) = (mesh.point(v0), mesh.point(v1)) {
+            let length = (p1 - p0).length();
+            if length > max_length {
+                let midpoint = (p0 + p1) * 0.5;
+                edges_to_split.push((eh, midpoint));
+            }
+        }
+    }
+
+    // Split each edge
+    for (eh, midpoint) in edges_to_split {
+        // Use the split_edge functionality
+        // Note: The actual edge split modifies the mesh topology
+        // For now, we'll add a vertex at the midpoint
+        // A full implementation would need to update the connectivity
+
+        let h0 = mesh.edge_halfedge_handle(eh, 0);
+        let v0 = mesh.from_vertex_handle(h0);
+        let v1 = mesh.to_vertex_handle(h0);
+
+        // Add new vertex at midpoint
+        let new_v = mesh.add_vertex(midpoint);
+
+        // Get adjacent faces
+        let fh0 = mesh.face_handle(h0);
+        let h1 = mesh.opposite_halfedge_handle(h0);
+        let fh1 = mesh.face_handle(h1);
+
+        // Delete original faces
+        if let Some(fh) = fh0 {
+            mesh.delete_face(fh);
+        }
+        if let Some(fh) = fh1 {
+            mesh.delete_face(fh);
+        }
+
+        // Get opposite vertices
+        let h0_next = mesh.next_halfedge_handle(h0);
+        let h1_next = mesh.next_halfedge_handle(h1);
+        let v2 = mesh.to_vertex_handle(h0_next);
+        let v3 = mesh.to_vertex_handle(h1_next);
+
+        // Create new triangles
+        // Original: (v0, v1, v2) and (v1, v0, v3)
+        // New: (v0, new_v, v2), (new_v, v1, v2), (v1, new_v, v3), (new_v, v0, v3)
+        if let (Some(p2), Some(p3)) = (mesh.point(v2), mesh.point(v3)) {
+            // Only create faces if vertices are valid
+            if p2 != glam::Vec3::ZERO || p3 != glam::Vec3::ZERO {
+                mesh.add_face(&[v0, new_v, v2]);
+                mesh.add_face(&[new_v, v1, v2]);
+                mesh.add_face(&[v1, new_v, v3]);
+                mesh.add_face(&[new_v, v0, v3]);
+            }
+        }
+
+        split_count += 1;
+    }
+
+    split_count
+}
+
+/// Collapse all edges shorter than a threshold
+///
+/// For each edge shorter than `min_length`, collapse it to one endpoint.
+///
+/// # Returns
+/// Number of edges collapsed
+pub fn collapse_short_edges(mesh: &mut RustMesh, min_length: f32) -> usize {
+    let mut collapse_count = 0;
+
+    // Collect edges to collapse
+    let mut edges_to_collapse: Vec<EdgeHandle> = Vec::new();
+
+    for i in 0..mesh.n_edges() {
+        let eh = EdgeHandle::new(i as u32);
+        if mesh.is_edge_deleted(eh) {
+            continue;
+        }
+
+        let h0 = mesh.edge_halfedge_handle(eh, 0);
+        let v0 = mesh.from_vertex_handle(h0);
+        let v1 = mesh.to_vertex_handle(h0);
+
+        if let (Some(p0), Some(p1)) = (mesh.point(v0), mesh.point(v1)) {
+            let length = (p1 - p0).length();
+            if length < min_length {
+                edges_to_collapse.push(eh);
+            }
+        }
+    }
+
+    // Collapse each edge
+    for eh in edges_to_collapse {
+        let h0 = mesh.edge_halfedge_handle(eh, 0);
+
+        // Check if collapse is legal
+        if mesh.is_collapse_ok(h0) {
+            // Move the vertex to midpoint for smoother result
+            let v0 = mesh.from_vertex_handle(h0);
+            let v1 = mesh.to_vertex_handle(h0);
+
+            if let (Some(p0), Some(p1)) = (mesh.point(v0), mesh.point(v1)) {
+                let midpoint = (p0 + p1) * 0.5;
+                mesh.set_point(v0, midpoint);
+            }
+
+            // Collapse the edge
+            if mesh.collapse(h0).is_ok() {
+                collapse_count += 1;
+            }
+        }
+    }
+
+    collapse_count
+}
+
+/// Get the valence (number of incident edges) of a vertex
+pub fn vertex_valence(mesh: &RustMesh, vh: VertexHandle) -> usize {
+    let mut count = 0;
+
+    if let Some(heh) = mesh.halfedge_handle(vh) {
+        let mut current = heh;
+        loop {
+            count += 1;
+            let opp = mesh.opposite_halfedge_handle(current);
+            current = mesh.next_halfedge_handle(opp);
+            if current == heh || !current.is_valid() {
+                break;
+            }
+        }
+    }
+
+    count
+}
+
+/// Compute optimal valence for a vertex
+///
+/// For interior vertices: 6
+/// For boundary vertices: 4
+fn optimal_valence(mesh: &RustMesh, vh: VertexHandle) -> usize {
+    if is_boundary_vertex(mesh, vh) {
+        4
+    } else {
+        6
+    }
+}
+
+/// Check if a vertex is on the boundary
+fn is_boundary_vertex(mesh: &RustMesh, vh: VertexHandle) -> bool {
+    if let Some(heh) = mesh.halfedge_handle(vh) {
+        let mut current = heh;
+        loop {
+            if mesh.is_boundary(current) {
+                return true;
+            }
+            let opp = mesh.opposite_halfedge_handle(current);
+            if mesh.is_boundary(opp) {
+                return true;
+            }
+            current = mesh.next_halfedge_handle(opp);
+            if current == heh || !current.is_valid() {
+                break;
+            }
+        }
+    }
+    false
+}
+
+/// Flip edges to improve vertex valence
+///
+/// For each edge, check if flipping would improve the valence of its endpoints.
+/// An edge is flipped if it reduces the deviation from optimal valence.
+///
+/// # Returns
+/// Number of edges flipped
+pub fn flip_edges_for_valence(mesh: &mut RustMesh) -> usize {
+    let mut flip_count = 0;
+
+    // Collect potential flips
+    let mut edges_to_check: Vec<EdgeHandle> = Vec::new();
+
+    for i in 0..mesh.n_edges() {
+        let eh = EdgeHandle::new(i as u32);
+        if mesh.is_edge_deleted(eh) {
+            continue;
+        }
+        edges_to_check.push(eh);
+    }
+
+    for eh in edges_to_check {
+        // Check if flip would improve valence
+        if should_flip_for_valence(mesh, eh) {
+            if mesh.flip_edge(eh).is_ok() {
+                flip_count += 1;
+            }
+        }
+    }
+
+    flip_count
+}
+
+/// Check if flipping an edge would improve valence
+fn should_flip_for_valence(mesh: &RustMesh, eh: EdgeHandle) -> bool {
+    let h0 = mesh.edge_halfedge_handle(eh, 0);
+
+    // Don't flip boundary edges
+    if mesh.is_boundary(h0) {
+        return false;
+    }
+
+    let h1 = mesh.opposite_halfedge_handle(h0);
+    if mesh.is_boundary(h1) {
+        return false;
+    }
+
+    // Get the four vertices involved
+    let v0 = mesh.from_vertex_handle(h0);
+    let v1 = mesh.to_vertex_handle(h0);
+
+    let h0_next = mesh.next_halfedge_handle(h0);
+    let h1_next = mesh.next_halfedge_handle(h1);
+    let v2 = mesh.to_vertex_handle(h0_next);
+    let v3 = mesh.to_vertex_handle(h1_next);
+
+    // Compute current valence deviation
+    let val0 = vertex_valence(mesh, v0);
+    let val1 = vertex_valence(mesh, v1);
+    let val2 = vertex_valence(mesh, v2);
+    let val3 = vertex_valence(mesh, v3);
+
+    let opt0 = optimal_valence(mesh, v0);
+    let opt1 = optimal_valence(mesh, v1);
+    let opt2 = optimal_valence(mesh, v2);
+    let opt3 = optimal_valence(mesh, v3);
+
+    // Current deviation
+    let current_deviation = (val0 as i32 - opt0 as i32).abs()
+        + (val1 as i32 - opt1 as i32).abs()
+        + (val2 as i32 - opt2 as i32).abs()
+        + (val3 as i32 - opt3 as i32).abs();
+
+    // After flip: v0 and v1 lose one incident edge, v2 and v3 gain one
+    let new_val0 = val0 - 1;
+    let new_val1 = val1 - 1;
+    let new_val2 = val2 + 1;
+    let new_val3 = val3 + 1;
+
+    let new_deviation = (new_val0 as i32 - opt0 as i32).abs()
+        + (new_val1 as i32 - opt1 as i32).abs()
+        + (new_val2 as i32 - opt2 as i32).abs()
+        + (new_val3 as i32 - opt3 as i32).abs();
+
+    new_deviation < current_deviation
+}
+
+/// Isotropic remeshing configuration
+#[derive(Debug, Clone)]
+pub struct RemeshingConfig {
+    /// Target edge length
+    pub target_edge_length: f32,
+    /// Number of iterations
+    pub iterations: usize,
+    /// Enable edge splitting
+    pub enable_split: bool,
+    /// Enable edge collapse
+    pub enable_collapse: bool,
+    /// Enable edge flipping
+    pub enable_flip: bool,
+    /// Enable tangential smoothing
+    pub enable_smooth: bool,
+}
+
+impl Default for RemeshingConfig {
+    fn default() -> Self {
+        Self {
+            target_edge_length: 0.1,
+            iterations: 10,
+            enable_split: true,
+            enable_collapse: true,
+            enable_flip: true,
+            enable_smooth: true,
+        }
+    }
+}
+
+/// Result of isotropic remeshing
+#[derive(Debug, Clone)]
+pub struct RemeshingResult {
+    /// Number of edges split
+    pub split_count: usize,
+    /// Number of edges collapsed
+    pub collapse_count: usize,
+    /// Number of edges flipped
+    pub flip_count: usize,
+    /// Final edge length statistics
+    pub final_stats: EdgeLengthStats,
+}
+
+/// Perform isotropic remeshing
+///
+/// This implements the Botsch & Kobbelt algorithm for isotropic remeshing:
+/// 1. Split edges longer than 4/3 * target
+/// 2. Collapse edges shorter than 4/5 * target
+/// 3. Flip edges to improve valence
+/// 4. Apply tangential smoothing
+///
+/// # Arguments
+/// * `mesh` - The mesh to remesh (modified in place)
+/// * `config` - Remeshing configuration
+///
+/// # Returns
+/// Statistics about the remeshing operation
+pub fn isotropic_remesh(mesh: &mut RustMesh, config: RemeshingConfig) -> RemeshingResult {
+    let target = config.target_edge_length;
+    let max_length = target * 4.0 / 3.0;
+    let min_length = target * 4.0 / 5.0;
+
+    let mut total_split = 0;
+    let mut total_collapse = 0;
+    let mut total_flip = 0;
+
+    for _iter in 0..config.iterations {
+        // Step 1: Split long edges
+        if config.enable_split {
+            let split = split_long_edges(mesh, max_length);
+            total_split += split;
+        }
+
+        // Step 2: Collapse short edges
+        if config.enable_collapse {
+            let collapse = collapse_short_edges(mesh, min_length);
+            total_collapse += collapse;
+        }
+
+        // Step 3: Flip edges for valence
+        if config.enable_flip {
+            let flip = flip_edges_for_valence(mesh);
+            total_flip += flip;
+        }
+
+        // Step 4: Tangential smoothing
+        if config.enable_smooth {
+            let smooth_config = SmootherConfig {
+                iterations: 1,
+                strength: 0.5,
+                uniform: false,
+                fixed_boundary: true,
+            };
+            tangential_smooth(mesh, smooth_config);
+        }
+    }
+
+    // Run garbage collection to clean up deleted elements
+    mesh.garbage_collection();
+
+    let final_stats = edge_length_statistics(mesh);
+
+    RemeshingResult {
+        split_count: total_split,
+        collapse_count: total_collapse,
+        flip_count: total_flip,
+        final_stats,
+    }
+}
+
+/// Equalize edge lengths through iterative remeshing
+///
+/// This is a simplified version that focuses on achieving uniform edge lengths
+/// without changing the mesh topology significantly.
+pub fn equalize_edge_lengths(mesh: &mut RustMesh, target_length: f32, iterations: usize) {
+    let config = RemeshingConfig {
+        target_edge_length: target_length,
+        iterations,
+        enable_split: true,
+        enable_collapse: true,
+        enable_flip: true,
+        enable_smooth: true,
+    };
+
+    isotropic_remesh(mesh, config);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::generate_sphere;
+
+    #[test]
+    fn test_edge_length_statistics() {
+        let mesh = generate_sphere(1.0, 16, 16);
+        let stats = edge_length_statistics(&mesh);
+
+        println!("Edge length stats: {:?}", stats);
+
+        assert!(stats.n_edges > 0);
+        assert!(stats.min_length > 0.0);
+        assert!(stats.max_length >= stats.min_length);
+        assert!(stats.mean_length >= stats.min_length);
+        assert!(stats.mean_length <= stats.max_length);
+    }
+
+    #[test]
+    fn test_vertex_valence() {
+        let mesh = generate_sphere(1.0, 16, 16);
+
+        // For a sphere mesh, interior vertices should have valence 6 (approximately)
+        // and vertices at poles might have different valence
+        let mut valences: Vec<usize> = Vec::new();
+
+        for vh in mesh.vertices() {
+            valences.push(vertex_valence(&mesh, vh));
+        }
+
+        println!("Valence distribution: {:?}", valences.iter().sum::<usize>() / valences.len());
+
+        // Most vertices should have valence around 4-8
+        let avg_valence: f32 = valences.iter().sum::<usize>() as f32 / valences.len() as f32;
+        assert!(avg_valence > 0.0 && avg_valence < 20.0);
+    }
+
+    #[test]
+    fn test_isotropic_remesh_sphere() {
+        let mut mesh = generate_sphere(1.0, 8, 8);
+
+        let original_stats = edge_length_statistics(&mesh);
+        println!("Original edge lengths: min={}, max={}, mean={}",
+            original_stats.min_length, original_stats.max_length, original_stats.mean_length);
+
+        let config = RemeshingConfig {
+            target_edge_length: 0.3,
+            iterations: 5,
+            enable_split: true,
+            enable_collapse: true,
+            enable_flip: true,
+            enable_smooth: true,
+        };
+
+        let result = isotropic_remesh(&mut mesh, config);
+
+        println!("Remeshing result: split={}, collapse={}, flip={}",
+            result.split_count, result.collapse_count, result.flip_count);
+        println!("Final edge lengths: min={}, max={}, mean={}",
+            result.final_stats.min_length, result.final_stats.max_length, result.final_stats.mean_length);
+
+        // Mesh should still have faces
+        assert!(mesh.n_active_faces() > 0);
+    }
+
+    #[test]
+    fn test_flip_edge_basic() {
+        let mut mesh = RustMesh::new();
+
+        // Create two triangles sharing an edge
+        let v0 = mesh.add_vertex(glam::vec3(0.0, 0.0, 0.0));
+        let v1 = mesh.add_vertex(glam::vec3(1.0, 0.0, 0.0));
+        let v2 = mesh.add_vertex(glam::vec3(0.5, 1.0, 0.0));
+        let v3 = mesh.add_vertex(glam::vec3(0.5, -1.0, 0.0));
+
+        mesh.add_face(&[v0, v1, v2]);
+        mesh.add_face(&[v0, v3, v1]);
+
+        // Get the edge between v0 and v1
+        let eh = find_edge(&mesh, v0, v1).expect("Edge should exist");
+
+        // Flip the edge
+        let result = mesh.flip_edge(eh);
+        assert!(result.is_ok(), "Edge flip should succeed");
+
+        // After flip, the edge should now connect v2 and v3
+        // Verify by checking valence
+        assert_eq!(vertex_valence(&mesh, v0), 2);
+        assert_eq!(vertex_valence(&mesh, v1), 2);
+        assert_eq!(vertex_valence(&mesh, v2), 3);
+        assert_eq!(vertex_valence(&mesh, v3), 3);
+    }
+
+    /// Helper function to find an edge between two vertices
+    fn find_edge(mesh: &RustMesh, v0: VertexHandle, v1: VertexHandle) -> Option<EdgeHandle> {
+        for i in 0..mesh.n_edges() {
+            let eh = EdgeHandle::new(i as u32);
+            if mesh.is_edge_deleted(eh) {
+                continue;
+            }
+            let h0 = mesh.edge_halfedge_handle(eh, 0);
+            let from = mesh.from_vertex_handle(h0);
+            let to = mesh.to_vertex_handle(h0);
+            if (from == v0 && to == v1) || (from == v1 && to == v0) {
+                return Some(eh);
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn test_flip_boundary_edge_fails() {
+        let mut mesh = RustMesh::new();
+
+        // Create a single triangle (boundary edges)
+        let v0 = mesh.add_vertex(glam::vec3(0.0, 0.0, 0.0));
+        let v1 = mesh.add_vertex(glam::vec3(1.0, 0.0, 0.0));
+        let v2 = mesh.add_vertex(glam::vec3(0.5, 1.0, 0.0));
+
+        mesh.add_face(&[v0, v1, v2]);
+
+        // Get the edge between v0 and v1 (this is a boundary edge)
+        let eh = find_edge(&mesh, v0, v1).expect("Edge should exist");
+
+        // Flipping a boundary edge should fail
+        let result = mesh.flip_edge(eh);
+        assert!(result.is_err(), "Flipping boundary edge should fail");
+    }
+
+    #[test]
+    fn test_optimal_valence() {
+        let mut mesh = RustMesh::new();
+
+        let v0 = mesh.add_vertex(glam::vec3(0.0, 0.0, 0.0));
+        let v1 = mesh.add_vertex(glam::vec3(1.0, 0.0, 0.0));
+        let v2 = mesh.add_vertex(glam::vec3(0.5, 1.0, 0.0));
+
+        mesh.add_face(&[v0, v1, v2]);
+
+        // All vertices are boundary vertices in a single triangle
+        assert_eq!(optimal_valence(&mesh, v0), 4);
+        assert_eq!(optimal_valence(&mesh, v1), 4);
+        assert_eq!(optimal_valence(&mesh, v2), 4);
+    }
+}

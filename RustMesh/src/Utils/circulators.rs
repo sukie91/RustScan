@@ -431,6 +431,144 @@ impl<'a> RustMesh {
     }
 }
 
+// ============================================================================
+// Additional Circulators (E6)
+// ============================================================================
+
+/// Halfedge-Halfedge Circulator: Visit halfedges around a halfedge
+///
+/// This visits halfedges that are connected to the current halfedge through
+/// shared vertices or shared faces.
+pub struct HalfedgeHalfedgeCirculator<'a> {
+    mesh: &'a RustMesh,
+    center_heh: HalfedgeHandle,
+    /// Adjacent halfedges to visit
+    adjacent: Vec<HalfedgeHandle>,
+    current_idx: usize,
+}
+
+impl<'a> Iterator for HalfedgeHalfedgeCirculator<'a> {
+    type Item = HalfedgeHandle;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.current_idx >= self.adjacent.len() {
+            return None;
+        }
+        let heh = self.adjacent[self.current_idx];
+        self.current_idx += 1;
+        Some(heh)
+    }
+}
+
+impl<'a> RustMesh {
+    /// Get halfedges adjacent to a given halfedge
+    ///
+    /// Adjacent halfedges include:
+    /// - The opposite halfedge
+    /// - Halfedges sharing the same face (prev/next)
+    /// - Other outgoing halfedges from the same vertex
+    pub fn halfedge_halfedges(&'a self, heh: HalfedgeHandle) -> Option<HalfedgeHalfedgeCirculator<'a>> {
+        let mut adjacent = Vec::new();
+
+        // Add opposite halfedge
+        let opp = self.opposite_halfedge_handle(heh);
+        adjacent.push(opp);
+
+        // Add prev and next in the same face (if face exists)
+        if let Some(_fh) = self.face_handle(heh) {
+            let prev = self.prev_halfedge_handle(heh);
+            let next = self.next_halfedge_handle(heh);
+            if prev != heh && prev != opp {
+                adjacent.push(prev);
+            }
+            if next != heh && next != opp {
+                adjacent.push(next);
+            }
+        }
+
+        // Add other outgoing halfedges from the same vertex (from_vertex of heh)
+        let from_v = self.from_vertex_handle(heh);
+        if let Some(vh_iter) = self.vertex_halfedges(from_v) {
+            for other_heh in vh_iter {
+                if other_heh != heh && other_heh != opp && !adjacent.contains(&other_heh) {
+                    adjacent.push(other_heh);
+                }
+            }
+        }
+
+        // Limit max iterations for safety
+        let max_iterations = self.n_halfedges().max(1000);
+        adjacent.truncate(max_iterations);
+
+        Some(HalfedgeHalfedgeCirculator {
+            mesh: self,
+            center_heh: heh,
+            adjacent,
+            current_idx: 0,
+        })
+    }
+}
+
+/// Edge-Edge Circulator: Visit edges around an edge
+///
+/// This visits edges that share a vertex with the given edge.
+pub struct EdgeEdgeCirculator<'a> {
+    mesh: &'a RustMesh,
+    adjacent: Vec<EdgeHandle>,
+    current_idx: usize,
+}
+
+impl<'a> Iterator for EdgeEdgeCirculator<'a> {
+    type Item = EdgeHandle;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.current_idx >= self.adjacent.len() {
+            return None;
+        }
+        let eh = self.adjacent[self.current_idx];
+        self.current_idx += 1;
+        Some(eh)
+    }
+}
+
+impl<'a> RustMesh {
+    /// Get edges adjacent to a given edge (sharing a vertex)
+    pub fn edge_edges(&'a self, eh: EdgeHandle) -> Option<EdgeEdgeCirculator<'a>> {
+        // Get the first halfedge for this edge
+        let heh = self.edge_halfedge_handle(eh, 0);
+
+        // Get both vertices of the edge
+        let v0 = self.from_vertex_handle(heh);
+        let v1 = self.to_vertex_handle(heh);
+
+        let mut adjacent = Vec::new();
+
+        // Add edges incident to v0
+        if let Some(vh_edges) = self.vertex_edges(v0) {
+            for other_eh in vh_edges {
+                if other_eh != eh && !adjacent.contains(&other_eh) {
+                    adjacent.push(other_eh);
+                }
+            }
+        }
+
+        // Add edges incident to v1
+        if let Some(vh_edges) = self.vertex_edges(v1) {
+            for other_eh in vh_edges {
+                if other_eh != eh && !adjacent.contains(&other_eh) {
+                    adjacent.push(other_eh);
+                }
+            }
+        }
+
+        Some(EdgeEdgeCirculator {
+            mesh: self,
+            adjacent,
+            current_idx: 0,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -696,5 +834,50 @@ mod tests {
         assert!(mesh.vertex_edges(VertexHandle::invalid()).is_none());
         assert!(mesh.face_halfedges(FaceHandle::invalid()).is_none());
         assert!(mesh.face_edges(FaceHandle::invalid()).is_none());
+    }
+
+    #[test]
+    fn test_halfedge_halfedge_circulator() {
+        let mesh = generate_tetrahedron();
+        // Get a valid halfedge from a vertex
+        let v0 = VertexHandle::new(0);
+        let heh = mesh.halfedge_handle(v0).expect("Vertex should have halfedge");
+
+        let adjacent: Vec<_> = match mesh.halfedge_halfedges(heh) {
+            Some(c) => c.collect(),
+            None => panic!("No circulator for halfedge"),
+        };
+
+        // Should include opposite halfedge and adjacent halfedges
+        println!("Adjacent halfedges to {:?}: {:?}", heh, adjacent);
+        assert!(!adjacent.is_empty(), "Should have adjacent halfedges");
+
+        // Should include the opposite
+        let opp = mesh.opposite_halfedge_handle(heh);
+        assert!(adjacent.contains(&opp), "Should include opposite halfedge");
+    }
+
+    #[test]
+    fn test_edge_edge_circulator() {
+        let mesh = generate_tetrahedron();
+        // Get a valid edge from a vertex's halfedge
+        let v0 = VertexHandle::new(0);
+        let heh = mesh.halfedge_handle(v0).expect("Vertex should have halfedge");
+        let eh = mesh.edge_handle(heh);
+
+        let adjacent: Vec<_> = match mesh.edge_edges(eh) {
+            Some(c) => c.collect(),
+            None => panic!("No circulator for edge"),
+        };
+
+        println!("Adjacent edges to {:?}: {:?}", eh, adjacent);
+
+        // In a tetrahedron, each edge connects 2 vertices
+        // Each vertex has 3 edges, so an edge should have (3-1) + (3-1) = 4 adjacent edges
+        // But some might overlap, so we expect at least 2 and at most 4
+        assert!(!adjacent.is_empty(), "Should have adjacent edges");
+
+        // The edge itself should not be in the list
+        assert!(!adjacent.contains(&eh), "Edge should not include itself");
     }
 }
