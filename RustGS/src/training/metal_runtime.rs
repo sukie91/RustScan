@@ -206,7 +206,7 @@ struct BwdLossScalars {
     float color_scale;
     float depth_scale;
     float ssim_scale;
-    float _pad;
+    float alpha_scale;
 };
 
 kernel void tile_backward(
@@ -307,15 +307,22 @@ kernel void tile_backward(
         const float tail_alpha = final_alpha - running_alpha - contrib;
         const float tail_depth_num = final_depth * depth_denom - running_depth_num - contrib * g.depth;
         float dl_dalpha_depth = 0.0f;
+        float dl_dalpha_alpha = 0.0f;
         if (dd_depth != 0.0f) {
             const float dnum_dalpha = transmittance * g.depth - tail_depth_num * inv_one_minus_alpha;
             const float dalpha_dalpha = transmittance - tail_alpha * inv_one_minus_alpha;
             const float ddepth_dalpha = (dnum_dalpha * depth_denom - final_depth * depth_denom * dalpha_dalpha)
                                       / (depth_denom * depth_denom);
             dl_dalpha_depth = dd_depth * ddepth_dalpha;
+            if (loss_scalars.alpha_scale > 0.0f) {
+                dl_dalpha_alpha = loss_scalars.alpha_scale * dalpha_dalpha;
+            }
+        } else if (loss_scalars.alpha_scale > 0.0f) {
+            const float dalpha_dalpha = transmittance - tail_alpha * inv_one_minus_alpha;
+            dl_dalpha_alpha = loss_scalars.alpha_scale * dalpha_dalpha;
         }
 
-        const float dl_dalpha_total = dl_dalpha_color + dl_dalpha_depth;
+        const float dl_dalpha_total = dl_dalpha_color + dl_dalpha_depth + dl_dalpha_alpha;
         const float dl_dz_direct = dd_depth * contrib / depth_denom;
 
         // Color gradient: dL/dc_i = T_i * alpha_i * dL/dC_p
@@ -2372,6 +2379,7 @@ impl MetalRuntime {
         color_scale: f32,
         depth_scale: f32,
         ssim_scale: f32,
+        alpha_scale: f32,
     ) -> candle_core::Result<()> {
         self.write_slice(MetalBufferSlot::TargetColor, target_color)?;
         self.write_slice(MetalBufferSlot::TargetDepth, target_depth)?;
@@ -2381,7 +2389,7 @@ impl MetalRuntime {
             color: f32,
             depth: f32,
             ssim: f32,
-            _pad: f32,
+            alpha: f32,
         }
         self.write_struct(
             MetalBufferSlot::LossScalars,
@@ -2389,7 +2397,7 @@ impl MetalRuntime {
                 color: color_scale,
                 depth: depth_scale,
                 ssim: ssim_scale,
-                _pad: 0.0,
+                alpha: alpha_scale,
             },
         )
     }

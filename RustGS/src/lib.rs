@@ -64,7 +64,8 @@ pub use crate::training::{
 };
 #[cfg(feature = "gpu")]
 pub use crate::training::{
-    estimate_chunk_capacity, ChunkCapacityDisposition, ChunkCapacityEstimate,
+    estimate_chunk_capacity, last_metal_training_telemetry, ChunkCapacityDisposition,
+    ChunkCapacityEstimate, LiteGsOptimizerLrs, LiteGsTrainingTelemetry,
 };
 pub use crate::training::{
     materialize_chunk_dataset, plan_spatial_chunks, ChunkBounds, ChunkBoundsSource,

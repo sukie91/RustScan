@@ -233,6 +233,7 @@ fn main() -> anyhow::Result<()> {
                 let train_start = std::time::Instant::now();
                 let scene = rustgs::train_from_slam(&slam_output, &config)?;
                 let training_elapsed = train_start.elapsed();
+                let training_telemetry = rustgs::last_metal_training_telemetry();
                 log::info!("Trained {} Gaussians", scene.len());
 
                 // Save scene - convert Gaussian3D to array-based Gaussian for PLY export
@@ -251,7 +252,10 @@ fn main() -> anyhow::Result<()> {
                     .collect();
                 let metadata = rustgs::SceneMetadata {
                     iterations: config.iterations,
-                    final_loss: 0.0,
+                    final_loss: training_telemetry
+                        .as_ref()
+                        .and_then(|telemetry| telemetry.loss_terms.total)
+                        .unwrap_or(0.0),
                     gaussian_count: gaussians.len(),
                 };
                 rustgs::save_scene_ply(&args.output, &gaussians, &metadata)?;
@@ -263,6 +267,7 @@ fn main() -> anyhow::Result<()> {
                     &slam_output,
                     &scene,
                     &config,
+                    training_telemetry.as_ref(),
                     training_elapsed,
                 ) {
                     log::warn!("failed to persist LiteGS parity report: {err}");
@@ -467,6 +472,7 @@ fn maybe_write_litegs_parity_report(
     slam_output: &rustscan_types::SlamOutput,
     scene: &rustgs::GaussianMap,
     config: &rustgs::TrainingConfig,
+    training_telemetry: Option<&rustgs::LiteGsTrainingTelemetry>,
     training_elapsed: Duration,
 ) -> anyhow::Result<()> {
     if config.training_profile != rustgs::TrainingProfile::LiteGsMacV1 {
@@ -483,7 +489,19 @@ fn maybe_write_litegs_parity_report(
     report.topology.final_gaussians = Some(scene.len());
     report.topology.export_outputs = 1;
 
-    report.metrics.active_sh_degree = Some(config.litegs.sh_degree);
+    if let Some(telemetry) = training_telemetry {
+        report.loss_terms = telemetry.loss_terms.clone();
+        report.topology.densify_events = telemetry.topology.densify_events;
+        report.topology.densify_added = telemetry.topology.densify_added;
+        report.topology.prune_events = telemetry.topology.prune_events;
+        report.topology.prune_removed = telemetry.topology.prune_removed;
+        report.topology.opacity_reset_events = telemetry.topology.opacity_reset_events;
+        report.topology.final_gaussians = telemetry.topology.final_gaussians.or(Some(scene.len()));
+        report.metrics.active_sh_degree = telemetry.active_sh_degree;
+        report.metrics.rotation_frozen = Some(telemetry.rotation_frozen);
+    } else {
+        report.metrics.active_sh_degree = Some(config.litegs.sh_degree);
+    }
     report.metrics.had_nan = scene_contains_non_finite(scene);
     report.metrics.had_oom = false;
 
@@ -499,10 +517,12 @@ fn maybe_write_litegs_parity_report(
         "LiteGsMacV1 now stores SH-compatible trainables and reports the configured SH degree, but the Metal renderer still evaluates the DC term only until full view-dependent SH shading lands."
             .to_string(),
     );
-    report.notes.push(
-        "PSNR, detailed loss-term capture, and topology-event counters are not wired into the runtime yet; those fields remain unset pending Story 17.3 completion."
-            .to_string(),
-    );
+    if training_telemetry.is_none() {
+        report.notes.push(
+            "Metal training telemetry was unavailable for this run, so the parity report fell back to config-level LiteGS metadata."
+                .to_string(),
+        );
+    }
 
     let (roundtrip_gaussians, roundtrip_metadata) = rustgs::load_scene_ply(output)?;
     report.metrics.export_roundtrip_ok = roundtrip_gaussians.len() == scene.len()
@@ -834,6 +854,7 @@ mod tests {
             &slam_output,
             &scene,
             &config,
+            None,
             Duration::from_millis(42),
         )
         .unwrap();
@@ -846,7 +867,86 @@ mod tests {
         assert_eq!(report.topology.final_gaussians, Some(1));
         assert_eq!(report.topology.export_outputs, 1);
         assert_eq!(report.metrics.active_sh_degree, Some(3));
+        assert_eq!(report.metrics.rotation_frozen, None);
         assert!(report.metrics.export_roundtrip_ok);
         assert_eq!(report.timing.training_ms, Some(42));
+    }
+
+    #[test]
+    fn litegs_parity_report_uses_runtime_telemetry_when_available() {
+        let dir = tempdir().unwrap();
+        let output = dir.path().join("scene.ply");
+        let input = std::path::Path::new("test_data/tum/rgbd_dataset_freiburg1_xyz");
+
+        let scene = rustgs::GaussianMap::from_gaussians(vec![rustgs::Gaussian3D::default()]);
+        let gaussians = vec![rustgs::Gaussian::new(
+            [0.0, 0.0, 0.0],
+            [0.01, 0.01, 0.01],
+            [1.0, 0.0, 0.0, 0.0],
+            0.5,
+            [0.2, 0.3, 0.4],
+        )];
+        rustgs::save_scene_ply(
+            &output,
+            &gaussians,
+            &rustgs::SceneMetadata {
+                iterations: 1,
+                final_loss: 0.0,
+                gaussian_count: gaussians.len(),
+            },
+        )
+        .unwrap();
+
+        let mut dataset =
+            rustgs::TrainingDataset::new(rustgs::Intrinsics::from_focal(500.0, 32, 32));
+        dataset.add_point([0.0, 0.0, 0.0], None);
+        let slam_output = rustscan_types::SlamOutput::from_dataset(dataset);
+        let config = rustgs::TrainingConfig {
+            training_profile: rustgs::TrainingProfile::LiteGsMacV1,
+            ..rustgs::TrainingConfig::default()
+        };
+        let telemetry = rustgs::LiteGsTrainingTelemetry {
+            loss_terms: rustgs::ParityLossTerms {
+                l1: Some(0.1),
+                ssim: Some(0.2),
+                scale_regularization: Some(0.3),
+                transmittance: Some(0.4),
+                depth: None,
+                total: Some(0.5),
+            },
+            topology: rustgs::ParityTopologyMetrics {
+                final_gaussians: Some(7),
+                densify_events: 2,
+                densify_added: 5,
+                prune_events: 1,
+                prune_removed: 3,
+                opacity_reset_events: 4,
+                ..Default::default()
+            },
+            active_sh_degree: Some(2),
+            rotation_frozen: true,
+            learning_rates: rustgs::LiteGsOptimizerLrs::default(),
+        };
+
+        maybe_write_litegs_parity_report(
+            input,
+            &output,
+            &slam_output,
+            &scene,
+            &config,
+            Some(&telemetry),
+            Duration::from_millis(42),
+        )
+        .unwrap();
+
+        let report_path = rustgs::default_parity_report_path(&output);
+        let report = rustgs::ParityHarnessReport::load_json(&report_path).unwrap();
+        assert_eq!(report.loss_terms.total, Some(0.5));
+        assert_eq!(report.topology.densify_events, 2);
+        assert_eq!(report.topology.densify_added, 5);
+        assert_eq!(report.topology.prune_removed, 3);
+        assert_eq!(report.metrics.active_sh_degree, Some(2));
+        assert_eq!(report.metrics.rotation_frozen, Some(true));
+        assert_eq!(report.topology.final_gaussians, Some(7));
     }
 }

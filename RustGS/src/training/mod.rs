@@ -45,7 +45,8 @@ pub use parity_harness::{
 
 #[cfg(feature = "gpu")]
 pub use metal_trainer::{
-    estimate_chunk_capacity, ChunkCapacityDisposition, ChunkCapacityEstimate, MetalTrainer,
+    estimate_chunk_capacity, last_metal_training_telemetry, ChunkCapacityDisposition,
+    ChunkCapacityEstimate, LiteGsOptimizerLrs, LiteGsTrainingTelemetry, MetalTrainer,
 };
 
 use crate::TrainingError;
@@ -742,63 +743,22 @@ fn validate_litegs_mac_v1_config(config: &TrainingConfig) -> Result<(), Training
             config.litegs.tile_size, defaults.tile_size
         ));
     }
-    if (config.litegs.reg_weight - defaults.reg_weight).abs() > f32::EPSILON {
-        unsupported.push(format!(
-            "reg_weight={} requires LiteGS loss parity work (Epic 18.4) and is not wired yet",
-            config.litegs.reg_weight
-        ));
-    }
-    if config.litegs.enable_transmittance != defaults.enable_transmittance {
-        unsupported.push(
-            "enable_transmittance=true requires LiteGS transmittance loss parity (Epic 18.4)"
-                .to_string(),
-        );
-    }
     if config.litegs.enable_depth != defaults.enable_depth {
         unsupported
             .push("enable_depth=true requires LiteGS depth loss parity (Epic 18.4)".to_string());
     }
-    if config.litegs.densify_from != defaults.densify_from {
-        unsupported.push(format!(
-            "densify_from={} requires LiteGS densify parity (Epic 20)",
-            config.litegs.densify_from
-        ));
+    if config.litegs.sh_degree == 0 {
+        unsupported
+            .push("sh_degree=0 is not supported for LiteGsMacV1; use degree >= 1".to_string());
     }
-    if config.litegs.densify_until != defaults.densify_until {
-        unsupported.push(format!(
-            "densify_until={:?} requires LiteGS densify parity (Epic 20)",
-            config.litegs.densify_until
-        ));
+    if config.litegs.densification_interval == 0 {
+        unsupported.push("densification_interval must be >= 1".to_string());
     }
-    if config.litegs.densification_interval != defaults.densification_interval {
-        unsupported.push(format!(
-            "densification_interval={} requires LiteGS densify parity (Epic 20)",
-            config.litegs.densification_interval
-        ));
+    if config.litegs.opacity_reset_interval == 0 {
+        unsupported.push("opacity_reset_interval must be >= 1".to_string());
     }
-    if config.litegs.opacity_reset_interval != defaults.opacity_reset_interval {
-        unsupported.push(format!(
-            "opacity_reset_interval={} requires LiteGS opacity reset parity (Epic 20)",
-            config.litegs.opacity_reset_interval
-        ));
-    }
-    if config.litegs.opacity_reset_mode != defaults.opacity_reset_mode {
-        unsupported.push(format!(
-            "opacity_reset_mode={} requires LiteGS opacity reset parity (Epic 20)",
-            config.litegs.opacity_reset_mode
-        ));
-    }
-    if config.litegs.prune_mode != defaults.prune_mode {
-        unsupported.push(format!(
-            "prune_mode={} requires LiteGS/TamingGS prune parity (Epic 20)",
-            config.litegs.prune_mode
-        ));
-    }
-    if config.litegs.target_primitives != defaults.target_primitives {
-        unsupported.push(format!(
-            "target_primitives={} requires TamingGS target schedule parity (Epic 20)",
-            config.litegs.target_primitives
-        ));
+    if config.litegs.target_primitives == 0 {
+        unsupported.push("target_primitives must be >= 1".to_string());
     }
 
     if unsupported.is_empty() {
@@ -1165,6 +1125,28 @@ mod tests {
             training_profile: TrainingProfile::LiteGsMacV1,
             ..TrainingConfig::default()
         };
+        validate_litegs_mac_v1_config(&config).unwrap();
+    }
+
+    #[test]
+    fn litegs_mac_v1_accepts_wired_non_clustered_overrides() {
+        let config = TrainingConfig {
+            training_profile: TrainingProfile::LiteGsMacV1,
+            litegs: LiteGsConfig {
+                reg_weight: 0.01,
+                enable_transmittance: true,
+                densify_from: 4,
+                densify_until: Some(16),
+                densification_interval: 3,
+                opacity_reset_interval: 6,
+                opacity_reset_mode: LiteGsOpacityResetMode::Reset,
+                prune_mode: LiteGsPruneMode::Threshold,
+                target_primitives: 42_000,
+                ..LiteGsConfig::default()
+            },
+            ..TrainingConfig::default()
+        };
+
         validate_litegs_mac_v1_config(&config).unwrap();
     }
 
