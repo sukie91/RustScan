@@ -5,7 +5,6 @@
 
 use crate::{FaceHandle, HalfedgeHandle, QuadricT, RustMesh, Vec3, VertexHandle};
 use std::cmp::Ordering;
-use std::collections::BinaryHeap;
 
 /// Decimation configuration
 #[derive(Debug, Clone)]
@@ -68,6 +67,14 @@ struct CollapseCandidate {
     halfedge: HalfedgeHandle,
     v_removed: VertexHandle,
     v_kept: VertexHandle,
+    is_boundary: bool,
+    faces_removed: u8,
+}
+
+struct CollapseTopology {
+    neighbors: Vec<Vec<VertexHandle>>,
+    boundary_vertices: Vec<bool>,
+    face_valences: Vec<usize>,
 }
 
 impl PartialEq for CollapseCandidate {
@@ -156,10 +163,14 @@ impl<'a> ModQuadricT<'a> {
 
                     let edge1 = p1 - p0;
                     let edge2 = p2 - p0;
-                    let normal = edge1.cross(edge2).normalize();
-                    let center = (p0 + p1 + p2) / 3.0;
+                    let area2 = edge1.cross(edge2).length();
+                    if !area2.is_finite() || area2 <= f32::EPSILON {
+                        continue;
+                    }
 
-                    let q = QuadricT::from_face(normal, center);
+                    let normal = edge1.cross(edge2) / area2;
+                    let area = area2 * 0.5;
+                    let q = QuadricT::from_face(normal, p0).mul_scalar(area);
 
                     for vh in &verts {
                         let idx = vh.idx_usize();
@@ -187,7 +198,8 @@ impl<'a> ModQuadricT<'a> {
         };
 
         let q = q0.add_values(*q1);
-        let (_optimal, error) = q.optimize();
+        let kept_pos = self.mesh.point(v0).unwrap_or(Vec3::ZERO);
+        let error = q.value(kept_pos);
 
         if self.max_err > 0.0 && error > self.max_err {
             return (f32::MAX, false);
@@ -319,7 +331,9 @@ impl<'a> Decimater<'a> {
         let target = if max_collapses > 0 {
             max_collapses
         } else {
-            self.mesh.n_vertices() - self.config.min_vertices
+            self.mesh
+                .active_vertex_count()
+                .saturating_sub(self.config.min_vertices)
         };
 
         // Build quadric once at start
@@ -341,10 +355,14 @@ impl<'a> Decimater<'a> {
 
                     let edge1 = p1 - p0;
                     let edge2 = p2 - p0;
-                    let normal = edge1.cross(edge2).normalize();
-                    let center = (p0 + p1 + p2) / 3.0;
+                    let area2 = edge1.cross(edge2).length();
+                    if !area2.is_finite() || area2 <= f32::EPSILON {
+                        continue;
+                    }
 
-                    let q = QuadricT::from_face(normal, center);
+                    let normal = edge1.cross(edge2) / area2;
+                    let area = area2 * 0.5;
+                    let q = QuadricT::from_face(normal, p0).mul_scalar(area);
 
                     for vh in &verts {
                         let idx = vh.idx_usize();
@@ -356,84 +374,27 @@ impl<'a> Decimater<'a> {
             }
         }
 
-        // P0-13 fix: Use BinaryHeap for O(log n) collapse selection
-        let mut heap: BinaryHeap<CollapseCandidate> = BinaryHeap::new();
-
-        // Initialize heap with all valid collapse candidates
-        for heh_idx in 0..self.mesh.n_halfedges() {
-            let heh = HalfedgeHandle::new(heh_idx as u32);
-            let to_vh = self.mesh.to_vertex_handle(heh);
-            let from_vh = self.mesh.from_vertex_handle(heh);
-
-            let idx0 = from_vh.idx_usize();
-            let idx1 = to_vh.idx_usize();
-
-            let q0 = match vertex_quadrics.get(idx0) {
-                Some(Some(q)) => q,
-                _ => continue,
-            };
-            let q1 = match vertex_quadrics.get(idx1) {
-                Some(Some(q)) => q,
-                _ => continue,
-            };
-
-            let combined = q0.add_values(*q1);
-            let (_opt, error) = combined.optimize();
-
-            if self.config.max_err > 0.0 && error > self.config.max_err {
-                continue;
-            }
-
-            heap.push(CollapseCandidate {
-                priority: error,
-                halfedge: heh,
-                v_removed: to_vh,
-                v_kept: from_vh,
-            });
-        }
-
         let mut collapses = 0;
-        let mut retries = 0;
-        let max_retries = heap.len().max(1000);
+        while collapses < target && self.mesh.active_vertex_count() > self.config.min_vertices {
+            let Some(candidate) = self.best_collapse_candidate(&vertex_quadrics) else {
+                break;
+            };
 
-        // Decimation loop with BinaryHeap (lazy deletion)
-        while collapses < target && retries < max_retries {
-            // Pop the best candidate from heap (O(log n))
-            match heap.pop() {
-                Some(candidate) => {
-                    let heh = candidate.halfedge;
-
-                    // Check if collapse is still valid
-                    if !self.mesh.is_collapse_ok(heh) {
-                        retries += 1;
-                        continue;
-                    }
-
-                    let v_removed = candidate.v_removed;
-                    let v_kept = candidate.v_kept;
-
-                    // Try to perform the collapse
-                    if let Err(_) = self.mesh.collapse(heh) {
-                        retries += 1;
-                        continue;
-                    }
-
-                    // Update quadrics: combine removed vertex's quadric into kept vertex
-                    let idx_removed = v_removed.idx_usize();
-                    let idx_kept = v_kept.idx_usize();
-                    if idx_removed < vertex_quadrics.len() && idx_kept < vertex_quadrics.len() {
-                        if let Some(qr) = vertex_quadrics[idx_removed] {
-                            if let Some(ref mut qk) = vertex_quadrics[idx_kept] {
-                                qk.add_assign_values(qr);
-                            }
-                        }
-                    }
-
-                    collapses += 1;
-                    retries = 0; // Reset retries on success
-                }
-                None => break,
+            if self.mesh.collapse(candidate.halfedge).is_err() {
+                break;
             }
+
+            let idx_removed = candidate.v_removed.idx_usize();
+            let idx_kept = candidate.v_kept.idx_usize();
+            if idx_removed < vertex_quadrics.len() && idx_kept < vertex_quadrics.len() {
+                if let Some(qr) = vertex_quadrics[idx_removed] {
+                    if let Some(ref mut qk) = vertex_quadrics[idx_kept] {
+                        qk.add_assign_values(qr);
+                    }
+                }
+            }
+
+            collapses += 1;
         }
 
         self.collapsed = collapses;
@@ -473,16 +434,321 @@ impl<'a> Decimater<'a> {
     }
 
     pub fn decimate_to(&mut self, target_vertices: usize) -> usize {
-        if target_vertices >= self.mesh.n_vertices() {
+        let active_vertices = self.mesh.active_vertex_count();
+        if target_vertices >= active_vertices {
             return 0;
         }
 
-        self.decimate(self.mesh.n_vertices() - target_vertices)
+        self.decimate(active_vertices - target_vertices)
     }
 
     pub fn n_collapses(&self) -> usize {
         self.collapsed
     }
+}
+
+impl<'a> Decimater<'a> {
+    fn best_collapse_candidate(
+        &self,
+        vertex_quadrics: &[Option<QuadricT>],
+    ) -> Option<CollapseCandidate> {
+        let topology = build_collapse_topology(self.mesh);
+        let mut best: Option<CollapseCandidate> = None;
+
+        for heh_idx in 0..self.mesh.n_halfedges() {
+            let heh = HalfedgeHandle::new(heh_idx as u32);
+            if !is_collapse_ok_with_topology(self.mesh, &topology, heh) {
+                continue;
+            }
+
+            let v_removed = self.mesh.to_vertex_handle(heh);
+            let v_kept = self.mesh.from_vertex_handle(heh);
+            let idx_removed = v_removed.idx_usize();
+            let idx_kept = v_kept.idx_usize();
+
+            let q_removed = match vertex_quadrics.get(idx_removed) {
+                Some(Some(q)) => q,
+                _ => continue,
+            };
+            let q_kept = match vertex_quadrics.get(idx_kept) {
+                Some(Some(q)) => q,
+                _ => continue,
+            };
+
+            let combined = q_kept.add_values(*q_removed);
+            let kept_pos = self.mesh.point(v_kept).unwrap_or(Vec3::ZERO);
+            let error = combined.value(kept_pos);
+
+            if !error.is_finite() {
+                continue;
+            }
+
+            if self.config.max_err > 0.0 && error > self.config.max_err {
+                continue;
+            }
+
+            let candidate = CollapseCandidate {
+                priority: error,
+                halfedge: heh,
+                v_removed,
+                v_kept,
+                is_boundary: self.mesh.face_handle(heh).is_none()
+                    || self
+                        .mesh
+                        .face_handle(self.mesh.opposite_halfedge_handle(heh))
+                        .is_none(),
+                faces_removed: if self.mesh.face_handle(heh).is_some() { 1 } else { 0 }
+                    + if self
+                        .mesh
+                        .face_handle(self.mesh.opposite_halfedge_handle(heh))
+                        .is_some()
+                    {
+                        1
+                    } else {
+                        0
+                    },
+            };
+
+            if best.as_ref().is_none_or(|current| is_better_candidate(&candidate, current)) {
+                best = Some(candidate);
+            }
+        }
+
+        best
+    }
+}
+
+fn is_better_candidate(candidate: &CollapseCandidate, current: &CollapseCandidate) -> bool {
+    const EPS: f32 = 1.0e-6;
+
+    if candidate.priority + EPS < current.priority {
+        return true;
+    }
+    if current.priority + EPS < candidate.priority {
+        return false;
+    }
+    if candidate.is_boundary != current.is_boundary {
+        return candidate.is_boundary;
+    }
+    if candidate.faces_removed != current.faces_removed {
+        return candidate.faces_removed < current.faces_removed;
+    }
+    candidate.halfedge.idx() < current.halfedge.idx()
+}
+
+fn build_collapse_topology(mesh: &RustMesh) -> CollapseTopology {
+    let mut neighbors = vec![Vec::new(); mesh.n_vertices()];
+    let mut face_valences = vec![0usize; mesh.n_faces()];
+
+    for fh in mesh.faces() {
+        if mesh.face_halfedge_handle(fh).is_none() {
+            continue;
+        }
+
+        let vertices = mesh.face_vertices_vec(fh);
+        let n = vertices.len();
+        face_valences[fh.idx_usize()] = n;
+
+        if n < 2 {
+            continue;
+        }
+
+        for (idx, &vh) in vertices.iter().enumerate() {
+            let prev = vertices[(idx + n - 1) % n];
+            let next = vertices[(idx + 1) % n];
+            push_unique_neighbor(&mut neighbors[vh.idx_usize()], prev, vh);
+            push_unique_neighbor(&mut neighbors[vh.idx_usize()], next, vh);
+        }
+    }
+
+    let mut boundary_vertices = vec![false; mesh.n_vertices()];
+    for heh_idx in 0..mesh.n_halfedges() {
+        let heh = HalfedgeHandle::new(heh_idx as u32);
+        let opp = mesh.opposite_halfedge_handle(heh);
+        if mesh.face_handle(heh).is_none() || mesh.face_handle(opp).is_none() {
+            let from = mesh.from_vertex_handle(heh).idx_usize();
+            let to = mesh.to_vertex_handle(heh).idx_usize();
+            if from < boundary_vertices.len() {
+                boundary_vertices[from] = true;
+            }
+            if to < boundary_vertices.len() {
+                boundary_vertices[to] = true;
+            }
+        }
+    }
+
+    CollapseTopology {
+        neighbors,
+        boundary_vertices,
+        face_valences,
+    }
+}
+
+fn push_unique_neighbor(neighbors: &mut Vec<VertexHandle>, candidate: VertexHandle, center: VertexHandle) {
+    if candidate != center && !neighbors.contains(&candidate) {
+        neighbors.push(candidate);
+    }
+}
+
+fn is_collapse_ok_with_topology(
+    mesh: &RustMesh,
+    topology: &CollapseTopology,
+    heh: HalfedgeHandle,
+) -> bool {
+    if !heh.is_valid() {
+        return false;
+    }
+
+    let v0 = mesh.to_vertex_handle(heh);
+    let v1 = mesh.from_vertex_handle(heh);
+    if mesh.halfedge_handle(v0).is_none() || mesh.halfedge_handle(v1).is_none() {
+        return false;
+    }
+
+    let heh_opp = mesh.opposite_halfedge_handle(heh);
+    let fh_left = mesh.face_handle(heh);
+    let fh_right = mesh.face_handle(heh_opp);
+    if fh_left.is_none() && fh_right.is_none() {
+        return false;
+    }
+
+    if fh_left.is_some() {
+        let h1 = mesh.next_halfedge_handle(heh);
+        let h2 = mesh.next_halfedge_handle(h1);
+        if mesh.is_boundary(mesh.opposite_halfedge_handle(h1))
+            && mesh.is_boundary(mesh.opposite_halfedge_handle(h2))
+        {
+            return false;
+        }
+    }
+
+    if fh_right.is_some() {
+        let h1 = mesh.next_halfedge_handle(heh_opp);
+        let h2 = mesh.next_halfedge_handle(h1);
+        if mesh.is_boundary(mesh.opposite_halfedge_handle(h1))
+            && mesh.is_boundary(mesh.opposite_halfedge_handle(h2))
+        {
+            return false;
+        }
+    }
+
+    let neighbors_v0 = topology
+        .neighbors
+        .get(v0.idx_usize())
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|&v| v != v1)
+        .collect::<Vec<_>>();
+    let neighbors_v1 = topology
+        .neighbors
+        .get(v1.idx_usize())
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|&v| v != v0)
+        .collect::<Vec<_>>();
+
+    let mut allowed_shared = Vec::new();
+    if let Some(fh) = fh_left {
+        for vh in mesh.face_vertices_vec(fh) {
+            if vh != v0 && vh != v1 && !allowed_shared.contains(&vh) {
+                allowed_shared.push(vh);
+            }
+        }
+    }
+    if let Some(fh) = fh_right {
+        for vh in mesh.face_vertices_vec(fh) {
+            if vh != v0 && vh != v1 && !allowed_shared.contains(&vh) {
+                allowed_shared.push(vh);
+            }
+        }
+    }
+
+    for &nv in &neighbors_v0 {
+        if neighbors_v1.contains(&nv) && !allowed_shared.contains(&nv) {
+            return false;
+        }
+    }
+
+    if fh_left.is_some() && fh_right.is_some() {
+        let vl = mesh.to_vertex_handle(mesh.next_halfedge_handle(heh));
+        let vr = mesh.to_vertex_handle(mesh.next_halfedge_handle(heh_opp));
+        if vl == vr {
+            return false;
+        }
+    }
+
+    let v0_boundary = topology
+        .boundary_vertices
+        .get(v0.idx_usize())
+        .copied()
+        .unwrap_or(false);
+    let v1_boundary = topology
+        .boundary_vertices
+        .get(v1.idx_usize())
+        .copied()
+        .unwrap_or(false);
+    let edge_boundary = fh_left.is_none() || fh_right.is_none();
+    if v0_boundary && v1_boundary && !edge_boundary {
+        return false;
+    }
+
+    if let Some(fh) = fh_left {
+        if topology
+            .face_valences
+            .get(fh.idx_usize())
+            .copied()
+            .unwrap_or_default()
+            == 3
+        {
+            let one = mesh.opposite_halfedge_handle(mesh.next_halfedge_handle(heh));
+            let two = mesh.opposite_halfedge_handle(mesh.next_halfedge_handle(
+                mesh.next_halfedge_handle(heh),
+            ));
+            if let (Some(face_one), Some(face_two)) = (mesh.face_handle(one), mesh.face_handle(two)) {
+                if face_one == face_two
+                    && topology
+                        .face_valences
+                        .get(face_one.idx_usize())
+                        .copied()
+                        .unwrap_or_default()
+                        != 3
+                {
+                    return false;
+                }
+            }
+        }
+    }
+
+    if let Some(fh) = fh_right {
+        if topology
+            .face_valences
+            .get(fh.idx_usize())
+            .copied()
+            .unwrap_or_default()
+            == 3
+        {
+            let one = mesh.opposite_halfedge_handle(mesh.next_halfedge_handle(heh_opp));
+            let two = mesh.opposite_halfedge_handle(mesh.next_halfedge_handle(
+                mesh.next_halfedge_handle(heh_opp),
+            ));
+            if let (Some(face_one), Some(face_two)) = (mesh.face_handle(one), mesh.face_handle(two)) {
+                if face_one == face_two
+                    && topology
+                        .face_valences
+                        .get(face_one.idx_usize())
+                        .copied()
+                        .unwrap_or_default()
+                        != 3
+                {
+                    return false;
+                }
+            }
+        }
+    }
+
+    true
 }
 
 /// Convenience function
@@ -493,13 +759,55 @@ pub fn decimate_mesh(mesh: &mut RustMesh, target_vertices: usize, max_err: f32) 
         ..Default::default()
     });
 
-    decimater.decimate_to(target_vertices)
+    let collapsed = decimater.decimate_to(target_vertices);
+    if collapsed > 0 {
+        decimater.mesh.garbage_collection();
+    }
+    collapsed
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{generate_cube, generate_sphere};
+    use crate::{generate_cube, generate_sphere, read_off, write_off};
+    use std::collections::HashMap;
+    use std::fs;
+
+    fn raw_face_diagnostics(mesh: &RustMesh) -> (usize, usize, usize) {
+        let mut active_faces = 0usize;
+        let mut degenerate_faces = 0usize;
+        let mut edge_use: HashMap<(usize, usize), usize> = HashMap::new();
+
+        for fh in mesh.faces() {
+            let vertices = mesh.face_vertices_vec(fh);
+            if vertices.len() < 3 {
+                continue;
+            }
+
+            active_faces += 1;
+            if vertices.len() != 3 {
+                degenerate_faces += 1;
+                continue;
+            }
+
+            let ids = [
+                vertices[0].idx_usize(),
+                vertices[1].idx_usize(),
+                vertices[2].idx_usize(),
+            ];
+            if ids[0] == ids[1] || ids[1] == ids[2] || ids[2] == ids[0] {
+                degenerate_faces += 1;
+            }
+
+            for (a, b) in [(ids[0], ids[1]), (ids[1], ids[2]), (ids[2], ids[0])] {
+                let key = if a < b { (a, b) } else { (b, a) };
+                *edge_use.entry(key).or_insert(0) += 1;
+            }
+        }
+
+        let non_manifold_edges = edge_use.values().filter(|&&count| count > 2).count();
+        (active_faces, degenerate_faces, non_manifold_edges)
+    }
 
     #[test]
     fn test_decimater_creation() {
@@ -579,5 +887,50 @@ mod tests {
         let collapsed = decimate_mesh(&mut mesh, target, 0.0);
         println!("Collapsed {} edges", collapsed);
         assert!(collapsed > 0);
+    }
+
+    #[test]
+    fn test_decimate_off_roundtrip_after_garbage_collection() {
+        let mut mesh = generate_sphere(1.0, 10, 10);
+        let target = mesh.n_vertices() / 2;
+        let collapsed = decimate_mesh(&mut mesh, target, 0.0);
+        assert!(collapsed > 0);
+
+        let path = "/tmp/rustmesh-decimate-roundtrip.off";
+        write_off(&mesh, path).unwrap();
+        let loaded = read_off(path).unwrap();
+        fs::remove_file(path).ok();
+
+        assert!(loaded.n_vertices() >= 3);
+        assert!(loaded.n_faces() >= 1);
+    }
+
+    #[test]
+    fn test_decimate_raw_topology_stays_valid() {
+        let mut mesh = generate_sphere(1.0, 10, 10);
+        let target = mesh.n_vertices() / 2;
+        let collapsed = Decimater::new(&mut mesh).decimate_to(target);
+        assert!(collapsed > 0);
+
+        let (active_faces, degenerate_faces, non_manifold_edges) = raw_face_diagnostics(&mesh);
+        assert!(active_faces > 0);
+        assert_eq!(degenerate_faces, 0);
+        assert_eq!(non_manifold_edges, 0);
+    }
+
+    #[test]
+    fn test_decimate_boundary_mesh_preserves_face_budget() {
+        let mut mesh = generate_sphere(1.0, 10, 10);
+        let target = mesh.n_vertices() / 2;
+        let collapsed = Decimater::new(&mut mesh).decimate_to(target);
+        assert!(collapsed > 0);
+
+        let (active_faces, degenerate_faces, non_manifold_edges) = raw_face_diagnostics(&mesh);
+        assert_eq!(degenerate_faces, 0);
+        assert_eq!(non_manifold_edges, 0);
+        assert!(
+            active_faces >= 100,
+            "expected decimation to preserve at least 100 faces on the seam-heavy sphere, got {active_faces}"
+        );
     }
 }
