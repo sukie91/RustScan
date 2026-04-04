@@ -2,7 +2,9 @@
 //!
 //! - `scene_io`: PLY scene export/import
 //! - `tum_dataset`: TUM RGB-D dataset loading for direct RustGS training
+//! - `colmap_dataset`: COLMAP dataset loading
 
+pub mod colmap_dataset;
 pub mod scene_io;
 pub mod tum_dataset;
 

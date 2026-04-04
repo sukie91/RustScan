@@ -74,6 +74,7 @@ pub use crate::training::{
 pub use crate::training::{TrainingBackend, TrainingConfig, TrainingResult};
 
 // Re-export IO types
+pub use crate::io::colmap_dataset::{load_colmap_dataset, ColmapConfig};
 pub use crate::io::scene_io::{load_scene_ply, save_scene_ply, SceneIoError, SceneMetadata};
 pub use crate::io::tum_dataset::{load_tum_rgbd_dataset, TumRgbdConfig};
 pub use crate::io::TrainingCheckpoint;

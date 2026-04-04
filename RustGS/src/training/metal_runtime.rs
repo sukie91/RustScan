@@ -629,8 +629,14 @@ kernel void project_gaussians(
                       + proj_x.z * (cc02 * proj_x.x + cc22 * proj_x.z);
     const float cov_y = proj_y.y * (cc11 * proj_y.y + cc12 * proj_y.z)
                       + proj_y.z * (cc12 * proj_y.y + cc22 * proj_y.z);
-    rec.raw_sigma_x = sqrt(max(cov_x, 1e-6f));
-    rec.raw_sigma_y = sqrt(max(cov_y, 1e-6f));
+
+    // Anti-aliasing low-pass filter: add 0.3² to covariance (Gausplat-style)
+    // This prevents aliasing artifacts for small/distant Gaussians
+    const float lowpass_filter = 0.3f;
+    const float lowpass_var = lowpass_filter * lowpass_filter;
+
+    rec.raw_sigma_x = sqrt(max(cov_x + lowpass_var, 1e-6f));
+    rec.raw_sigma_y = sqrt(max(cov_y + lowpass_var, 1e-6f));
 
     if (!isfinite(rec.raw_sigma_x) || !isfinite(rec.raw_sigma_y)) {
         out_records[gid] = rec;

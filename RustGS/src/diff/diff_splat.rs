@@ -1229,9 +1229,14 @@ fn project_covariance_full(
         + s1 * s1 * proj_axis_y[1] * proj_axis_y[1]
         + s2 * s2 * proj_axis_y[2] * proj_axis_y[2];
 
+    // Anti-aliasing low-pass filter: add 0.3² to covariance (Gausplat-style)
+    // This prevents aliasing artifacts for small/distant Gaussians
+    const LOWPASS_FILTER: f32 = 0.3;
+    const LOWPASS_VAR: f32 = LOWPASS_FILTER * LOWPASS_FILTER;
+
     (
-        cov_xx.max(1e-6).sqrt(),
-        cov_yy.max(1e-6).sqrt(),
+        (cov_xx + LOWPASS_VAR).max(1e-6).sqrt(),
+        (cov_yy + LOWPASS_VAR).max(1e-6).sqrt(),
         cov_xy,
         proj_axis_x,
         proj_axis_y,

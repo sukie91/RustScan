@@ -8,7 +8,9 @@
 pub mod training_pipeline;
 
 pub mod chunk_planner;
+pub mod morton;
 pub mod parity_harness;
+pub mod pose_embedding;
 
 #[cfg(feature = "gpu")]
 mod data_loading;
@@ -489,6 +491,16 @@ pub struct LiteGsConfig {
     pub prune_mode: LiteGsPruneMode,
     pub target_primitives: usize,
     pub learnable_viewproj: bool,
+    /// Learning rate for camera pose optimization (quaternion + translation).
+    /// Default is 1e-4. Only used when learnable_viewproj is true.
+    pub lr_pose: f32,
+    /// Enable Morton code spatial sorting after densification.
+    /// Improves memory coherence during rendering by reordering Gaussians
+    /// along a Z-order curve based on their 3D positions.
+    pub morton_sort_on_densify: bool,
+    /// Prune Gaussians with max(scale) > prune_scale_threshold.
+    /// Default is 0.5 (Gausplat-style). Set to 0 to disable scale-based pruning.
+    pub prune_scale_threshold: f32,
 }
 
 impl Default for LiteGsConfig {
@@ -512,6 +524,9 @@ impl Default for LiteGsConfig {
             prune_mode: LiteGsPruneMode::Weight,
             target_primitives: 1_000_000,
             learnable_viewproj: false,
+            lr_pose: 1e-4,               // Default pose learning rate
+            morton_sort_on_densify: true,  // Enable by default for better memory coherence
+            prune_scale_threshold: 0.5,    // Gausplat-style scale pruning
         }
     }
 }
@@ -732,10 +747,8 @@ fn validate_litegs_mac_v1_config(config: &TrainingConfig) -> Result<(), Training
     let mut unsupported = Vec::new();
 
     if config.litegs.learnable_viewproj {
-        unsupported.push(
-            "learnable_viewproj is reserved but deferred for LiteGsMacV1 on Mac (future story, currently unsupported)"
-                .to_string(),
-        );
+        // Learnable camera extrinsics is now supported (Story 3.2)
+        // Uses sparse Adam for pose optimization
     }
     if config.litegs.cluster_size != defaults.cluster_size {
         unsupported.push(format!(
@@ -1010,6 +1023,7 @@ fn persist_gaussian_map_scene(
         iterations,
         final_loss: 0.0,
         gaussian_count: gaussians.len(),
+        sh_degree: 0,
     };
     crate::save_scene_ply(path, &gaussians, &metadata).map_err(|err| {
         TrainingError::TrainingFailed(format!("failed to persist {}: {}", path.display(), err))

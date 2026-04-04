@@ -1470,13 +1470,22 @@ impl MetalTrainer {
 
         let mut keep_mask = vec![true; snapshot.len()];
         for (idx, info) in infos.iter().enumerate() {
-            let prune = match self.litegs.prune_mode {
+            // Check opacity/visibility-based pruning
+            let prune_opacity = match self.litegs.prune_mode {
                 super::LiteGsPruneMode::Weight => info.invisible || info.fragment_weight <= 0.0,
                 super::LiteGsPruneMode::Threshold => {
                     info.invisible || info.opacity < LITEGS_OPACITY_THRESHOLD
                 }
             };
-            if prune {
+
+            // Check scale-based pruning (Gausplat-style)
+            let prune_scale = if self.litegs.prune_scale_threshold > 0.0 {
+                info.max_scale > self.litegs.prune_scale_threshold
+            } else {
+                false
+            };
+
+            if prune_opacity || prune_scale {
                 keep_mask[idx] = false;
             }
         }
@@ -1787,6 +1796,50 @@ impl MetalTrainer {
         } else {
             0
         };
+
+        // Apply Morton code spatial sorting after densification for better memory coherence
+        let morton_sorted = if self.is_litegs_mode()
+            && self.litegs.morton_sort_on_densify
+            && added > 0
+            && snapshot.len() > 1
+        {
+            let morton_perm = super::morton::morton_sort_permutation(
+                &snapshot.positions,
+                super::morton::DEFAULT_MORTON_BITS,
+            );
+
+            if morton_perm.len() == snapshot.len() {
+                // Apply permutation to all snapshot arrays
+                snapshot.positions = super::morton::permute_vec3(&snapshot.positions, &morton_perm);
+                snapshot.log_scales = super::morton::permute_vec3(&snapshot.log_scales, &morton_perm);
+                snapshot.rotations = super::morton::permute_vec4(&snapshot.rotations, &morton_perm);
+                snapshot.opacity_logits = super::morton::permute_scalar(&snapshot.opacity_logits, &morton_perm);
+                snapshot.colors = super::morton::permute_vec3(&snapshot.colors, &morton_perm);
+
+                // Apply permutation to sh_rest if present
+                let sh_rest_row_width = snapshot.sh_rest_row_width();
+                if sh_rest_row_width > 0 && !snapshot.sh_rest.is_empty() {
+                    snapshot.sh_rest = super::morton::permute_rows(&snapshot.sh_rest, sh_rest_row_width, &morton_perm);
+                }
+
+                // Apply permutation to stats and origins
+                let mut new_stats = vec![MetalGaussianStats::default(); morton_perm.len()];
+                let mut new_origins = vec![None; morton_perm.len()];
+                for (new_idx, &old_idx) in morton_perm.iter().enumerate() {
+                    new_stats[new_idx] = stats[old_idx].clone();
+                    new_origins[new_idx] = origins[old_idx];
+                }
+                stats = new_stats;
+                origins = new_origins;
+
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
         let topology_duration = topology_start.elapsed();
         let topology_ms = duration_ms(topology_duration);
         let topology_ratio = self
@@ -1897,13 +1950,14 @@ impl MetalTrainer {
         }
 
         log::info!(
-            "Metal topology update at iter {} | densify={} | prune={} | reset_opacity={} | added {} | pruned {} | gaussians {} -> {} | budget_cap={} | topology={:.2}ms | step_share={:.0}% | active_grad_stats={} | small_scale_stats={} | opacity_ready_stats={} | clone_candidates={} | split_candidates={} | prune_candidates={} | max_grad_accum={:.6} | mean_grad_accum={:.6}",
+            "Metal topology update at iter {} | densify={} | prune={} | reset_opacity={} | added {} | pruned {} | morton={} | gaussians {} -> {} | budget_cap={} | topology={:.2}ms | step_share={:.0}% | active_grad_stats={} | small_scale_stats={} | opacity_ready_stats={} | clone_candidates={} | split_candidates={} | prune_candidates={} | max_grad_accum={:.6} | mean_grad_accum={:.6}",
             self.iteration,
             should_densify,
             should_prune,
             should_reset_opacity,
             added,
             pruned,
+            morton_sorted,
             old_len,
             gaussians.len(),
             max_gaussians,

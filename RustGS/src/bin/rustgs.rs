@@ -146,6 +146,38 @@ struct TrainArgs {
     #[arg(long, default_value = "1000000")]
     litegs_target_primitives: usize,
 
+    /// Enable Morton code spatial sorting after densification for better memory coherence
+    #[arg(long, default_value_t = true)]
+    litegs_morton_sort_on_densify: bool,
+
+    /// Prune Gaussians with max scale > threshold (0 disables scale pruning)
+    #[arg(long, default_value = "0.5")]
+    litegs_prune_scale_threshold: f32,
+
+    /// Position learning rate (initial)
+    #[arg(long, default_value = "0.00016")]
+    lr_position: f32,
+
+    /// Position learning rate (final) - exponential decay target
+    #[arg(long, default_value = "0.0000016")]
+    lr_position_final: f32,
+
+    /// Scale learning rate
+    #[arg(long, default_value = "0.005")]
+    lr_scale: f32,
+
+    /// Rotation learning rate
+    #[arg(long, default_value = "0.001")]
+    lr_rotation: f32,
+
+    /// Opacity learning rate
+    #[arg(long, default_value = "0.05")]
+    lr_opacity: f32,
+
+    /// Color/SH learning rate
+    #[arg(long, default_value = "0.0025")]
+    lr_color: f32,
+
     /// Enable budget-driven chunked training mode
     #[arg(long, default_value_t = false)]
     chunked_training: bool,
@@ -368,6 +400,13 @@ fn build_training_config(args: &TrainArgs) -> anyhow::Result<rustgs::TrainingCon
     config.chunk_overlap_ratio = args.chunk_overlap_ratio;
     config.min_cameras_per_chunk = args.min_cameras_per_chunk;
     config.max_chunks = args.max_chunks;
+    // Learning rates
+    config.lr_position = args.lr_position;
+    config.lr_pos_final = args.lr_position_final;
+    config.lr_scale = args.lr_scale;
+    config.lr_rotation = args.lr_rotation;
+    config.lr_opacity = args.lr_opacity;
+    config.lr_color = args.lr_color;
     config.merge_core_only = if args.no_merge_core_only {
         false
     } else if args.merge_core_only {
@@ -399,6 +438,8 @@ fn build_training_config(args: &TrainArgs) -> anyhow::Result<rustgs::TrainingCon
         prune_invisible_epochs: args.litegs_prune_invisible_epochs,
         target_primitives: args.litegs_target_primitives,
         learnable_viewproj: false,
+        morton_sort_on_densify: args.litegs_morton_sort_on_densify,
+        prune_scale_threshold: args.litegs_prune_scale_threshold,
     };
 
     Ok(config)
