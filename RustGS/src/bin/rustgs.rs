@@ -1,7 +1,7 @@
 //! RustGS CLI - 3D Gaussian Splatting Training
 //!
 //! Usage:
-//!   rustgs train --input <slam_output.json|tum_dataset_dir> --output <scene.ply>
+//!   rustgs train --input <slam_output.json|training_dataset.json|tum_dataset_dir|colmap_dir> --output <scene.ply>
 //!   rustgs render --input <scene.ply> --camera <pose.json> --output <image.png>
 
 use anyhow::bail;
@@ -18,7 +18,7 @@ struct Cli {
 
 #[derive(Debug, Clone, clap::Args)]
 struct TrainArgs {
-    /// Path to SLAM output JSON file or TUM RGB-D dataset directory
+    /// Path to SLAM output JSON, TrainingDataset JSON, TUM RGB-D directory, or COLMAP directory
     #[arg(short, long)]
     input: PathBuf,
 
@@ -146,6 +146,14 @@ struct TrainArgs {
     #[arg(long, default_value = "1000000")]
     litegs_target_primitives: usize,
 
+    /// Enable LiteGS learnable camera extrinsics
+    #[arg(long, default_value_t = false)]
+    litegs_learnable_viewproj: bool,
+
+    /// LiteGS pose learning rate
+    #[arg(long, default_value = "0.0001")]
+    litegs_lr_pose: f32,
+
     /// Enable Morton code spatial sorting after densification for better memory coherence
     #[arg(long, default_value_t = true)]
     litegs_morton_sort_on_densify: bool,
@@ -236,7 +244,7 @@ struct RenderArgs {
 
 #[derive(Debug, clap::Subcommand)]
 enum Commands {
-    /// Train a 3DGS scene from SLAM output JSON or a TUM RGB-D dataset directory
+    /// Train a 3DGS scene from JSON input, a TUM RGB-D dataset directory, or a COLMAP directory
     Train(TrainArgs),
 
     /// Render a scene from a given viewpoint
@@ -351,29 +359,31 @@ fn load_training_input(
 ) -> anyhow::Result<rustscan_types::SlamOutput> {
     if !input.is_dir() && (max_frames > 0 || frame_stride > 1) {
         log::warn!(
-            "--max-frames and --frame-stride only apply to TUM RGB-D dataset directories; ignoring them for {:?}",
+            "--max-frames and --frame-stride only apply to dataset directories; ignoring them for {:?}",
             input
         );
     }
 
-    let dataset = rustgs::load_training_dataset(
+    let (dataset, source) = rustgs::load_training_dataset_with_source(
         input,
         &rustgs::TumRgbdConfig {
             max_frames,
             frame_stride,
             ..Default::default()
         },
+        &rustgs::ColmapConfig {
+            max_frames,
+            frame_stride,
+            ..Default::default()
+        },
     )?;
 
-    if input.is_dir() {
-        log::info!(
-            "Resolved {:?} as a TUM RGB-D dataset with {} poses",
-            input,
-            dataset.poses.len(),
-        );
-    } else {
-        log::info!("Resolved {:?} as serialized training input", input);
-    }
+    log::info!(
+        "Resolved {:?} as {} with {} poses",
+        input,
+        source,
+        dataset.poses.len(),
+    );
 
     Ok(rustscan_types::SlamOutput::from_dataset(dataset))
 }
@@ -438,8 +448,8 @@ fn build_training_config(args: &TrainArgs) -> anyhow::Result<rustgs::TrainingCon
         prune_min_age: args.litegs_prune_min_age,
         prune_invisible_epochs: args.litegs_prune_invisible_epochs,
         target_primitives: args.litegs_target_primitives,
-        learnable_viewproj: false,
-        lr_pose: rustgs::LiteGsConfig::default().lr_pose,
+        learnable_viewproj: args.litegs_learnable_viewproj,
+        lr_pose: args.litegs_lr_pose,
         morton_sort_on_densify: args.litegs_morton_sort_on_densify,
         prune_scale_threshold: args.litegs_prune_scale_threshold,
     };
@@ -506,7 +516,7 @@ fn log_litegs_training_config(config: &rustgs::TrainingConfig) {
     }
 
     log::info!(
-        "LiteGS profile config | sh_degree={} | cluster_size={} | tile_size={} | sparse_grad={} | reg_weight={:.4} | enable_transmittance={} | enable_depth={} | densify_from={} | densify_until={:?} | densification_interval={} | opacity_reset_interval={} | opacity_reset_mode={} | prune_mode={} | target_primitives={}",
+        "LiteGS profile config | sh_degree={} | cluster_size={} | tile_size={} | sparse_grad={} | reg_weight={:.4} | enable_transmittance={} | enable_depth={} | learnable_viewproj={} | lr_pose={:.6} | densify_from={} | densify_until={:?} | densification_interval={} | opacity_reset_interval={} | opacity_reset_mode={} | prune_mode={} | target_primitives={}",
         config.litegs.sh_degree,
         config.litegs.cluster_size,
         config.litegs.tile_size,
@@ -514,6 +524,8 @@ fn log_litegs_training_config(config: &rustgs::TrainingConfig) {
         config.litegs.reg_weight,
         config.litegs.enable_transmittance,
         config.litegs.enable_depth,
+        config.litegs.learnable_viewproj,
+        config.litegs.lr_pose,
         config.litegs.densify_from,
         config.litegs.densify_until,
         config.litegs.densification_interval,
@@ -763,6 +775,9 @@ mod tests {
             "threshold",
             "--litegs-target-primitives",
             "200000",
+            "--litegs-learnable-viewproj",
+            "--litegs-lr-pose",
+            "0.0002",
         ]);
         let config = build_training_config(&args).unwrap();
 
@@ -790,6 +805,8 @@ mod tests {
         assert_eq!(config.litegs.prune_min_age, 3); // default value
         assert_eq!(config.litegs.prune_invisible_epochs, 2); // default value
         assert_eq!(config.litegs.target_primitives, 200_000);
+        assert!(config.litegs.learnable_viewproj);
+        assert_eq!(config.litegs.lr_pose, 0.0002);
     }
 
     #[test]

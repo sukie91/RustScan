@@ -520,16 +520,16 @@ impl Default for LiteGsConfig {
             densify_until: None,
             densification_interval: 5,
             opacity_reset_interval: 10,
-            prune_offset_epochs: 0,      // No offset - densify/prune together like LiteGS
-            prune_min_age: 5,            // Must survive 5 iterations (more protection)
-            prune_invisible_epochs: 10,  // Must be invisible for 10+ epochs (less aggressive)
+            prune_offset_epochs: 0, // No offset - densify/prune together like LiteGS
+            prune_min_age: 5,       // Must survive 5 iterations (more protection)
+            prune_invisible_epochs: 10, // Must be invisible for 10+ epochs (less aggressive)
             opacity_reset_mode: LiteGsOpacityResetMode::Decay,
             prune_mode: LiteGsPruneMode::Weight,
             target_primitives: 1_000_000,
             learnable_viewproj: false,
-            lr_pose: 1e-4,               // Default pose learning rate
-            morton_sort_on_densify: true,  // Enable by default for better memory coherence
-            prune_scale_threshold: 0.5,    // Gausplat-style scale pruning
+            lr_pose: 1e-4,                // Default pose learning rate
+            morton_sort_on_densify: true, // Enable by default for better memory coherence
+            prune_scale_threshold: 0.5,   // Gausplat-style scale pruning
         }
     }
 }
@@ -692,7 +692,7 @@ fn train_litegs_mac_v1(
 ) -> Result<GaussianMap, TrainingError> {
     validate_litegs_mac_v1_config(config)?;
     log::info!(
-        "Training with LiteGS Mac V1 profile | sh_degree={} | cluster_size={} | tile_size={} | sparse_grad={} | reg_weight={:.4} | enable_transmittance={} | enable_depth={}",
+        "Training with LiteGS Mac V1 profile | sh_degree={} | cluster_size={} | tile_size={} | sparse_grad={} | reg_weight={:.4} | enable_transmittance={} | enable_depth={} | learnable_viewproj={} | lr_pose={:.6}",
         config.litegs.sh_degree,
         config.litegs.cluster_size,
         config.litegs.tile_size,
@@ -700,6 +700,8 @@ fn train_litegs_mac_v1(
         config.litegs.reg_weight,
         config.litegs.enable_transmittance,
         config.litegs.enable_depth,
+        config.litegs.learnable_viewproj,
+        config.litegs.lr_pose,
     );
 
     let plan = select_training_execution_plan(dataset, config)?;
@@ -1120,7 +1122,7 @@ mod tests {
         assert_eq!(litegs.densify_until, None);
         assert_eq!(litegs.densification_interval, 5);
         assert_eq!(litegs.opacity_reset_interval, 10);
-        assert_eq!(litegs.prune_offset_epochs, 0);  // densify/prune together
+        assert_eq!(litegs.prune_offset_epochs, 0); // densify/prune together
         assert_eq!(litegs.prune_min_age, 5);
         assert_eq!(litegs.prune_invisible_epochs, 10);
         assert_eq!(litegs.opacity_reset_mode, LiteGsOpacityResetMode::Decay);

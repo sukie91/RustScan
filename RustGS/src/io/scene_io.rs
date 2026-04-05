@@ -228,20 +228,25 @@ pub fn save_scene_ply(
 
         // Write all 62 values:
         // 3 position + 3 normal + 3 f_dc + 45 f_rest + 1 opacity + 3 scale + 4 rotation
-        write!(writer, "{} {} {} ", g.position[0], g.position[1], g.position[2])
-            .map_err(|source| SceneIoError::Write {
-                path: path.display().to_string(),
-                source,
-            })?; // 3 position
+        write!(
+            writer,
+            "{} {} {} ",
+            g.position[0], g.position[1], g.position[2]
+        )
+        .map_err(|source| SceneIoError::Write {
+            path: path.display().to_string(),
+            source,
+        })?; // 3 position
         write!(writer, "0 0 0 ").map_err(|source| SceneIoError::Write {
             path: path.display().to_string(),
             source,
         })?; // 3 normal (zeros)
-        write!(writer, "{} {} {} ", f_dc_0, f_dc_1, f_dc_2)
-            .map_err(|source| SceneIoError::Write {
+        write!(writer, "{} {} {} ", f_dc_0, f_dc_1, f_dc_2).map_err(|source| {
+            SceneIoError::Write {
                 path: path.display().to_string(),
                 source,
-            })?; // 3 f_dc
+            }
+        })?; // 3 f_dc
 
         // 45 f_rest (from sh_rest if available, otherwise zeros)
         if let Some(ref sh_rest) = g.sh_rest {
@@ -368,27 +373,27 @@ pub fn load_scene_ply(path: &Path) -> Result<(Vec<Gaussian>, SceneMetadata), Sce
 
             let gaussian = if has_sh_rest {
                 Gaussian::with_sh(
-                    [values[0], values[1], values[2]],                       // position
-                    [values[55].exp(), values[56].exp(), values[57].exp()],  // scale (from log)
-                    [values[58], values[59], values[60], values[61]],        // rotation (w,x,y,z)
-                    values[54],                                              // opacity
+                    [values[0], values[1], values[2]],                      // position
+                    [values[55].exp(), values[56].exp(), values[57].exp()], // scale (from log)
+                    [values[58], values[59], values[60], values[61]],       // rotation (w,x,y,z)
+                    values[54],                                             // opacity
                     [
-                        sh_dc_to_rgb(values[6]),  // f_dc_0 -> r
-                        sh_dc_to_rgb(values[7]),  // f_dc_1 -> g
-                        sh_dc_to_rgb(values[8]),  // f_dc_2 -> b
+                        sh_dc_to_rgb(values[6]), // f_dc_0 -> r
+                        sh_dc_to_rgb(values[7]), // f_dc_1 -> g
+                        sh_dc_to_rgb(values[8]), // f_dc_2 -> b
                     ],
                     sh_rest,
                 )
             } else {
                 Gaussian::new(
-                    [values[0], values[1], values[2]],                       // position
-                    [values[55].exp(), values[56].exp(), values[57].exp()],  // scale (from log)
-                    [values[58], values[59], values[60], values[61]],        // rotation (w,x,y,z)
-                    values[54],                                              // opacity
+                    [values[0], values[1], values[2]],                      // position
+                    [values[55].exp(), values[56].exp(), values[57].exp()], // scale (from log)
+                    [values[58], values[59], values[60], values[61]],       // rotation (w,x,y,z)
+                    values[54],                                             // opacity
                     [
-                        sh_dc_to_rgb(values[6]),  // f_dc_0 -> r
-                        sh_dc_to_rgb(values[7]),  // f_dc_1 -> g
-                        sh_dc_to_rgb(values[8]),  // f_dc_2 -> b
+                        sh_dc_to_rgb(values[6]), // f_dc_0 -> r
+                        sh_dc_to_rgb(values[7]), // f_dc_1 -> g
+                        sh_dc_to_rgb(values[8]), // f_dc_2 -> b
                     ],
                 )
             };
@@ -490,16 +495,14 @@ mod tests {
         // Create gaussian with SH coefficients (45 values for degree 3)
         let sh_rest: Vec<f32> = (0..45).map(|i| i as f32 * 0.01).collect();
 
-        let gaussians = vec![
-            Gaussian::with_sh(
-                [0.0, 0.0, 1.0],
-                [0.1, 0.1, 0.1],
-                [1.0, 0.0, 0.0, 0.0],
-                0.5,
-                [0.2, 0.3, 0.4],
-                sh_rest.clone(),
-            ),
-        ];
+        let gaussians = vec![Gaussian::with_sh(
+            [0.0, 0.0, 1.0],
+            [0.1, 0.1, 0.1],
+            [1.0, 0.0, 0.0, 0.0],
+            0.5,
+            [0.2, 0.3, 0.4],
+            sh_rest.clone(),
+        )];
 
         let metadata = SceneMetadata {
             iterations: 3000,
@@ -516,7 +519,10 @@ mod tests {
 
         // Check SH coefficients are preserved
         let loaded_g = &loaded[0];
-        assert!(loaded_g.sh_rest.is_some(), "SH coefficients should be loaded");
+        assert!(
+            loaded_g.sh_rest.is_some(),
+            "SH coefficients should be loaded"
+        );
         let loaded_sh = loaded_g.sh_rest.as_ref().unwrap();
         assert_eq!(loaded_sh.len(), 45, "Should have 45 SH coefficients");
 
@@ -524,7 +530,9 @@ mod tests {
             assert!(
                 (orig - loaded).abs() < 1e-5,
                 "SH coefficient {} mismatch: {} vs {}",
-                i, orig, loaded
+                i,
+                orig,
+                loaded
             );
         }
     }

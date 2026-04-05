@@ -15,7 +15,8 @@ fn main() -> anyhow::Result<()> {
     let (scene, metadata) = load_scene_ply(&args.scene)?;
 
     let device = if args.device == "metal" {
-        Device::new_metal(0).map_err(|err| anyhow::anyhow!("failed to create Metal device: {err}"))?
+        Device::new_metal(0)
+            .map_err(|err| anyhow::anyhow!("failed to create Metal device: {err}"))?
     } else {
         Device::Cpu
     };
@@ -78,9 +79,7 @@ fn main() -> anyhow::Result<()> {
     );
     println!(
         "scene_metadata iterations={} gaussian_count={} final_loss={}",
-        metadata.iterations,
-        metadata.gaussian_count,
-        metadata.final_loss
+        metadata.iterations, metadata.gaussian_count, metadata.final_loss
     );
     println!(
         "psnr_mean_db={:.4}\npsnr_median_db={:.4}\npsnr_min_db={:.4}\npsnr_max_db={:.4}\npsnr_std_db={:.4}\nelapsed_seconds={:.2}",
@@ -191,10 +190,7 @@ impl Args {
     }
 }
 
-fn next_value(
-    args: &mut impl Iterator<Item = String>,
-    flag: &str,
-) -> anyhow::Result<String> {
+fn next_value(args: &mut impl Iterator<Item = String>, flag: &str) -> anyhow::Result<String> {
     args.next()
         .ok_or_else(|| anyhow::anyhow!("missing value for {flag}"))
 }
@@ -221,13 +217,22 @@ struct FrameMetric {
     image_path: PathBuf,
 }
 
-fn select_frames(dataset: &TrainingDataset, max_frames: usize, frame_stride: usize) -> TrainingDataset {
-    let mut selected = TrainingDataset::new(dataset.intrinsics).with_depth_scale(dataset.depth_scale);
+fn select_frames(
+    dataset: &TrainingDataset,
+    max_frames: usize,
+    frame_stride: usize,
+) -> TrainingDataset {
+    let mut selected =
+        TrainingDataset::new(dataset.intrinsics).with_depth_scale(dataset.depth_scale);
     selected.initial_points = dataset.initial_points.clone();
     for pose in dataset
         .poses
         .iter()
-        .take(if max_frames == 0 { dataset.poses.len() } else { max_frames })
+        .take(if max_frames == 0 {
+            dataset.poses.len()
+        } else {
+            max_frames
+        })
         .step_by(frame_stride.max(1))
     {
         selected.add_pose(pose.clone());
@@ -235,7 +240,10 @@ fn select_frames(dataset: &TrainingDataset, max_frames: usize, frame_stride: usi
     selected
 }
 
-fn trainable_from_scene(scene: &[Gaussian], device: &Device) -> candle_core::Result<TrainableGaussians> {
+fn trainable_from_scene(
+    scene: &[Gaussian],
+    device: &Device,
+) -> candle_core::Result<TrainableGaussians> {
     let mut positions = Vec::with_capacity(scene.len() * 3);
     let mut scales = Vec::with_capacity(scene.len() * 3);
     let mut rotations = Vec::with_capacity(scene.len() * 4);
@@ -357,7 +365,9 @@ fn load_resized_target(
         .into_iter()
         .map(|v| v as f32 / 255.0)
         .collect();
-    Ok(resize_rgb_box(&src, src_width, src_height, dst_width, dst_height))
+    Ok(resize_rgb_box(
+        &src, src_width, src_height, dst_width, dst_height,
+    ))
 }
 
 fn resize_rgb_box(
@@ -435,7 +445,11 @@ fn default_export_dir(scene: &std::path::Path) -> PathBuf {
 
 fn print_worst_frames(frame_metrics: &[FrameMetric], count: usize) {
     let mut sorted = frame_metrics.to_vec();
-    sorted.sort_by(|a, b| a.psnr.partial_cmp(&b.psnr).unwrap_or(std::cmp::Ordering::Equal));
+    sorted.sort_by(|a, b| {
+        a.psnr
+            .partial_cmp(&b.psnr)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     let count = count.max(5).min(sorted.len());
     for (rank, metric) in sorted.into_iter().take(count).enumerate() {
         println!(
@@ -463,8 +477,14 @@ fn export_worst_frames(
     std::fs::create_dir_all(export_dir)?;
 
     let mut sorted = frame_metrics.to_vec();
-    sorted.sort_by(|a, b| a.psnr.partial_cmp(&b.psnr).unwrap_or(std::cmp::Ordering::Equal));
-    let worst = sorted.into_iter().take(export_worst_k.min(frame_metrics.len()));
+    sorted.sort_by(|a, b| {
+        a.psnr
+            .partial_cmp(&b.psnr)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let worst = sorted
+        .into_iter()
+        .take(export_worst_k.min(frame_metrics.len()));
 
     let mut summary = String::from("rank\tdataset_index\tframe_id\tpsnr_db\timage_path\n");
     for (rank, metric) in worst.enumerate() {
@@ -481,7 +501,13 @@ fn export_worst_frames(
         let target_u8 = rgb_f32_to_u8(&target);
         let rendered_u8 = rgb_f32_to_u8(&rendered);
         let diff_u8 = diff_visualization(&target, &rendered);
-        let strip_u8 = make_strip(&target_u8, &rendered_u8, &diff_u8, render_width, render_height);
+        let strip_u8 = make_strip(
+            &target_u8,
+            &rendered_u8,
+            &diff_u8,
+            render_width,
+            render_height,
+        );
 
         let prefix = format!(
             "rank_{:02}_frame_{:04}_psnr_{:.2}",
@@ -548,19 +574,14 @@ fn diff_visualization(target: &[f32], rendered: &[f32]) -> Vec<u8> {
     out
 }
 
-fn make_strip(
-    left: &[u8],
-    middle: &[u8],
-    right: &[u8],
-    width: usize,
-    height: usize,
-) -> Vec<u8> {
+fn make_strip(left: &[u8], middle: &[u8], right: &[u8], width: usize, height: usize) -> Vec<u8> {
     let row_bytes = width * 3;
     let mut out = vec![0u8; width * 3 * height * 3];
     for y in 0..height {
         let src_start = y * row_bytes;
         let dst_start = y * row_bytes * 3;
-        out[dst_start..dst_start + row_bytes].copy_from_slice(&left[src_start..src_start + row_bytes]);
+        out[dst_start..dst_start + row_bytes]
+            .copy_from_slice(&left[src_start..src_start + row_bytes]);
         out[dst_start + row_bytes..dst_start + row_bytes * 2]
             .copy_from_slice(&middle[src_start..src_start + row_bytes]);
         out[dst_start + row_bytes * 2..dst_start + row_bytes * 3]
@@ -569,14 +590,11 @@ fn make_strip(
     out
 }
 
-fn save_rgb_png(
-    path: PathBuf,
-    width: usize,
-    height: usize,
-    data: &[u8],
-) -> anyhow::Result<()> {
+fn save_rgb_png(path: PathBuf, width: usize, height: usize, data: &[u8]) -> anyhow::Result<()> {
     let image: RgbImage = ImageBuffer::from_raw(width as u32, height as u32, data.to_vec())
-        .ok_or_else(|| anyhow::anyhow!("failed to construct image buffer for {}", path.display()))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!("failed to construct image buffer for {}", path.display())
+        })?;
     image.save(&path)?;
     Ok(())
 }

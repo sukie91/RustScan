@@ -5,7 +5,7 @@
 //! - Reduced memory bandwidth during rendering
 //! - Better cache locality for large scenes
 
-use glam::{Vec3, Mat4};
+use glam::{Mat4, Vec3};
 use std::collections::HashMap;
 
 /// Axis-aligned bounding box for a cluster.
@@ -62,12 +62,24 @@ impl ClusterAABB {
             let y = clip.y / w;
             let z = clip.z / w;
 
-            if x > -1.0 { all_left = false; }
-            if x < 1.0 { all_right = false; }
-            if y > -1.0 { all_bottom = false; }
-            if y < 1.0 { all_top = false; }
-            if z > 0.0 { all_near = false; }
-            if z < 1.0 { all_far = false; }
+            if x > -1.0 {
+                all_left = false;
+            }
+            if x < 1.0 {
+                all_right = false;
+            }
+            if y > -1.0 {
+                all_bottom = false;
+            }
+            if y < 1.0 {
+                all_top = false;
+            }
+            if z > 0.0 {
+                all_near = false;
+            }
+            if z < 1.0 {
+                all_far = false;
+            }
         }
 
         // If all corners are outside any single plane, the AABB is not visible
@@ -213,12 +225,7 @@ impl ClusterAssignment {
     }
 
     /// Reassign clusters (called after significant topology changes).
-    pub fn reassign(
-        &mut self,
-        positions: &[[f32; 3]],
-        cluster_size: usize,
-        scene_extent: f32,
-    ) {
+    pub fn reassign(&mut self, positions: &[[f32; 3]], cluster_size: usize, scene_extent: f32) {
         let new_assignment = Self::assign_spatial_hash(positions, cluster_size, scene_extent);
         *self = new_assignment;
     }
@@ -312,11 +319,11 @@ mod tests {
         assert_eq!(morton::encode(0, 0, 0), 0);
         // x=1: spread(1)=1, shifted left by 2 = 4
         assert_eq!(morton::encode(1, 0, 0), 0b100); // x=1 at bit position 2
-        // y=1: spread(1)=1, shifted left by 1 = 2
+                                                    // y=1: spread(1)=1, shifted left by 1 = 2
         assert_eq!(morton::encode(0, 1, 0), 0b010); // y=1 at bit position 1
-        // z=1: spread(1)=1, not shifted = 1
+                                                    // z=1: spread(1)=1, not shifted = 1
         assert_eq!(morton::encode(0, 0, 1), 0b001); // z=1 at bit position 0
-        // All dimensions
+                                                    // All dimensions
         assert_eq!(morton::encode(1, 1, 1), 0b111); // all bits set at positions 0, 1, 2
     }
 

@@ -93,7 +93,12 @@ impl PoseEmbedding {
 
         // Convert back to SE3 convention (qx, qy, qz, qw)
         Ok(SE3::new(
-            &[q_normalized[1], q_normalized[2], q_normalized[3], q_normalized[0]],
+            &[
+                q_normalized[1],
+                q_normalized[2],
+                q_normalized[3],
+                q_normalized[0],
+            ],
             &t_arr,
         ))
     }
@@ -119,7 +124,17 @@ impl PoseEmbedding {
         let rotation = view_pose.rotation();
         let translation = view_pose.translation();
 
-        DiffCamera::new(fx, fy, cx, cy, width, height, &rotation, &translation, device)
+        DiffCamera::new(
+            fx,
+            fy,
+            cx,
+            cy,
+            width,
+            height,
+            &rotation,
+            &translation,
+            device,
+        )
     }
 }
 
@@ -232,12 +247,6 @@ impl PoseEmbeddings {
         let bias_correction1 = 1.0 - self.beta1.powf(t);
         let bias_correction2 = 1.0 - self.beta2.powf(t);
 
-        // Create scalar tensors for division
-        let bc1_tensor = Tensor::new(bias_correction1, &Device::Cpu)?;
-        let bc2_tensor = Tensor::new(bias_correction2, &Device::Cpu)?;
-        let eps_tensor = Tensor::new(self.eps, &Device::Cpu)?;
-        let lr_tensor = Tensor::new(self.lr, &Device::Cpu)?;
-
         for (i, &frame_idx) in frame_indices.iter().enumerate() {
             if frame_idx >= self.embeddings.len() {
                 continue;
@@ -247,27 +256,32 @@ impl PoseEmbeddings {
 
             // Update quaternion
             let q_grad = &quaternion_grads[i];
+            let q_device = q_grad.device();
             let q_m = &self.quaternion_m[frame_idx];
             let q_v = &self.quaternion_v[frame_idx];
 
-            let beta1_t = Tensor::new(self.beta1, q_grad.device())?;
-            let one_minus_beta1 = Tensor::new(1.0 - self.beta1, q_grad.device())?;
-            let beta2_t = Tensor::new(self.beta2, q_grad.device())?;
-            let one_minus_beta2 = Tensor::new(1.0 - self.beta2, q_grad.device())?;
+            let q_m_new = q_m
+                .affine(self.beta1 as f64, 0.0)?
+                .broadcast_add(&q_grad.affine((1.0 - self.beta1) as f64, 0.0)?)?;
+            let q_v_new = q_v
+                .affine(self.beta2 as f64, 0.0)?
+                .broadcast_add(&q_grad.sqr()?.affine((1.0 - self.beta2) as f64, 0.0)?)?;
 
-            let q_m_new = q_m.mul(&beta1_t)?.add(&q_grad.mul(&one_minus_beta1)?)?;
-            let q_v_new = q_v.mul(&beta2_t)?.add(&q_grad.sqr()?.mul(&one_minus_beta2)?)?;
-
-            let q_m_hat = q_m_new.div(&bc1_tensor)?;
-            let q_v_hat = q_v_new.div(&bc2_tensor)?;
-
-            let q_update = q_m_hat.div(&q_v_hat.sqrt()?.add(&eps_tensor)?)?.mul(&lr_tensor)?;
+            let q_m_hat = q_m_new.affine((1.0 / bias_correction1) as f64, 0.0)?;
+            let q_v_hat = q_v_new.affine((1.0 / bias_correction2) as f64, 0.0)?;
+            let q_update = q_m_hat
+                .broadcast_div(
+                    &q_v_hat
+                        .sqrt()?
+                        .broadcast_add(&Tensor::new(self.eps, q_device)?)?,
+                )?
+                .affine(self.lr as f64, 0.0)?;
             let q_new = embedding.quaternion.as_tensor().sub(&q_update)?;
 
             // Normalize quaternion to maintain unit length
             let q_norm = q_new.sqr()?.sum_all()?.to_scalar::<f32>()?.sqrt();
             let q_normalized = if q_norm > 1e-8 {
-                q_new.div(&Tensor::new(q_norm, q_new.device())?)?
+                q_new.affine((1.0 / q_norm) as f64, 0.0)?
             } else {
                 q_new
             };
@@ -281,13 +295,22 @@ impl PoseEmbeddings {
             let t_m = &self.translation_m[frame_idx];
             let t_v = &self.translation_v[frame_idx];
 
-            let t_m_new = t_m.mul(&beta1_t)?.add(&t_grad.mul(&one_minus_beta1)?)?;
-            let t_v_new = t_v.mul(&beta2_t)?.add(&t_grad.sqr()?.mul(&one_minus_beta2)?)?;
+            let t_m_new = t_m
+                .affine(self.beta1 as f64, 0.0)?
+                .broadcast_add(&t_grad.affine((1.0 - self.beta1) as f64, 0.0)?)?;
+            let t_v_new = t_v
+                .affine(self.beta2 as f64, 0.0)?
+                .broadcast_add(&t_grad.sqr()?.affine((1.0 - self.beta2) as f64, 0.0)?)?;
 
-            let t_m_hat = t_m_new.div(&bc1_tensor)?;
-            let t_v_hat = t_v_new.div(&bc2_tensor)?;
-
-            let t_update = t_m_hat.div(&t_v_hat.sqrt()?.add(&eps_tensor)?)?.mul(&lr_tensor)?;
+            let t_m_hat = t_m_new.affine((1.0 / bias_correction1) as f64, 0.0)?;
+            let t_v_hat = t_v_new.affine((1.0 / bias_correction2) as f64, 0.0)?;
+            let t_update = t_m_hat
+                .broadcast_div(
+                    &t_v_hat
+                        .sqrt()?
+                        .broadcast_add(&Tensor::new(self.eps, q_device)?)?,
+                )?
+                .affine(self.lr as f64, 0.0)?;
             let t_new = embedding.translation.as_tensor().sub(&t_update)?;
 
             embedding.translation = Var::from_tensor(&t_new)?;
@@ -317,11 +340,11 @@ pub fn compute_pose_gradients_fd<F>(
     cy: f32,
     width: usize,
     height: usize,
-    loss_fn: F,
+    mut loss_fn: F,
     device: &Device,
 ) -> candle_core::Result<(Tensor, Tensor)>
 where
-    F: Fn(&DiffCamera) -> candle_core::Result<f32>,
+    F: FnMut(&DiffCamera) -> candle_core::Result<f32>,
 {
     const EPS: f32 = 1e-4;
 
@@ -431,14 +454,58 @@ mod tests {
         let orig_q = original.quaternion();
         let rec_q = recovered.quaternion();
         for i in 0..4 {
-            assert!((orig_q[i] - rec_q[i]).abs() < 1e-5, "Quaternion mismatch at {}", i);
+            assert!(
+                (orig_q[i] - rec_q[i]).abs() < 1e-5,
+                "Quaternion mismatch at {}",
+                i
+            );
         }
 
         // Check translation
         let orig_t = original.translation();
         let rec_t = recovered.translation();
         for i in 0..3 {
-            assert!((orig_t[i] - rec_t[i]).abs() < 1e-5, "Translation mismatch at {}", i);
+            assert!(
+                (orig_t[i] - rec_t[i]).abs() < 1e-5,
+                "Translation mismatch at {}",
+                i
+            );
         }
+    }
+
+    #[test]
+    fn test_pose_embeddings_adam_step_updates_selected_frame() {
+        let device = Device::Cpu;
+        let poses = vec![crate::ScenePose::new(
+            0,
+            "frame.png".into(),
+            SE3::identity(),
+            0.0,
+        )];
+        let mut embeddings = PoseEmbeddings::from_dataset(&poses, 1e-2, &device).unwrap();
+        let before = embeddings.get(0).unwrap().to_se3().unwrap();
+
+        embeddings
+            .adam_step(
+                &[0],
+                &[Tensor::from_slice(&[0.1f32, 0.2, 0.0, 0.0], (4,), &device).unwrap()],
+                &[Tensor::from_slice(&[0.3f32, -0.2, 0.1], (3,), &device).unwrap()],
+            )
+            .unwrap();
+
+        let after = embeddings.get(0).unwrap().to_se3().unwrap();
+        let after_q = after.quaternion();
+        let q_norm = (after_q[0] * after_q[0]
+            + after_q[1] * after_q[1]
+            + after_q[2] * after_q[2]
+            + after_q[3] * after_q[3])
+            .sqrt();
+
+        assert!((q_norm - 1.0).abs() < 1e-5);
+        assert!(
+            (after.translation()[0] - before.translation()[0]).abs() > 1e-6
+                || (after.translation()[1] - before.translation()[1]).abs() > 1e-6
+                || (after.translation()[2] - before.translation()[2]).abs() > 1e-6
+        );
     }
 }

@@ -63,6 +63,7 @@ Mesh Export (OBJ/PLY + JSON Metadata)
 | [RustSLAM README](RustSLAM-README.md) | RustSLAM-specific documentation |
 | [RustSLAM Design](RustSLAM-DESIGN.md) | Detailed design decisions |
 | [RustSLAM ToDo](RustSLAM-ToDo.md) | Development roadmap |
+| [RustGS LiteGS Parity Progress 2026-04-05](RustGS-LiteGS-Parity-Progress-2026-04-05.md) | RustGS 相对 LiteGS 的当前对齐进展、验证结果与后续任务 |
 
 ### Project Planning
 

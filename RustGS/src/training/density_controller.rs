@@ -60,8 +60,10 @@ impl StatisticsHelper {
         if new_len > old_len {
             self.visible_count.extend(vec![0; new_len - old_len]);
             self.mean2d_grad.extend(vec![(0.0, 0.0); new_len - old_len]);
-            self.fragment_weight.extend(vec![(0.0, 0.0); new_len - old_len]);
-            self.fragment_err.extend(vec![(0.0, 0.0, 0.0); new_len - old_len]);
+            self.fragment_weight
+                .extend(vec![(0.0, 0.0); new_len - old_len]);
+            self.fragment_err
+                .extend(vec![(0.0, 0.0, 0.0); new_len - old_len]);
             self.opacity.extend(vec![0.0; new_len - old_len]);
             self.max_scale.extend(vec![0.0; new_len - old_len]);
         } else if new_len < old_len {
@@ -386,7 +388,9 @@ impl DensityController {
 
     /// Get all densification scores for multinomial sampling.
     pub fn get_all_densify_scores(&self) -> Vec<f32> {
-        (0..self.stats.len()).map(|i| self.get_densify_score(i)).collect()
+        (0..self.stats.len())
+            .map(|i| self.get_densify_score(i))
+            .collect()
     }
 
     /// Compute densify budget for TamingGS mode.
@@ -394,7 +398,12 @@ impl DensityController {
     /// LiteGS TamingGS:
     /// cur_target = (target - init) / (densify_until - densify_from) * (epoch - densify_from) + init
     /// budget = min(max(cur_target - current_count, 1) + prune_count, current_count)
-    pub fn compute_densify_budget(&self, current_count: usize, prune_count: usize, epoch: usize) -> usize {
+    pub fn compute_densify_budget(
+        &self,
+        current_count: usize,
+        prune_count: usize,
+        epoch: usize,
+    ) -> usize {
         if !self.taming_gs_mode {
             // Official mode: no budget limit
             return current_count;
@@ -408,8 +417,8 @@ impl DensityController {
         let span = densify_until.saturating_sub(densify_from).max(1);
         let progressed = epoch.saturating_sub(densify_from);
 
-        let cur_target = init as f32
-            + ((target.saturating_sub(init)) as f32 / span as f32) * progressed as f32;
+        let cur_target =
+            init as f32 + ((target.saturating_sub(init)) as f32 / span as f32) * progressed as f32;
         let cur_target = cur_target.round() as usize;
 
         let deficit = cur_target.saturating_sub(current_count).max(1);
@@ -547,7 +556,7 @@ mod tests {
         controller.stats.visible_count = vec![5, 3];
         // fragment_weight sum for index 0
         controller.stats.fragment_weight[0] = (0.5, 1.0); // mean = 0.5, weight_sum = 0.5 * 5 = 2.5
-        // fragment_weight for index 1 is 0
+                                                          // fragment_weight for index 1 is 0
         controller.stats.fragment_weight[1] = (0.0, 0.0); // weight_sum = 0
 
         let mask = controller.get_prune_mask();
@@ -609,8 +618,8 @@ mod tests {
         // Set up stats for score computation
         // score = var * frag_count * opacity^2
         controller.stats.fragment_err[0] = (6.0, 10.0, 2.0); // mean=3, sq_mean=5, var=5-9=-4->0
-        // Recompute: sum=6, sq_sum=10, count=2
-        // mean = 3, sq_mean = 5, var = 5 - 9 = -4 -> clamped to 0
+                                                             // Recompute: sum=6, sq_sum=10, count=2
+                                                             // mean = 3, sq_mean = 5, var = 5 - 9 = -4 -> clamped to 0
         controller.stats.opacity[0] = 0.5;
 
         // Let's set up correctly for var = 1
@@ -618,7 +627,7 @@ mod tests {
         // mean=3, sq_mean=10, var=10-9=1
         controller.stats.fragment_err[0] = (6.0, 20.0, 2.0);
         controller.stats.opacity[0] = 0.5; // opacity^2 = 0.25
-        // score = 1 * 2 * 0.25 = 0.5
+                                           // score = 1 * 2 * 0.25 = 0.5
 
         let score = controller.get_densify_score(0);
         assert!((score - 0.5).abs() < 1e-6);
@@ -686,8 +695,18 @@ mod tests {
         // 2. Index 0 (score=4) should be second most selected
         // 3. Index 1 (score=1) should be third most selected
         // 4. Index 3 (score=0) and 4 (no stats) should never be selected
-        assert!(counts[2] > counts[0], "Index 2 (score=100) should be selected more than index 0 (score=4): {} vs {}", counts[2], counts[0]);
-        assert!(counts[0] > counts[1], "Index 0 (score=4) should be selected more than index 1 (score=1): {} vs {}", counts[0], counts[1]);
+        assert!(
+            counts[2] > counts[0],
+            "Index 2 (score=100) should be selected more than index 0 (score=4): {} vs {}",
+            counts[2],
+            counts[0]
+        );
+        assert!(
+            counts[0] > counts[1],
+            "Index 0 (score=4) should be selected more than index 1 (score=1): {} vs {}",
+            counts[0],
+            counts[1]
+        );
         assert_eq!(counts[3], 0, "Index 3 (score=0) should never be selected");
         assert_eq!(counts[4], 0, "Index 4 (no stats) should never be selected");
     }

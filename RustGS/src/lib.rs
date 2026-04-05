@@ -128,20 +128,47 @@ pub fn initialize_from_points(
 }
 
 /// Load a training dataset from a TUM RGB-D directory, a SLAM output JSON file,
-/// or a serialized `TrainingDataset` JSON file.
-pub fn load_training_dataset(
+/// a COLMAP directory, or a serialized `TrainingDataset` JSON file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrainingInputKind {
+    TumRgbd,
+    Colmap,
+    SlamOutputJson,
+    TrainingDatasetJson,
+}
+
+impl std::fmt::Display for TrainingInputKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TumRgbd => write!(f, "TUM RGB-D dataset"),
+            Self::Colmap => write!(f, "COLMAP dataset"),
+            Self::SlamOutputJson => write!(f, "SlamOutput JSON"),
+            Self::TrainingDatasetJson => write!(f, "TrainingDataset JSON"),
+        }
+    }
+}
+
+/// Load a training dataset and report which input type was resolved.
+pub fn load_training_dataset_with_source(
     input: &Path,
     tum_config: &TumRgbdConfig,
-) -> Result<TrainingDataset, TrainingError> {
+    colmap_config: &ColmapConfig,
+) -> Result<(TrainingDataset, TrainingInputKind), TrainingError> {
     if input.is_dir() {
-        return load_tum_rgbd_dataset(input, tum_config);
+        if io::colmap_dataset::resolve_colmap_sparse_dir(input).is_ok() {
+            return load_colmap_dataset(input, colmap_config)
+                .map(|dataset| (dataset, TrainingInputKind::Colmap));
+        }
+
+        return load_tum_rgbd_dataset(input, tum_config)
+            .map(|dataset| (dataset, TrainingInputKind::TumRgbd));
     }
 
     let input_buf = input.to_path_buf();
     match SlamOutput::load(&input_buf) {
-        Ok(slam_output) => Ok(slam_output.to_dataset()),
+        Ok(slam_output) => Ok((slam_output.to_dataset(), TrainingInputKind::SlamOutputJson)),
         Err(slam_err) => match TrainingDataset::load(&input_buf) {
-            Ok(dataset) => Ok(dataset),
+            Ok(dataset) => Ok((dataset, TrainingInputKind::TrainingDatasetJson)),
             Err(dataset_err) => Err(TrainingError::InvalidInput(format!(
                 "failed to load {} as SlamOutput JSON ({}) or TrainingDataset JSON ({})",
                 input.display(),
@@ -150,6 +177,20 @@ pub fn load_training_dataset(
             ))),
         },
     }
+}
+
+/// Load a training dataset from a TUM RGB-D directory, a COLMAP directory, a
+/// serialized `SlamOutput` JSON file, or a serialized `TrainingDataset` JSON file.
+pub fn load_training_dataset(
+    input: &Path,
+    tum_config: &TumRgbdConfig,
+) -> Result<TrainingDataset, TrainingError> {
+    let colmap_config = ColmapConfig {
+        max_frames: tum_config.max_frames,
+        frame_stride: tum_config.frame_stride,
+        depth_scale: 1.0,
+    };
+    load_training_dataset_with_source(input, tum_config, &colmap_config).map(|(dataset, _)| dataset)
 }
 
 /// Train a 3DGS scene from a SLAM output.
@@ -173,8 +214,8 @@ pub fn train_from_slam(
 
 /// Train a 3DGS scene directly from a dataset path.
 ///
-/// `input` can be a TUM RGB-D dataset directory, a serialized `SlamOutput` JSON
-/// file, or a serialized `TrainingDataset` JSON file.
+/// `input` can be a TUM RGB-D dataset directory, a COLMAP directory, a
+/// serialized `SlamOutput` JSON file, or a serialized `TrainingDataset` JSON file.
 #[cfg(feature = "gpu")]
 pub fn train_from_path(
     input: &Path,
@@ -183,6 +224,53 @@ pub fn train_from_path(
 ) -> Result<GaussianMap, TrainingError> {
     let dataset = load_training_dataset(input, tum_config)?;
     training::train(&dataset, config)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn write_colmap_test_dataset(root: &Path) {
+        let sparse = root.join("sparse").join("0");
+        std::fs::create_dir_all(&sparse).unwrap();
+        let images = root.join("images");
+        std::fs::create_dir_all(&images).unwrap();
+
+        std::fs::write(
+            sparse.join("cameras.txt"),
+            "# Camera list with one line of data per camera:\n1 PINHOLE 640 480 500 500 320 240\n",
+        )
+        .unwrap();
+        std::fs::write(
+            sparse.join("images.txt"),
+            "# Image list with two lines of data per image:\n1 1.0 0.0 0.0 0.0 0.0 0.0 1.0 1 frame_0001.jpg\n",
+        )
+        .unwrap();
+        std::fs::write(
+            sparse.join("points3D.txt"),
+            "# 3D point list with one line of data per point:\n1 0.0 0.0 1.0 128 128 128 0.1\n",
+        )
+        .unwrap();
+        std::fs::write(images.join("frame_0001.jpg"), vec![0u8; 640 * 480 * 3]).unwrap();
+    }
+
+    #[test]
+    fn test_load_training_dataset_with_source_detects_colmap_directory() {
+        let temp = tempdir().unwrap();
+        write_colmap_test_dataset(temp.path());
+
+        let (dataset, source) = load_training_dataset_with_source(
+            temp.path(),
+            &TumRgbdConfig::default(),
+            &ColmapConfig::default(),
+        )
+        .unwrap();
+
+        assert_eq!(source, TrainingInputKind::Colmap);
+        assert_eq!(dataset.poses.len(), 1);
+        assert_eq!(dataset.initial_points.len(), 1);
+    }
 }
 
 /// Training error type.

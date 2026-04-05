@@ -235,7 +235,7 @@ impl TiledRenderer {
             // 3. Camera-space covariance: Σ_cam = C_rot * Σ_world * C_rot^T.
             //    Only the upper-left 3×3 is needed; compute the 6 unique entries.
             let c = r; // camera rotation matrix (world-to-camera)
-            // Intermediate: M = C_rot * Σ_world  (3×3)
+                       // Intermediate: M = C_rot * Σ_world  (3×3)
             let m00 = c[0][0] * cw00 + c[0][1] * cw01 + c[0][2] * cw02;
             let m01 = c[0][0] * cw01 + c[0][1] * cw11 + c[0][2] * cw12;
             let m02 = c[0][0] * cw02 + c[0][1] * cw12 + c[0][2] * cw22;
@@ -560,15 +560,8 @@ mod tests {
         );
 
         let rotation = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
-        let projected = renderer.project_gaussians(
-            &[g],
-            500.0,
-            500.0,
-            0.0,
-            0.0,
-            &rotation,
-            &[0.0, 0.0, 0.0],
-        );
+        let projected =
+            renderer.project_gaussians(&[g], 500.0, 500.0, 0.0, 0.0, &rotation, &[0.0, 0.0, 0.0]);
 
         assert!(!projected.is_empty());
         let p = &projected[0];
@@ -601,15 +594,8 @@ mod tests {
         );
 
         let rotation = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
-        let projected = renderer.project_gaussians(
-            &[g],
-            500.0,
-            500.0,
-            0.0,
-            0.0,
-            &rotation,
-            &[0.0, 0.0, 0.0],
-        );
+        let projected =
+            renderer.project_gaussians(&[g], 500.0, 500.0, 0.0, 0.0, &rotation, &[0.0, 0.0, 0.0]);
 
         assert!(!projected.is_empty());
         let p = &projected[0];

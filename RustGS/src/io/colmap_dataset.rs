@@ -9,7 +9,7 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 
-use crate::{Intrinsics, ScenePose, SE3, TrainingDataset, TrainingError};
+use crate::{Intrinsics, ScenePose, TrainingDataset, TrainingError, SE3};
 
 /// Configuration for loading a COLMAP dataset.
 #[derive(Debug, Clone)]
@@ -61,11 +61,11 @@ impl CameraModel {
     /// Number of parameters for this camera model.
     fn num_params(&self) -> usize {
         match self {
-            CameraModel::Pinhole => 4,        // fx, fy, cx, cy
-            CameraModel::SimpleRadial => 4,   // f, cx, cy, k1
-            CameraModel::Radial => 5,         // f, cx, cy, k1, k2
-            CameraModel::OpenCV => 8,         // fx, fy, cx, cy, k1, k2, p1, p2
-            CameraModel::OpenCVFisheye => 8,  // fx, fy, cx, cy, k1, k2, k3, k4
+            CameraModel::Pinhole => 4,       // fx, fy, cx, cy
+            CameraModel::SimpleRadial => 4,  // f, cx, cy, k1
+            CameraModel::Radial => 5,        // f, cx, cy, k1, k2
+            CameraModel::OpenCV => 8,        // fx, fy, cx, cy, k1, k2, p1, p2
+            CameraModel::OpenCVFisheye => 8, // fx, fy, cx, cy, k1, k2, k3, k4
             CameraModel::FullFisheye => 12,
             CameraModel::ThinPrismFisheye => 15,
         }
@@ -223,11 +223,17 @@ pub fn load_colmap_dataset(
     let first_camera = &cameras[0];
     let intrinsics = first_camera
         .model
-        .intrinsics(first_camera.width, first_camera.height, &first_camera.params)
-        .ok_or_else(|| TrainingError::InvalidInput(format!(
-            "unsupported camera model {:?} or missing parameters",
-            first_camera.model
-        )))?;
+        .intrinsics(
+            first_camera.width,
+            first_camera.height,
+            &first_camera.params,
+        )
+        .ok_or_else(|| {
+            TrainingError::InvalidInput(format!(
+                "unsupported camera model {:?} or missing parameters",
+                first_camera.model
+            ))
+        })?;
 
     // Build dataset
     let mut dataset = TrainingDataset::new(intrinsics).with_depth_scale(config.depth_scale);
@@ -261,21 +267,14 @@ pub fn load_colmap_dataset(
     {
         let image_path = image_dir.join(&image.name);
         if !image_path.exists() {
-            log::warn!(
-                "image {} not found at {}",
-                image.name,
-                image_path.display()
-            );
+            log::warn!("image {} not found at {}", image.name, image_path.display());
             continue;
         }
 
-        // COLMAP quaternion is (qw, qx, qy, qz) - same as our convention
-        // COLMAP pose is camera-to-world (t is camera center in world coords)
-        // This matches our SE3 convention
-        let pose = SE3::new(
-            &[image.qx as f32, image.qy as f32, image.qz as f32, image.qw as f32],
-            &[image.tx as f32, image.ty as f32, image.tz as f32],
-        );
+        // COLMAP stores world-to-camera extrinsics:
+        //   X_cam = R * X_world + t
+        // ScenePose expects camera-to-world, so invert here.
+        let pose = scene_pose_from_colmap_image(&image);
 
         let scene_pose = ScenePose::new(frame_idx as u64, image_path, pose, image.image_id as f64);
         dataset.add_pose(scene_pose);
@@ -302,7 +301,7 @@ pub fn load_colmap_dataset(
     Ok(dataset)
 }
 
-fn resolve_colmap_sparse_dir(input: &Path) -> Result<PathBuf, TrainingError> {
+pub(crate) fn resolve_colmap_sparse_dir(input: &Path) -> Result<PathBuf, TrainingError> {
     // Check if input is directly a sparse directory
     if is_colmap_sparse_dir(input) {
         return Ok(input.to_path_buf());
@@ -326,10 +325,23 @@ fn resolve_colmap_sparse_dir(input: &Path) -> Result<PathBuf, TrainingError> {
     )))
 }
 
-fn is_colmap_sparse_dir(path: &Path) -> bool {
+pub(crate) fn is_colmap_sparse_dir(path: &Path) -> bool {
     path.is_dir()
         && (path.join("cameras.bin").exists() || path.join("cameras.txt").exists())
         && (path.join("images.bin").exists() || path.join("images.txt").exists())
+}
+
+fn scene_pose_from_colmap_image(image: &ColmapImage) -> SE3 {
+    let world_to_camera = SE3::new(
+        &[
+            image.qx as f32,
+            image.qy as f32,
+            image.qz as f32,
+            image.qw as f32,
+        ],
+        &[image.tx as f32, image.ty as f32, image.tz as f32],
+    );
+    world_to_camera.inverse()
 }
 
 fn resolve_image_dir(sparse_dir: &Path) -> Result<PathBuf, TrainingError> {
@@ -337,7 +349,12 @@ fn resolve_image_dir(sparse_dir: &Path) -> Result<PathBuf, TrainingError> {
     let candidates = [
         sparse_dir.join("images"),
         sparse_dir.parent().unwrap().join("images"),
-        sparse_dir.parent().unwrap().parent().unwrap().join("images"),
+        sparse_dir
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("images"),
     ];
 
     for candidate in &candidates {
@@ -785,6 +802,8 @@ mod tests {
         assert_eq!(dataset.intrinsics.width, 1920);
         assert_eq!(dataset.intrinsics.height, 1080);
         assert!((dataset.intrinsics.fx - 1500.0).abs() < 1e-3);
+        assert_eq!(dataset.poses[0].pose.translation(), [0.0, 0.0, -1.0]);
+        assert_eq!(dataset.poses[1].pose.translation(), [-1.0, 0.0, -2.0]);
     }
 
     #[test]

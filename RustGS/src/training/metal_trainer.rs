@@ -1150,8 +1150,7 @@ impl MetalTrainer {
                     // LiteGS threshold mode: prune when opacity < threshold
                     // Only use invisible_for_prune as extra protection for truly dead Gaussians
                     super::LiteGsPruneMode::Threshold => {
-                        (age_eligible && opacity < LITEGS_OPACITY_THRESHOLD)
-                            || invisible_for_prune
+                        (age_eligible && opacity < LITEGS_OPACITY_THRESHOLD) || invisible_for_prune
                     }
                 };
                 if should_prune {
@@ -1486,7 +1485,14 @@ impl MetalTrainer {
             // log_scale = ln(scale / 1.6) = ln(scale) - ln(1.6)
             log_scale[max_axis] = (max_axis_scale / 1.6).max(1e-6).ln();
 
-            snapshot.push(position, log_scale, rotation, opacity_logit, color, &sh_rest);
+            snapshot.push(
+                position,
+                log_scale,
+                rotation,
+                opacity_logit,
+                color,
+                &sh_rest,
+            );
             stats.push(MetalGaussianStats::default());
             origins.push(None);
             added = added.saturating_add(1);
@@ -1505,7 +1511,14 @@ impl MetalTrainer {
             let color = snapshot.color(*idx);
             let sh_rest = snapshot.sh_rest(*idx).to_vec();
 
-            snapshot.push(position, log_scale, rotation, opacity_logit, color, &sh_rest);
+            snapshot.push(
+                position,
+                log_scale,
+                rotation,
+                opacity_logit,
+                color,
+                &sh_rest,
+            );
             stats.push(MetalGaussianStats::default());
             origins.push(None);
             added = added.saturating_add(1);
@@ -1735,6 +1748,221 @@ impl MetalTrainer {
         iteration % self.topology_log_interval == 0
     }
 
+    fn clustering_positions(
+        &self,
+        gaussians: &TrainableGaussians,
+    ) -> candle_core::Result<Vec<[f32; 3]>> {
+        gaussians
+            .positions()
+            .to_vec2::<f32>()?
+            .into_iter()
+            .map(|row| {
+                if row.len() != 3 {
+                    candle_core::bail!("expected gaussian positions with row width 3");
+                }
+                Ok([row[0], row[1], row[2]])
+            })
+            .collect()
+    }
+
+    fn sync_cluster_assignment(
+        &mut self,
+        gaussians: &TrainableGaussians,
+        topology_changed: bool,
+    ) -> candle_core::Result<()> {
+        if self.litegs.cluster_size == 0 {
+            self.cluster_assignment = None;
+            return Ok(());
+        }
+
+        let positions = self.clustering_positions(gaussians)?;
+        if positions.is_empty() {
+            self.cluster_assignment = None;
+            return Ok(());
+        }
+
+        match self.cluster_assignment.as_mut() {
+            Some(assignment)
+                if !topology_changed && assignment.cluster_indices.len() == positions.len() =>
+            {
+                assignment.update_aabbs(&positions);
+            }
+            Some(assignment) => {
+                assignment.reassign(&positions, self.litegs.cluster_size, self.scene_extent);
+            }
+            None => {
+                self.cluster_assignment = Some(ClusterAssignment::assign_spatial_hash(
+                    &positions,
+                    self.litegs.cluster_size,
+                    self.scene_extent,
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn cluster_visible_mask_for_camera(
+        &self,
+        gaussians_len: usize,
+        camera: &DiffCamera,
+    ) -> Option<Vec<bool>> {
+        let assignment = self.cluster_assignment.as_ref()?;
+        let view_proj = camera.view_projection_mat4();
+        let visible_clusters = assignment.get_visible_clusters(&view_proj);
+
+        let mut mask = vec![false; gaussians_len];
+        for &cluster in &visible_clusters {
+            for (i, &c) in assignment.cluster_indices.iter().enumerate() {
+                if c == cluster {
+                    mask[i] = true;
+                }
+            }
+        }
+
+        let visible_count = mask.iter().filter(|&v| *v).count();
+        if visible_count < gaussians_len {
+            log::debug!(
+                "Cluster culling: {} / {} Gaussians visible ({} / {} clusters)",
+                visible_count,
+                gaussians_len,
+                visible_clusters.len(),
+                assignment.num_clusters
+            );
+        }
+
+        Some(mask)
+    }
+
+    fn loss_weights(&self) -> (f32, f32, f32) {
+        let color_weight = if self.is_litegs_mode() {
+            1.0 - LITEGS_LAMBDA_DSSIM
+        } else {
+            0.8
+        };
+        let ssim_weight = if self.is_litegs_mode() {
+            LITEGS_LAMBDA_DSSIM
+        } else {
+            0.2
+        };
+        let depth_weight = if self.is_litegs_mode() {
+            if self.litegs.enable_depth {
+                0.1
+            } else {
+                0.0
+            }
+        } else {
+            0.1
+        };
+        (color_weight, ssim_weight, depth_weight)
+    }
+
+    fn total_loss_for_render_result(
+        &self,
+        gaussians: &TrainableGaussians,
+        rendered: &RenderedFrame,
+        projected: &ProjectedGaussians,
+        frame: &MetalTrainingFrame,
+    ) -> candle_core::Result<f32> {
+        let color_loss = mean_abs_diff(&rendered.color, &frame.target_color)?;
+        let depth_loss =
+            masked_mean_abs_diff(&rendered.depth, &frame.target_depth, &frame.target_depth)?;
+        let rendered_color_cpu = rendered.color.flatten_all()?.to_vec1::<f32>()?;
+        let (ssim_value, _) = ssim_gradient(
+            &rendered_color_cpu,
+            &frame.target_color_cpu,
+            self.render_width,
+            self.render_height,
+        );
+        let ssim_loss_term = 1.0 - ssim_value;
+        let (color_weight, ssim_weight, depth_weight) = self.loss_weights();
+        let scale_reg_term =
+            if self.is_litegs_mode() && self.litegs.reg_weight > 0.0 && projected.visible_count > 0
+            {
+                self.litegs_scale_regularization_term(
+                    &gaussians
+                        .scales
+                        .as_tensor()
+                        .index_select(&projected.source_indices, 0)?,
+                )?
+            } else {
+                Tensor::new(0.0f32, color_loss.device())?
+            };
+        let transmittance_term = if self.is_litegs_mode() && self.litegs.enable_transmittance {
+            rendered.alpha.mean_all()?
+        } else {
+            Tensor::new(0.0f32, color_loss.device())?
+        };
+
+        let mut total =
+            color_loss
+                .affine(color_weight as f64, 0.0)?
+                .broadcast_add(&Tensor::new(
+                    ssim_weight * ssim_loss_term,
+                    color_loss.device(),
+                )?)?;
+        if depth_weight > 0.0 {
+            total = total.broadcast_add(&depth_loss.affine(depth_weight as f64, 0.0)?)?;
+        }
+        if self.is_litegs_mode() && self.litegs.reg_weight > 0.0 {
+            total =
+                total.broadcast_add(&scale_reg_term.affine(self.litegs.reg_weight as f64, 0.0)?)?;
+        }
+        if self.is_litegs_mode() && self.litegs.enable_transmittance {
+            total = total.broadcast_add(&transmittance_term)?;
+        }
+
+        total.to_vec0::<f32>()
+    }
+
+    fn loss_for_camera(
+        &mut self,
+        gaussians: &TrainableGaussians,
+        frame: &MetalTrainingFrame,
+        camera: &DiffCamera,
+    ) -> candle_core::Result<f32> {
+        let collect_visible_indices = self.is_litegs_mode() && self.litegs.reg_weight > 0.0;
+        let cluster_visible_mask = self.cluster_visible_mask_for_camera(gaussians.len(), camera);
+        let (rendered, projected, _) = self.render(
+            gaussians,
+            camera,
+            false,
+            collect_visible_indices,
+            cluster_visible_mask.as_deref(),
+        )?;
+        self.total_loss_for_render_result(gaussians, &rendered, &projected, frame)
+    }
+
+    fn pose_parameter_grads(
+        &mut self,
+        gaussians: &TrainableGaussians,
+        frame: &MetalTrainingFrame,
+        frame_idx: usize,
+    ) -> candle_core::Result<Option<(Tensor, Tensor)>> {
+        let Some(embedding) = self
+            .pose_embeddings
+            .as_ref()
+            .and_then(|pose_embeddings| pose_embeddings.get(frame_idx))
+            .cloned()
+        else {
+            return Ok(None);
+        };
+        let device = self.device.clone();
+
+        let grads = crate::training::pose_embedding::compute_pose_gradients_fd(
+            &embedding,
+            frame.camera.fx,
+            frame.camera.fy,
+            frame.camera.cx,
+            frame.camera.cy,
+            frame.camera.width,
+            frame.camera.height,
+            |camera| self.loss_for_camera(gaussians, frame, camera),
+            &device,
+        )?;
+        Ok(Some(grads))
+    }
+
     fn maybe_apply_topology_updates(
         &mut self,
         gaussians: &mut TrainableGaussians,
@@ -1760,8 +1988,8 @@ impl MetalTrainer {
             // LiteGS semantics: densify and prune fire together at same epoch
             // This matches DensityControllerOfficial.step() which calls
             // split_and_clone() and prune() in the same epoch
-            let should_densify = active_window
-                && epoch % self.litegs.densification_interval.max(1) == 0;
+            let should_densify =
+                active_window && epoch % self.litegs.densification_interval.max(1) == 0;
 
             // Prune fires at same epoch as densify (no offset)
             // TamingGS and Official both densify+prune together
@@ -1881,15 +2109,21 @@ impl MetalTrainer {
             if morton_perm.len() == snapshot.len() {
                 // Apply permutation to all snapshot arrays
                 snapshot.positions = super::morton::permute_vec3(&snapshot.positions, &morton_perm);
-                snapshot.log_scales = super::morton::permute_vec3(&snapshot.log_scales, &morton_perm);
+                snapshot.log_scales =
+                    super::morton::permute_vec3(&snapshot.log_scales, &morton_perm);
                 snapshot.rotations = super::morton::permute_vec4(&snapshot.rotations, &morton_perm);
-                snapshot.opacity_logits = super::morton::permute_scalar(&snapshot.opacity_logits, &morton_perm);
+                snapshot.opacity_logits =
+                    super::morton::permute_scalar(&snapshot.opacity_logits, &morton_perm);
                 snapshot.colors = super::morton::permute_vec3(&snapshot.colors, &morton_perm);
 
                 // Apply permutation to sh_rest if present
                 let sh_rest_row_width = snapshot.sh_rest_row_width();
                 if sh_rest_row_width > 0 && !snapshot.sh_rest.is_empty() {
-                    snapshot.sh_rest = super::morton::permute_rows(&snapshot.sh_rest, sh_rest_row_width, &morton_perm);
+                    snapshot.sh_rest = super::morton::permute_rows(
+                        &snapshot.sh_rest,
+                        sh_rest_row_width,
+                        &morton_perm,
+                    );
                 }
 
                 // Apply permutation to stats and origins
@@ -1994,6 +2228,7 @@ impl MetalTrainer {
         *gaussians = rebuilt;
         self.adam = Some(new_adam);
         self.gaussian_stats = stats;
+        self.sync_cluster_assignment(gaussians, true)?;
         self.runtime.reserve_core_buffers(gaussians.len())?;
         if should_reset_opacity {
             self.apply_litegs_opacity_reset(gaussians)?;
@@ -2259,6 +2494,10 @@ impl MetalTrainer {
             || self.should_densify_at(self.iteration)
             || self.should_prune_at(self.iteration);
 
+        if self.litegs.cluster_size > 0 {
+            self.sync_cluster_assignment(gaussians, false)?;
+        }
+
         // Get the camera to use for rendering
         // If pose embeddings exist, use the learnable camera for this frame
         let render_camera = if let Some(ref pose_embeddings) = self.pose_embeddings {
@@ -2279,34 +2518,8 @@ impl MetalTrainer {
             frame.camera.clone()
         };
 
-        // Compute cluster visibility mask for frustum culling
-        let cluster_visible_mask: Option<Vec<bool>> = if let Some(ref assignment) = self.cluster_assignment {
-            let view_proj = render_camera.view_projection_mat4();
-            let visible_clusters = assignment.get_visible_clusters(&view_proj);
-
-            // Build mask: Gaussian i is visible if its cluster is visible
-            let mut mask = vec![false; gaussians.len()];
-            for &cluster in &visible_clusters {
-                for (i, &c) in assignment.cluster_indices.iter().enumerate() {
-                    if c == cluster {
-                        mask[i] = true;
-                    }
-                }
-            }
-
-            // Count visible Gaussians for profiling
-            let visible_count = mask.iter().filter(|&v| *v).count();
-            if visible_count < gaussians.len() {
-                log::debug!(
-                    "Cluster culling: {} / {} Gaussians visible ({} / {} clusters)",
-                    visible_count, gaussians.len(),
-                    visible_clusters.len(), assignment.num_clusters
-                );
-            }
-            Some(mask)
-        } else {
-            None
-        };
+        let cluster_visible_mask =
+            self.cluster_visible_mask_for_camera(gaussians.len(), &render_camera);
 
         let (rendered, projected, render_profile) = self.render(
             gaussians,
@@ -2332,34 +2545,16 @@ impl MetalTrainer {
         );
 
         let ssim_loss_term = 1.0 - ssim_value;
-        let color_weight: f32 = if self.is_litegs_mode() {
-            1.0 - LITEGS_LAMBDA_DSSIM
-        } else {
-            0.8
-        };
-        let ssim_weight: f32 = if self.is_litegs_mode() {
-            LITEGS_LAMBDA_DSSIM
-        } else {
-            0.2
-        };
-        let depth_weight: f32 = if self.is_litegs_mode() {
-            if self.litegs.enable_depth {
-                0.1
-            } else {
-                0.0
-            }
-        } else {
-            0.1
-        };
+        let (color_weight, ssim_weight, depth_weight) = self.loss_weights();
         let scale_reg_term =
             if self.is_litegs_mode() && self.litegs.reg_weight > 0.0 && projected.visible_count > 0
             {
-                gaussians
-                    .scales
-                    .as_tensor()
-                    .index_select(&projected.source_indices, 0)?
-                    .sqr()?
-                    .mean_all()?
+                self.litegs_scale_regularization_term(
+                    &gaussians
+                        .scales
+                        .as_tensor()
+                        .index_select(&projected.source_indices, 0)?,
+                )?
             } else {
                 Tensor::new(0.0f32, color_loss.device())?
             };
@@ -2445,32 +2640,29 @@ impl MetalTrainer {
             &mut self.runtime,
             &projected.tile_bins,
             gaussians.len(),
-            &frame.camera,
+            &render_camera,
         )?;
         profile.backward = backward_start.elapsed();
 
         let optimizer_start = Instant::now();
         let effective_lr_pos = self.compute_lr_pos();
-        let scale_reg_grad =
-            if self.is_litegs_mode() && self.litegs.reg_weight > 0.0 && projected.visible_count > 0
-            {
-                let visible_scales = gaussians
-                    .scales
-                    .as_tensor()
-                    .index_select(&projected.source_indices, 0)?;
-                let visible_elem_count = visible_scales.elem_count().max(1) as f32;
-                let visible_reg_grad = visible_scales.affine(
-                    ((2.0 * self.litegs.reg_weight) / visible_elem_count) as f64,
-                    0.0,
-                )?;
-                Some(Tensor::zeros_like(gaussians.scales.as_tensor())?.index_add(
-                    &projected.source_indices,
-                    &visible_reg_grad,
-                    0,
-                )?)
-            } else {
-                None
-            };
+        let scale_reg_grad = if self.is_litegs_mode()
+            && self.litegs.reg_weight > 0.0
+            && projected.visible_count > 0
+        {
+            let visible_log_scales = gaussians
+                .scales
+                .as_tensor()
+                .index_select(&projected.source_indices, 0)?;
+            let visible_reg_grad = self.litegs_scale_regularization_grad(&visible_log_scales)?;
+            Some(Tensor::zeros_like(gaussians.scales.as_tensor())?.index_add(
+                &projected.source_indices,
+                &visible_reg_grad,
+                0,
+            )?)
+        } else {
+            None
+        };
         let rotation_parameter_grads = if self.lr_rotation > 0.0 && projected.visible_count > 0 {
             Some(self.rotation_parameter_grads(
                 gaussians,
@@ -2481,25 +2673,26 @@ impl MetalTrainer {
                 &frame.target_depth_cpu,
                 &ssim_grads,
                 backward_loss_scales,
-                &frame.camera,
+                &render_camera,
             )?)
         } else {
             None
         };
+        let pose_parameter_grads = self.pose_parameter_grads(gaussians, frame, frame_idx)?;
         self.apply_backward_grads(
             gaussians,
             &backward.grads,
             &projected,
-            &frame.camera,
+            &render_camera,
             effective_lr_pos,
             scale_reg_grad.as_ref(),
             rotation_parameter_grads.as_ref(),
         )?;
-
-        // Note: Learnable camera pose updates would go here.
-        // The finite-difference approach requires Fn closures but render takes &mut self.
-        // Full implementation would use analytical pose gradients through the differentiable renderer.
-        // For now, pose embeddings are updated externally via the backward pass through rendering.
+        if let Some((quaternion_grad, translation_grad)) = pose_parameter_grads {
+            if let Some(pose_embeddings) = self.pose_embeddings.as_mut() {
+                pose_embeddings.adam_step(&[frame_idx], &[quaternion_grad], &[translation_grad])?;
+            }
+        }
 
         self.update_gaussian_stats(&backward.grad_magnitudes, &projected, gaussians.len())?;
         self.synchronize_if_needed(should_profile)?;
@@ -2528,6 +2721,24 @@ impl MetalTrainer {
             return lr0;
         }
         lr0 * (lr_end / lr0).powf(t / total)
+    }
+
+    fn litegs_scale_regularization_term(
+        &self,
+        visible_log_scales: &Tensor,
+    ) -> candle_core::Result<Tensor> {
+        visible_log_scales.exp()?.sqr()?.mean_all()
+    }
+
+    fn litegs_scale_regularization_grad(
+        &self,
+        visible_log_scales: &Tensor,
+    ) -> candle_core::Result<Tensor> {
+        let visible_elem_count = visible_log_scales.elem_count().max(1) as f32;
+        visible_log_scales.exp()?.sqr()?.affine(
+            ((2.0 * self.litegs.reg_weight) / visible_elem_count) as f64,
+            0.0,
+        )
     }
 
     fn render_colors_for_camera(
@@ -2585,10 +2796,11 @@ impl MetalTrainer {
                     .broadcast_sub(&yy.affine(SH_C2[2] as f64, 0.0)?)
             );
             add_sh_term!(6, xz.affine(SH_C2[3] as f64, 0.0));
-            add_sh_term!(7, xx.affine(SH_C2[4] as f64, 0.0)?.broadcast_sub(&yy.affine(
-                SH_C2[4] as f64,
-                0.0,
-            )?));
+            add_sh_term!(
+                7,
+                xx.affine(SH_C2[4] as f64, 0.0)?
+                    .broadcast_sub(&yy.affine(SH_C2[4] as f64, 0.0,)?)
+            );
         }
 
         if active_degree > 2 {
@@ -2657,8 +2869,7 @@ impl MetalTrainer {
             );
             add_sh_term!(
                 18,
-                yz.broadcast_mul(&zz7_minus_3)?
-                    .affine(SH_C4[3] as f64, 0.0)
+                yz.broadcast_mul(&zz7_minus_3)?.affine(SH_C4[3] as f64, 0.0)
             );
             add_sh_term!(
                 19,
@@ -2667,8 +2878,7 @@ impl MetalTrainer {
             );
             add_sh_term!(
                 20,
-                xz.broadcast_mul(&zz7_minus_3)?
-                    .affine(SH_C4[5] as f64, 0.0)
+                xz.broadcast_mul(&zz7_minus_3)?.affine(SH_C4[5] as f64, 0.0)
             );
             add_sh_term!(
                 21,
@@ -2684,9 +2894,7 @@ impl MetalTrainer {
             add_sh_term!(
                 23,
                 xx.broadcast_mul(&xx.broadcast_sub(&yy.affine(3.0, 0.0)?)?)?
-                    .broadcast_sub(
-                        &yy.broadcast_mul(&xx.affine(3.0, 0.0)?.broadcast_sub(&yy)?)?,
-                    )?
+                    .broadcast_sub(&yy.broadcast_mul(&xx.affine(3.0, 0.0)?.broadcast_sub(&yy)?)?,)?
                     .affine(SH_C4[8] as f64, 0.0)
             );
         }
@@ -2719,8 +2927,12 @@ impl MetalTrainer {
         let rendered_depth_cpu = rendered.depth.flatten_all()?.to_vec1::<f32>()?;
         let rendered_alpha_cpu = rendered.alpha.flatten_all()?.to_vec1::<f32>()?;
         let raw_rotation_rows = gaussians.rotations.as_tensor().to_vec2::<f32>()?;
-        let color_grads =
-            pixel_color_grads(rendered_color_cpu, target_color_cpu, ssim_grads, loss_scales);
+        let color_grads = pixel_color_grads(
+            rendered_color_cpu,
+            target_color_cpu,
+            ssim_grads,
+            loss_scales,
+        );
         let depth_grads = pixel_depth_grads(&rendered_depth_cpu, target_depth_cpu, loss_scales);
         let mut dl_dsigma_x = vec![0.0f32; row_count];
         let mut dl_dsigma_y = vec![0.0f32; row_count];
@@ -2740,8 +2952,12 @@ impl MetalTrainer {
             let tile_y = tile_idx / num_tiles_x;
             let min_x = tile_x * METAL_TILE_SIZE;
             let min_y = tile_y * METAL_TILE_SIZE;
-            let max_x = (min_x + METAL_TILE_SIZE).min(self.render_width).saturating_sub(1);
-            let max_y = (min_y + METAL_TILE_SIZE).min(self.render_height).saturating_sub(1);
+            let max_x = (min_x + METAL_TILE_SIZE)
+                .min(self.render_width)
+                .saturating_sub(1);
+            let max_y = (min_y + METAL_TILE_SIZE)
+                .min(self.render_height)
+                .saturating_sub(1);
             let tile_width = max_x.saturating_sub(min_x) + 1;
             let tile_height = max_y.saturating_sub(min_y) + 1;
             let tile_pixel_count = tile_width * tile_height;
@@ -2801,23 +3017,20 @@ impl MetalTrainer {
                             .copied()
                             .unwrap_or(0.0);
                         let r_r = final_color_r - running_s[local_idx * 3] - contrib * g.color[0];
-                        let r_g = final_color_g
-                            - running_s[local_idx * 3 + 1]
-                            - contrib * g.color[1];
-                        let r_b = final_color_b
-                            - running_s[local_idx * 3 + 2]
-                            - contrib * g.color[2];
+                        let r_g =
+                            final_color_g - running_s[local_idx * 3 + 1] - contrib * g.color[1];
+                        let r_b =
+                            final_color_b - running_s[local_idx * 3 + 2] - contrib * g.color[2];
 
                         let transmittance = 1.0 - running_alpha[local_idx];
                         let inv_one_minus_alpha = 1.0 / (1.0 - alpha).max(1e-6);
                         let dc_r = color_grads.get(color_idx).copied().unwrap_or(0.0);
                         let dc_g = color_grads.get(color_idx + 1).copied().unwrap_or(0.0);
                         let dc_b = color_grads.get(color_idx + 2).copied().unwrap_or(0.0);
-                        let dl_dalpha_color = (transmittance * g.color[0]
-                            - r_r * inv_one_minus_alpha)
-                            * dc_r
-                            + (transmittance * g.color[1] - r_g * inv_one_minus_alpha) * dc_g
-                            + (transmittance * g.color[2] - r_b * inv_one_minus_alpha) * dc_b;
+                        let dl_dalpha_color =
+                            (transmittance * g.color[0] - r_r * inv_one_minus_alpha) * dc_r
+                                + (transmittance * g.color[1] - r_g * inv_one_minus_alpha) * dc_g
+                                + (transmittance * g.color[2] - r_b * inv_one_minus_alpha) * dc_b;
                         let dd_depth = depth_grads.get(pixel_idx).copied().unwrap_or(0.0);
                         let tail_alpha = final_alpha - running_alpha[local_idx] - contrib;
                         let tail_depth_num = final_depth * depth_denom
@@ -2828,8 +3041,7 @@ impl MetalTrainer {
                         if dd_depth != 0.0 {
                             let dnum_dalpha =
                                 transmittance * g.depth - tail_depth_num * inv_one_minus_alpha;
-                            let dalpha_dalpha =
-                                transmittance - tail_alpha * inv_one_minus_alpha;
+                            let dalpha_dalpha = transmittance - tail_alpha * inv_one_minus_alpha;
                             let ddepth_dalpha = (dnum_dalpha * depth_denom
                                 - final_depth * depth_denom * dalpha_dalpha)
                                 / (depth_denom * depth_denom);
@@ -2838,8 +3050,7 @@ impl MetalTrainer {
                                 dl_dalpha_alpha = loss_scales.alpha * dalpha_dalpha;
                             }
                         } else if loss_scales.alpha > 0.0 {
-                            let dalpha_dalpha =
-                                transmittance - tail_alpha * inv_one_minus_alpha;
+                            let dalpha_dalpha = transmittance - tail_alpha * inv_one_minus_alpha;
                             dl_dalpha_alpha = loss_scales.alpha * dalpha_dalpha;
                         }
 
@@ -2853,18 +3064,15 @@ impl MetalTrainer {
                             continue;
                         }
 
-                        let dl_dalpha_total =
-                            dl_dalpha_color + dl_dalpha_depth + dl_dalpha_alpha;
+                        let dl_dalpha_total = dl_dalpha_color + dl_dalpha_depth + dl_dalpha_alpha;
                         let dl_dkernel = dl_dalpha_total * g.opacity;
                         let dk_ddx = kernel * (-dx);
                         let dk_ddy = kernel * (-dy);
                         if g.sigma_x.abs() >= 0.5 {
-                            dl_dsigma_x[source_idx] +=
-                                dl_dkernel * dk_ddx * (-dx / g.sigma_x);
+                            dl_dsigma_x[source_idx] += dl_dkernel * dk_ddx * (-dx / g.sigma_x);
                         }
                         if g.sigma_y.abs() >= 0.5 {
-                            dl_dsigma_y[source_idx] +=
-                                dl_dkernel * dk_ddy * (-dy / g.sigma_y);
+                            dl_dsigma_y[source_idx] += dl_dkernel * dk_ddy * (-dy / g.sigma_y);
                         }
                     }
                 }
@@ -3030,13 +3238,8 @@ impl MetalTrainer {
         scale_reg_grad: Option<&Tensor>,
         rotation_parameter_grads: Option<&Tensor>,
     ) -> candle_core::Result<()> {
-        let (color_parameter_grads, sh_rest_parameter_grads) =
-            self.parameter_grads_from_render_color_grads(
-                gaussians,
-                projected,
-                &grads.colors,
-                camera,
-            )?;
+        let (color_parameter_grads, sh_rest_parameter_grads) = self
+            .parameter_grads_from_render_color_grads(gaussians, projected, &grads.colors, camera)?;
         let adam = self
             .adam
             .as_mut()
@@ -3172,7 +3375,8 @@ impl MetalTrainer {
         // Camera will be staged inside project_gaussians, no need to stage here
         if should_profile && self.device.is_metal() {
             let render_positions = gaussians.positions().detach();
-            let render_colors = self.render_colors_for_camera(gaussians, &render_positions, camera)?;
+            let render_colors =
+                self.render_colors_for_camera(gaussians, &render_positions, camera)?;
             let gaussian_bindings = self.runtime.bind_gaussians(gaussians, &render_colors)?;
             let _ = (
                 gaussian_bindings.positions.byte_offset(),
@@ -3186,8 +3390,13 @@ impl MetalTrainer {
             );
         }
 
-        let (projected, mut profile) =
-            self.project_gaussians(gaussians, camera, should_profile, collect_visible_indices, cluster_visible_mask)?;
+        let (projected, mut profile) = self.project_gaussians(
+            gaussians,
+            camera,
+            should_profile,
+            collect_visible_indices,
+            cluster_visible_mask,
+        )?;
         let raster_start = Instant::now();
         let tile_bins = self.build_tile_bins(&projected)?;
         let (rendered, tile_stats, native_profile) = if self.use_native_forward {
@@ -3960,11 +4169,8 @@ pub fn train(
     // Initialize pose embeddings if learnable_viewproj is enabled
     if config.litegs.learnable_viewproj && config.litegs.lr_pose > 0.0 {
         use crate::training::pose_embedding::PoseEmbeddings;
-        let pose_embeddings = PoseEmbeddings::from_dataset(
-            &dataset.poses,
-            config.litegs.lr_pose,
-            &trainer.device,
-        )?;
+        let pose_embeddings =
+            PoseEmbeddings::from_dataset(&dataset.poses, config.litegs.lr_pose, &trainer.device)?;
         log::info!(
             "MetalTrainer initialized {} learnable camera poses with lr={}",
             pose_embeddings.len(),
@@ -3976,7 +4182,9 @@ pub fn train(
     // Initialize cluster assignment if cluster_size > 0
     if config.litegs.cluster_size > 0 {
         use crate::training::clustering::ClusterAssignment;
-        let positions: Vec<[f32; 3]> = loaded.initial_map.gaussians()
+        let positions: Vec<[f32; 3]> = loaded
+            .initial_map
+            .gaussians()
             .iter()
             .map(|g| g.position.into())
             .collect();
@@ -4639,7 +4847,9 @@ fn cpu_projected_from_record(record: MetalProjectionRecord) -> CpuProjectedGauss
     }
 }
 
-fn projected_rows_to_cpu(projected: &ProjectedGaussians) -> candle_core::Result<Vec<CpuProjectedGaussian>> {
+fn projected_rows_to_cpu(
+    projected: &ProjectedGaussians,
+) -> candle_core::Result<Vec<CpuProjectedGaussian>> {
     let source_indices = projected.source_indices.to_vec1::<u32>()?;
     let u = projected.u.to_vec1::<f32>()?;
     let v = projected.v.to_vec1::<f32>()?;
@@ -4810,16 +5020,8 @@ fn finite_difference_sigma_wrt_rotation_component(
     plus[component] += ROTATION_FD_EPS;
     minus[component] -= ROTATION_FD_EPS;
 
-    let (plus_sigma_x, plus_sigma_y) = projected_axis_aligned_sigmas(
-        x,
-        y,
-        z,
-        scale,
-        plus,
-        &camera.rotation,
-        camera.fx,
-        camera.fy,
-    );
+    let (plus_sigma_x, plus_sigma_y) =
+        projected_axis_aligned_sigmas(x, y, z, scale, plus, &camera.rotation, camera.fx, camera.fy);
     let (minus_sigma_x, minus_sigma_y) = projected_axis_aligned_sigmas(
         x,
         y,
@@ -5143,8 +5345,15 @@ mod tests {
         )
         .unwrap();
 
-        let (rendered, projected, _) = trainer.render(&gaussians, &camera, false, true, None).unwrap();
-        let rendered_color_cpu = rendered.color.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        let (rendered, projected, _) = trainer
+            .render(&gaussians, &camera, false, true, None)
+            .unwrap();
+        let rendered_color_cpu = rendered
+            .color
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
         let mut target_color = rendered_color_cpu.clone();
         let u = projected.u.to_vec1::<f32>().unwrap()[0];
         let v = projected.v.to_vec1::<f32>().unwrap()[0];
@@ -5213,15 +5422,16 @@ mod tests {
         )
         .unwrap();
         trainer.adam = Some(MetalAdamState::new(&gaussians).unwrap());
-        let (_, projected, _) = trainer.render(&gaussians, &camera, false, true, None).unwrap();
+        let (_, projected, _) = trainer
+            .render(&gaussians, &camera, false, true, None)
+            .unwrap();
         let zero_grads = MetalBackwardGrads {
             positions: Tensor::zeros((1, 3), DType::F32, &device).unwrap(),
             log_scales: Tensor::zeros((1, 3), DType::F32, &device).unwrap(),
             opacity_logits: Tensor::zeros((1,), DType::F32, &device).unwrap(),
             colors: Tensor::zeros((1, 3), DType::F32, &device).unwrap(),
         };
-        let rotation_grads =
-            Tensor::from_slice(&[0.0f32, 0.0, 0.0, 1.0], (1, 4), &device).unwrap();
+        let rotation_grads = Tensor::from_slice(&[0.0f32, 0.0, 0.0, 1.0], (1, 4), &device).unwrap();
         let before = gaussians.rotations.as_tensor().to_vec2::<f32>().unwrap();
 
         trainer
@@ -5237,7 +5447,10 @@ mod tests {
             .unwrap();
 
         let after = gaussians.rotations.as_tensor().to_vec2::<f32>().unwrap();
-        assert!(after[0][3] < before[0][3], "before={before:?} after={after:?}");
+        assert!(
+            after[0][3] < before[0][3],
+            "before={before:?} after={after:?}"
+        );
     }
 
     #[test]
@@ -5940,6 +6153,110 @@ mod tests {
     }
 
     #[test]
+    fn sync_cluster_assignment_updates_aabbs_from_current_positions() {
+        let device = Device::Cpu;
+        let mut trainer = MetalTrainer::new(
+            32,
+            16,
+            &TrainingConfig {
+                training_profile: TrainingProfile::LiteGsMacV1,
+                litegs: super::LiteGsConfig {
+                    cluster_size: 2,
+                    ..super::LiteGsConfig::default()
+                },
+                ..TrainingConfig::default()
+            },
+            device.clone(),
+        )
+        .unwrap();
+        trainer.scene_extent = 16.0;
+        let gaussians = TrainableGaussians::new(
+            &[0.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            &[0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            &[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+            &[0.0, 0.0],
+            &[1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            &device,
+        )
+        .unwrap();
+
+        trainer.sync_cluster_assignment(&gaussians, false).unwrap();
+        let initial_aabb = trainer.cluster_assignment.as_ref().unwrap().aabbs[0];
+
+        gaussians
+            .positions
+            .set(
+                &Tensor::from_slice(&[10.0f32, 0.0, 0.0, 11.0, 0.0, 0.0], (2, 3), &device).unwrap(),
+            )
+            .unwrap();
+        trainer.sync_cluster_assignment(&gaussians, false).unwrap();
+
+        let updated_aabb = trainer.cluster_assignment.as_ref().unwrap().aabbs[0];
+        assert!(initial_aabb.min[0] < 1.0);
+        assert!((updated_aabb.min[0] - 10.0).abs() < 1e-6);
+        assert!((updated_aabb.max[0] - 11.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn sync_cluster_assignment_reassigns_after_topology_change() {
+        let device = Device::Cpu;
+        let mut trainer = MetalTrainer::new(
+            32,
+            16,
+            &TrainingConfig {
+                training_profile: TrainingProfile::LiteGsMacV1,
+                litegs: super::LiteGsConfig {
+                    cluster_size: 1,
+                    ..super::LiteGsConfig::default()
+                },
+                ..TrainingConfig::default()
+            },
+            device.clone(),
+        )
+        .unwrap();
+        trainer.scene_extent = 16.0;
+        let gaussians_one = TrainableGaussians::new(
+            &[0.0, 0.0, 0.0],
+            &[0.0, 0.0, 0.0],
+            &[1.0, 0.0, 0.0, 0.0],
+            &[0.0],
+            &[1.0, 0.0, 0.0],
+            &device,
+        )
+        .unwrap();
+        trainer
+            .sync_cluster_assignment(&gaussians_one, false)
+            .unwrap();
+        assert_eq!(
+            trainer
+                .cluster_assignment
+                .as_ref()
+                .unwrap()
+                .cluster_indices
+                .len(),
+            1
+        );
+
+        let gaussians_two = TrainableGaussians::new(
+            &[0.0, 0.0, 0.0, 5.0, 0.0, 0.0],
+            &[0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            &[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+            &[0.0, 0.0],
+            &[1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            &device,
+        )
+        .unwrap();
+        trainer
+            .sync_cluster_assignment(&gaussians_two, true)
+            .unwrap();
+
+        let assignment = trainer.cluster_assignment.as_ref().unwrap();
+        assert_eq!(assignment.cluster_indices.len(), 2);
+        assert_eq!(assignment.cluster_sizes.iter().sum::<usize>(), 2);
+        assert_eq!(assignment.aabbs.len(), assignment.num_clusters);
+    }
+
+    #[test]
     fn lr_pos_exponential_decay_is_correct() {
         let mut trainer = MetalTrainer::new(
             32,
@@ -6040,6 +6357,131 @@ mod tests {
     }
 
     #[test]
+    fn litegs_scale_regularization_uses_activated_scales() {
+        let device = Device::Cpu;
+        let trainer = MetalTrainer::new(
+            32,
+            16,
+            &TrainingConfig {
+                training_profile: TrainingProfile::LiteGsMacV1,
+                litegs: super::LiteGsConfig {
+                    reg_weight: 0.5,
+                    ..super::LiteGsConfig::default()
+                },
+                ..TrainingConfig::default()
+            },
+            device.clone(),
+        )
+        .unwrap();
+        let visible_log_scales =
+            Tensor::from_slice(&[2.0f32.ln(), 1.0f32.ln(), 0.5f32.ln()], (1, 3), &device).unwrap();
+
+        let term = trainer
+            .litegs_scale_regularization_term(&visible_log_scales)
+            .unwrap()
+            .to_vec0::<f32>()
+            .unwrap();
+        let grad = trainer
+            .litegs_scale_regularization_grad(&visible_log_scales)
+            .unwrap()
+            .to_vec2::<f32>()
+            .unwrap();
+
+        assert!((term - 1.75).abs() < 1e-6);
+        assert!((grad[0][0] - (4.0 / 3.0)).abs() < 1e-6);
+        assert!((grad[0][1] - (1.0 / 3.0)).abs() < 1e-6);
+        assert!((grad[0][2] - (1.0 / 12.0)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn pose_parameter_grads_returns_tensor_pair() {
+        let device = Device::Cpu;
+        let mut trainer = MetalTrainer::new(
+            32,
+            16,
+            &TrainingConfig {
+                training_profile: TrainingProfile::LiteGsMacV1,
+                litegs: super::LiteGsConfig {
+                    learnable_viewproj: true,
+                    lr_pose: 1e-4,
+                    ..super::LiteGsConfig::default()
+                },
+                ..TrainingConfig::default()
+            },
+            device.clone(),
+        )
+        .unwrap();
+        let camera = DiffCamera::new(
+            16.0,
+            16.0,
+            16.0,
+            8.0,
+            32,
+            16,
+            &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            &[0.0, 0.0, 0.0],
+            &device,
+        )
+        .unwrap();
+        let gaussians = TrainableGaussians::new(
+            &[0.0, 0.0, 3.0],
+            &[0.0, 0.0, 0.0],
+            &[1.0, 0.0, 0.0, 0.0],
+            &[0.0],
+            &[1.0, 0.5, 0.25],
+            &device,
+        )
+        .unwrap();
+        let (rendered, _, _) = trainer
+            .render(&gaussians, &camera, false, true, None)
+            .unwrap();
+        let target_color_cpu = rendered
+            .color
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
+        let target_depth_cpu = rendered
+            .depth
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
+        let frame = MetalTrainingFrame {
+            camera: camera.clone(),
+            target_color: rendered.color.clone(),
+            target_depth: rendered.depth.clone(),
+            target_color_cpu,
+            target_depth_cpu,
+        };
+        trainer.pose_embeddings = Some(
+            crate::training::pose_embedding::PoseEmbeddings::from_dataset(
+                &[crate::ScenePose::new(
+                    0,
+                    std::path::PathBuf::from("frame.png"),
+                    crate::SE3::identity(),
+                    0.0,
+                )],
+                1e-4,
+                &device,
+            )
+            .unwrap(),
+        );
+
+        let (quaternion_grad, translation_grad) = trainer
+            .pose_parameter_grads(&gaussians, &frame, 0)
+            .unwrap()
+            .unwrap();
+        let quaternion_grad = quaternion_grad.to_vec1::<f32>().unwrap();
+        let translation_grad = translation_grad.to_vec1::<f32>().unwrap();
+
+        assert_eq!(quaternion_grad.len(), 4);
+        assert_eq!(translation_grad.len(), 3);
+        assert!(quaternion_grad.iter().all(|value| value.is_finite()));
+        assert!(translation_grad.iter().all(|value| value.is_finite()));
+    }
+
+    #[test]
     fn sh_parameter_grads_populate_sh_rest_terms() {
         let device = Device::Cpu;
         let mut trainer = MetalTrainer::new(
@@ -6102,16 +6544,10 @@ mod tests {
             tile_bins: MetalTileBins::default(),
             staging_source: ProjectionStagingSource::TensorReadback,
         };
-        let render_grads =
-            Tensor::from_slice(&[1.0f32, 2.0, -0.5], (1, 3), &device).unwrap();
+        let render_grads = Tensor::from_slice(&[1.0f32, 2.0, -0.5], (1, 3), &device).unwrap();
 
         let (sh_0_grads, sh_rest_grads) = trainer
-            .parameter_grads_from_render_color_grads(
-                &gaussians,
-                &projected,
-                &render_grads,
-                &camera,
-            )
+            .parameter_grads_from_render_color_grads(&gaussians, &projected, &render_grads, &camera)
             .unwrap();
         let sh_0_grads = sh_0_grads.to_vec2::<f32>().unwrap();
         let sh_rest_grads = sh_rest_grads.to_vec3::<f32>().unwrap();

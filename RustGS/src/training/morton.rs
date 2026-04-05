@@ -31,7 +31,11 @@ pub fn morton_encode_3d(x: u32, y: u32, z: u32, bits: usize) -> u64 {
 /// placing each bit at positions 0, 3, 6, 9, ...
 fn spread_bits_3d(mut v: u32, bits: usize) -> u64 {
     // Mask to keep only the relevant bits
-    let mask = if bits >= 32 { !0u32 } else { (1u32 << bits) - 1 };
+    let mask = if bits >= 32 {
+        !0u32
+    } else {
+        (1u32 << bits) - 1
+    };
     v &= mask;
     let mut result = v as u64;
 
@@ -105,8 +109,10 @@ pub fn compute_morton_codes(
     for i in 0..n {
         let base = i * 3;
         let x = ((positions[base] - bounds_min[0]) * scale[0]).clamp(0.0, max_val as f32) as u32;
-        let y = ((positions[base + 1] - bounds_min[1]) * scale[1]).clamp(0.0, max_val as f32) as u32;
-        let z = ((positions[base + 2] - bounds_min[2]) * scale[2]).clamp(0.0, max_val as f32) as u32;
+        let y =
+            ((positions[base + 1] - bounds_min[1]) * scale[1]).clamp(0.0, max_val as f32) as u32;
+        let z =
+            ((positions[base + 2] - bounds_min[2]) * scale[2]).clamp(0.0, max_val as f32) as u32;
         codes.push(morton_encode_3d(x, y, z, bits));
     }
 
@@ -326,11 +332,7 @@ mod tests {
 
     #[test]
     fn test_compute_bounding_box() {
-        let positions = vec![
-            0.0, 0.0, 0.0,
-            1.0, 2.0, 3.0,
-            -1.0, -2.0, -3.0,
-        ];
+        let positions = vec![0.0, 0.0, 0.0, 1.0, 2.0, 3.0, -1.0, -2.0, -3.0];
 
         let (min, max) = compute_bounding_box(&positions);
 
