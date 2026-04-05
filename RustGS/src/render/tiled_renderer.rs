@@ -24,6 +24,10 @@ pub struct Gaussian {
     pub opacity: f32,
     /// Color RGB [r, g, b]
     pub color: [f32; 3],
+    /// Higher-order spherical harmonics coefficients (optional).
+    /// Layout: [coeff_count * 3] where coeff_count = (degree+1)^2 - 1.
+    /// For degree 3: 15 coeffs * 3 channels = 45 values.
+    pub sh_rest: Option<Vec<f32>>,
 }
 
 impl Gaussian {
@@ -40,6 +44,26 @@ impl Gaussian {
             rotation,
             opacity,
             color,
+            sh_rest: None,
+        }
+    }
+
+    /// Create with SH coefficients
+    pub fn with_sh(
+        position: [f32; 3],
+        scale: [f32; 3],
+        rotation: [f32; 4],
+        opacity: f32,
+        color: [f32; 3],
+        sh_rest: Vec<f32>,
+    ) -> Self {
+        Self {
+            position,
+            scale,
+            rotation,
+            opacity,
+            color,
+            sh_rest: Some(sh_rest),
         }
     }
 
@@ -55,6 +79,7 @@ impl Gaussian {
                 color[1] as f32 / 255.0,
                 color[2] as f32 / 255.0,
             ],
+            sh_rest: None,
         }
     }
 
@@ -66,6 +91,7 @@ impl Gaussian {
             rotation: [g.rotation.w, g.rotation.x, g.rotation.y, g.rotation.z],
             opacity: g.opacity,
             color: g.color,
+            sh_rest: None,
         }
     }
 

@@ -418,12 +418,13 @@ impl DensityController {
 
     /// Multinomial sampling for densification candidates (TamingGS).
     ///
-    /// Returns indices of selected Gaussians for densification.
+    /// Samples indices proportional to their scores without replacement,
+    /// matching LiteGS's `torch.multinomial(weights, num_samples, replacement=False)`.
     pub fn sample_densify_candidates(&self, budget: usize) -> Vec<usize> {
         let scores = self.get_all_densify_scores();
 
         // Create (index, score) pairs for non-zero scores
-        let mut candidates: Vec<(usize, f32)> = scores
+        let candidates: Vec<(usize, f32)> = scores
             .iter()
             .enumerate()
             .filter(|(_, &s)| s > 0.0 && s.is_finite())
@@ -434,11 +435,48 @@ impl DensityController {
             return Vec::new();
         }
 
-        // Sort by score descending and take top budget
-        candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        candidates.truncate(budget);
+        let budget = budget.min(candidates.len());
 
-        candidates.into_iter().map(|(i, _)| i).collect()
+        // If budget equals or exceeds candidates, return all
+        if budget >= candidates.len() {
+            return candidates.into_iter().map(|(i, _)| i).collect();
+        }
+
+        // Multinomial sampling without replacement using the alias method
+        // (reservoir sampling with weighted probabilities)
+        //
+        // We implement weighted random sampling without replacement by:
+        // 1. Compute cumulative weights
+        // 2. Sample proportional to weights, removing selected items
+        //
+        // For efficiency with large budgets, we use Efraimidis-Spirakis algorithm:
+        // Assign each item a key = random^(1/weight), then take top-k by key.
+        // This gives weighted sampling without replacement in O(n log k) time.
+
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
+
+        // Compute keys for Efraimidis-Spirakis sampling
+        // key = -ln(U) / weight where U ~ Uniform(0,1)
+        // This is equivalent to random^(1/weight) but numerically more stable
+        let mut keyed: Vec<(usize, f64)> = candidates
+            .iter()
+            .filter_map(|&(idx, score)| {
+                if score > 0.0 {
+                    let u: f64 = rng.gen_range(1e-10..1.0);
+                    let key = -u.ln() / (score as f64);
+                    Some((idx, key))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Select items with smallest keys (equivalent to highest random^(1/weight))
+        keyed.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        keyed.truncate(budget);
+
+        keyed.into_iter().map(|(i, _)| i).collect()
     }
 }
 
@@ -605,30 +643,52 @@ mod tests {
     }
 
     #[test]
-    fn test_sample_densify_candidates() {
+    fn test_sample_densify_candidates_multinomial() {
         let config = DensityControllerConfig::default();
         let mut controller = DensityController::new(config, true);
 
         controller.stats.resize(5);
 
-        // Set scores
+        // Set scores with VERY different magnitudes to clearly test weighted sampling
         controller.stats.fragment_err[0] = (0.0, 4.0, 1.0); // var=4
-        controller.stats.opacity[0] = 1.0; // score = 4 * 1 * 1 = 4
+        controller.stats.opacity[0] = 1.0; // score = 4
+        controller.stats.visible_count[0] = 1; // frag_count=1
 
         controller.stats.fragment_err[1] = (0.0, 1.0, 1.0); // var=1
         controller.stats.opacity[1] = 1.0; // score = 1
+        controller.stats.visible_count[1] = 1;
 
-        controller.stats.fragment_err[2] = (0.0, 9.0, 1.0); // var=9
-        controller.stats.opacity[2] = 1.0; // score = 9 (highest)
+        controller.stats.fragment_err[2] = (0.0, 100.0, 1.0); // var=100 (MUCH higher)
+        controller.stats.opacity[2] = 1.0; // score = 100
+        controller.stats.visible_count[2] = 1;
 
         controller.stats.fragment_err[3] = (0.0, 0.0, 0.0); // var=0
-        controller.stats.opacity[3] = 1.0; // score = 0
+        controller.stats.opacity[3] = 1.0; // score = 0 (should never be selected)
 
-        let candidates = controller.sample_densify_candidates(2);
+        // Debug: print actual scores
+        let scores = controller.get_all_densify_scores();
+        eprintln!("Scores: {:?}", scores);
 
-        // Should pick indices 2 (score=9) and 0 (score=4)
-        assert_eq!(candidates.len(), 2);
-        assert_eq!(candidates[0], 2);
-        assert_eq!(candidates[1], 0);
+        // Run sampling multiple times to check statistical distribution
+        let mut counts = [0usize; 5];
+        for _ in 0..1000 {
+            let candidates = controller.sample_densify_candidates(2);
+            assert_eq!(candidates.len(), 2);
+            for &idx in &candidates {
+                counts[idx] += 1;
+            }
+        }
+
+        eprintln!("Counts: {:?}", counts);
+
+        // Key properties to verify:
+        // 1. Index 2 (highest score=100) should be selected most often
+        // 2. Index 0 (score=4) should be second most selected
+        // 3. Index 1 (score=1) should be third most selected
+        // 4. Index 3 (score=0) and 4 (no stats) should never be selected
+        assert!(counts[2] > counts[0], "Index 2 (score=100) should be selected more than index 0 (score=4): {} vs {}", counts[2], counts[0]);
+        assert!(counts[0] > counts[1], "Index 0 (score=4) should be selected more than index 1 (score=1): {} vs {}", counts[0], counts[1]);
+        assert_eq!(counts[3], 0, "Index 3 (score=0) should never be selected");
+        assert_eq!(counts[4], 0, "Index 4 (no stats) should never be selected");
     }
 }

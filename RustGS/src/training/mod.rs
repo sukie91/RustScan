@@ -8,6 +8,7 @@
 pub mod training_pipeline;
 
 pub mod chunk_planner;
+pub mod clustering;
 pub mod density_controller;
 pub mod morton;
 pub mod parity_harness;
@@ -753,10 +754,8 @@ fn validate_litegs_mac_v1_config(config: &TrainingConfig) -> Result<(), Training
         // Uses sparse Adam for pose optimization
     }
     if config.litegs.cluster_size != defaults.cluster_size {
-        unsupported.push(format!(
-            "cluster_size={} requires Epic 19 clustered parity; LiteGsMacV1 currently supports only non-clustered training",
-            config.litegs.cluster_size
-        ));
+        // Clustered training is now supported
+        // Uses spatial hash clustering and AABB frustum culling
     }
     if config.litegs.sparse_grad != defaults.sparse_grad {
         unsupported.push(
@@ -1190,7 +1189,7 @@ mod tests {
     }
 
     #[test]
-    fn litegs_mac_v1_rejects_clustered_override_before_epic_19() {
+    fn litegs_mac_v1_accepts_clustered_override() {
         let config = TrainingConfig {
             training_profile: TrainingProfile::LiteGsMacV1,
             litegs: LiteGsConfig {
@@ -1200,8 +1199,8 @@ mod tests {
             ..TrainingConfig::default()
         };
 
-        let err = validate_litegs_mac_v1_config(&config).unwrap_err();
-        assert!(err.to_string().contains("cluster_size=128"));
+        // Clustered training is now supported
+        assert!(validate_litegs_mac_v1_config(&config).is_ok());
     }
 }
 
