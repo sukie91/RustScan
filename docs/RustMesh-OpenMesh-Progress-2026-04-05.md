@@ -26,9 +26,14 @@
   - RustMesh: `collapsed=61, boundary=31, interior=30, final V=60, final F=109`
   - OpenMesh: `collapsed=61, boundary=31, interior=30, final V=60, final F=109`
 - `cargo test --lib tools::decimation::tests --quiet` 通过，当前为 `12 passed`。
+- `remeshing` 已完成第一轮加固：
+  - `split_long_edges()` 改为批量重建三角面，不再使用原先会破坏流程稳定性的占位式删面重建
+  - `test_isotropic_remesh_sphere` 不再卡死
+  - `cargo test --lib tools::remeshing::tests --quiet` 通过，当前为 `7 passed`
 - `RUSTMESH_TRACE_IMPORT_MODE=standard` 仍然保留为调试入口，但当前只对齐到前 6 步，不再作为 parity example 的默认基线。
+- 当前 worktree 已清空，`git status --short` 无未提交修改。
 
-这意味着当前这轮 decimation parity 工作已经从“定位最后一步分歧”推进到“默认 parity 基线闭环并加固回归”。
+这意味着当前这轮工作已经从“定位最后一步 decimation 分歧”推进到“parity 闭环完成，并开始清理后续 remeshing 稳定性问题”。
 
 ## 2. 当前已验证基线
 
@@ -90,6 +95,32 @@ cargo test --example openmesh_compare_decimation_trace --quiet
 - example 编译通过
 - `0 failed`
 
+### 2.3 Remeshing 基线
+
+命令：
+
+```bash
+cargo test --lib tools::remeshing::tests --quiet
+```
+
+结果：
+
+- `7 passed`
+- `0 failed`
+
+关键现象：
+
+- `test_isotropic_remesh_sphere -- --exact --nocapture` 已能正常结束
+- 当前一次样例输出为：
+  - `split=587`
+  - `collapse=609`
+  - `flip=106`
+  - `Final edge lengths: min=0.1194512, max=1.1829344, mean=0.44982117`
+
+新增回归：
+
+- `test_split_long_edges_splits_shared_interior_edge_into_four_triangles`
+
 ## 3. 当前最重要的定位结论
 
 ### 3.1 face quadric 数值路径已经对齐到 OpenMesh
@@ -119,6 +150,19 @@ cargo test --example openmesh_compare_decimation_trace --quiet
 
 - 这一轮“最后一步 decimation trace gap”已经闭合。
 - 当前更值得继续开发的方向不再是 trace 盲调，而是把后续 remeshing / VDPM / 文档清单继续往前推。
+
+### 3.3 remeshing 当前已从“会挂起”恢复到“可验证”
+
+本轮对 `remeshing` 的最新结论是：
+
+- 旧 `split_long_edges()` 在迭代过程中直接删面重建，容易把 `isotropic_remesh()` 推进到不稳定甚至卡住的状态。
+- 当前实现改成：
+  - 先收集要 split 的长边
+  - 为 midpoint 统一建点
+  - 再按每个三角面的 split mask 批量重建面片
+- 这不是最终版 half-edge split primitive，但已经足以：
+  - 让 remeshing 测试恢复可跑
+  - 给下一阶段更深入的拓扑加固留出稳定基线
 
 ## 4. 本轮已尝试且不应重复的方案
 
@@ -211,23 +255,38 @@ env RUSTFLAGS=-Awarnings \
 - `RustMesh/src/Core/connectivity.rs`
 - `RustMesh/src/Core/io/off.rs`
 - `RustMesh/src/Tools/decimation.rs`
+- `RustMesh/src/Tools/remeshing.rs`
 - `RustMesh/src/Utils/circulators.rs`
+- `docs/plans/2026-04-05-rustmesh-rm-opt-dev-checklist.md`
 
-## 7. 下一步计划
+## 7. 当前提交状态
+
+截至本文档更新时，本轮已落地的最新提交为：
+
+- `d1fa637` `Add rm-opt development checklist`
+- `3709e53` `Stabilize remeshing edge splitting`
+- `92c4f04` `Close OpenMesh decimation parity gap`
+
+当前工作树状态：
+
+- `git status --short` 为空
+- 可以直接在干净基线上继续后续任务
+
+## 8. 下一步计划
 
 当前 parity 闭环已经完成，后续优先级建议如下：
 
 1. 如果要继续加强 decimation parity，可补一条“trace prefix 10”自动回归，而不只是 face-bit regression。
 2. 进入 `docs/plans/2026-04-05-rustmesh-rm-opt-dev-checklist.md` 的下一阶段任务：
-   - remeshing 拓扑操作加固
+   - remeshing 拓扑操作继续加固，尤其是 collapse 路径和真实 half-edge split primitive
    - VDPM LOD API 补齐
    - roadmap / progress 文档继续同步
 3. 保留 `standard` 模式作为调试对照，但不要再把它作为默认期望结果。
 
-## 8. 结论摘要
+## 9. 结论摘要
 
 当前最准确的结论可以压缩为三句话：
 
 - 默认 `OpenMeshParity` 模式下，RustMesh 与 OpenMesh 的 decimation trace 前 10 步现在已经完整对齐。
 - `face 192` / `face 196` 的 per-face quadric 构造已做到位级 parity，并由回归测试覆盖。
-- 当前更合理的开发重心应该转向 checklist 里的 remeshing、VDPM 和后续文档收口，而不是继续在已闭环的 step-10 trace gap 上反复调试。
+- `remeshing` 已经从“测试会挂起”恢复到“测试可稳定验证”，下一阶段应继续推进更完整的拓扑实现、VDPM 和文档收口。
