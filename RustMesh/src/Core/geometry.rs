@@ -264,6 +264,261 @@ pub fn dihedral_angle(
     cos_angle.acos()
 }
 
+// ============================================================================
+// Bounding Sphere (E8-S1)
+// ============================================================================
+
+/// Calculate a bounding sphere for a point set using Ritter's algorithm
+///
+/// This is an approximation that runs in O(n) time.
+/// Returns (center, radius)
+pub fn bounding_sphere(points: &[Point]) -> (Point, f32) {
+    if points.is_empty() {
+        return (Point::ZERO, 0.0);
+    }
+
+    if points.len() == 1 {
+        return (points[0], 0.0);
+    }
+
+    // Step 1: Find the min and max points along each axis
+    let mut min_x = points[0];
+    let mut max_x = points[0];
+    let mut min_y = points[0];
+    let mut max_y = points[0];
+    let mut min_z = points[0];
+    let mut max_z = points[0];
+
+    for &p in points {
+        if p.x < min_x.x { min_x = p; }
+        if p.x > max_x.x { max_x = p; }
+        if p.y < min_y.y { min_y = p; }
+        if p.y > max_y.y { max_y = p; }
+        if p.z < min_z.z { min_z = p; }
+        if p.z > max_z.z { max_z = p; }
+    }
+
+    // Step 2: Find the pair with the largest distance
+    let dist_x = distance(min_x, max_x);
+    let dist_y = distance(min_y, max_y);
+    let dist_z = distance(min_z, max_z);
+
+    let (p1, p2) = if dist_x >= dist_y && dist_x >= dist_z {
+        (min_x, max_x)
+    } else if dist_y >= dist_z {
+        (min_y, max_y)
+    } else {
+        (min_z, max_z)
+    };
+
+    // Step 3: Initial sphere from the two points
+    let mut center = (p1 + p2) * 0.5;
+    let mut radius = distance(p1, p2) * 0.5;
+
+    // Step 4: Expand sphere to include all points
+    for &p in points {
+        let d = distance(p, center);
+        if d > radius {
+            // Expand the sphere to include this point
+            let direction = (p - center).normalize_or_zero();
+            let new_radius = (radius + d) * 0.5;
+            center = center + direction * (new_radius - radius);
+            radius = new_radius;
+        }
+    }
+
+    (center, radius)
+}
+
+/// Calculate the minimum enclosing sphere using an iterative refinement
+///
+/// This is more accurate than bounding_sphere but slower.
+pub fn minimum_enclosing_sphere(points: &[Point], iterations: usize) -> (Point, f32) {
+    let (mut center, mut radius) = bounding_sphere(points);
+
+    // Iteratively refine the sphere
+    for _ in 0..iterations {
+        // Find the point farthest from the center
+        let mut farthest_dist = radius;
+        let mut farthest_point = center;
+
+        for &p in points {
+            let d = distance(p, center);
+            if d > farthest_dist {
+                farthest_dist = d;
+                farthest_point = p;
+            }
+        }
+
+        // Move center towards the farthest point slightly
+        if farthest_dist > radius {
+            let direction = (farthest_point - center).normalize_or_zero();
+            center = center + direction * (farthest_dist - radius) * 0.5;
+            radius = (radius + farthest_dist) * 0.5;
+        }
+    }
+
+    (center, radius)
+}
+
+// ============================================================================
+// Curvature Estimation Functions (E8-S2, E8-S3, E8-S4)
+// ============================================================================
+
+/// Calculate the Voronoi area for a vertex in a mesh
+///
+/// The Voronoi area is the area of the region around a vertex that is
+/// closer to that vertex than to any other vertex.
+///
+/// For a vertex with neighboring triangles, this is computed using
+/// the circumcenters of the triangles.
+pub fn voronoi_area(p_center: Point, neighbors: &[Point]) -> f32 {
+    if neighbors.len() < 3 {
+        return 0.0;
+    }
+
+    let n = neighbors.len();
+    let mut total_area = 0.0;
+
+    // For each triangle (p_center, neighbors[i], neighbors[(i+1)%n])
+    for i in 0..n {
+        let p1 = neighbors[i];
+        let p2 = neighbors[(i + 1) % n];
+
+        // Calculate the angles at p1 and p2
+        let angle1 = triangle_angle_at(p1, p_center, p2);
+        let angle2 = triangle_angle_at(p2, p_center, p1);
+
+        // For obtuse triangles, use mixed Voronoi area
+        let angle_center = triangle_angle_at(p_center, p1, p2);
+
+        if angle_center >= std::f32::consts::PI / 2.0 {
+            // Obtuse angle at center: use half the triangle area
+            total_area += triangle_area(p_center, p1, p2) * 0.5;
+        } else if angle1 >= std::f32::consts::PI / 2.0 || angle2 >= std::f32::consts::PI / 2.0 {
+            // Obtuse angle elsewhere: use half the triangle area
+            total_area += triangle_area(p_center, p1, p2) * 0.5;
+        } else {
+            // Acute triangle: use proper Voronoi area
+            // Area = (|p_center - p1|^2 * cot(angle2) + |p_center - p2|^2 * cot(angle1)) / 8
+            let d1_sq = (p_center - p1).length_squared();
+            let d2_sq = (p_center - p2).length_squared();
+
+            let cot1 = cotangent(angle1);
+            let cot2 = cotangent(angle2);
+
+            total_area += (d1_sq * cot2 + d2_sq * cot1) / 8.0;
+        }
+    }
+
+    total_area.max(1e-10) // Avoid division by zero
+}
+
+/// Estimate the Gaussian curvature at a vertex
+///
+/// Gaussian curvature K = (2π - Σθi) / Ai
+/// where θi are the angles at the vertex in each incident triangle,
+/// and Ai is the Voronoi area.
+pub fn gaussian_curvature(p_center: Point, neighbors: &[Point]) -> f32 {
+    if neighbors.len() < 3 {
+        return 0.0;
+    }
+
+    let mut angle_sum = 0.0;
+
+    // Sum up angles at the center vertex
+    let n = neighbors.len();
+    for i in 0..n {
+        let p1 = neighbors[i];
+        let p2 = neighbors[(i + 1) % n];
+        angle_sum += triangle_angle_at(p_center, p1, p2);
+    }
+
+    let angle_defect = 2.0 * std::f32::consts::PI - angle_sum;
+    let v_area = voronoi_area(p_center, neighbors);
+
+    angle_defect / v_area
+}
+
+/// Estimate the mean curvature at a vertex using the Laplace-Beltrami operator
+///
+/// Mean curvature H = ||Δp|| / 2
+/// where Δp is the Laplace-Beltrami of the position.
+pub fn mean_curvature(p_center: Point, neighbors: &[Point]) -> f32 {
+    if neighbors.len() < 3 {
+        return 0.0;
+    }
+
+    // Compute the Laplace-Beltrami using cotangent weights
+    let mut laplacian = Vector::ZERO;
+    let mut total_weight = 0.0;
+
+    let n = neighbors.len();
+    for i in 0..n {
+        let p1 = neighbors[i];
+        let p2 = neighbors[(i + 1) % n];
+        let p0 = neighbors[(i + n - 1) % n];
+
+        // Compute cotangent weights for the edge (p_center, p1)
+        // α is the angle at p2 in triangle (p_center, p1, p2)
+        // β is the angle at p0 in triangle (p_center, p0, p1)
+        let alpha = triangle_angle_at(p2, p_center, p1);
+        let beta = triangle_angle_at(p0, p_center, p1);
+
+        let cot_alpha = cotangent(alpha);
+        let cot_beta = cotangent(beta);
+
+        let weight = (cot_alpha + cot_beta) * 0.5;
+        total_weight += weight;
+
+        laplacian += (p1 - p_center) * weight;
+    }
+
+    if total_weight > 1e-10 {
+        laplacian /= total_weight;
+    }
+
+    // Mean curvature = half the magnitude of the Laplace-Beltrami
+    laplacian.length() * 0.5
+}
+
+/// Calculate the two principal curvatures from Gaussian and mean curvatures
+///
+/// k1, k2 = H ± sqrt(H² - K)
+/// Returns (k1, k2) where k1 >= k2
+pub fn principal_curvatures(gaussian: f32, mean: f32) -> (f32, f32) {
+    let discriminant = mean * mean - gaussian;
+
+    if discriminant < 0.0 {
+        // Complex curvatures (shouldn't happen for valid surfaces)
+        return (mean, mean);
+    }
+
+    let sqrt_disc = discriminant.sqrt();
+    let k1 = mean + sqrt_disc;
+    let k2 = mean - sqrt_disc;
+
+    (k1, k2)
+}
+
+/// Calculate the curvature directions (shape index and curvedness)
+///
+/// Shape index: S = -2/π * arctan((k1 + k2) / (k1 - k2))
+/// Ranges from -1 (cup) to +1 (cap)
+///
+/// Curvedness: C = sqrt((k1² + k2²) / 2)
+pub fn curvature_descriptors(k1: f32, k2: f32) -> (f32, f32) {
+    let shape_index = if (k1 - k2).abs() < 1e-10 {
+        0.0 // Spherical point
+    } else {
+        -2.0 / std::f32::consts::PI * ((k1 + k2) / (k1 - k2)).atan()
+    };
+
+    let curvedness = ((k1 * k1 + k2 * k2) * 0.5).sqrt();
+
+    (shape_index, curvedness)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -407,5 +662,114 @@ mod tests {
 
         let folded_angle = dihedral_angle(f0, f1, fo0, fo1);
         assert!((folded_angle - std::f32::consts::PI / 2.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_bounding_sphere() {
+        let points = [
+            glam::vec3(0.0, 0.0, 0.0),
+            glam::vec3(1.0, 0.0, 0.0),
+            glam::vec3(0.0, 1.0, 0.0),
+            glam::vec3(0.0, 0.0, 1.0),
+        ];
+
+        let (center, radius) = bounding_sphere(&points);
+
+        // All points should be inside the sphere
+        for &p in &points {
+            let d = distance(p, center);
+            assert!(d <= radius + 0.01, "Point {:?} outside sphere", p);
+        }
+
+        println!("Bounding sphere: center={:?}, radius={}", center, radius);
+    }
+
+    #[test]
+    fn test_voronoi_area() {
+        // Equilateral triangle fan around center
+        let center = glam::vec3(0.0, 0.0, 0.0);
+        let r = 1.0;
+        let neighbors: Vec<Point> = (0..6)
+            .map(|i| {
+                let angle = i as f32 * std::f32::consts::PI / 3.0;
+                glam::vec3(r * angle.cos(), r * angle.sin(), 0.0)
+            })
+            .collect();
+
+        let area = voronoi_area(center, &neighbors);
+        println!("Voronoi area for regular hexagon vertex: {}", area);
+
+        // Should be approximately the area of a hexagon divided by 6
+        let hexagon_area = 3.0_f32.sqrt() * 1.5 * r * r;
+        let expected = hexagon_area / 6.0;
+        assert!((area - expected).abs() < 0.1 * expected);
+    }
+
+    #[test]
+    fn test_gaussian_curvature() {
+        // For a flat region, Gaussian curvature should be ~0
+        let center = glam::vec3(0.0, 0.0, 0.0);
+        let neighbors = [
+            glam::vec3(1.0, 0.0, 0.0),
+            glam::vec3(1.0, 1.0, 0.0),
+            glam::vec3(0.0, 1.0, 0.0),
+            glam::vec3(-1.0, 1.0, 0.0),
+            glam::vec3(-1.0, 0.0, 0.0),
+            glam::vec3(-1.0, -1.0, 0.0),
+            glam::vec3(0.0, -1.0, 0.0),
+            glam::vec3(1.0, -1.0, 0.0),
+        ];
+
+        let k = gaussian_curvature(center, &neighbors);
+        println!("Gaussian curvature for flat region: {}", k);
+        assert!(k.abs() < 0.1, "Flat region should have near-zero Gaussian curvature");
+    }
+
+    #[test]
+    fn test_mean_curvature() {
+        // For a flat region, mean curvature should be ~0
+        let center = glam::vec3(0.0, 0.0, 0.0);
+        let neighbors = [
+            glam::vec3(1.0, 0.0, 0.0),
+            glam::vec3(0.0, 1.0, 0.0),
+            glam::vec3(-1.0, 0.0, 0.0),
+            glam::vec3(0.0, -1.0, 0.0),
+        ];
+
+        let h = mean_curvature(center, &neighbors);
+        println!("Mean curvature for flat region: {}", h);
+        assert!(h.abs() < 0.1, "Flat region should have near-zero mean curvature");
+    }
+
+    #[test]
+    fn test_principal_curvatures() {
+        // Test for a saddle point (K < 0)
+        let k1 = 1.0;
+        let k2 = -1.0;
+        let gaussian = k1 * k2;
+        let mean = (k1 + k2) * 0.5;
+
+        let (pk1, pk2) = principal_curvatures(gaussian, mean);
+        println!("Principal curvatures: k1={}, k2={}", pk1, pk2);
+
+        // For saddle point: K = -1, H = 0, k1 = 1, k2 = -1
+        assert!((pk1 - 1.0).abs() < 0.01);
+        assert!((pk2 + 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_curvature_descriptors() {
+        // Saddle point
+        let (shape, curved) = curvature_descriptors(1.0, -1.0);
+        println!("Saddle: shape_index={}, curvedness={}", shape, curved);
+        assert!(shape.abs() < 0.01, "Saddle should have shape index near 0");
+
+        // Cup (concave)
+        let (shape_cup, _) = curvature_descriptors(-1.0, -1.0);
+        assert!(shape_cup > 0.5, "Cup should have positive shape index");
+
+        // Cap (convex)
+        let (shape_cap, _) = curvature_descriptors(1.0, 1.0);
+        assert!(shape_cap < -0.5, "Cap should have negative shape index");
     }
 }

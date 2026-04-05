@@ -342,6 +342,146 @@ pub fn cotangent_smooth(mesh: &mut RustMesh, config: SmootherConfig) -> SmoothRe
     }
 }
 
+/// Estimate mean curvature at a vertex using cotangent weights
+///
+/// The mean curvature is approximated by the length of the cotangent-weighted Laplacian.
+/// Higher values indicate sharper features (edges, corners).
+pub fn estimate_mean_curvature(mesh: &RustMesh, vh: VertexHandle) -> Option<f32> {
+    let laplacian = cotangent_weight_laplacian(mesh, vh)?;
+    Some(laplacian.length())
+}
+
+/// Compute curvature for all vertices
+///
+/// Returns a vector of curvature values (0.0 for boundary or invalid vertices)
+pub fn compute_curvatures(mesh: &RustMesh) -> Vec<f32> {
+    let n_vertices = mesh.n_vertices();
+    let mut curvatures = vec![0.0f32; n_vertices];
+
+    for vh in mesh.vertices() {
+        let idx = vh.idx_usize();
+        if idx < n_vertices {
+            curvatures[idx] = estimate_mean_curvature(mesh, vh).unwrap_or(0.0);
+        }
+    }
+
+    curvatures
+}
+
+/// Adaptive smoothing configuration
+#[derive(Debug, Clone)]
+pub struct AdaptiveSmootherConfig {
+    /// Number of smoothing iterations
+    pub iterations: usize,
+    /// Minimum smoothing strength (for high curvature areas)
+    pub min_strength: f32,
+    /// Maximum smoothing strength (for low curvature areas)
+    pub max_strength: f32,
+    /// Curvature threshold for minimum strength
+    pub curvature_high: f32,
+    /// Curvature threshold for maximum strength
+    pub curvature_low: f32,
+    /// Boundary vertices are fixed
+    pub fixed_boundary: bool,
+}
+
+impl Default for AdaptiveSmootherConfig {
+    fn default() -> Self {
+        Self {
+            iterations: 10,
+            min_strength: 0.1,
+            max_strength: 0.8,
+            curvature_high: 0.5,
+            curvature_low: 0.01,
+            fixed_boundary: true,
+        }
+    }
+}
+
+/// Adaptive Laplace smoothing
+///
+/// Adjusts smoothing strength based on local curvature:
+/// - High curvature areas (sharp features) get less smoothing to preserve edges
+/// - Low curvature areas (flat regions) get more smoothing to reduce noise
+///
+/// The strength interpolation formula:
+///   strength = min_strength + (max_strength - min_strength) * (1 - t)
+///   where t = clamp((curvature - curvature_low) / (curvature_high - curvature_low), 0, 1)
+pub fn adaptive_smooth(mesh: &mut RustMesh, config: AdaptiveSmootherConfig) -> SmoothResult {
+    let n_vertices = mesh.n_vertices();
+    if n_vertices == 0 {
+        return SmoothResult {
+            iterations: 0,
+            max_displacement: 0.0,
+        };
+    }
+
+    let vhs: Vec<VertexHandle> = mesh.vertices().collect();
+    let boundary_mask: Vec<bool> = if config.fixed_boundary {
+        vhs.iter().map(|&vh| is_boundary_vertex(mesh, vh)).collect()
+    } else {
+        vec![false; n_vertices]
+    };
+
+    let mut current_positions = vec![Vec3::ZERO; n_vertices];
+    let mut next_positions = vec![Vec3::ZERO; n_vertices];
+    let mut max_displacement = 0.0f32;
+
+    // Precompute curvature range
+    let curvature_range = config.curvature_high - config.curvature_low;
+    let strength_range = config.max_strength - config.min_strength;
+
+    for _ in 0..config.iterations {
+        // Cache current positions
+        for (i, &vh) in vhs.iter().enumerate() {
+            let point = mesh.point(vh).unwrap_or(Vec3::ZERO);
+            current_positions[i] = point;
+            next_positions[i] = point;
+        }
+
+        // Compute adaptive smoothing
+        for (i, &vh) in vhs.iter().enumerate() {
+            if boundary_mask[i] {
+                continue;
+            }
+
+            // Compute curvature and Laplacian
+            let curvature = estimate_mean_curvature(mesh, vh).unwrap_or(0.0);
+            let laplacian = match cotangent_weight_laplacian(mesh, vh) {
+                Some(l) => l,
+                None => continue,
+            };
+
+            // Compute adaptive strength
+            let t = if curvature_range > 1e-10 {
+                ((curvature - config.curvature_low) / curvature_range).clamp(0.0, 1.0)
+            } else {
+                0.5
+            };
+
+            // Higher curvature -> lower strength (t close to 1)
+            // Lower curvature -> higher strength (t close to 0)
+            let strength = config.min_strength + strength_range * (1.0 - t);
+
+            let displacement = laplacian * strength;
+            max_displacement = max_displacement.max(displacement.length());
+            next_positions[i] = current_positions[i] + displacement;
+        }
+
+        // Apply new positions
+        for (i, &vh) in vhs.iter().enumerate() {
+            if next_positions[i] != current_positions[i] {
+                mesh.set_point(vh, next_positions[i]);
+            }
+        }
+    }
+
+    SmoothResult {
+        iterations: config.iterations,
+        max_displacement,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -440,5 +580,101 @@ mod tests {
 
         // The Laplacian should exist
         assert!(laplacian.is_some());
+    }
+
+    #[test]
+    fn test_estimate_mean_curvature() {
+        let mut mesh = RustMesh::new();
+        let v0 = mesh.add_vertex(Vec3::new(0.0, 0.0, 0.0));
+        let v1 = mesh.add_vertex(Vec3::new(1.0, 0.0, 0.0));
+        let v2 = mesh.add_vertex(Vec3::new(0.0, 1.0, 0.0));
+        let v3 = mesh.add_vertex(Vec3::new(1.0, 1.0, 0.0));
+
+        mesh.add_face(&[v0, v1, v2]);
+        mesh.add_face(&[v1, v3, v2]);
+
+        // Interior vertex should have finite curvature
+        let curvature = estimate_mean_curvature(&mesh, v1);
+        println!("Mean curvature at v1: {:?}", curvature);
+        assert!(curvature.is_some());
+    }
+
+    #[test]
+    fn test_compute_curvatures() {
+        let mesh = generate_sphere(1.0, 16, 16);
+        let curvatures = compute_curvatures(&mesh);
+
+        // All curvature values should be non-negative
+        for &c in &curvatures {
+            assert!(c >= 0.0);
+        }
+
+        // For a sphere, curvature should be relatively uniform
+        let non_zero: Vec<f32> = curvatures.iter().copied().filter(|&c| c > 0.0).collect();
+        if !non_zero.is_empty() {
+            let mean: f32 = non_zero.iter().sum::<f32>() / non_zero.len() as f32;
+            println!("Mean curvature on sphere: {}", mean);
+        }
+    }
+
+    #[test]
+    fn test_adaptive_smooth() {
+        let mut mesh = generate_sphere(1.0, 16, 16);
+        let original_count = mesh.n_vertices();
+
+        let config = AdaptiveSmootherConfig {
+            iterations: 3,
+            min_strength: 0.1,
+            max_strength: 0.5,
+            curvature_high: 0.3,
+            curvature_low: 0.05,
+            fixed_boundary: false,
+        };
+
+        let result = adaptive_smooth(&mut mesh, config);
+
+        println!(
+            "Adaptive smooth: {} iterations, {} vertices, max displacement: {}",
+            result.iterations,
+            mesh.n_vertices(),
+            result.max_displacement
+        );
+
+        // Count should not change
+        assert_eq!(mesh.n_vertices(), original_count);
+    }
+
+    #[test]
+    fn test_adaptive_smooth_preserves_features() {
+        // Create a mesh with sharp features (a cube)
+        let mut mesh = generate_cube();
+
+        // Store original edge positions
+        let original_positions: Vec<_> = mesh.vertices()
+            .map(|vh| mesh.point(vh).unwrap_or(Vec3::ZERO))
+            .collect();
+
+        let config = AdaptiveSmootherConfig {
+            iterations: 5,
+            min_strength: 0.01, // Very low for high curvature
+            max_strength: 0.3,
+            curvature_high: 0.5,
+            curvature_low: 0.01,
+            fixed_boundary: true,
+        };
+
+        let _ = adaptive_smooth(&mut mesh, config);
+
+        // Cube corners (high curvature) should be well preserved
+        let new_positions: Vec<_> = mesh.vertices()
+            .map(|vh| mesh.point(vh).unwrap_or(Vec3::ZERO))
+            .collect();
+
+        // Check that vertices haven't moved too much
+        for (orig, new) in original_positions.iter().zip(new_positions.iter()) {
+            let displacement = (*new - *orig).length();
+            // Adaptive smooth with fixed boundary should preserve corners
+            assert!(displacement < 0.1, "Vertex moved too much: {}", displacement);
+        }
     }
 }

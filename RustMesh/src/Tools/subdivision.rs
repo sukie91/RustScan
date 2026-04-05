@@ -1623,6 +1623,289 @@ pub fn midpoint_subdivide_iterations(
     Ok(all_stats)
 }
 
+// ============================================================================
+// Butterfly Subdivision (Interpolating Subdivision)
+// ============================================================================
+
+/// Butterfly subdivision scheme
+///
+/// Butterfly is an interpolating subdivision scheme that preserves original
+/// vertex positions while inserting new vertices on edges.
+///
+/// For an edge between vertices v0 and v1, the new vertex position is:
+///   p_new = 0.5*(v0+v1) + w*(v2+v3) - w/2*(v4+v5+v6+v7)
+///
+/// where w = 1/8 for the standard Butterfly scheme.
+///
+/// ## Properties
+/// - Interpolating: original vertices remain unchanged
+/// - Produces C1 continuous surfaces on regular meshes
+/// - Works best on triangular meshes
+///
+/// ## References
+/// - Dyn, N., Levin, D., & Gregory, J. (1990). "A Butterfly Subdivision Scheme for
+///   Surface Interpolation with Tension Control". ACM TOG.
+pub fn butterfly_subdivide(mesh: &mut RustMesh) -> SubdivisionResult<SubdivisionStats> {
+    if mesh.n_faces() == 0 {
+        return Err(SubdivisionError::EmptyMesh);
+    }
+
+    let original_vertices = mesh.n_vertices();
+    let original_edges = mesh.n_edges();
+    let original_faces = mesh.n_faces();
+
+    // Map from edge (min_vertex, max_vertex) to new midpoint vertex
+    let mut edge_to_new_vertex: HashMap<(u32, u32), VertexHandle> = HashMap::new();
+
+    // Collect original edges to split
+    let edges: Vec<_> = (0..mesh.n_edges())
+        .filter_map(|i| {
+            let eh = crate::EdgeHandle::new(i as u32);
+            if mesh.is_edge_deleted(eh) {
+                return None;
+            }
+            let h0 = mesh.edge_halfedge_handle(eh, 0);
+            let v0 = mesh.from_vertex_handle(h0);
+            let v1 = mesh.to_vertex_handle(h0);
+            let min_v = if v0.idx() < v1.idx() { v0 } else { v1 };
+            let max_v = if v0.idx() < v1.idx() { v1 } else { v0 };
+            Some((eh, v0, v1, min_v, max_v))
+        })
+        .collect();
+
+    // Step 1: Compute new vertex positions for each edge using Butterfly weights
+    for (_, v0, v1, min_v, max_v) in &edges {
+        let key = (min_v.idx(), max_v.idx());
+        if edge_to_new_vertex.contains_key(&key) {
+            continue;
+        }
+
+        let p0 = match mesh.point(*v0) {
+            Some(p) => p,
+            None => continue,
+        };
+        let p1 = match mesh.point(*v1) {
+            Some(p) => p,
+            None => continue,
+        };
+
+        // Compute Butterfly weight
+        let new_pos = compute_butterfly_position(mesh, *v0, *v1, p0, p1);
+
+        let new_vh = mesh.add_vertex(new_pos);
+        edge_to_new_vertex.insert(key, new_vh);
+    }
+
+    // Step 2: Split each face using the new edge vertices
+    let faces: Vec<_> = mesh.faces().collect();
+    for fh in faces {
+        let halfedge = match mesh.face_halfedge_handle(fh) {
+            Some(he) => he,
+            None => continue,
+        };
+
+        // Get the vertices of this face
+        let face_vertices: Vec<VertexHandle> = mesh.face_vertices_vec(fh);
+        let n = face_vertices.len();
+
+        if n < 3 {
+            continue;
+        }
+
+        // Get edge midpoint vertices for each edge
+        let mut edge_midpoints: Vec<VertexHandle> = Vec::with_capacity(n);
+        for i in 0..n {
+            let vi = face_vertices[i];
+            let vj = face_vertices[(i + 1) % n];
+            let min_v = if vi.idx() < vj.idx() { vi } else { vj };
+            let max_v = if vi.idx() < vj.idx() { vj } else { vi };
+            let key = (min_v.idx(), max_v.idx());
+
+            match edge_to_new_vertex.get(&key) {
+                Some(&mid_vh) => edge_midpoints.push(mid_vh),
+                None => {
+                    // Fallback: create midpoint if not found
+                    let pi = mesh.point(vi).unwrap_or(glam::Vec3::ZERO);
+                    let pj = mesh.point(vj).unwrap_or(glam::Vec3::ZERO);
+                    let mid_vh = mesh.add_vertex((pi + pj) * 0.5);
+                    edge_midpoints.push(mid_vh);
+                }
+            }
+        }
+
+        // Delete the original face
+        mesh.delete_face(fh);
+
+        // Create new faces
+        if n == 3 {
+            // Triangle: create 4 new triangles
+            // Original: v0, v1, v2
+            // Edge midpoints: m01, m12, m20
+            let v = face_vertices;
+            let m = edge_midpoints;
+
+            mesh.add_face(&[v[0], m[0], m[2]]);
+            mesh.add_face(&[m[0], v[1], m[1]]);
+            mesh.add_face(&[m[2], m[1], v[2]]);
+            mesh.add_face(&[m[0], m[1], m[2]]);
+        } else {
+            // General polygon: create central face + triangles
+            // For each edge, create a triangle with the original vertex and two edge midpoints
+            for i in 0..n {
+                let mi = edge_midpoints[i];
+                let mi_prev = edge_midpoints[(i + n - 1) % n];
+                mesh.add_face(&[face_vertices[i], mi, mi_prev]);
+            }
+            // Central face connecting all midpoints
+            mesh.add_face(&edge_midpoints);
+        }
+    }
+
+    // Run garbage collection
+    mesh.garbage_collection();
+
+    let new_vertices = mesh.n_vertices() - original_vertices;
+    let new_edges = mesh.n_edges() - original_edges;
+    let new_faces = mesh.n_faces() - original_faces;
+
+    Ok(SubdivisionStats {
+        original_vertices,
+        original_edges,
+        original_faces,
+        new_vertices,
+        new_edges,
+        new_faces,
+    })
+}
+
+/// Compute the new vertex position for an edge using Butterfly weights
+fn compute_butterfly_position(
+    mesh: &RustMesh,
+    v0: VertexHandle,
+    v1: VertexHandle,
+    p0: glam::Vec3,
+    p1: glam::Vec3,
+) -> glam::Vec3 {
+    // Standard Butterfly weight
+    const W: f32 = 1.0 / 8.0;
+
+    // Start with the edge midpoint contribution
+    let mut new_pos = (p0 + p1) * 0.5;
+
+    // Get the two adjacent triangles
+    let he0 = find_halfedge_between(mesh, v0, v1);
+    let he1 = he0.and_then(|he| Some(mesh.opposite_halfedge_handle(he)));
+
+    // Find the opposite vertices in the two adjacent triangles
+    let mut opposite_vertices: Vec<glam::Vec3> = Vec::with_capacity(2);
+    let mut far_vertices: Vec<glam::Vec3> = Vec::with_capacity(4);
+
+    if let Some(he) = he0 {
+        // Get the opposite vertex in the triangle on the he side
+        let next = mesh.next_halfedge_handle(he);
+        let opp = mesh.to_vertex_handle(next);
+        if let Some(p) = mesh.point(opp) {
+            opposite_vertices.push(p);
+
+            // Try to get the far vertex (one more step away)
+            if let Some(vv) = mesh.vertex_vertices(opp) {
+                for neighbor in vv {
+                    if neighbor != v0 && neighbor != v1 {
+                        if let Some(p) = mesh.point(neighbor) {
+                            // Check if this vertex is adjacent to v0 or v1
+                            let is_adjacent_to_v0 = mesh.vertex_vertices(v0)
+                                .map(|mut vv_iter| vv_iter.any(|v| v == neighbor))
+                                .unwrap_or(false);
+                            if !is_adjacent_to_v0 {
+                                far_vertices.push(p);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(he) = he1 {
+        // Get the opposite vertex in the triangle on the opposite side
+        let next = mesh.next_halfedge_handle(he);
+        let opp = mesh.to_vertex_handle(next);
+        if let Some(p) = mesh.point(opp) {
+            opposite_vertices.push(p);
+
+            // Try to get the far vertex
+            if let Some(vv) = mesh.vertex_vertices(opp) {
+                for neighbor in vv {
+                    if neighbor != v0 && neighbor != v1 {
+                        if let Some(p) = mesh.point(neighbor) {
+                            let is_adjacent_to_v1 = mesh.vertex_vertices(v1)
+                                .map(|mut vv_iter| vv_iter.any(|v| v == neighbor))
+                                .unwrap_or(false);
+                            if !is_adjacent_to_v1 {
+                                far_vertices.push(p);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Add the opposite vertex contributions (v2, v3)
+    // w * (v2 + v3)
+    let opp_count = opposite_vertices.len().min(2);
+    if opp_count > 0 {
+        let mut opp_sum = glam::Vec3::ZERO;
+        for p in opposite_vertices.iter().take(opp_count) {
+            opp_sum += *p;
+        }
+        new_pos += W * opp_sum;
+    }
+
+    // Subtract far vertex contributions (v4, v5, v6, v7)
+    // -w/2 * (v4 + v5 + v6 + v7)
+    let far_count = far_vertices.len().min(4);
+    if far_count > 0 {
+        let mut far_sum = glam::Vec3::ZERO;
+        for p in far_vertices.iter().take(far_count) {
+            far_sum += *p;
+        }
+        new_pos -= (W / 2.0) * far_sum;
+    }
+
+    new_pos
+}
+
+/// Find the halfedge from v0 to v1
+fn find_halfedge_between(mesh: &RustMesh, v0: VertexHandle, v1: VertexHandle) -> Option<HalfedgeHandle> {
+    if let Some(vv) = mesh.vertex_halfedges(v0) {
+        for he in vv {
+            let to = mesh.to_vertex_handle(he);
+            if to == v1 {
+                return Some(he);
+            }
+        }
+    }
+    None
+}
+
+/// Perform multiple iterations of Butterfly subdivision
+pub fn butterfly_subdivide_iterations(
+    mesh: &mut RustMesh,
+    iterations: usize,
+) -> SubdivisionResult<Vec<SubdivisionStats>> {
+    let mut all_stats = Vec::with_capacity(iterations);
+
+    for _ in 0..iterations {
+        let stats = butterfly_subdivide(mesh)?;
+        all_stats.push(stats);
+    }
+
+    Ok(all_stats)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2847,5 +3130,101 @@ mod tests {
             (midpoint_01 - expected_midpoint_01).length() < 0.001,
             "Midpoint should be at edge center"
         );
+    }
+
+    // Butterfly Subdivision Tests
+    mod butterfly_tests {
+        use super::*;
+
+        #[test]
+        fn test_butterfly_simple_triangle() {
+            let mut mesh = create_simple_triangle();
+
+            let original_v0 = mesh.point(VertexHandle::new(0)).unwrap();
+            let original_v1 = mesh.point(VertexHandle::new(1)).unwrap();
+            let original_v2 = mesh.point(VertexHandle::new(2)).unwrap();
+
+            let result = butterfly_subdivide(&mut mesh);
+
+            assert!(result.is_ok(), "Butterfly subdivision should succeed");
+
+            let stats = result.unwrap();
+            println!("Butterfly stats: {}", stats);
+
+            // Original vertices should remain unchanged (interpolating property)
+            assert_eq!(mesh.point(VertexHandle::new(0)).unwrap(), original_v0);
+            assert_eq!(mesh.point(VertexHandle::new(1)).unwrap(), original_v1);
+            assert_eq!(mesh.point(VertexHandle::new(2)).unwrap(), original_v2);
+
+            // Triangle -> 4 triangles
+            assert_eq!(mesh.n_active_faces(), 4);
+            // 3 new edge vertices
+            assert_eq!(stats.new_vertices, 3);
+        }
+
+        #[test]
+        fn test_butterfly_tetrahedron() {
+            let mut mesh = create_tetrahedron();
+            let original_faces = mesh.n_active_faces();
+
+            let result = butterfly_subdivide(&mut mesh);
+
+            assert!(result.is_ok());
+
+            let stats = result.unwrap();
+            println!("Butterfly tetrahedron stats: {}", stats);
+
+            // Tetrahedron: 4 triangles -> 16 triangles (4 * 4)
+            assert_eq!(mesh.n_active_faces(), original_faces * 4);
+        }
+
+        #[test]
+        fn test_butterfly_preserves_interpolation() {
+            let mut mesh = create_simple_triangle();
+
+            // Store original vertex positions
+            let positions: Vec<_> = (0..3)
+                .map(|i| mesh.point(VertexHandle::new(i as u32)).unwrap())
+                .collect();
+
+            // Apply multiple iterations
+            for _ in 0..3 {
+                butterfly_subdivide(&mut mesh).unwrap();
+            }
+
+            // Original vertices should still be at their original positions
+            for (i, &original_pos) in positions.iter().enumerate() {
+                let current_pos = mesh.point(VertexHandle::new(i as u32)).unwrap();
+                assert_eq!(
+                    current_pos, original_pos,
+                    "Original vertex {} should not move (interpolating property)",
+                    i
+                );
+            }
+        }
+
+        #[test]
+        fn test_butterfly_iterations() {
+            let mut mesh = create_tetrahedron();
+
+            let all_stats = butterfly_subdivide_iterations(&mut mesh, 2);
+
+            assert!(all_stats.is_ok());
+
+            let all_stats = all_stats.unwrap();
+            assert_eq!(all_stats.len(), 2);
+
+            // After 2 iterations: 4 -> 16 -> 64
+            assert_eq!(mesh.n_active_faces(), 64);
+        }
+
+        #[test]
+        fn test_butterfly_empty_mesh() {
+            let mut mesh = RustMesh::new();
+
+            let result = butterfly_subdivide(&mut mesh);
+
+            assert!(matches!(result, Err(SubdivisionError::EmptyMesh)));
+        }
     }
 }

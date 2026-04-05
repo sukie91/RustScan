@@ -191,7 +191,7 @@ fn read_stl_ascii(mut reader: BufReader<File>) -> io::Result<RustMesh> {
     let mut mesh = RustMesh::new();
 
     // Vertex deduplication: map positions to handles (use tuple key for hash)
-    let mut vertex_map: HashMap<(u32, u32, u32), crate::VertexHandle> = HashMap::new();
+    let mut vertex_map: HashMap<(i64, i64, i64), crate::VertexHandle> = HashMap::new();
 
     let mut line = String::new();
 
@@ -255,7 +255,7 @@ fn read_stl_binary_with_count(mut reader: BufReader<File>, n_triangles: u32) -> 
     let mut mesh = RustMesh::new();
 
     // Vertex deduplication
-    let mut vertex_map: HashMap<(u32, u32, u32), crate::VertexHandle> = HashMap::new();
+    let mut vertex_map: HashMap<(i64, i64, i64), crate::VertexHandle> = HashMap::new();
 
     for _ in 0..n_triangles {
         // Read normal (12 bytes) - ignored for now
@@ -293,19 +293,20 @@ fn read_stl_binary_with_count(mut reader: BufReader<File>, n_triangles: u32) -> 
 }
 
 /// Convert float to hashable key (quantize to avoid float comparison issues)
-fn float_key(x: f32, y: f32, z: f32) -> (u32, u32, u32) {
+fn float_key(x: f32, y: f32, z: f32) -> (i64, i64, i64) {
     // Quantize to 1e-6 precision for hashing
+    // Use i64 to correctly handle negative values
     (
-        (x * 1e6).round() as u32,
-        (y * 1e6).round() as u32,
-        (z * 1e6).round() as u32,
+        (x * 1e6).round() as i64,
+        (y * 1e6).round() as i64,
+        (z * 1e6).round() as i64,
     )
 }
 
 /// Parse a vertex line and return or create a vertex handle
 fn parse_vertex_line(
     parts: &[&str],
-    vertex_map: &mut HashMap<(u32, u32, u32), crate::VertexHandle>,
+    vertex_map: &mut HashMap<(i64, i64, i64), crate::VertexHandle>,
     mesh: &mut RustMesh,
 ) -> crate::VertexHandle {
     if parts.len() >= 4 {
