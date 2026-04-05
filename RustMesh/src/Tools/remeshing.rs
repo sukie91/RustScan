@@ -20,6 +20,7 @@
 use crate::handles::{EdgeHandle, VertexHandle};
 use crate::smoother::{tangential_smooth, SmootherConfig};
 use crate::RustMesh;
+use std::collections::HashMap;
 
 /// Edge length statistics for a mesh
 #[derive(Debug, Clone)]
@@ -53,6 +54,69 @@ fn active_edge_endpoints(mesh: &RustMesh, eh: EdgeHandle) -> Option<(VertexHandl
     }
 
     Some((v0, v1))
+}
+
+#[inline]
+fn edge_key(v0: VertexHandle, v1: VertexHandle) -> (usize, usize) {
+    let a = v0.idx_usize();
+    let b = v1.idx_usize();
+    if a < b { (a, b) } else { (b, a) }
+}
+
+fn add_face_if_valid(mesh: &mut RustMesh, vertices: &[VertexHandle]) {
+    if vertices.len() < 3 {
+        return;
+    }
+    if vertices.iter().enumerate().any(|(idx, vh)| vertices[..idx].contains(vh)) {
+        return;
+    }
+    let _ = mesh.add_face(vertices);
+}
+
+fn rebuild_split_triangle(
+    mesh: &mut RustMesh,
+    vertices: [VertexHandle; 3],
+    mids: [Option<VertexHandle>; 3],
+) {
+    let [a, b, c] = vertices;
+    let [ab, bc, ca] = mids;
+
+    match (ab, bc, ca) {
+        (None, None, None) => add_face_if_valid(mesh, &[a, b, c]),
+        (Some(ab), None, None) => {
+            add_face_if_valid(mesh, &[a, ab, c]);
+            add_face_if_valid(mesh, &[ab, b, c]);
+        }
+        (None, Some(bc), None) => {
+            add_face_if_valid(mesh, &[a, b, bc]);
+            add_face_if_valid(mesh, &[a, bc, c]);
+        }
+        (None, None, Some(ca)) => {
+            add_face_if_valid(mesh, &[a, b, ca]);
+            add_face_if_valid(mesh, &[ca, b, c]);
+        }
+        (Some(ab), Some(bc), None) => {
+            add_face_if_valid(mesh, &[a, ab, c]);
+            add_face_if_valid(mesh, &[ab, b, bc]);
+            add_face_if_valid(mesh, &[ab, bc, c]);
+        }
+        (None, Some(bc), Some(ca)) => {
+            add_face_if_valid(mesh, &[a, b, ca]);
+            add_face_if_valid(mesh, &[b, bc, ca]);
+            add_face_if_valid(mesh, &[ca, bc, c]);
+        }
+        (Some(ab), None, Some(ca)) => {
+            add_face_if_valid(mesh, &[a, ab, ca]);
+            add_face_if_valid(mesh, &[ab, b, c]);
+            add_face_if_valid(mesh, &[ca, ab, c]);
+        }
+        (Some(ab), Some(bc), Some(ca)) => {
+            add_face_if_valid(mesh, &[a, ab, ca]);
+            add_face_if_valid(mesh, &[ab, b, bc]);
+            add_face_if_valid(mesh, &[ca, bc, c]);
+            add_face_if_valid(mesh, &[ab, bc, ca]);
+        }
+    }
 }
 
 /// Compute edge length statistics for a mesh
@@ -105,80 +169,72 @@ pub fn edge_length_statistics(mesh: &RustMesh) -> EdgeLengthStats {
 /// # Returns
 /// Number of edges split
 pub fn split_long_edges(mesh: &mut RustMesh, max_length: f32) -> usize {
-    let mut split_count = 0;
+    mesh.garbage_collection();
 
-    // Collect edges to split (we can't modify while iterating)
-    let mut edges_to_split: Vec<(EdgeHandle, glam::Vec3)> = Vec::new();
+    let mut midpoint_positions: HashMap<(usize, usize), glam::Vec3> = HashMap::new();
 
     for i in 0..mesh.n_edges() {
         let eh = EdgeHandle::new(i as u32);
-        if mesh.is_edge_deleted(eh) {
+        if let Some((v0, v1)) = active_edge_endpoints(mesh, eh) {
+            let (Some(p0), Some(p1)) = (mesh.point(v0), mesh.point(v1)) else {
+                continue;
+            };
+            let length = (p1 - p0).length();
+            if length > max_length {
+                midpoint_positions.insert(edge_key(v0, v1), (p0 + p1) * 0.5);
+            }
+        }
+    }
+
+    if midpoint_positions.is_empty() {
+        return 0;
+    }
+
+    let mut rebuilt = RustMesh::new();
+    let mut original_vertices = Vec::with_capacity(mesh.n_vertices());
+    for idx in 0..mesh.n_vertices() {
+        let vh = VertexHandle::from_usize(idx);
+        let Some(point) = mesh.point(vh) else {
+            continue;
+        };
+        original_vertices.push(rebuilt.add_vertex(point));
+    }
+
+    let mut midpoint_vertices = HashMap::with_capacity(midpoint_positions.len());
+    for (key, midpoint) in &midpoint_positions {
+        midpoint_vertices.insert(*key, rebuilt.add_vertex(*midpoint));
+    }
+
+    for fh in mesh.faces() {
+        let verts = mesh.face_vertices_vec(fh);
+        if verts.len() < 3 {
             continue;
         }
 
-        let h0 = mesh.edge_halfedge_handle(eh, 0);
-        let v0 = mesh.from_vertex_handle(h0);
-        let v1 = mesh.to_vertex_handle(h0);
-
-        if let (Some(p0), Some(p1)) = (mesh.point(v0), mesh.point(v1)) {
-            let length = (p1 - p0).length();
-            if length > max_length {
-                let midpoint = (p0 + p1) * 0.5;
-                edges_to_split.push((eh, midpoint));
-            }
+        if verts.len() != 3 {
+            let mapped = verts
+                .iter()
+                .map(|vh| original_vertices[vh.idx_usize()])
+                .collect::<Vec<_>>();
+            add_face_if_valid(&mut rebuilt, &mapped);
+            continue;
         }
+
+        let mapped = [
+            original_vertices[verts[0].idx_usize()],
+            original_vertices[verts[1].idx_usize()],
+            original_vertices[verts[2].idx_usize()],
+        ];
+        let mids = [
+            midpoint_vertices.get(&edge_key(verts[0], verts[1])).copied(),
+            midpoint_vertices.get(&edge_key(verts[1], verts[2])).copied(),
+            midpoint_vertices.get(&edge_key(verts[2], verts[0])).copied(),
+        ];
+        rebuild_split_triangle(&mut rebuilt, mapped, mids);
     }
 
-    // Split each edge
-    for (eh, midpoint) in edges_to_split {
-        // Use the split_edge functionality
-        // Note: The actual edge split modifies the mesh topology
-        // For now, we'll add a vertex at the midpoint
-        // A full implementation would need to update the connectivity
-
-        let h0 = mesh.edge_halfedge_handle(eh, 0);
-        let v0 = mesh.from_vertex_handle(h0);
-        let v1 = mesh.to_vertex_handle(h0);
-
-        // Add new vertex at midpoint
-        let new_v = mesh.add_vertex(midpoint);
-
-        // Get adjacent faces
-        let fh0 = mesh.face_handle(h0);
-        let h1 = mesh.opposite_halfedge_handle(h0);
-        let fh1 = mesh.face_handle(h1);
-
-        // Delete original faces
-        if let Some(fh) = fh0 {
-            mesh.delete_face(fh);
-        }
-        if let Some(fh) = fh1 {
-            mesh.delete_face(fh);
-        }
-
-        // Get opposite vertices
-        let h0_next = mesh.next_halfedge_handle(h0);
-        let h1_next = mesh.next_halfedge_handle(h1);
-        let v2 = mesh.to_vertex_handle(h0_next);
-        let v3 = mesh.to_vertex_handle(h1_next);
-
-        // Create new triangles
-        // Original: (v0, v1, v2) and (v1, v0, v3)
-        // New: (v0, new_v, v2), (new_v, v1, v2), (v1, new_v, v3), (new_v, v0, v3)
-        if let (Some(p2), Some(p3)) = (mesh.point(v2), mesh.point(v3)) {
-            // Only create faces if vertices are valid
-            if p2 != glam::Vec3::ZERO || p3 != glam::Vec3::ZERO {
-                mesh.add_face(&[v0, new_v, v2]);
-                mesh.add_face(&[new_v, v1, v2]);
-                mesh.add_face(&[v1, new_v, v3]);
-                mesh.add_face(&[new_v, v0, v3]);
-            }
-        }
-
-        split_count += 1;
-    }
-
-    split_count
+    *mesh = rebuilt;
+    midpoint_positions.len()
 }
 
 /// Collapse all edges shorter than a threshold
@@ -231,6 +287,10 @@ pub fn collapse_short_edges(mesh: &mut RustMesh, min_length: f32) -> usize {
                 collapse_count += 1;
             }
         }
+    }
+
+    if collapse_count > 0 {
+        mesh.garbage_collection();
     }
 
     collapse_count
@@ -551,6 +611,17 @@ mod tests {
     use super::*;
     use crate::generate_sphere;
 
+    fn make_two_triangle_patch(width: f32, height: f32) -> RustMesh {
+        let mut mesh = RustMesh::new();
+        let v0 = mesh.add_vertex(glam::vec3(0.0, 0.0, 0.0));
+        let v1 = mesh.add_vertex(glam::vec3(width, 0.0, 0.0));
+        let v2 = mesh.add_vertex(glam::vec3(width, height, 0.0));
+        let v3 = mesh.add_vertex(glam::vec3(0.0, height, 0.0));
+        mesh.add_face(&[v0, v1, v2]);
+        mesh.add_face(&[v0, v2, v3]);
+        mesh
+    }
+
     #[test]
     fn test_edge_length_statistics() {
         let mesh = generate_sphere(1.0, 16, 16);
@@ -582,6 +653,24 @@ mod tests {
         // Most vertices should have valence around 4-8
         let avg_valence: f32 = valences.iter().sum::<usize>() as f32 / valences.len() as f32;
         assert!(avg_valence > 0.0 && avg_valence < 20.0);
+    }
+
+    #[test]
+    fn test_split_long_edges_splits_shared_interior_edge_into_four_triangles() {
+        let mut mesh = make_two_triangle_patch(2.2, 1.0);
+
+        let split = split_long_edges(&mut mesh, 2.25);
+
+        assert_eq!(split, 1);
+        assert_eq!(mesh.n_active_faces(), 4);
+
+        for fh in mesh.faces() {
+            let verts = mesh.face_vertices_vec(fh);
+            assert_eq!(verts.len(), 3);
+            assert_ne!(verts[0], verts[1]);
+            assert_ne!(verts[1], verts[2]);
+            assert_ne!(verts[2], verts[0]);
+        }
     }
 
     #[test]
