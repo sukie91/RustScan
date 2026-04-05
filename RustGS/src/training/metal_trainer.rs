@@ -5856,6 +5856,97 @@ mod tests {
     }
 
     #[test]
+    fn training_step_records_depth_telemetry_with_clustered_sparse_grad() {
+        let device = crate::preferred_device();
+        if !device.is_metal() {
+            return;
+        }
+        let config = TrainingConfig {
+            training_profile: TrainingProfile::LiteGsMacV1,
+            litegs: LiteGsConfig {
+                cluster_size: 1,
+                sparse_grad: true,
+                enable_depth: true,
+                ..LiteGsConfig::default()
+            },
+            metal_render_scale: 1.0,
+            ..TrainingConfig::default()
+        };
+        let mut trainer = MetalTrainer::new(64, 64, &config, device.clone()).unwrap();
+        trainer.scene_extent = 16.0;
+        let camera = make_test_camera(&device);
+        let mut gaussians = TrainableGaussians::new(
+            &[
+                0.0, 0.0, 2.0, //
+                0.0, 0.0, -2.0,
+            ],
+            &[
+                0.0, 0.0, 0.0, //
+                0.0, 0.0, 0.0,
+            ],
+            &[
+                1.0, 0.0, 0.0, 0.0, //
+                1.0, 0.0, 0.0, 0.0,
+            ],
+            &[0.0, 0.0],
+            &[
+                1.0, 0.25, 0.25, //
+                0.1, 1.0, 0.1,
+            ],
+            &device,
+        )
+        .unwrap();
+        trainer.adam = Some(MetalAdamState::new(&gaussians).unwrap());
+        trainer.sync_cluster_assignment(&gaussians, false).unwrap();
+        let cluster_visible_mask =
+            trainer.cluster_visible_mask_for_camera(gaussians.len(), &camera);
+        let (rendered, _, _) = trainer
+            .render(
+                &gaussians,
+                &camera,
+                false,
+                true,
+                cluster_visible_mask.as_deref(),
+            )
+            .unwrap();
+        let target_depth_cpu = rendered
+            .depth
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
+        let target_color_cpu = vec![0.0f32; trainer.pixel_count * 3];
+        let frame = MetalTrainingFrame {
+            camera: camera.clone(),
+            target_color: Tensor::from_slice(&target_color_cpu, (trainer.pixel_count, 3), &device)
+                .unwrap(),
+            target_depth: rendered.depth.clone(),
+            target_color_cpu,
+            target_depth_cpu,
+        };
+
+        let outcome = trainer
+            .training_step(&mut gaussians, &frame, 0, 1, false)
+            .unwrap();
+        let telemetry = trainer.current_telemetry();
+        let color_moments = trainer
+            .adam
+            .as_ref()
+            .unwrap()
+            .m_color
+            .to_vec2::<f32>()
+            .unwrap();
+
+        assert_eq!(outcome.visible_gaussians, 1);
+        assert!(telemetry.loss_terms.total.unwrap_or(0.0) > 0.0);
+        assert!(telemetry.loss_terms.depth.is_some());
+        assert_eq!(telemetry.learning_rates.xyz, Some(trainer.compute_lr_pos()));
+        assert!(color_moments[0].iter().any(|value| value.abs() > 1e-8));
+        assert!(color_moments[1].iter().all(|value| value.abs() < 1e-8));
+        assert!(trainer.cluster_assignment.is_some());
+    }
+
+    #[test]
     fn adam_step_var_sparse_preserves_invisible_rows_for_tensor3_params() {
         let device = Device::Cpu;
         let var = Var::from_tensor(

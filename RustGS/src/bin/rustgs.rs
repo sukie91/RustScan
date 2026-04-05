@@ -1029,4 +1029,82 @@ mod tests {
         assert_eq!(report.metrics.rotation_frozen, Some(true));
         assert_eq!(report.topology.final_gaussians, Some(7));
     }
+
+    #[test]
+    fn litegs_parity_report_persists_depth_and_sparse_cluster_config() {
+        let dir = tempdir().unwrap();
+        let output = dir.path().join("scene.ply");
+        let input = std::path::Path::new("test_data/tum/rgbd_dataset_freiburg1_xyz");
+
+        let scene = rustgs::GaussianMap::from_gaussians(vec![rustgs::Gaussian3D::default()]);
+        let gaussians = vec![rustgs::Gaussian::new(
+            [0.0, 0.0, 0.0],
+            [0.01, 0.01, 0.01],
+            [1.0, 0.0, 0.0, 0.0],
+            0.5,
+            [0.2, 0.3, 0.4],
+        )];
+        rustgs::save_scene_ply(
+            &output,
+            &gaussians,
+            &rustgs::SceneMetadata {
+                iterations: 1,
+                final_loss: 0.0,
+                gaussian_count: gaussians.len(),
+                sh_degree: 0,
+            },
+        )
+        .unwrap();
+
+        let mut dataset =
+            rustgs::TrainingDataset::new(rustgs::Intrinsics::from_focal(500.0, 32, 32));
+        dataset.add_point([0.0, 0.0, 0.0], None);
+        let slam_output = rustscan_types::SlamOutput::from_dataset(dataset);
+        let config = rustgs::TrainingConfig {
+            training_profile: rustgs::TrainingProfile::LiteGsMacV1,
+            litegs: rustgs::LiteGsConfig {
+                cluster_size: 64,
+                sparse_grad: true,
+                enable_depth: true,
+                ..rustgs::LiteGsConfig::default()
+            },
+            ..rustgs::TrainingConfig::default()
+        };
+        let telemetry = rustgs::LiteGsTrainingTelemetry {
+            loss_terms: rustgs::ParityLossTerms {
+                l1: Some(0.1),
+                ssim: Some(0.2),
+                scale_regularization: Some(0.3),
+                transmittance: Some(0.4),
+                depth: Some(0.6),
+                total: Some(0.7),
+            },
+            topology: rustgs::ParityTopologyMetrics {
+                final_gaussians: Some(3),
+                ..Default::default()
+            },
+            active_sh_degree: Some(2),
+            rotation_frozen: true,
+            learning_rates: rustgs::LiteGsOptimizerLrs::default(),
+        };
+
+        maybe_write_litegs_parity_report(
+            input,
+            &output,
+            &slam_output,
+            &scene,
+            &config,
+            Some(&telemetry),
+            Duration::from_millis(42),
+        )
+        .unwrap();
+
+        let report_path = rustgs::default_parity_report_path(&output);
+        let report = rustgs::ParityHarnessReport::load_json(&report_path).unwrap();
+        assert_eq!(report.litegs.cluster_size, 64);
+        assert!(report.litegs.sparse_grad);
+        assert!(report.litegs.enable_depth);
+        assert_eq!(report.loss_terms.depth, Some(0.6));
+        assert_eq!(report.loss_terms.total, Some(0.7));
+    }
 }
