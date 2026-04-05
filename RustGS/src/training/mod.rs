@@ -765,10 +765,6 @@ fn validate_litegs_mac_v1_config(config: &TrainingConfig) -> Result<(), Training
             config.litegs.tile_size, defaults.tile_size
         ));
     }
-    if config.litegs.enable_depth != defaults.enable_depth {
-        unsupported
-            .push("enable_depth=true requires LiteGS depth loss parity (Epic 18.4)".to_string());
-    }
     if config.litegs.sh_degree == 0 {
         unsupported
             .push("sh_degree=0 is not supported for LiteGsMacV1; use degree >= 1".to_string());
@@ -1205,6 +1201,20 @@ mod tests {
             training_profile: TrainingProfile::LiteGsMacV1,
             litegs: LiteGsConfig {
                 sparse_grad: true,
+                ..LiteGsConfig::default()
+            },
+            ..TrainingConfig::default()
+        };
+
+        assert!(validate_litegs_mac_v1_config(&config).is_ok());
+    }
+
+    #[test]
+    fn litegs_mac_v1_accepts_enable_depth_override() {
+        let config = TrainingConfig {
+            training_profile: TrainingProfile::LiteGsMacV1,
+            litegs: LiteGsConfig {
+                enable_depth: true,
                 ..LiteGsConfig::default()
             },
             ..TrainingConfig::default()

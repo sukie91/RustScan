@@ -5821,6 +5821,41 @@ mod tests {
     }
 
     #[test]
+    fn litegs_loss_weights_only_enable_depth_when_requested() {
+        let disabled = MetalTrainer::new(
+            32,
+            16,
+            &TrainingConfig {
+                training_profile: TrainingProfile::LiteGsMacV1,
+                litegs: LiteGsConfig {
+                    enable_depth: false,
+                    ..LiteGsConfig::default()
+                },
+                ..TrainingConfig::default()
+            },
+            Device::Cpu,
+        )
+        .unwrap();
+        let enabled = MetalTrainer::new(
+            32,
+            16,
+            &TrainingConfig {
+                training_profile: TrainingProfile::LiteGsMacV1,
+                litegs: LiteGsConfig {
+                    enable_depth: true,
+                    ..LiteGsConfig::default()
+                },
+                ..TrainingConfig::default()
+            },
+            Device::Cpu,
+        )
+        .unwrap();
+
+        assert_eq!(disabled.loss_weights(), (0.8, 0.2, 0.0));
+        assert_eq!(enabled.loss_weights(), (0.8, 0.2, 0.1));
+    }
+
+    #[test]
     fn adam_step_var_sparse_preserves_invisible_rows_for_tensor3_params() {
         let device = Device::Cpu;
         let var = Var::from_tensor(
