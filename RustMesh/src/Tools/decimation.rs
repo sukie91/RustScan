@@ -175,12 +175,13 @@ fn face_quadric_from_points(p0: Vec3, p1: Vec3, p2: Vec3) -> Option<Quadricd> {
     let e2y = p2.y as f64 - p0y;
     let e2z = p2.z as f64 - p0z;
 
-    let mut nx = e1y * e2z - e1z * e2y;
-    let mut ny = e1z * e2x - e1x * e2z;
-    let mut nz = e1x * e2y - e1y * e2x;
-    let mut sqrnorm = nx * nx;
-    sqrnorm += ny * ny;
-    sqrnorm += nz * nz;
+    let mut nx = e1y.mul_add(e2z, -(e1z * e2y));
+    let mut ny = e1z.mul_add(e2x, -(e1x * e2z));
+    let mut nz = e1x.mul_add(e2y, -(e1y * e2x));
+    let mut sqrnorm = 0.0f64;
+    sqrnorm = nx.mul_add(nx, sqrnorm);
+    sqrnorm = ny.mul_add(ny, sqrnorm);
+    sqrnorm = nz.mul_add(nz, sqrnorm);
     let mut area = sqrnorm.sqrt();
     if !area.is_finite() {
         return None;
@@ -193,9 +194,10 @@ fn face_quadric_from_points(p0: Vec3, p1: Vec3, p2: Vec3) -> Option<Quadricd> {
         area *= 0.5;
     }
 
-    let mut plane_dot = p0x * nx;
-    plane_dot += p0y * ny;
-    plane_dot += p0z * nz;
+    let mut plane_dot = 0.0f64;
+    plane_dot = p0x.mul_add(nx, plane_dot);
+    plane_dot = p0y.mul_add(ny, plane_dot);
+    plane_dot = p0z.mul_add(nz, plane_dot);
     let d = -plane_dot;
 
     let mut q = Quadricd::from_plane(nx, ny, nz, d);
@@ -1800,9 +1802,11 @@ pub fn decimate_mesh(mesh: &mut RustMesh, target_vertices: usize, max_err: f32) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{generate_cube, generate_sphere, read_off, write_off};
+    use crate::{generate_cube, generate_sphere, read_off, read_off_openmesh_parity, write_off, FaceHandle};
     use std::collections::HashMap;
     use std::fs;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
     fn raw_face_diagnostics(mesh: &RustMesh) -> (usize, usize, usize) {
         let mut active_faces = 0usize;
@@ -1838,6 +1842,49 @@ mod tests {
 
         let non_manifold_edges = edge_use.values().filter(|&&count| count > 2).count();
         (active_faces, degenerate_faces, non_manifold_edges)
+    }
+
+    fn quadric_bits(q: Quadricd) -> [u64; 10] {
+        [
+            q.a.to_bits(),
+            q.b.to_bits(),
+            q.c.to_bits(),
+            q.d.to_bits(),
+            q.e.to_bits(),
+            q.f.to_bits(),
+            q.g.to_bits(),
+            q.h.to_bits(),
+            q.i.to_bits(),
+            q.j.to_bits(),
+        ]
+    }
+
+    fn next_openmesh_parity_trace_path() -> PathBuf {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+        let suffix = COUNTER.fetch_add(1, AtomicOrdering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "rustmesh-decimation-quadric-parity-{}-{suffix}.off",
+            std::process::id()
+        ))
+    }
+
+    fn load_openmesh_parity_trace_mesh() -> RustMesh {
+        let mesh = generate_sphere(1.0, 10, 10);
+        let path = next_openmesh_parity_trace_path();
+        write_off(&mesh, &path).unwrap();
+        let loaded = read_off_openmesh_parity(&path).unwrap();
+        fs::remove_file(&path).ok();
+        loaded
+    }
+
+    fn face_quadric_bits_for_face(mesh: &RustMesh, face_idx: usize) -> [u64; 10] {
+        let verts = mesh.face_vertices_vec(FaceHandle::new(face_idx as u32));
+        assert_eq!(verts.len(), 3, "expected triangular face at index {face_idx}");
+        let p0 = mesh.point(verts[0]).unwrap();
+        let p1 = mesh.point(verts[1]).unwrap();
+        let p2 = mesh.point(verts[2]).unwrap();
+        quadric_bits(face_quadric_from_points(p0, p1, p2).unwrap())
     }
 
     #[test]
@@ -1884,6 +1931,48 @@ mod tests {
         let (priority, is_legal) = module.collapse_priority(v0, v1);
         assert!(is_legal);
         assert!(priority.is_finite());
+    }
+
+    #[test]
+    fn test_face_192_quadric_bits_match_openmesh_parity() {
+        let mesh = load_openmesh_parity_trace_mesh();
+        let bits = face_quadric_bits_for_face(&mesh, 192);
+        assert_eq!(
+            bits,
+            [
+                0x3f31623c3e106c9d,
+                0x3f6632e01a38bcf8,
+                0x3f37ed3a3910ee84,
+                0x3f6632e015109502,
+                0x3f9c58ef9c2b479a,
+                0x3f6e8dcfe3003862,
+                0x3f9c58ef9595766f,
+                0x3f40775432a41726,
+                0x3f6e8dcfdbe72e18,
+                0x3f9c58ef8effa545,
+            ]
+        );
+    }
+
+    #[test]
+    fn test_face_196_quadric_bits_match_openmesh_parity() {
+        let mesh = load_openmesh_parity_trace_mesh();
+        let bits = face_quadric_bits_for_face(&mesh, 196);
+        assert_eq!(
+            bits,
+            [
+                0x3f31623cdc1096be,
+                0xbf6632e01ad1e1c5,
+                0xbf37ed39a2c03f6c,
+                0xbf6632e015a9b9cc,
+                0x3f9c58ee9c0c3009,
+                0x3f6e8dce0e2b7a7e,
+                0x3f9c58ee95765f18,
+                0x3f407752ce16e56d,
+                0x3f6e8dce0712709f,
+                0x3f9c58ee8ee08e27,
+            ]
+        );
     }
 
     #[test]

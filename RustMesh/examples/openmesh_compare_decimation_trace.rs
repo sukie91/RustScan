@@ -163,8 +163,9 @@ fn parse_rust_import_mode() -> RustImportMode {
         .ok()
         .as_deref()
     {
+        Some("standard") => RustImportMode::Standard,
         Some("openmesh_parity") => RustImportMode::OpenMeshParity,
-        _ => RustImportMode::Standard,
+        _ => RustImportMode::OpenMeshParity,
     }
 }
 
@@ -329,10 +330,27 @@ fn debug_dump_face_quadrics_enabled() -> bool {
         .is_some_and(|raw| !raw.trim().is_empty() && raw != "0")
 }
 
+fn parse_debug_face_ops() -> Vec<usize> {
+    std::env::var("RUSTMESH_TRACE_DUMP_FACE_OPS")
+        .ok()
+        .map(|raw| {
+            raw.split(',')
+                .filter_map(|token| token.trim().parse::<usize>().ok())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+fn should_debug_face_ops(face_idx: usize, debug_faces: &[usize]) -> bool {
+    debug_faces.contains(&face_idx)
+}
+
 fn debug_rust_face_quadrics(mesh: &rustmesh::RustMesh, vertices: &[usize]) {
     if !debug_dump_face_quadrics_enabled() || vertices.is_empty() {
         return;
     }
+
+    let debug_face_ops = parse_debug_face_ops();
 
     let mut faces = vertices
         .iter()
@@ -362,6 +380,11 @@ fn debug_rust_face_quadrics(mesh: &rustmesh::RustMesh, vertices: &[usize]) {
                 "  face_quadric_bits=[0x{:016x},0x{:016x},0x{:016x},0x{:016x},0x{:016x},0x{:016x},0x{:016x},0x{:016x},0x{:016x},0x{:016x}]",
                 bits[0], bits[1], bits[2], bits[3], bits[4], bits[5], bits[6], bits[7], bits[8], bits[9]
             );
+            if should_debug_face_ops(face_idx, &debug_face_ops) {
+                if let Some(ops) = rust_face_quadric_ops_from_vertices(mesh, &verts_vh) {
+                    print_face_ops("  face_ops", &ops);
+                }
+            }
             for shift in 1..verts_vh.len().min(3) {
                 let rotated = rotate_face_vertices(&verts_vh, shift);
                 if let Some(rot_bits) = rust_face_quadric_bits_from_vertices(mesh, &rotated) {
@@ -378,6 +401,11 @@ fn debug_rust_face_quadrics(mesh: &rustmesh::RustMesh, vertices: &[usize]) {
                         rot_bits[8],
                         rot_bits[9]
                     );
+                }
+                if should_debug_face_ops(face_idx, &debug_face_ops) {
+                    if let Some(rot_ops) = rust_face_quadric_ops_from_vertices(mesh, &rotated) {
+                        print_face_ops(&format!("  face_ops_rot{shift}"), &rot_ops);
+                    }
                 }
             }
         } else {
@@ -414,6 +442,112 @@ fn rotate_face_vertices(vertices: &[VertexHandle], shift: usize) -> Vec<VertexHa
     (0..n).map(|idx| vertices[(idx + shift) % n]).collect()
 }
 
+#[derive(Clone, Copy)]
+struct FaceQuadricOps {
+    e1: [u64; 3],
+    e2: [u64; 3],
+    cross: [u64; 3],
+    sqrnorm: u64,
+    area_norm: u64,
+    unit_normal: [u64; 3],
+    area_half: u64,
+    plane_dot: u64,
+    d: u64,
+}
+
+fn print_face_ops(label: &str, ops: &FaceQuadricOps) {
+    println!(
+        "{label} e1=[0x{:016x},0x{:016x},0x{:016x}] e2=[0x{:016x},0x{:016x},0x{:016x}] cross=[0x{:016x},0x{:016x},0x{:016x}] sqrnorm=0x{:016x} area_norm=0x{:016x} unit_normal=[0x{:016x},0x{:016x},0x{:016x}] area_half=0x{:016x} plane_dot=0x{:016x} d=0x{:016x}",
+        ops.e1[0],
+        ops.e1[1],
+        ops.e1[2],
+        ops.e2[0],
+        ops.e2[1],
+        ops.e2[2],
+        ops.cross[0],
+        ops.cross[1],
+        ops.cross[2],
+        ops.sqrnorm,
+        ops.area_norm,
+        ops.unit_normal[0],
+        ops.unit_normal[1],
+        ops.unit_normal[2],
+        ops.area_half,
+        ops.plane_dot,
+        ops.d
+    );
+}
+
+fn rust_face_quadric_ops_from_vertices(
+    mesh: &rustmesh::RustMesh,
+    verts: &[VertexHandle],
+) -> Option<FaceQuadricOps> {
+    if verts.len() < 3 {
+        return None;
+    }
+
+    let p0 = mesh.point(verts[0])?;
+    let p1 = mesh.point(verts[1])?;
+    let p2 = mesh.point(verts[2])?;
+    rust_face_quadric_ops_from_points(p0, p1, p2)
+}
+
+fn rust_face_quadric_ops_from_points(
+    p0: glam::Vec3,
+    p1: glam::Vec3,
+    p2: glam::Vec3,
+) -> Option<FaceQuadricOps> {
+    let p0x = p0.x as f64;
+    let p0y = p0.y as f64;
+    let p0z = p0.z as f64;
+    let e1x = p1.x as f64 - p0x;
+    let e1y = p1.y as f64 - p0y;
+    let e1z = p1.z as f64 - p0z;
+    let e2x = p2.x as f64 - p0x;
+    let e2y = p2.y as f64 - p0y;
+    let e2z = p2.z as f64 - p0z;
+
+    let mut nx = e1y.mul_add(e2z, -(e1z * e2y));
+    let mut ny = e1z.mul_add(e2x, -(e1x * e2z));
+    let mut nz = e1x.mul_add(e2y, -(e1y * e2x));
+    let cross = [nx.to_bits(), ny.to_bits(), nz.to_bits()];
+
+    let mut sqrnorm = 0.0f64;
+    sqrnorm = nx.mul_add(nx, sqrnorm);
+    sqrnorm = ny.mul_add(ny, sqrnorm);
+    sqrnorm = nz.mul_add(nz, sqrnorm);
+    let area_norm = sqrnorm.sqrt();
+    if !area_norm.is_finite() {
+        return None;
+    }
+
+    let mut area_half = area_norm;
+    if area_half > f32::MIN_POSITIVE as f64 {
+        nx /= area_half;
+        ny /= area_half;
+        nz /= area_half;
+        area_half *= 0.5;
+    }
+
+    let mut plane_dot = 0.0f64;
+    plane_dot = p0x.mul_add(nx, plane_dot);
+    plane_dot = p0y.mul_add(ny, plane_dot);
+    plane_dot = p0z.mul_add(nz, plane_dot);
+    let d = -plane_dot;
+
+    Some(FaceQuadricOps {
+        e1: [e1x.to_bits(), e1y.to_bits(), e1z.to_bits()],
+        e2: [e2x.to_bits(), e2y.to_bits(), e2z.to_bits()],
+        cross,
+        sqrnorm: sqrnorm.to_bits(),
+        area_norm: area_norm.to_bits(),
+        unit_normal: [nx.to_bits(), ny.to_bits(), nz.to_bits()],
+        area_half: area_half.to_bits(),
+        plane_dot: plane_dot.to_bits(),
+        d: d.to_bits(),
+    })
+}
+
 fn rust_face_quadric_bits_from_points(
     p0: glam::Vec3,
     p1: glam::Vec3,
@@ -429,12 +563,13 @@ fn rust_face_quadric_bits_from_points(
     let e2y = p2.y as f64 - p0y;
     let e2z = p2.z as f64 - p0z;
 
-    let mut nx = e1y * e2z - e1z * e2y;
-    let mut ny = e1z * e2x - e1x * e2z;
-    let mut nz = e1x * e2y - e1y * e2x;
-    let mut sqrnorm = nx * nx;
-    sqrnorm += ny * ny;
-    sqrnorm += nz * nz;
+    let mut nx = e1y.mul_add(e2z, -(e1z * e2y));
+    let mut ny = e1z.mul_add(e2x, -(e1x * e2z));
+    let mut nz = e1x.mul_add(e2y, -(e1y * e2x));
+    let mut sqrnorm = 0.0f64;
+    sqrnorm = nx.mul_add(nx, sqrnorm);
+    sqrnorm = ny.mul_add(ny, sqrnorm);
+    sqrnorm = nz.mul_add(nz, sqrnorm);
     let mut area = sqrnorm.sqrt();
     if !area.is_finite() {
         return None;
@@ -447,9 +582,10 @@ fn rust_face_quadric_bits_from_points(
         area *= 0.5;
     }
 
-    let mut plane_dot = p0x * nx;
-    plane_dot += p0y * ny;
-    plane_dot += p0z * nz;
+    let mut plane_dot = 0.0f64;
+    plane_dot = p0x.mul_add(nx, plane_dot);
+    plane_dot = p0y.mul_add(ny, plane_dot);
+    plane_dot = p0z.mul_add(nz, plane_dot);
     let d = -plane_dot;
     let a = (nx * nx * area).to_bits();
     let b = (nx * ny * area).to_bits();
@@ -546,6 +682,7 @@ fn parse_openmesh_trace(stdout: &str) -> io::Result<TraceRun> {
             || line.starts_with("after ")
             || line.starts_with("vertex ")
             || line.starts_with("face ")
+            || line.starts_with("  face_ops")
             || line.starts_with("  point_bits=")
             || line.starts_with("  quadric=")
             || line.starts_with("  quadric_bits=")
@@ -821,6 +958,36 @@ public:
       return size_t(0);
     }();
     return collapses;
+  }
+
+  std::vector<int> debug_face_ops() const {
+    static const std::vector<int> faces = []() {
+      std::vector<int> values;
+      if (const char* raw = std::getenv("RUSTMESH_TRACE_DUMP_FACE_OPS")) {
+        const char* cursor = raw;
+        while (*cursor != '\0') {
+          char* end = nullptr;
+          const long parsed = std::strtol(cursor, &end, 10);
+          if (end != cursor) {
+            values.push_back(static_cast<int>(parsed));
+            cursor = end;
+          }
+          while (*cursor == ',' || *cursor == ' ' || *cursor == '\t') {
+            ++cursor;
+          }
+          if (end == cursor && *cursor != '\0') {
+            ++cursor;
+          }
+        }
+      }
+      return values;
+    }();
+    return faces;
+  }
+
+  bool should_debug_face_ops(int face_idx) const {
+    const auto faces = debug_face_ops();
+    return std::find(faces.begin(), faces.end(), face_idx) != faces.end();
   }
 
   bool should_debug_step(size_t step) const {
@@ -1217,6 +1384,37 @@ private:
               << std::dec << std::setfill(' ') << "]\n";
   }
 
+  static void print_face_ops(const char* prefix,
+                             const OpenMesh::Vec3d& e1,
+                             const OpenMesh::Vec3d& e2,
+                             const OpenMesh::Vec3d& cross,
+                             double sqrnorm,
+                             double area_norm,
+                             const OpenMesh::Vec3d& unit_normal,
+                             double area_half,
+                             double plane_dot,
+                             double d) {
+    std::cout << prefix
+              << " e1=[0x" << std::hex << std::setw(16) << std::setfill('0') << bit_cast_u64(e1[0])
+              << ",0x" << std::setw(16) << bit_cast_u64(e1[1])
+              << ",0x" << std::setw(16) << bit_cast_u64(e1[2])
+              << "] e2=[0x" << std::setw(16) << bit_cast_u64(e2[0])
+              << ",0x" << std::setw(16) << bit_cast_u64(e2[1])
+              << ",0x" << std::setw(16) << bit_cast_u64(e2[2])
+              << "] cross=[0x" << std::setw(16) << bit_cast_u64(cross[0])
+              << ",0x" << std::setw(16) << bit_cast_u64(cross[1])
+              << ",0x" << std::setw(16) << bit_cast_u64(cross[2])
+              << "] sqrnorm=0x" << std::setw(16) << bit_cast_u64(sqrnorm)
+              << " area_norm=0x" << std::setw(16) << bit_cast_u64(area_norm)
+              << " unit_normal=[0x" << std::setw(16) << bit_cast_u64(unit_normal[0])
+              << ",0x" << std::setw(16) << bit_cast_u64(unit_normal[1])
+              << ",0x" << std::setw(16) << bit_cast_u64(unit_normal[2])
+              << "] area_half=0x" << std::setw(16) << bit_cast_u64(area_half)
+              << " plane_dot=0x" << std::setw(16) << bit_cast_u64(plane_dot)
+              << " d=0x" << std::setw(16) << bit_cast_u64(d)
+              << std::dec << std::setfill(' ') << "\n";
+  }
+
   void debug_face_quadrics() {
     if (!debug_dump_face_quadrics()) {
       return;
@@ -1268,16 +1466,25 @@ private:
       const Vec3 v0 = OpenMesh::vector_cast<Vec3>(mesh_.point(vh0));
       const Vec3 v1 = OpenMesh::vector_cast<Vec3>(mesh_.point(vh1));
       const Vec3 v2 = OpenMesh::vector_cast<Vec3>(mesh_.point(vh2));
-      Vec3 n = (v1 - v0) % (v2 - v0);
-      double area = n.norm();
-      if (area > FLT_MIN) {
-        n /= area;
-        area *= 0.5;
+      const Vec3 e1 = v1 - v0;
+      const Vec3 e2 = v2 - v0;
+      const Vec3 cross = e1 % e2;
+      Vec3 n = cross;
+      double sqrnorm = n.sqrnorm();
+      double area_norm = n.norm();
+      double area_half = area_norm;
+      if (area_half > FLT_MIN) {
+        n /= area_half;
+        area_half *= 0.5;
       }
-      const double d = -(v0 | n);
+      const double plane_dot = (v0 | n);
+      const double d = -plane_dot;
       Quadric q(n[0], n[1], n[2], d);
-      q *= area;
+      q *= area_half;
       print_quadric_bits("  face_quadric_bits=", q);
+      if (should_debug_face_ops(face_idx)) {
+        print_face_ops("  face_ops", e1, e2, cross, sqrnorm, area_norm, n, area_half, plane_dot, d);
+      }
     }
   }
 
