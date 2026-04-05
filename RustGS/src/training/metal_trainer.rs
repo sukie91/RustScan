@@ -3240,104 +3240,160 @@ impl MetalTrainer {
     ) -> candle_core::Result<()> {
         let (color_parameter_grads, sh_rest_parameter_grads) = self
             .parameter_grads_from_render_color_grads(gaussians, projected, &grads.colors, camera)?;
+        let use_sparse_updates = self.is_litegs_mode() && self.litegs.sparse_grad;
         let adam = self
             .adam
             .as_mut()
             .ok_or_else(|| candle_core::Error::Msg("adam state not initialized".into()))?;
 
         let (beta1, beta2, eps, step) = (self.beta1, self.beta2, self.eps, self.iteration);
+        if use_sparse_updates && projected.visible_count == 0 {
+            return Ok(());
+        }
+        let sparse_row_indices = use_sparse_updates.then_some(&projected.source_indices);
         let scale_grads = if let Some(extra) = scale_reg_grad {
             grads.log_scales.broadcast_add(extra)?
         } else {
             grads.log_scales.clone()
         };
 
-        // Use fused Adam kernel on Metal device to eliminate ~48 temp Tensor allocs per step.
-        adam_step_var_fused(
-            &gaussians.positions,
-            &grads.positions,
-            &mut adam.m_pos,
-            &mut adam.v_pos,
-            &mut self.runtime,
-            effective_lr_pos,
-            beta1,
-            beta2,
-            eps,
-            step,
-            MetalBufferSlot::AdamGradPos,
-            MetalBufferSlot::AdamMPos,
-            MetalBufferSlot::AdamVPos,
-            MetalBufferSlot::AdamParamPos,
-        )?;
-        adam_step_var_fused(
-            &gaussians.scales,
-            &scale_grads,
-            &mut adam.m_scale,
-            &mut adam.v_scale,
-            &mut self.runtime,
-            self.lr_scale,
-            beta1,
-            beta2,
-            eps,
-            step,
-            MetalBufferSlot::AdamGradScale,
-            MetalBufferSlot::AdamMScale,
-            MetalBufferSlot::AdamVScale,
-            MetalBufferSlot::AdamParamScale,
-        )?;
-        if let Some(rotation_grads) = rotation_parameter_grads {
-            adam_step_var(
-                &gaussians.rotations,
-                rotation_grads,
-                &mut adam.m_rot,
-                &mut adam.v_rot,
-                self.lr_rotation,
+        if let Some(row_indices) = sparse_row_indices {
+            adam_step_var_sparse(
+                &gaussians.positions,
+                &grads.positions,
+                &mut adam.m_pos,
+                &mut adam.v_pos,
+                row_indices,
+                effective_lr_pos,
                 beta1,
                 beta2,
                 eps,
                 step,
             )?;
-        }
-        adam_step_var_fused(
-            &gaussians.opacities,
-            &grads.opacity_logits,
-            &mut adam.m_op,
-            &mut adam.v_op,
-            &mut self.runtime,
-            self.lr_opacity,
-            beta1,
-            beta2,
-            eps,
-            step,
-            MetalBufferSlot::AdamGradOpacity,
-            MetalBufferSlot::AdamMOpacity,
-            MetalBufferSlot::AdamVOpacity,
-            MetalBufferSlot::AdamParamOpacity,
-        )?;
-        adam_step_var_fused(
-            &gaussians.colors,
-            &color_parameter_grads,
-            &mut adam.m_color,
-            &mut adam.v_color,
-            &mut self.runtime,
-            self.lr_color,
-            beta1,
-            beta2,
-            eps,
-            step,
-            MetalBufferSlot::AdamGradColor,
-            MetalBufferSlot::AdamMColor,
-            MetalBufferSlot::AdamVColor,
-            MetalBufferSlot::AdamParamColor,
-        )?;
-        if gaussians.uses_spherical_harmonics() {
+            adam_step_var_sparse(
+                &gaussians.scales,
+                &scale_grads,
+                &mut adam.m_scale,
+                &mut adam.v_scale,
+                row_indices,
+                self.lr_scale,
+                beta1,
+                beta2,
+                eps,
+                step,
+            )?;
+        } else {
+            // Use fused Adam kernel on Metal device to eliminate ~48 temp Tensor allocs per step.
             adam_step_var_fused(
-                &gaussians.sh_rest,
-                &sh_rest_parameter_grads,
-                &mut adam.m_sh_rest,
-                &mut adam.v_sh_rest,
+                &gaussians.positions,
+                &grads.positions,
+                &mut adam.m_pos,
+                &mut adam.v_pos,
                 &mut self.runtime,
-                self.lr_sh_rest,
+                effective_lr_pos,
+                beta1,
+                beta2,
+                eps,
+                step,
+                MetalBufferSlot::AdamGradPos,
+                MetalBufferSlot::AdamMPos,
+                MetalBufferSlot::AdamVPos,
+                MetalBufferSlot::AdamParamPos,
+            )?;
+            adam_step_var_fused(
+                &gaussians.scales,
+                &scale_grads,
+                &mut adam.m_scale,
+                &mut adam.v_scale,
+                &mut self.runtime,
+                self.lr_scale,
+                beta1,
+                beta2,
+                eps,
+                step,
+                MetalBufferSlot::AdamGradScale,
+                MetalBufferSlot::AdamMScale,
+                MetalBufferSlot::AdamVScale,
+                MetalBufferSlot::AdamParamScale,
+            )?;
+        }
+        if let Some(rotation_grads) = rotation_parameter_grads {
+            if let Some(row_indices) = sparse_row_indices {
+                adam_step_var_sparse(
+                    &gaussians.rotations,
+                    rotation_grads,
+                    &mut adam.m_rot,
+                    &mut adam.v_rot,
+                    row_indices,
+                    self.lr_rotation,
+                    beta1,
+                    beta2,
+                    eps,
+                    step,
+                )?;
+            } else {
+                adam_step_var(
+                    &gaussians.rotations,
+                    rotation_grads,
+                    &mut adam.m_rot,
+                    &mut adam.v_rot,
+                    self.lr_rotation,
+                    beta1,
+                    beta2,
+                    eps,
+                    step,
+                )?;
+            }
+        }
+        if let Some(row_indices) = sparse_row_indices {
+            adam_step_var_sparse(
+                &gaussians.opacities,
+                &grads.opacity_logits,
+                &mut adam.m_op,
+                &mut adam.v_op,
+                row_indices,
+                self.lr_opacity,
+                beta1,
+                beta2,
+                eps,
+                step,
+            )?;
+            adam_step_var_sparse(
+                &gaussians.colors,
+                &color_parameter_grads,
+                &mut adam.m_color,
+                &mut adam.v_color,
+                row_indices,
+                self.lr_color,
+                beta1,
+                beta2,
+                eps,
+                step,
+            )?;
+        } else {
+            adam_step_var_fused(
+                &gaussians.opacities,
+                &grads.opacity_logits,
+                &mut adam.m_op,
+                &mut adam.v_op,
+                &mut self.runtime,
+                self.lr_opacity,
+                beta1,
+                beta2,
+                eps,
+                step,
+                MetalBufferSlot::AdamGradOpacity,
+                MetalBufferSlot::AdamMOpacity,
+                MetalBufferSlot::AdamVOpacity,
+                MetalBufferSlot::AdamParamOpacity,
+            )?;
+            adam_step_var_fused(
+                &gaussians.colors,
+                &color_parameter_grads,
+                &mut adam.m_color,
+                &mut adam.v_color,
+                &mut self.runtime,
+                self.lr_color,
                 beta1,
                 beta2,
                 eps,
@@ -3347,6 +3403,39 @@ impl MetalTrainer {
                 MetalBufferSlot::AdamVColor,
                 MetalBufferSlot::AdamParamColor,
             )?;
+        }
+        if gaussians.uses_spherical_harmonics() {
+            if let Some(row_indices) = sparse_row_indices {
+                adam_step_var_sparse(
+                    &gaussians.sh_rest,
+                    &sh_rest_parameter_grads,
+                    &mut adam.m_sh_rest,
+                    &mut adam.v_sh_rest,
+                    row_indices,
+                    self.lr_sh_rest,
+                    beta1,
+                    beta2,
+                    eps,
+                    step,
+                )?;
+            } else {
+                adam_step_var_fused(
+                    &gaussians.sh_rest,
+                    &sh_rest_parameter_grads,
+                    &mut adam.m_sh_rest,
+                    &mut adam.v_sh_rest,
+                    &mut self.runtime,
+                    self.lr_sh_rest,
+                    beta1,
+                    beta2,
+                    eps,
+                    step,
+                    MetalBufferSlot::AdamGradColor,
+                    MetalBufferSlot::AdamMColor,
+                    MetalBufferSlot::AdamVColor,
+                    MetalBufferSlot::AdamParamColor,
+                )?;
+            }
         }
 
         Ok(())
@@ -3474,9 +3563,10 @@ impl MetalTrainer {
         let mut projected_cpu = Vec::with_capacity(gaussians.len());
         let mut visible_source_indices = Vec::new();
         if self.device.is_metal() {
-            // For Metal path, cluster culling would require GPU-side filtering.
-            // For now, we rely on the z-value filtering and bounds checking in the shader.
-            // A full implementation would pass the cluster mask to the GPU projection shader.
+            // Metal projection still runs on the GPU, but LiteGS mode reads the compacted
+            // projection records back to the CPU for tiling and backward. Filter those rows
+            // against the cluster mask so clustered rendering and sparse updates share the
+            // same visible primitive set.
             let gpu_batch =
                 self.runtime
                     .project_gaussians(gaussians, &colors, collect_visible_indices)?;
@@ -3568,7 +3658,15 @@ impl MetalTrainer {
             }
         }
 
-        if !self.device.is_metal() {
+        let had_projected_cpu_rows = !projected_cpu.is_empty();
+        if had_projected_cpu_rows {
+            filter_projected_gaussians_by_cluster_visibility(
+                &mut projected_cpu,
+                cluster_visible_mask,
+            );
+        }
+
+        if !self.device.is_metal() || had_projected_cpu_rows {
             visible_source_indices = projected_cpu.iter().map(|g| g.source_idx).collect();
             profile.visible_gaussians = projected_cpu.len();
         }
@@ -4640,23 +4738,83 @@ fn adam_step_var(
     eps: f32,
     step: usize,
 ) -> candle_core::Result<()> {
-    *m = m
+    let (new_param, new_m, new_v) =
+        adam_updated_tensors(var.as_tensor(), grad, m, v, lr, beta1, beta2, eps, step)?;
+    *m = new_m;
+    *v = new_v;
+    var.set(&new_param)?;
+    Ok(())
+}
+
+fn adam_step_var_sparse(
+    var: &Var,
+    grad: &Tensor,
+    m: &mut Tensor,
+    v: &mut Tensor,
+    row_indices: &Tensor,
+    lr: f32,
+    beta1: f32,
+    beta2: f32,
+    eps: f32,
+    step: usize,
+) -> candle_core::Result<()> {
+    let grad_rows = grad.index_select(row_indices, 0)?;
+    if grad_rows.dim(0)? == 0 {
+        return Ok(());
+    }
+
+    let m_rows = m.index_select(row_indices, 0)?;
+    let v_rows = v.index_select(row_indices, 0)?;
+    let param_rows = var.as_tensor().index_select(row_indices, 0)?;
+    let (new_param_rows, new_m_rows, new_v_rows) = adam_updated_tensors(
+        &param_rows,
+        &grad_rows,
+        &m_rows,
+        &v_rows,
+        lr,
+        beta1,
+        beta2,
+        eps,
+        step,
+    )?;
+
+    *m = m.index_add(row_indices, &new_m_rows.broadcast_sub(&m_rows)?, 0)?;
+    *v = v.index_add(row_indices, &new_v_rows.broadcast_sub(&v_rows)?, 0)?;
+    let updated_params =
+        var.as_tensor()
+            .index_add(row_indices, &new_param_rows.broadcast_sub(&param_rows)?, 0)?;
+    var.set(&updated_params)?;
+    Ok(())
+}
+
+fn adam_updated_tensors(
+    param: &Tensor,
+    grad: &Tensor,
+    m: &Tensor,
+    v: &Tensor,
+    lr: f32,
+    beta1: f32,
+    beta2: f32,
+    eps: f32,
+    step: usize,
+) -> candle_core::Result<(Tensor, Tensor, Tensor)> {
+    let new_m = m
         .affine(beta1 as f64, 0.0)?
         .broadcast_add(&grad.affine((1.0 - beta1) as f64, 0.0)?)?;
-    *v = v
+    let new_v = v
         .affine(beta2 as f64, 0.0)?
         .broadcast_add(&grad.sqr()?.affine((1.0 - beta2) as f64, 0.0)?)?;
 
     let bc1 = 1.0 - beta1.powi(step as i32);
     let bc2 = 1.0 - beta2.powi(step as i32);
-    let m_hat = m.affine(1.0 / bc1 as f64, 0.0)?;
-    let v_hat = v.affine(1.0 / bc2 as f64, 0.0)?;
+    let m_hat = new_m.affine(1.0 / bc1 as f64, 0.0)?;
+    let v_hat = new_v.affine(1.0 / bc2 as f64, 0.0)?;
     let denom = v_hat
         .sqrt()?
-        .broadcast_add(&Tensor::new(eps, var.as_tensor().device())?)?;
+        .broadcast_add(&Tensor::new(eps, param.device())?)?;
     let update = m_hat.broadcast_div(&denom)?.affine(lr as f64, 0.0)?;
-    var.set(&var.as_tensor().sub(&update)?)?;
-    Ok(())
+    let new_param = param.sub(&update)?;
+    Ok((new_param, new_m, new_v))
 }
 
 fn flatten_rows(rows: Vec<Vec<f32>>) -> Vec<f32> {
@@ -5142,9 +5300,73 @@ fn resize_depth(
     dst
 }
 
+fn filter_projected_gaussians_by_cluster_visibility(
+    projected_cpu: &mut Vec<CpuProjectedGaussian>,
+    cluster_visible_mask: Option<&[bool]>,
+) {
+    let Some(mask) = cluster_visible_mask else {
+        return;
+    };
+
+    projected_cpu.retain(|gaussian| {
+        mask.get(gaussian.source_idx as usize)
+            .copied()
+            .unwrap_or(true)
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn make_test_camera(device: &Device) -> DiffCamera {
+        DiffCamera::new(
+            64.0,
+            64.0,
+            32.0,
+            32.0,
+            64,
+            64,
+            &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            &[0.0, 0.0, 0.0],
+            device,
+        )
+        .unwrap()
+    }
+
+    fn projected_with_visible_sources(
+        device: &Device,
+        visible_source_indices: &[u32],
+    ) -> ProjectedGaussians {
+        let visible_count = visible_source_indices.len();
+        ProjectedGaussians {
+            source_indices: if visible_count == 0 {
+                Tensor::zeros((0,), DType::U32, device).unwrap()
+            } else {
+                Tensor::from_slice(visible_source_indices, visible_count, device).unwrap()
+            },
+            u: Tensor::zeros((visible_count,), DType::F32, device).unwrap(),
+            v: Tensor::zeros((visible_count,), DType::F32, device).unwrap(),
+            sigma_x: Tensor::ones((visible_count,), DType::F32, device).unwrap(),
+            sigma_y: Tensor::ones((visible_count,), DType::F32, device).unwrap(),
+            raw_sigma_x: Tensor::ones((visible_count,), DType::F32, device).unwrap(),
+            raw_sigma_y: Tensor::ones((visible_count,), DType::F32, device).unwrap(),
+            depth: Tensor::ones((visible_count,), DType::F32, device).unwrap(),
+            opacity: Tensor::ones((visible_count,), DType::F32, device).unwrap(),
+            opacity_logits: Tensor::zeros((visible_count,), DType::F32, device).unwrap(),
+            scale3d: Tensor::ones((visible_count, 3), DType::F32, device).unwrap(),
+            colors: Tensor::zeros((visible_count, 3), DType::F32, device).unwrap(),
+            min_x: Tensor::zeros((visible_count,), DType::F32, device).unwrap(),
+            max_x: Tensor::zeros((visible_count,), DType::F32, device).unwrap(),
+            min_y: Tensor::zeros((visible_count,), DType::F32, device).unwrap(),
+            max_y: Tensor::zeros((visible_count,), DType::F32, device).unwrap(),
+            visible_source_indices: visible_source_indices.to_vec(),
+            visible_count,
+            tile_bins: MetalTileBins::default(),
+            staging_source: ProjectionStagingSource::TensorReadback,
+        }
+    }
+
     #[test]
     fn scaled_dimensions_keep_minimum_size() {
         assert_eq!(scaled_dimensions(640, 480, 0.25), (160, 120));
@@ -5451,6 +5673,211 @@ mod tests {
             after[0][3] < before[0][3],
             "before={before:?} after={after:?}"
         );
+    }
+
+    #[test]
+    fn apply_backward_grads_sparse_grad_preserves_invisible_rows_and_moments() {
+        let device = Device::Cpu;
+        let config = TrainingConfig {
+            training_profile: TrainingProfile::LiteGsMacV1,
+            litegs: LiteGsConfig {
+                sparse_grad: true,
+                ..LiteGsConfig::default()
+            },
+            metal_render_scale: 1.0,
+            ..TrainingConfig::default()
+        };
+        let mut trainer = MetalTrainer::new(64, 64, &config, device.clone()).unwrap();
+        trainer.iteration = 3;
+        let camera = make_test_camera(&device);
+        let mut gaussians = TrainableGaussians::new(
+            &[0.0, 0.0, 2.0, 3.0, 0.0, 2.0],
+            &[0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            &[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+            &[0.0, 0.0],
+            &[0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            &device,
+        )
+        .unwrap();
+        trainer.adam = Some(MetalAdamState::new(&gaussians).unwrap());
+        let adam = trainer.adam.as_mut().unwrap();
+        adam.m_pos =
+            Tensor::from_slice(&[0.0f32, 0.0, 0.0, 0.5, -0.25, 0.75], (2, 3), &device).unwrap();
+        adam.v_pos =
+            Tensor::from_slice(&[0.0f32, 0.0, 0.0, 0.4, 0.2, 0.6], (2, 3), &device).unwrap();
+        let projected = projected_with_visible_sources(&device, &[0]);
+        let grads = MetalBackwardGrads {
+            positions: Tensor::from_slice(&[1.0f32, 0.0, 0.0, 0.0, 0.0, 0.0], (2, 3), &device)
+                .unwrap(),
+            log_scales: Tensor::zeros((2, 3), DType::F32, &device).unwrap(),
+            opacity_logits: Tensor::zeros((2,), DType::F32, &device).unwrap(),
+            colors: Tensor::zeros((2, 3), DType::F32, &device).unwrap(),
+        };
+        let before_positions = gaussians.positions().to_vec2::<f32>().unwrap();
+
+        trainer
+            .apply_backward_grads(&mut gaussians, &grads, &projected, &camera, 0.1, None, None)
+            .unwrap();
+
+        let after_positions = gaussians.positions().to_vec2::<f32>().unwrap();
+        let after_m_pos = trainer
+            .adam
+            .as_ref()
+            .unwrap()
+            .m_pos
+            .to_vec2::<f32>()
+            .unwrap();
+        let after_v_pos = trainer
+            .adam
+            .as_ref()
+            .unwrap()
+            .v_pos
+            .to_vec2::<f32>()
+            .unwrap();
+
+        assert!(after_positions[0][0] < before_positions[0][0]);
+        assert_eq!(after_positions[1], before_positions[1]);
+        assert!(after_m_pos[0][0].abs() > 1e-6);
+        assert_eq!(after_m_pos[1], vec![0.5, -0.25, 0.75]);
+        assert_eq!(after_v_pos[1], vec![0.4, 0.2, 0.6]);
+    }
+
+    #[test]
+    fn apply_backward_grads_sparse_grad_noops_when_no_gaussians_are_visible() {
+        let device = Device::Cpu;
+        let config = TrainingConfig {
+            training_profile: TrainingProfile::LiteGsMacV1,
+            litegs: LiteGsConfig {
+                sparse_grad: true,
+                ..LiteGsConfig::default()
+            },
+            metal_render_scale: 1.0,
+            ..TrainingConfig::default()
+        };
+        let mut trainer = MetalTrainer::new(64, 64, &config, device.clone()).unwrap();
+        trainer.iteration = 4;
+        let camera = make_test_camera(&device);
+        let mut gaussians = TrainableGaussians::new(
+            &[0.0, 0.0, 2.0, 3.0, 0.0, 2.0],
+            &[0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            &[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+            &[0.0, 0.0],
+            &[0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            &device,
+        )
+        .unwrap();
+        trainer.adam = Some(MetalAdamState::new(&gaussians).unwrap());
+        let adam = trainer.adam.as_mut().unwrap();
+        adam.m_pos =
+            Tensor::from_slice(&[0.3f32, -0.1, 0.2, 0.5, -0.25, 0.75], (2, 3), &device).unwrap();
+        adam.v_pos =
+            Tensor::from_slice(&[0.4f32, 0.2, 0.1, 0.4, 0.2, 0.6], (2, 3), &device).unwrap();
+        let projected = projected_with_visible_sources(&device, &[]);
+        let grads = MetalBackwardGrads {
+            positions: Tensor::zeros((2, 3), DType::F32, &device).unwrap(),
+            log_scales: Tensor::zeros((2, 3), DType::F32, &device).unwrap(),
+            opacity_logits: Tensor::zeros((2,), DType::F32, &device).unwrap(),
+            colors: Tensor::zeros((2, 3), DType::F32, &device).unwrap(),
+        };
+        let before_positions = gaussians.positions().to_vec2::<f32>().unwrap();
+        let before_m_pos = trainer
+            .adam
+            .as_ref()
+            .unwrap()
+            .m_pos
+            .to_vec2::<f32>()
+            .unwrap();
+        let before_v_pos = trainer
+            .adam
+            .as_ref()
+            .unwrap()
+            .v_pos
+            .to_vec2::<f32>()
+            .unwrap();
+
+        trainer
+            .apply_backward_grads(&mut gaussians, &grads, &projected, &camera, 0.1, None, None)
+            .unwrap();
+
+        let after_positions = gaussians.positions().to_vec2::<f32>().unwrap();
+        let after_m_pos = trainer
+            .adam
+            .as_ref()
+            .unwrap()
+            .m_pos
+            .to_vec2::<f32>()
+            .unwrap();
+        let after_v_pos = trainer
+            .adam
+            .as_ref()
+            .unwrap()
+            .v_pos
+            .to_vec2::<f32>()
+            .unwrap();
+
+        assert_eq!(after_positions, before_positions);
+        assert_eq!(after_m_pos, before_m_pos);
+        assert_eq!(after_v_pos, before_v_pos);
+    }
+
+    #[test]
+    fn adam_step_var_sparse_preserves_invisible_rows_for_tensor3_params() {
+        let device = Device::Cpu;
+        let var = Var::from_tensor(
+            &Tensor::from_slice(
+                &[
+                    1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
+                ],
+                (2, 2, 3),
+                &device,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let grad = Tensor::from_slice(
+            &[
+                0.0f32, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, -1.0, 0.5, 0.25, -0.5, 0.75,
+            ],
+            (2, 2, 3),
+            &device,
+        )
+        .unwrap();
+        let mut m = Tensor::from_slice(
+            &[
+                0.5f32, 0.5, 0.5, 0.5, 0.5, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            ],
+            (2, 2, 3),
+            &device,
+        )
+        .unwrap();
+        let mut v = Tensor::from_slice(
+            &[
+                0.25f32, 0.25, 0.25, 0.25, 0.25, 0.25, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            ],
+            (2, 2, 3),
+            &device,
+        )
+        .unwrap();
+        let indices = Tensor::from_slice(&[1u32], 1, &device).unwrap();
+        let before_param = var.as_tensor().to_vec3::<f32>().unwrap();
+        let before_m = m.to_vec3::<f32>().unwrap();
+        let before_v = v.to_vec3::<f32>().unwrap();
+
+        adam_step_var_sparse(
+            &var, &grad, &mut m, &mut v, &indices, 0.1, 0.9, 0.999, 1e-8, 2,
+        )
+        .unwrap();
+
+        let after_param = var.as_tensor().to_vec3::<f32>().unwrap();
+        let after_m = m.to_vec3::<f32>().unwrap();
+        let after_v = v.to_vec3::<f32>().unwrap();
+
+        assert_eq!(after_param[0], before_param[0]);
+        assert_eq!(after_m[0], before_m[0]);
+        assert_eq!(after_v[0], before_v[0]);
+        assert_ne!(after_param[1], before_param[1]);
+        assert_ne!(after_m[1], before_m[1]);
+        assert_ne!(after_v[1], before_v[1]);
     }
 
     #[test]
@@ -5930,6 +6357,78 @@ mod tests {
 
         assert_eq!(profile.visible_gaussians, 3);
         assert_eq!(source_indices, vec![1, 0, 2]);
+    }
+
+    #[test]
+    fn project_gaussians_applies_cluster_visible_mask_on_metal() {
+        let device = crate::preferred_device();
+        if !device.is_metal() {
+            return;
+        }
+
+        let trainer_config = TrainingConfig {
+            training_profile: TrainingProfile::LiteGsMacV1,
+            litegs: LiteGsConfig {
+                cluster_size: 1,
+                ..LiteGsConfig::default()
+            },
+            metal_render_scale: 1.0,
+            ..TrainingConfig::default()
+        };
+        let mut trainer = MetalTrainer::new(32, 16, &trainer_config, device.clone()).unwrap();
+        let camera = DiffCamera::new(
+            16.0,
+            16.0,
+            16.0,
+            8.0,
+            32,
+            16,
+            &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            &[0.0, 0.0, 0.0],
+            &device,
+        )
+        .unwrap();
+        let gaussians = TrainableGaussians::new(
+            &[
+                0.0, 0.0, 1.0, //
+                0.1, 0.0, 0.5, //
+                -0.1, 0.0, 2.0,
+            ],
+            &[
+                0.0, 0.0, 0.0, //
+                0.0, 0.0, 0.0, //
+                0.0, 0.0, 0.0,
+            ],
+            &[
+                1.0, 0.0, 0.0, 0.0, //
+                1.0, 0.0, 0.0, 0.0, //
+                1.0, 0.0, 0.0, 0.0,
+            ],
+            &[0.0, 0.0, 0.0],
+            &[
+                1.0, 0.0, 0.0, //
+                0.0, 1.0, 0.0, //
+                0.0, 0.0, 1.0,
+            ],
+            &device,
+        )
+        .unwrap();
+        let cluster_visible_mask = [true, false, true];
+
+        let (projected, profile) = trainer
+            .project_gaussians(
+                &gaussians,
+                &camera,
+                false,
+                true,
+                Some(cluster_visible_mask.as_slice()),
+            )
+            .unwrap();
+        let source_indices = projected.source_indices.to_vec1::<u32>().unwrap();
+
+        assert_eq!(profile.visible_gaussians, 2);
+        assert_eq!(projected.visible_source_indices, vec![0, 2]);
+        assert_eq!(source_indices, vec![0, 2]);
     }
 
     #[test]

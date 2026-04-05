@@ -759,12 +759,6 @@ fn validate_litegs_mac_v1_config(config: &TrainingConfig) -> Result<(), Training
         // Clustered training is now supported
         // Uses spatial hash clustering and AABB frustum culling
     }
-    if config.litegs.sparse_grad != defaults.sparse_grad {
-        unsupported.push(
-            "sparse_grad=true requires Epic 19 sparse-gradient parity and is not available in LiteGsMacV1 yet"
-                .to_string(),
-        );
-    }
     if config.litegs.tile_size != defaults.tile_size {
         unsupported.push(format!(
             "tile_size={} overrides are reserved for later LiteGS parity work; bootstrap profile currently expects {}",
@@ -1202,6 +1196,20 @@ mod tests {
         };
 
         // Clustered training is now supported
+        assert!(validate_litegs_mac_v1_config(&config).is_ok());
+    }
+
+    #[test]
+    fn litegs_mac_v1_accepts_sparse_grad_override() {
+        let config = TrainingConfig {
+            training_profile: TrainingProfile::LiteGsMacV1,
+            litegs: LiteGsConfig {
+                sparse_grad: true,
+                ..LiteGsConfig::default()
+            },
+            ..TrainingConfig::default()
+        };
+
         assert!(validate_litegs_mac_v1_config(&config).is_ok());
     }
 }
