@@ -291,6 +291,207 @@ impl RustMesh {
         Some(fh)
     }
 
+    /// OpenMesh-style face insertion path used only for parity debugging.
+    ///
+    /// This mirrors OpenMesh's patch relinking and conditional vertex-anchor
+    /// adjustment more closely than the library's default `add_face()`.
+    pub fn add_face_openmesh_parity(&mut self, vertices: &[VertexHandle]) -> Option<FaceHandle> {
+        #[derive(Clone, Copy)]
+        struct FaceEdgeData {
+            halfedge_handle: HalfedgeHandle,
+            is_new: bool,
+            needs_adjust: bool,
+        }
+
+        if vertices.len() < 3 {
+            return None;
+        }
+
+        let n = vertices.len();
+        let mut edge_data: Vec<FaceEdgeData> = Vec::with_capacity(n);
+        let mut next_cache: Vec<(HalfedgeHandle, HalfedgeHandle)> = Vec::with_capacity(6 * n);
+
+        for i in 0..n {
+            let start = vertices[i];
+            let end = vertices[(i + 1) % n];
+
+            if !self.is_boundary_vertex_for_parity_face(start) {
+                return None;
+            }
+
+            let existing_heh = self.find_halfedge_between(start, end);
+            let is_new = existing_heh.is_none();
+            let halfedge_handle = existing_heh.unwrap_or_else(HalfedgeHandle::invalid);
+
+            if let Some(heh) = existing_heh {
+                if !self.is_boundary(heh) {
+                    return None;
+                }
+            }
+
+            edge_data.push(FaceEdgeData {
+                halfedge_handle,
+                is_new,
+                needs_adjust: false,
+            });
+        }
+
+        for i in 0..n {
+            let ii = (i + 1) % n;
+            if edge_data[i].is_new || edge_data[ii].is_new {
+                continue;
+            }
+
+            let inner_prev = edge_data[i].halfedge_handle;
+            let inner_next = edge_data[ii].halfedge_handle;
+            if self.kernel.next_halfedge_handle(inner_prev) == Some(inner_next) {
+                continue;
+            }
+
+            let outer_prev = self.opposite_halfedge_handle(inner_next);
+            if !outer_prev.is_valid() {
+                return None;
+            }
+
+            let mut boundary_prev = outer_prev;
+            let mut found_boundary = false;
+            for _ in 0..self.n_halfedges().max(1) {
+                let next = self
+                    .kernel
+                    .next_halfedge_handle(boundary_prev)
+                    .unwrap_or_else(HalfedgeHandle::invalid);
+                if !next.is_valid() {
+                    return None;
+                }
+                boundary_prev = self.opposite_halfedge_handle(next);
+                if !boundary_prev.is_valid() {
+                    return None;
+                }
+                if self.is_boundary(boundary_prev) {
+                    found_boundary = true;
+                    break;
+                }
+            }
+
+            if !found_boundary || boundary_prev == inner_prev {
+                return None;
+            }
+
+            let boundary_next = self
+                .kernel
+                .next_halfedge_handle(boundary_prev)
+                .unwrap_or_else(HalfedgeHandle::invalid);
+            let patch_start = self
+                .kernel
+                .next_halfedge_handle(inner_prev)
+                .unwrap_or_else(HalfedgeHandle::invalid);
+            let patch_end = self
+                .kernel
+                .prev_halfedge_handle(inner_next)
+                .unwrap_or_else(HalfedgeHandle::invalid);
+            if !boundary_next.is_valid() || !patch_start.is_valid() || !patch_end.is_valid() {
+                return None;
+            }
+
+            next_cache.push((boundary_prev, patch_start));
+            next_cache.push((patch_end, boundary_next));
+            next_cache.push((inner_prev, inner_next));
+        }
+
+        for i in 0..n {
+            if edge_data[i].is_new {
+                edge_data[i].halfedge_handle =
+                    self.add_edge(vertices[i], vertices[(i + 1) % n]);
+            }
+        }
+
+        let fh = self.kernel.add_face(Some(edge_data[n - 1].halfedge_handle));
+
+        for i in 0..n {
+            let ii = (i + 1) % n;
+            let vh = vertices[ii];
+            let inner_prev = edge_data[i].halfedge_handle;
+            let inner_next = edge_data[ii].halfedge_handle;
+
+            let mut id = 0u8;
+            if edge_data[i].is_new {
+                id |= 1;
+            }
+            if edge_data[ii].is_new {
+                id |= 2;
+            }
+
+            if id != 0 {
+                let outer_prev = self.opposite_halfedge_handle(inner_next);
+                let outer_next = self.opposite_halfedge_handle(inner_prev);
+                if !outer_prev.is_valid() || !outer_next.is_valid() {
+                    return None;
+                }
+
+                match id {
+                    1 => {
+                        let boundary_prev = self
+                            .kernel
+                            .prev_halfedge_handle(inner_next)
+                            .unwrap_or_else(HalfedgeHandle::invalid);
+                        if !boundary_prev.is_valid() {
+                            return None;
+                        }
+                        next_cache.push((boundary_prev, outer_next));
+                        self.kernel.set_halfedge_handle(vh, outer_next);
+                    }
+                    2 => {
+                        let boundary_next = self
+                            .kernel
+                            .next_halfedge_handle(inner_prev)
+                            .unwrap_or_else(HalfedgeHandle::invalid);
+                        if !boundary_next.is_valid() {
+                            return None;
+                        }
+                        next_cache.push((outer_prev, boundary_next));
+                        self.kernel.set_halfedge_handle(vh, boundary_next);
+                    }
+                    3 => {
+                        if self.halfedge_handle(vh).is_none() {
+                            self.kernel.set_halfedge_handle(vh, outer_next);
+                            next_cache.push((outer_prev, outer_next));
+                        } else {
+                            let boundary_next = self.halfedge_handle(vh)?;
+                            let boundary_prev = self
+                                .kernel
+                                .prev_halfedge_handle(boundary_next)
+                                .unwrap_or_else(HalfedgeHandle::invalid);
+                            if !boundary_prev.is_valid() {
+                                return None;
+                            }
+                            next_cache.push((boundary_prev, outer_next));
+                            next_cache.push((outer_prev, boundary_next));
+                        }
+                    }
+                    _ => unreachable!(),
+                }
+
+                next_cache.push((inner_prev, inner_next));
+            } else {
+                edge_data[ii].needs_adjust = self.halfedge_handle(vh) == Some(inner_next);
+            }
+
+            self.kernel.set_face_handle(inner_prev, fh);
+        }
+
+        for (from, to) in next_cache {
+            self.kernel.set_next_halfedge_handle(from, to);
+        }
+
+        for i in 0..n {
+            if edge_data[i].needs_adjust {
+                self.adjust_outgoing_halfedge(vertices[i]);
+            }
+        }
+
+        Some(fh)
+    }
+
     /// Get the number of faces (includes deleted faces)
     #[inline]
     pub fn n_faces(&self) -> usize {
@@ -307,6 +508,46 @@ impl RustMesh {
     #[inline]
     pub fn n_halfedges(&self) -> usize {
         self.kernel.n_halfedges()
+    }
+
+    fn find_halfedge_between(
+        &self,
+        start_vh: VertexHandle,
+        end_vh: VertexHandle,
+    ) -> Option<HalfedgeHandle> {
+        self.kernel.find_halfedge(start_vh, end_vh)
+    }
+
+    fn boundary_outgoing_halfedge(&self, vh: VertexHandle) -> Option<HalfedgeHandle> {
+        if !vh.is_valid() || self.is_vertex_deleted(vh) {
+            return None;
+        }
+
+        if let Some(heh) = self.halfedge_handle(vh) {
+            if self.from_vertex_handle(heh) == vh && self.is_boundary(heh) {
+                return Some(heh);
+            }
+        }
+
+        for heh_idx in 0..self.n_halfedges() {
+            let heh = HalfedgeHandle::new(heh_idx as u32);
+            if self.is_halfedge_deleted(heh) || self.is_edge_deleted(self.edge_handle(heh)) {
+                continue;
+            }
+            if self.from_vertex_handle(heh) == vh && self.is_boundary(heh) {
+                return Some(heh);
+            }
+        }
+
+        None
+    }
+
+    fn is_boundary_vertex_for_parity_face(&self, vh: VertexHandle) -> bool {
+        if !vh.is_valid() || self.is_vertex_deleted(vh) {
+            return false;
+        }
+
+        self.halfedge_handle(vh).is_none() || self.boundary_outgoing_halfedge(vh).is_some()
     }
 
     // --- Face iteration ---
@@ -477,6 +718,52 @@ impl RustMesh {
     #[inline]
     pub fn next_halfedge_handle(&self, heh: HalfedgeHandle) -> HalfedgeHandle {
         self.kernel.next_halfedge_handle(heh).unwrap_or(heh)
+    }
+
+    pub(crate) fn next_outgoing_halfedge(&self, heh: HalfedgeHandle) -> HalfedgeHandle {
+        if !heh.is_valid() {
+            return HalfedgeHandle::invalid();
+        }
+
+        let center = self.from_vertex_handle(heh);
+        if !center.is_valid() {
+            return HalfedgeHandle::invalid();
+        }
+
+        let rotated = self.next_halfedge_handle(self.opposite_halfedge_handle(heh));
+        if rotated.is_valid() && rotated != heh && self.from_vertex_handle(rotated) == center {
+            return rotated;
+        }
+
+        if let Some(boundary_heh) = self.halfedge_handle(center) {
+            if boundary_heh != heh
+                && self.is_boundary(boundary_heh)
+                && self.from_vertex_handle(boundary_heh) == center
+            {
+                return boundary_heh;
+            }
+        }
+
+        let mut first_outgoing = HalfedgeHandle::invalid();
+        for idx in 0..self.n_halfedges() {
+            let candidate = HalfedgeHandle::new(idx as u32);
+            if self.is_halfedge_deleted(candidate)
+                || self.is_edge_deleted(self.edge_handle(candidate))
+                || candidate == heh
+                || self.from_vertex_handle(candidate) != center
+            {
+                continue;
+            }
+
+            if self.is_boundary(candidate) {
+                return candidate;
+            }
+            if !first_outgoing.is_valid() {
+                first_outgoing = candidate;
+            }
+        }
+
+        first_outgoing
     }
 
     /// Get the previous halfedge in the cycle
@@ -704,13 +991,12 @@ impl RustMesh {
             return false;
         }
 
-        // A vertex is on boundary if ANY incident halfedge has no face
-        // Use circulator approach (same as subdivision.rs)
+        // A vertex is on boundary if ANY incident halfedge has no face.
+        // Keep the local one-ring walk here because this path is hot in decimation.
         if let Some(heh) = self.halfedge_handle(vh) {
             let mut current = heh;
             let max_iterations = 100; // Valence is typically small
             for _ in 0..max_iterations {
-                // Check both the outgoing halfedge and its opposite
                 if self.is_boundary(current) {
                     return true;
                 }
@@ -718,7 +1004,7 @@ impl RustMesh {
                 if self.is_boundary(opp) {
                     return true;
                 }
-                current = self.next_halfedge_handle(opp);
+                current = self.next_outgoing_halfedge(current);
                 if current == heh || !current.is_valid() {
                     break;
                 }
@@ -743,9 +1029,7 @@ impl RustMesh {
                     neighbors.push(neighbor);
                 }
 
-                // Move to next outgoing halfedge: opposite -> next
-                let opp = self.opposite_halfedge_handle(current_heh);
-                let next_heh = self.next_halfedge_handle(opp);
+                let next_heh = self.next_outgoing_halfedge(current_heh);
 
                 // Check if we've completed the cycle or hit invalid halfedge
                 if !next_heh.is_valid() || next_heh == start_heh {
@@ -899,30 +1183,102 @@ impl RustMesh {
             return;
         }
 
-        let mut first = None;
-        let mut boundary = None;
+        let current = self.halfedge_handle(vh).filter(|&heh| {
+            heh.is_valid()
+                && !self.is_halfedge_deleted(heh)
+                && !self.is_edge_deleted(self.edge_handle(heh))
+                && self.from_vertex_handle(heh) == vh
+        });
+
+        if let Some(start) = current {
+            let mut heh = start;
+            let max_iterations = self.n_halfedges().max(1000);
+            for _ in 0..max_iterations {
+                if self.is_boundary(heh) {
+                    self.kernel.set_halfedge_handle(vh, heh);
+                    return;
+                }
+
+                let next = self.next_outgoing_halfedge(heh);
+                if !next.is_valid() || next == start || self.from_vertex_handle(next) != vh {
+                    break;
+                }
+                heh = next;
+            }
+
+            // OpenMesh keeps the current outgoing halfedge when no boundary
+            // halfedge is found around the one-ring.
+            self.kernel.set_halfedge_handle(vh, start);
+            return;
+        }
 
         for heh_idx in 0..self.n_halfedges() {
             let heh = HalfedgeHandle::new(heh_idx as u32);
             if self.is_halfedge_deleted(heh) || self.is_edge_deleted(self.edge_handle(heh)) {
                 continue;
             }
-            if self.from_vertex_handle(heh) != vh {
-                continue;
-            }
-
-            if first.is_none() {
-                first = Some(heh);
-            }
-            if self.is_boundary(heh) {
-                boundary = Some(heh);
-                break;
+            if self.from_vertex_handle(heh) == vh {
+                self.kernel.set_halfedge_handle(vh, heh);
+                return;
             }
         }
 
-        match boundary.or(first) {
-            Some(heh) => self.kernel.set_halfedge_handle(vh, heh),
-            None => self.clear_halfedge_handle(vh),
+        self.clear_halfedge_handle(vh);
+    }
+
+    pub fn normalize_boundary_halfedge_handles(&mut self) {
+        let vertices: Vec<_> = self.vertices().collect();
+        for vh in vertices {
+            self.adjust_outgoing_halfedge(vh);
+        }
+    }
+
+    pub fn rebuild_boundary_halfedge_links(&mut self) {
+        let n_vertices = self.n_vertices();
+        let mut incoming = vec![None; n_vertices];
+        let mut outgoing = vec![None; n_vertices];
+        let mut incoming_ambiguous = vec![false; n_vertices];
+        let mut outgoing_ambiguous = vec![false; n_vertices];
+
+        for heh_idx in 0..self.n_halfedges() {
+            let heh = HalfedgeHandle::new(heh_idx as u32);
+            if self.is_halfedge_deleted(heh)
+                || self.is_edge_deleted(self.edge_handle(heh))
+                || !self.is_boundary(heh)
+            {
+                continue;
+            }
+
+            let from = self.from_vertex_handle(heh);
+            if from.is_valid() {
+                let idx = from.idx_usize();
+                if outgoing[idx].is_some() && outgoing[idx] != Some(heh) {
+                    outgoing_ambiguous[idx] = true;
+                } else {
+                    outgoing[idx] = Some(heh);
+                }
+            }
+
+            let to = self.to_vertex_handle(heh);
+            if to.is_valid() {
+                let idx = to.idx_usize();
+                if incoming[idx].is_some() && incoming[idx] != Some(heh) {
+                    incoming_ambiguous[idx] = true;
+                } else {
+                    incoming[idx] = Some(heh);
+                }
+            }
+        }
+
+        for idx in 0..n_vertices {
+            if incoming_ambiguous[idx] || outgoing_ambiguous[idx] {
+                continue;
+            }
+
+            if let (Some(incoming_heh), Some(outgoing_heh)) = (incoming[idx], outgoing[idx]) {
+                self.kernel
+                    .set_next_halfedge_handle(incoming_heh, outgoing_heh);
+            }
         }
     }
 
@@ -1013,80 +1369,84 @@ impl RustMesh {
             return Err("Cannot flip: resulting edge already exists");
         }
 
-        // Get more halfedge handles we need
         let h0_prev = self.prev_halfedge_handle(h0);
         let h1_prev = self.prev_halfedge_handle(h1);
-        let h0_next_next = self.next_halfedge_handle(h0_next);
-        let h1_next_next = self.next_halfedge_handle(h1_next);
 
         // Now perform the flip:
-        // The edge now connects v2 to v3 instead of v0 to v1
-        //
-        // We need to rewire the halfedge connections:
-        // h0 now goes from v2 to v3
-        // h1 now goes from v3 to v2
+        // h0/h1 become the new diagonal, and the adjacent halfedge cycles are:
+        // fh0: h0 (v2->v3) -> h1_prev (v3->v1) -> h0_next (v1->v2)
+        // fh1: h1 (v3->v2) -> h0_prev (v2->v0) -> h1_next (v0->v3)
 
         // Set the new vertex endpoints
         self.kernel.set_halfedge_to_vertex(h0, v3);
         self.kernel.set_halfedge_to_vertex(h1, v2);
 
-        // Rewire the next/prev pointers
-        // Face 0 (originally v0-v1-v2, now v0-v3-v2):
-        // h0_prev -> h1_next -> h0 (forms face 0)
-        self.kernel.set_next_halfedge_handle(h0_prev, h1_next);
-        self.kernel.set_next_halfedge_handle(h1_next, h0);
-        self.kernel.set_next_halfedge_handle(h0, h0_prev);
-
-        // Face 1 (originally v1-v0-v3, now v1-v2-v3):
-        // h1_prev -> h0_next -> h1 (forms face 1)
+        // Rewire the next pointers for both triangle loops.
+        self.kernel.set_next_halfedge_handle(h0, h1_prev);
         self.kernel.set_next_halfedge_handle(h1_prev, h0_next);
-        self.kernel.set_next_halfedge_handle(h0_next, h1);
-        self.kernel.set_next_halfedge_handle(h1, h1_prev);
+        self.kernel.set_next_halfedge_handle(h0_next, h0);
+
+        self.kernel.set_next_halfedge_handle(h1, h0_prev);
+        self.kernel.set_next_halfedge_handle(h0_prev, h1_next);
+        self.kernel.set_next_halfedge_handle(h1_next, h1);
+
+        // Keep prev pointers consistent with the new face cycles.
+        self.kernel.set_prev_halfedge_handle(h1_prev, h0);
+        self.kernel.set_prev_halfedge_handle(h0_next, h1_prev);
+        self.kernel.set_prev_halfedge_handle(h0, h0_next);
+
+        self.kernel.set_prev_halfedge_handle(h0_prev, h1);
+        self.kernel.set_prev_halfedge_handle(h1_next, h0_prev);
+        self.kernel.set_prev_halfedge_handle(h1, h1_next);
 
         // Update face handles
-        // h1_next now belongs to face 0
-        self.kernel.set_face_handle(h1_next, fh0);
-        // h0_next now belongs to face 1
-        self.kernel.set_face_handle(h0_next, fh1);
+        self.kernel.set_face_handle(h0, fh0);
+        self.kernel.set_face_handle(h1_prev, fh0);
+        self.kernel.set_face_handle(h0_next, fh0);
 
-        // Update vertex halfedge handles
-        // v0's outgoing halfedge might have been h0, update if needed
-        if let Some(vh) = self.kernel.halfedge_handle(v0) {
-            if vh == h0 {
-                self.kernel.set_halfedge_handle(v0, h0_prev);
-            }
-        }
-        // v1's outgoing halfedge might have been h1, update if needed
-        if let Some(vh) = self.kernel.halfedge_handle(v1) {
-            if vh == h1 {
-                self.kernel.set_halfedge_handle(v1, h1_prev);
-            }
-        }
-        // v2's outgoing halfedge should point to the flipped edge
-        self.kernel.set_halfedge_handle(v2, h1);
-        // v3's outgoing halfedge should point to the flipped edge
-        self.kernel.set_halfedge_handle(v3, h0);
+        self.kernel.set_face_handle(h1, fh1);
+        self.kernel.set_face_handle(h0_prev, fh1);
+        self.kernel.set_face_handle(h1_next, fh1);
 
         // Update face halfedge handles
         self.kernel.set_face_halfedge_handle(fh0, Some(h0));
         self.kernel.set_face_halfedge_handle(fh1, Some(h1));
+
+        // Recompute outgoing halfedge anchors for the affected one-ring.
+        self.adjust_outgoing_halfedge(v0);
+        self.adjust_outgoing_halfedge(v1);
+        self.adjust_outgoing_halfedge(v2);
+        self.adjust_outgoing_halfedge(v3);
 
         Ok(())
     }
 
     /// Check if two vertices are connected by an edge
     fn vertices_connected(&self, v0: VertexHandle, v1: VertexHandle) -> bool {
-        if let Some(heh) = self.kernel.halfedge_handle(v0) {
-            let mut current = heh;
-            loop {
-                if self.to_vertex_handle(current) == v1 {
-                    return true;
-                }
-                let opp = self.opposite_halfedge_handle(current);
-                current = self.next_halfedge_handle(opp);
-                if current == heh || !current.is_valid() {
-                    break;
-                }
+        if !v0.is_valid() || !v1.is_valid() || v0 == v1 {
+            return false;
+        }
+
+        for eh_idx in 0..self.n_edges() {
+            let eh = EdgeHandle::new(eh_idx as u32);
+            if self.is_edge_deleted(eh) {
+                continue;
+            }
+
+            let h0 = self.edge_halfedge_handle(eh, 0);
+            let e0 = self.from_vertex_handle(h0);
+            let e1 = self.to_vertex_handle(h0);
+
+            if !e0.is_valid()
+                || !e1.is_valid()
+                || self.is_vertex_deleted(e0)
+                || self.is_vertex_deleted(e1)
+            {
+                continue;
+            }
+
+            if (e0 == v0 && e1 == v1) || (e0 == v1 && e1 == v0) {
+                return true;
             }
         }
         false
@@ -2001,6 +2361,36 @@ mod tests_soa {
             Some(glam::vec4(0.5, 0.5, 0.5, 1.0))
         );
     }
+
+    #[test]
+    fn test_add_face_openmesh_parity_keeps_boundary_vertex_handles_on_boundary() {
+        let mut mesh = RustMesh::new();
+
+        let v0 = mesh.add_vertex(glam::vec3(0.0, 0.0, 0.0));
+        let v1 = mesh.add_vertex(glam::vec3(1.0, 0.0, 0.0));
+        let v2 = mesh.add_vertex(glam::vec3(1.0, 1.0, 0.0));
+        let v3 = mesh.add_vertex(glam::vec3(0.0, 1.0, 0.0));
+
+        let f0 = mesh.add_face_openmesh_parity(&[v0, v1, v2]).unwrap();
+        let f1 = mesh.add_face_openmesh_parity(&[v0, v2, v3]).unwrap();
+
+        assert_eq!(mesh.face_vertices_vec(f0), vec![v0, v1, v2]);
+        assert_eq!(mesh.face_vertices_vec(f1), vec![v0, v2, v3]);
+
+        for vh in [v0, v1, v2, v3] {
+            let heh = mesh
+                .halfedge_handle(vh)
+                .expect("square boundary vertex should keep an outgoing halfedge");
+            assert_eq!(mesh.from_vertex_handle(heh), vh);
+            assert!(
+                mesh.is_boundary(heh),
+                "vertex {:?} anchor should stay on a boundary halfedge, got {:?}",
+                vh,
+                heh
+            );
+        }
+    }
+
 }
 
 // RustMesh is now the primary mesh type (previously PolyMeshSoA)

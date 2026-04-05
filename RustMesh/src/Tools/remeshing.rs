@@ -17,7 +17,7 @@
 //! - Botsch, M., & Kobbelt, L. (2004). "A Remeshing Approach to Multiresolution Modeling".
 //!   Symposium on Geometry Processing.
 
-use crate::handles::{EdgeHandle, HalfedgeHandle, VertexHandle};
+use crate::handles::{EdgeHandle, VertexHandle};
 use crate::smoother::{tangential_smooth, SmootherConfig};
 use crate::RustMesh;
 
@@ -34,11 +34,53 @@ pub struct EdgeLengthStats {
     pub n_edges: usize,
 }
 
+fn active_edge_endpoints(mesh: &RustMesh, eh: EdgeHandle) -> Option<(VertexHandle, VertexHandle)> {
+    if mesh.is_edge_deleted(eh) {
+        return None;
+    }
+
+    let h0 = mesh.edge_halfedge_handle(eh, 0);
+    let v0 = mesh.from_vertex_handle(h0);
+    let v1 = mesh.to_vertex_handle(h0);
+
+    if !v0.is_valid()
+        || !v1.is_valid()
+        || v0 == v1
+        || mesh.is_vertex_deleted(v0)
+        || mesh.is_vertex_deleted(v1)
+    {
+        return None;
+    }
+
+    Some((v0, v1))
+}
+
 /// Compute edge length statistics for a mesh
 pub fn edge_length_statistics(mesh: &RustMesh) -> EdgeLengthStats {
-    let n_edges = mesh.n_edges();
+    let mut min_length = f32::MAX;
+    let mut max_length = 0.0f32;
+    let mut total_length = 0.0f32;
+    let mut counted_edges = 0usize;
 
-    if n_edges == 0 {
+    for i in 0..mesh.n_edges() {
+        let eh = EdgeHandle::new(i as u32);
+        if let Some((v0, v1)) = active_edge_endpoints(mesh, eh) {
+            let (Some(p0), Some(p1)) = (mesh.point(v0), mesh.point(v1)) else {
+                continue;
+            };
+            let length = (p1 - p0).length();
+            if !length.is_finite() || length <= f32::EPSILON {
+                continue;
+            }
+
+            min_length = min_length.min(length);
+            max_length = max_length.max(length);
+            total_length += length;
+            counted_edges += 1;
+        }
+    }
+
+    if counted_edges == 0 {
         return EdgeLengthStats {
             min_length: 0.0,
             max_length: 0.0,
@@ -47,39 +89,11 @@ pub fn edge_length_statistics(mesh: &RustMesh) -> EdgeLengthStats {
         };
     }
 
-    let mut min_length = f32::MAX;
-    let mut max_length = 0.0f32;
-    let mut total_length = 0.0f32;
-
-    for i in 0..n_edges {
-        let eh = EdgeHandle::new(i as u32);
-        if mesh.is_edge_deleted(eh) {
-            continue;
-        }
-
-        let h0 = mesh.edge_halfedge_handle(eh, 0);
-        let v0 = mesh.from_vertex_handle(h0);
-        let v1 = mesh.to_vertex_handle(h0);
-
-        if let (Some(p0), Some(p1)) = (mesh.point(v0), mesh.point(v1)) {
-            let length = (p1 - p0).length();
-            min_length = min_length.min(length);
-            max_length = max_length.max(length);
-            total_length += length;
-        }
-    }
-
-    let active_edges = mesh.n_edges(); // Approximation; could be refined
-
     EdgeLengthStats {
-        min_length: if min_length == f32::MAX { 0.0 } else { min_length },
+        min_length,
         max_length,
-        mean_length: if active_edges > 0 {
-            total_length / active_edges as f32
-        } else {
-            0.0
-        },
-        n_edges,
+        mean_length: total_length / counted_edges as f32,
+        n_edges: counted_edges,
     }
 }
 
@@ -224,16 +238,17 @@ pub fn collapse_short_edges(mesh: &mut RustMesh, min_length: f32) -> usize {
 
 /// Get the valence (number of incident edges) of a vertex
 pub fn vertex_valence(mesh: &RustMesh, vh: VertexHandle) -> usize {
-    let mut count = 0;
+    if !vh.is_valid() || mesh.is_vertex_deleted(vh) {
+        return 0;
+    }
 
-    if let Some(heh) = mesh.halfedge_handle(vh) {
-        let mut current = heh;
-        loop {
-            count += 1;
-            let opp = mesh.opposite_halfedge_handle(current);
-            current = mesh.next_halfedge_handle(opp);
-            if current == heh || !current.is_valid() {
-                break;
+    let mut count = 0usize;
+
+    for i in 0..mesh.n_edges() {
+        let eh = EdgeHandle::new(i as u32);
+        if let Some((v0, v1)) = active_edge_endpoints(mesh, eh) {
+            if v0 == vh || v1 == vh {
+                count += 1;
             }
         }
     }
@@ -255,23 +270,57 @@ fn optimal_valence(mesh: &RustMesh, vh: VertexHandle) -> usize {
 
 /// Check if a vertex is on the boundary
 fn is_boundary_vertex(mesh: &RustMesh, vh: VertexHandle) -> bool {
-    if let Some(heh) = mesh.halfedge_handle(vh) {
-        let mut current = heh;
-        loop {
-            if mesh.is_boundary(current) {
-                return true;
-            }
-            let opp = mesh.opposite_halfedge_handle(current);
-            if mesh.is_boundary(opp) {
-                return true;
-            }
-            current = mesh.next_halfedge_handle(opp);
-            if current == heh || !current.is_valid() {
-                break;
+    if !vh.is_valid() || mesh.is_vertex_deleted(vh) {
+        return false;
+    }
+
+    for i in 0..mesh.n_edges() {
+        let eh = EdgeHandle::new(i as u32);
+        if let Some((v0, v1)) = active_edge_endpoints(mesh, eh) {
+            if v0 == vh || v1 == vh {
+                let h0 = mesh.edge_halfedge_handle(eh, 0);
+                let h1 = mesh.edge_halfedge_handle(eh, 1);
+                if mesh.is_boundary(h0) || mesh.is_boundary(h1) {
+                    return true;
+                }
             }
         }
     }
     false
+}
+
+fn edge_flip_vertices(
+    mesh: &RustMesh,
+    eh: EdgeHandle,
+) -> Option<(VertexHandle, VertexHandle, VertexHandle, VertexHandle)> {
+    let h0 = mesh.edge_halfedge_handle(eh, 0);
+    if mesh.is_boundary(h0) {
+        return None;
+    }
+
+    let h1 = mesh.opposite_halfedge_handle(h0);
+    if mesh.is_boundary(h1) {
+        return None;
+    }
+
+    let v0 = mesh.from_vertex_handle(h0);
+    let v1 = mesh.to_vertex_handle(h0);
+    let v2 = mesh.to_vertex_handle(mesh.next_halfedge_handle(h0));
+    let v3 = mesh.to_vertex_handle(mesh.next_halfedge_handle(h1));
+
+    if !v0.is_valid()
+        || !v1.is_valid()
+        || !v2.is_valid()
+        || !v3.is_valid()
+        || mesh.is_vertex_deleted(v0)
+        || mesh.is_vertex_deleted(v1)
+        || mesh.is_vertex_deleted(v2)
+        || mesh.is_vertex_deleted(v3)
+    {
+        return None;
+    }
+
+    Some((v0, v1, v2, v3))
 }
 
 /// Flip edges to improve vertex valence
@@ -286,19 +335,37 @@ pub fn flip_edges_for_valence(mesh: &mut RustMesh) -> usize {
 
     // Collect potential flips
     let mut edges_to_check: Vec<EdgeHandle> = Vec::new();
+    let mut valences = vec![0usize; mesh.n_vertices()];
+    let mut boundary_vertices = vec![false; mesh.n_vertices()];
 
     for i in 0..mesh.n_edges() {
         let eh = EdgeHandle::new(i as u32);
-        if mesh.is_edge_deleted(eh) {
-            continue;
+        if let Some((v0, v1)) = active_edge_endpoints(mesh, eh) {
+            valences[v0.idx_usize()] += 1;
+            valences[v1.idx_usize()] += 1;
+
+            let h0 = mesh.edge_halfedge_handle(eh, 0);
+            let h1 = mesh.edge_halfedge_handle(eh, 1);
+            if mesh.is_boundary(h0) || mesh.is_boundary(h1) {
+                boundary_vertices[v0.idx_usize()] = true;
+                boundary_vertices[v1.idx_usize()] = true;
+            }
+
+            edges_to_check.push(eh);
         }
-        edges_to_check.push(eh);
     }
 
     for eh in edges_to_check {
-        // Check if flip would improve valence
-        if should_flip_for_valence(mesh, eh) {
+        let Some((v0, v1, v2, v3)) = edge_flip_vertices(mesh, eh) else {
+            continue;
+        };
+
+        if should_flip_for_valence(mesh, eh, &valences, &boundary_vertices) {
             if mesh.flip_edge(eh).is_ok() {
+                valences[v0.idx_usize()] = valences[v0.idx_usize()].saturating_sub(1);
+                valences[v1.idx_usize()] = valences[v1.idx_usize()].saturating_sub(1);
+                valences[v2.idx_usize()] += 1;
+                valences[v3.idx_usize()] += 1;
                 flip_count += 1;
             }
         }
@@ -308,38 +375,29 @@ pub fn flip_edges_for_valence(mesh: &mut RustMesh) -> usize {
 }
 
 /// Check if flipping an edge would improve valence
-fn should_flip_for_valence(mesh: &RustMesh, eh: EdgeHandle) -> bool {
-    let h0 = mesh.edge_halfedge_handle(eh, 0);
+fn should_flip_for_valence(
+    mesh: &RustMesh,
+    eh: EdgeHandle,
+    valences: &[usize],
+    boundary_vertices: &[bool],
+) -> bool {
+    let Some((v0, v1, v2, v3)) = edge_flip_vertices(mesh, eh) else {
+        return false;
+    };
 
-    // Don't flip boundary edges
-    if mesh.is_boundary(h0) {
+    let val0 = valences[v0.idx_usize()];
+    let val1 = valences[v1.idx_usize()];
+    let val2 = valences[v2.idx_usize()];
+    let val3 = valences[v3.idx_usize()];
+
+    if val0 == 0 || val1 == 0 || val2 == 0 || val3 == 0 {
         return false;
     }
 
-    let h1 = mesh.opposite_halfedge_handle(h0);
-    if mesh.is_boundary(h1) {
-        return false;
-    }
-
-    // Get the four vertices involved
-    let v0 = mesh.from_vertex_handle(h0);
-    let v1 = mesh.to_vertex_handle(h0);
-
-    let h0_next = mesh.next_halfedge_handle(h0);
-    let h1_next = mesh.next_halfedge_handle(h1);
-    let v2 = mesh.to_vertex_handle(h0_next);
-    let v3 = mesh.to_vertex_handle(h1_next);
-
-    // Compute current valence deviation
-    let val0 = vertex_valence(mesh, v0);
-    let val1 = vertex_valence(mesh, v1);
-    let val2 = vertex_valence(mesh, v2);
-    let val3 = vertex_valence(mesh, v3);
-
-    let opt0 = optimal_valence(mesh, v0);
-    let opt1 = optimal_valence(mesh, v1);
-    let opt2 = optimal_valence(mesh, v2);
-    let opt3 = optimal_valence(mesh, v3);
+    let opt0 = if boundary_vertices[v0.idx_usize()] { 4 } else { 6 };
+    let opt1 = if boundary_vertices[v1.idx_usize()] { 4 } else { 6 };
+    let opt2 = if boundary_vertices[v2.idx_usize()] { 4 } else { 6 };
+    let opt3 = if boundary_vertices[v3.idx_usize()] { 4 } else { 6 };
 
     // Current deviation
     let current_deviation = (val0 as i32 - opt0 as i32).abs()
@@ -348,8 +406,8 @@ fn should_flip_for_valence(mesh: &RustMesh, eh: EdgeHandle) -> bool {
         + (val3 as i32 - opt3 as i32).abs();
 
     // After flip: v0 and v1 lose one incident edge, v2 and v3 gain one
-    let new_val0 = val0 - 1;
-    let new_val1 = val1 - 1;
+    let new_val0 = val0.saturating_sub(1);
+    let new_val1 = val1.saturating_sub(1);
     let new_val2 = val2 + 1;
     let new_val3 = val3 + 1;
 
@@ -586,14 +644,10 @@ mod tests {
     fn find_edge(mesh: &RustMesh, v0: VertexHandle, v1: VertexHandle) -> Option<EdgeHandle> {
         for i in 0..mesh.n_edges() {
             let eh = EdgeHandle::new(i as u32);
-            if mesh.is_edge_deleted(eh) {
-                continue;
-            }
-            let h0 = mesh.edge_halfedge_handle(eh, 0);
-            let from = mesh.from_vertex_handle(h0);
-            let to = mesh.to_vertex_handle(h0);
-            if (from == v0 && to == v1) || (from == v1 && to == v0) {
-                return Some(eh);
+            if let Some((from, to)) = active_edge_endpoints(mesh, eh) {
+                if (from == v0 && to == v1) || (from == v1 && to == v0) {
+                    return Some(eh);
+                }
             }
         }
         None

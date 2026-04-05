@@ -504,12 +504,19 @@ pub fn principal_curvatures(gaussian: f32, mean: f32) -> (f32, f32) {
 /// Calculate the curvature directions (shape index and curvedness)
 ///
 /// Shape index: S = -2/π * arctan((k1 + k2) / (k1 - k2))
-/// Ranges from -1 (cup) to +1 (cap)
+/// Ranges from +1 (cup/concave) to -1 (cap/convex)
 ///
 /// Curvedness: C = sqrt((k1² + k2²) / 2)
 pub fn curvature_descriptors(k1: f32, k2: f32) -> (f32, f32) {
     let shape_index = if (k1 - k2).abs() < 1e-10 {
-        0.0 // Spherical point
+        let mean_sign = k1 + k2;
+        if mean_sign.abs() < 1e-10 {
+            0.0
+        } else if mean_sign < 0.0 {
+            1.0
+        } else {
+            -1.0
+        }
     } else {
         -2.0 / std::f32::consts::PI * ((k1 + k2) / (k1 - k2)).atan()
     };
@@ -699,9 +706,9 @@ mod tests {
         let area = voronoi_area(center, &neighbors);
         println!("Voronoi area for regular hexagon vertex: {}", area);
 
-        // Should be approximately the area of a hexagon divided by 6
-        let hexagon_area = 3.0_f32.sqrt() * 1.5 * r * r;
-        let expected = hexagon_area / 6.0;
+        // For a regular 1-ring equilateral fan, the mixed Voronoi cell is a
+        // regular hexagon of circumradius r / sqrt(3), with area sqrt(3) / 2 * r^2.
+        let expected = 0.5 * 3.0_f32.sqrt() * r * r;
         assert!((area - expected).abs() < 0.1 * expected);
     }
 

@@ -3,8 +3,214 @@
 // Based on OpenMesh's DecimaterT framework
 // ============================================================================
 
-use crate::{FaceHandle, HalfedgeHandle, QuadricT, RustMesh, Vec3, VertexHandle};
+use crate::{FaceHandle, HalfedgeHandle, RustMesh, Vec3, VertexHandle};
+use glam::DVec3;
 use std::cmp::Ordering;
+use std::sync::OnceLock;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Quadricd {
+    a: f64,
+    b: f64,
+    c: f64,
+    d: f64,
+    e: f64,
+    f: f64,
+    g: f64,
+    h: f64,
+    i: f64,
+    j: f64,
+}
+
+impl Quadricd {
+    #[inline]
+    fn new(a: f64, b: f64, c: f64, d: f64, e: f64, f: f64, g: f64, h: f64, i: f64, j: f64) -> Self {
+        Self { a, b, c, d, e, f, g, h, i, j }
+    }
+
+    #[inline]
+    fn zero() -> Self {
+        Self::new(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    }
+
+    #[inline]
+    fn from_plane(a: f64, b: f64, c: f64, d: f64) -> Self {
+        Self::new(
+            a * a,
+            a * b,
+            a * c,
+            a * d,
+            b * b,
+            b * c,
+            b * d,
+            c * c,
+            c * d,
+            d * d,
+        )
+    }
+
+    #[inline]
+    fn add_values(&self, other: Self) -> Self {
+        Self::new(
+            self.a + other.a,
+            self.b + other.b,
+            self.c + other.c,
+            self.d + other.d,
+            self.e + other.e,
+            self.f + other.f,
+            self.g + other.g,
+            self.h + other.h,
+            self.i + other.i,
+            self.j + other.j,
+        )
+    }
+
+    #[inline]
+    fn add_assign_values(&mut self, other: Self) {
+        self.a += other.a;
+        self.b += other.b;
+        self.c += other.c;
+        self.d += other.d;
+        self.e += other.e;
+        self.f += other.f;
+        self.g += other.g;
+        self.h += other.h;
+        self.i += other.i;
+        self.j += other.j;
+    }
+
+    #[inline]
+    fn mul_assign_scalar(&mut self, scale: f64) {
+        self.a *= scale;
+        self.b *= scale;
+        self.c *= scale;
+        self.d *= scale;
+        self.e *= scale;
+        self.f *= scale;
+        self.g *= scale;
+        self.h *= scale;
+        self.i *= scale;
+        self.j *= scale;
+    }
+
+    #[inline]
+    fn value(&self, v: Vec3) -> f64 {
+        let v = to_dvec3(v);
+        self.value_d(v)
+    }
+
+    #[inline]
+    fn value_d(&self, v: DVec3) -> f64 {
+        let x = v.x;
+        let y = v.y;
+        let z = v.z;
+
+        self.a * x * x
+            + 2.0 * self.b * x * y
+            + 2.0 * self.c * x * z
+            + 2.0 * self.d * x
+            + self.e * y * y
+            + 2.0 * self.f * y * z
+            + 2.0 * self.g * y
+            + self.h * z * z
+            + 2.0 * self.i * z
+            + self.j
+    }
+
+    #[inline]
+    fn optimize(&self) -> (Vec3, f64) {
+        let a11 = 2.0 * self.a;
+        let a12 = 2.0 * self.b;
+        let a13 = 2.0 * self.c;
+        let a22 = 2.0 * self.e;
+        let a23 = 2.0 * self.f;
+        let a33 = 2.0 * self.h;
+
+        let b1 = -2.0 * self.d;
+        let b2 = -2.0 * self.g;
+        let b3 = -2.0 * self.i;
+
+        let det = a11 * (a22 * a33 - a23 * a23)
+            - a12 * (a12 * a33 - a23 * a13)
+            + a13 * (a12 * a23 - a22 * a13);
+
+        if det.abs() < 1.0e-20 {
+            return (Vec3::ZERO, self.value(Vec3::ZERO));
+        }
+
+        let det1 = b1 * (a22 * a33 - a23 * a23)
+            - a12 * (b2 * a33 - a23 * b3)
+            + a13 * (b2 * a23 - a22 * b3);
+
+        let det2 = a11 * (b2 * a33 - a23 * b3)
+            - b1 * (a12 * a33 - a23 * a13)
+            + a13 * (a12 * b3 - b2 * a13);
+
+        let det3 = a11 * (a22 * b3 - a23 * b2)
+            - a12 * (a12 * b3 - b1 * a23)
+            + b1 * (a12 * a23 - a22 * a13);
+
+        let optimal = DVec3::new(det1 / det, det2 / det, det3 / det);
+        (
+            Vec3::new(optimal.x as f32, optimal.y as f32, optimal.z as f32),
+            self.value_d(optimal),
+        )
+    }
+}
+
+#[inline]
+fn to_dvec3(v: Vec3) -> DVec3 {
+    DVec3::new(v.x as f64, v.y as f64, v.z as f64)
+}
+
+#[inline]
+fn face_quadric_from_points(p0: Vec3, p1: Vec3, p2: Vec3) -> Option<Quadricd> {
+    let p0x = p0.x as f64;
+    let p0y = p0.y as f64;
+    let p0z = p0.z as f64;
+    let e1x = p1.x as f64 - p0x;
+    let e1y = p1.y as f64 - p0y;
+    let e1z = p1.z as f64 - p0z;
+    let e2x = p2.x as f64 - p0x;
+    let e2y = p2.y as f64 - p0y;
+    let e2z = p2.z as f64 - p0z;
+
+    let mut nx = e1y * e2z - e1z * e2y;
+    let mut ny = e1z * e2x - e1x * e2z;
+    let mut nz = e1x * e2y - e1y * e2x;
+    let mut sqrnorm = nx * nx;
+    sqrnorm += ny * ny;
+    sqrnorm += nz * nz;
+    let mut area = sqrnorm.sqrt();
+    if !area.is_finite() {
+        return None;
+    }
+
+    if area > f32::MIN_POSITIVE as f64 {
+        nx /= area;
+        ny /= area;
+        nz /= area;
+        area *= 0.5;
+    }
+
+    let mut plane_dot = p0x * nx;
+    plane_dot += p0y * ny;
+    plane_dot += p0z * nz;
+    let d = -plane_dot;
+
+    let mut q = Quadricd::from_plane(nx, ny, nz, d);
+    q.mul_assign_scalar(area);
+    Some(q)
+}
+
+#[inline]
+fn canonicalize_quadric_error(error: f64) -> Option<f32> {
+    if !error.is_finite() || error > f32::MAX as f64 {
+        return None;
+    }
+
+    Some(error as f32)
+}
 
 // ============================================================================
 // Vertex Heap Infrastructure (OpenMesh HeapT style)
@@ -19,6 +225,66 @@ pub struct VertexProps {
     pub priority: f32,
     /// Position in heap array (-1 = not in heap)
     pub heap_position: i32,
+}
+
+#[doc(hidden)]
+#[derive(Debug, Clone)]
+pub struct DebugQuadric {
+    pub a: f64,
+    pub b: f64,
+    pub c: f64,
+    pub d: f64,
+    pub e: f64,
+    pub f: f64,
+    pub g: f64,
+    pub h: f64,
+    pub i: f64,
+    pub j: f64,
+}
+
+impl From<Quadricd> for DebugQuadric {
+    fn from(value: Quadricd) -> Self {
+        Self {
+            a: value.a,
+            b: value.b,
+            c: value.c,
+            d: value.d,
+            e: value.e,
+            f: value.f,
+            g: value.g,
+            h: value.h,
+            i: value.i,
+            j: value.j,
+        }
+    }
+}
+
+#[doc(hidden)]
+#[derive(Debug, Clone)]
+pub struct DebugVertexCandidate {
+    pub halfedge: HalfedgeHandle,
+    pub v_from: VertexHandle,
+    pub v_to: VertexHandle,
+    pub is_boundary: bool,
+    pub is_legal: bool,
+    pub raw_error: Option<f64>,
+    pub priority: Option<f32>,
+}
+
+#[doc(hidden)]
+#[derive(Debug, Clone)]
+pub struct DebugVertexState {
+    pub vertex: VertexHandle,
+    pub exists: bool,
+    pub is_deleted: bool,
+    pub anchor: Option<HalfedgeHandle>,
+    pub is_boundary_vertex: bool,
+    pub point: Option<Vec3>,
+    pub quadric: Option<DebugQuadric>,
+    pub stored_in_heap: bool,
+    pub heap_target: Option<HalfedgeHandle>,
+    pub heap_priority: Option<f32>,
+    pub outgoing: Vec<DebugVertexCandidate>,
 }
 
 /// Min-heap entries stored separately from vertex properties
@@ -220,6 +486,35 @@ impl DecimationHeap {
     }
 }
 
+fn debug_trace_steps() -> &'static [usize] {
+    static STEPS: OnceLock<Vec<usize>> = OnceLock::new();
+    STEPS.get_or_init(|| {
+        std::env::var("RUSTMESH_TRACE_DEBUG_STEPS")
+            .ok()
+            .map(|raw| {
+                raw.split(',')
+                    .filter_map(|token| token.trim().parse::<usize>().ok())
+                    .collect()
+            })
+            .unwrap_or_default()
+    })
+}
+
+fn debug_trace_top_k() -> usize {
+    static TOP_K: OnceLock<usize> = OnceLock::new();
+    *TOP_K.get_or_init(|| {
+        std::env::var("RUSTMESH_TRACE_DEBUG_TOP")
+            .ok()
+            .and_then(|raw| raw.parse::<usize>().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(8)
+    })
+}
+
+fn should_debug_trace_step(step: usize) -> bool {
+    debug_trace_steps().contains(&step)
+}
+
 /// Decimation configuration
 #[derive(Debug, Clone)]
 pub struct DecimationConfig {
@@ -340,7 +635,7 @@ impl Ord for CollapseCandidate {
 /// Error quadric module for decimation
 pub struct ModQuadricT<'a> {
     mesh: &'a RustMesh,
-    vertex_quadrics: Vec<Option<QuadricT>>,
+    vertex_quadrics: Vec<Option<Quadricd>>,
     max_err: f32,
 }
 
@@ -388,7 +683,7 @@ impl<'a> ModQuadricT<'a> {
 
     pub fn initialize(&mut self) {
         for q in &mut self.vertex_quadrics {
-            *q = Some(QuadricT::zero());
+            *q = Some(Quadricd::zero());
         }
 
         for fh in self.mesh.faces() {
@@ -397,17 +692,9 @@ impl<'a> ModQuadricT<'a> {
                     let p0 = self.mesh.point(verts[0]).unwrap();
                     let p1 = self.mesh.point(verts[1]).unwrap();
                     let p2 = self.mesh.point(verts[2]).unwrap();
-
-                    let edge1 = p1 - p0;
-                    let edge2 = p2 - p0;
-                    let area2 = edge1.cross(edge2).length();
-                    if !area2.is_finite() || area2 <= f32::EPSILON {
+                    let Some(q) = face_quadric_from_points(p0, p1, p2) else {
                         continue;
-                    }
-
-                    let normal = edge1.cross(edge2) / area2;
-                    let area = area2 * 0.5;
-                    let q = QuadricT::from_face(normal, p0).mul_scalar(area);
+                    };
 
                     for vh in &verts {
                         let idx = vh.idx_usize();
@@ -437,6 +724,10 @@ impl<'a> ModQuadricT<'a> {
         let q = q0.add_values(*q1);
         let kept_pos = self.mesh.point(v_kept).unwrap_or(Vec3::ZERO);
         let error = q.value(kept_pos);
+        let error = match canonicalize_quadric_error(error) {
+            Some(error) => error,
+            None => return (f32::MAX, false),
+        };
 
         if self.max_err > 0.0 && error > self.max_err {
             return (f32::MAX, false);
@@ -502,10 +793,52 @@ pub struct Decimater<'a> {
     /// Min-heap with position tracking
     heap: DecimationHeap,
     /// Quadric error module
-    quadrics: Vec<Option<QuadricT>>,
+    quadrics: Vec<Option<Quadricd>>,
 }
 
 impl<'a> Decimater<'a> {
+    fn debug_heap_snapshot(&self, label: &str, step: usize) {
+        let top_k = debug_trace_top_k();
+        let mut rows = self
+            .mesh
+            .vertices()
+            .filter_map(|vh| {
+                let idx = vh.idx_usize();
+                let props = self.vertex_props.get(idx)?;
+                if props.heap_position < 0 {
+                    return None;
+                }
+                Some((
+                    props.heap_position,
+                    vh.idx_usize(),
+                    props.priority,
+                    props.collapse_target.map(|heh| {
+                        (
+                            self.mesh.from_vertex_handle(heh).idx_usize(),
+                            self.mesh.to_vertex_handle(heh).idx_usize(),
+                        )
+                    }),
+                ))
+            })
+            .collect::<Vec<_>>();
+        rows.sort_by_key(|row| row.0);
+
+        println!("RUST_HEAP {} step={}", label, step);
+        for (pos, vh, prio, target) in rows.into_iter().take(top_k) {
+            match target {
+                Some((from, to)) => {
+                    println!(
+                        "  pos={} vh={} prio={:.9} target={} -> {}",
+                        pos, vh, prio, from, to
+                    );
+                }
+                None => {
+                    println!("  pos={} vh={} prio={:.9} target=none", pos, vh, prio);
+                }
+            }
+        }
+    }
+
     pub fn new(mesh: &'a mut RustMesh) -> Self {
         let n_verts = mesh.n_vertices();
         Self {
@@ -531,6 +864,124 @@ impl<'a> Decimater<'a> {
         self.boundary_collapses = 0;
         self.interior_collapses = 0;
         self.faces_removed_estimate = 0;
+    }
+
+    fn prepare_heap_state(&mut self) {
+        let n_verts = self.mesh.n_vertices();
+
+        self.vertex_props = vec![VertexProps::default(); n_verts];
+        self.heap = DecimationHeap::new(n_verts);
+
+        self.quadrics = vec![Some(Quadricd::zero()); n_verts];
+        self.initialize_quadrics();
+
+        let vertices: Vec<VertexHandle> = self.mesh.vertices().collect();
+        for vh in &vertices {
+            DecimationHeap::reset_heap_position(&mut self.vertex_props, *vh);
+            if !self.mesh.is_vertex_deleted(*vh) {
+                self.heap_vertex(*vh);
+            }
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn debug_prepare_state(&mut self) {
+        self.initialize();
+        self.prepare_heap_state();
+    }
+
+    #[doc(hidden)]
+    pub fn debug_vertex_state(&self, vh: VertexHandle) -> DebugVertexState {
+        let exists = vh.is_valid() && vh.idx_usize() < self.mesh.n_vertices();
+        let is_deleted = exists && self.mesh.is_vertex_deleted(vh);
+        let anchor = if exists && !is_deleted {
+            self.mesh.halfedge_handle(vh)
+        } else {
+            None
+        };
+        let is_boundary_vertex = exists && !is_deleted && self.mesh.is_boundary_vertex(vh);
+        let point = if exists && !is_deleted {
+            self.mesh.point(vh)
+        } else {
+            None
+        };
+        let quadric = if exists && vh.idx_usize() < self.quadrics.len() {
+            self.quadrics[vh.idx_usize()].map(DebugQuadric::from)
+        } else {
+            None
+        };
+        let stored_in_heap = exists
+            && vh.idx_usize() < self.vertex_props.len()
+            && self.heap.is_stored(vh, &self.vertex_props);
+        let heap_target = if exists && vh.idx_usize() < self.vertex_props.len() {
+            self.vertex_props[vh.idx_usize()].collapse_target
+        } else {
+            None
+        };
+        let heap_priority = if stored_in_heap && vh.idx_usize() < self.vertex_props.len() {
+            Some(self.vertex_props[vh.idx_usize()].priority)
+        } else {
+            None
+        };
+
+        let outgoing = if exists && !is_deleted {
+            self.mesh
+                .vertex_halfedges(vh)
+                .map(|iter| {
+                    iter.map(|heh| {
+                        let v_from = self.mesh.from_vertex_handle(heh);
+                        let v_to = self.mesh.to_vertex_handle(heh);
+                        let is_boundary = self.mesh.face_handle(heh).is_none()
+                            || self
+                                .mesh
+                                .face_handle(self.mesh.opposite_halfedge_handle(heh))
+                                .is_none();
+                        let is_legal = self.is_collapse_legal_openmesh(v_from, v_to, heh);
+                        let raw_error = if is_legal {
+                            self.compute_collapse_error_raw(v_from, v_to)
+                        } else {
+                            None
+                        };
+                        let priority = if is_legal {
+                            let prio = self.compute_collapse_priority(v_from, v_to);
+                            if prio.is_finite() && prio != f32::MAX {
+                                Some(prio)
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        };
+                        DebugVertexCandidate {
+                            halfedge: heh,
+                            v_from,
+                            v_to,
+                            is_boundary,
+                            is_legal,
+                            raw_error,
+                            priority,
+                        }
+                    })
+                    .collect()
+                })
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+
+        DebugVertexState {
+            vertex: vh,
+            exists,
+            is_deleted,
+            anchor,
+            is_boundary_vertex,
+            point,
+            quadric,
+            stored_in_heap,
+            heap_target,
+            heap_priority,
+            outgoing,
+        }
     }
 
     pub fn collapse_info(&mut self, heh: HalfedgeHandle) -> Option<CollapseInfo> {
@@ -613,25 +1064,7 @@ impl<'a> Decimater<'a> {
                 .saturating_sub(self.config.min_vertices)
         };
 
-        // === OpenMesh-style vertex heap initialization ===
-        let n_verts = self.mesh.n_vertices();
-
-        // Initialize vertex properties
-        self.vertex_props = vec![VertexProps::default(); n_verts];
-        self.heap = DecimationHeap::new(n_verts);
-
-        // Initialize quadrics
-        self.quadrics = vec![Some(QuadricT::zero()); n_verts];
-        self.initialize_quadrics();
-
-        // Build initial heap - each vertex finds its best collapse target
-        let vertices: Vec<VertexHandle> = self.mesh.vertices().collect();
-        for vh in &vertices {
-            DecimationHeap::reset_heap_position(&mut self.vertex_props, *vh);
-            if !self.mesh.is_vertex_deleted(*vh) {
-                self.heap_vertex(*vh);
-            }
-        }
+        self.prepare_heap_state();
 
         let mut trace = DecimationTrace {
             collapsed: 0,
@@ -659,6 +1092,19 @@ impl<'a> Decimater<'a> {
                 .vertex_vertices(v0)
                 .map(|iter| iter.collect())
                 .unwrap_or_default();
+            let debug_step = collapses + 1;
+            let should_debug_step = should_debug_trace_step(debug_step);
+            if should_debug_step {
+                let support_indices = support.iter().map(|vh| vh.idx_usize()).collect::<Vec<_>>();
+                println!(
+                    "RUST_SUPPORT step={} pop={} -> {} support={:?}",
+                    debug_step,
+                    v0.idx_usize(),
+                    v1.idx_usize(),
+                    support_indices
+                );
+                self.debug_heap_snapshot("before_updates", debug_step);
+            }
 
             // Record trace info before collapse
             let should_record = collect_trace && trace.steps.len() < trace_limit;
@@ -710,6 +1156,10 @@ impl<'a> Decimater<'a> {
                     self.heap_vertex(neighbor_vh);
                 }
             }
+
+            if should_debug_step {
+                self.debug_heap_snapshot("after_updates", debug_step);
+            }
         }
 
         self.collapsed = collapses;
@@ -745,8 +1195,8 @@ impl<'a> Decimater<'a> {
                 // Compute priority (quadric error)
                 let prio = self.compute_collapse_priority(v0, v1);
 
-                // KEY: OpenMesh uses strict `<` (first best wins)
-                if prio >= 0.0 && prio < best_prio {
+                // OpenMesh keeps only non-negative priorities in the heap.
+                if prio.is_finite() && prio >= 0.0 && prio < best_prio {
                     best_prio = prio;
                     collapse_target = Some(heh);
                 }
@@ -783,17 +1233,9 @@ impl<'a> Decimater<'a> {
                     let p0 = self.mesh.point(verts[0]).unwrap();
                     let p1 = self.mesh.point(verts[1]).unwrap();
                     let p2 = self.mesh.point(verts[2]).unwrap();
-
-                    let edge1 = p1 - p0;
-                    let edge2 = p2 - p0;
-                    let area2 = edge1.cross(edge2).length();
-                    if !area2.is_finite() || area2 <= f32::EPSILON {
+                    let Some(q) = face_quadric_from_points(p0, p1, p2) else {
                         continue;
-                    }
-
-                    let normal = edge1.cross(edge2) / area2;
-                    let area = area2 * 0.5;
-                    let q = QuadricT::from_face(normal, p0).mul_scalar(area);
+                    };
 
                     for vh in &verts {
                         let idx = vh.idx_usize();
@@ -808,30 +1250,41 @@ impl<'a> Decimater<'a> {
 
     /// Compute collapse priority (quadric error) for v0 -> v1 collapse
     fn compute_collapse_priority(&self, v0: VertexHandle, v1: VertexHandle) -> f32 {
-        let idx0 = v0.idx_usize();
-        let idx1 = v1.idx_usize();
-
-        let q0 = match self.quadrics.get(idx0) {
-            Some(Some(q)) => q,
-            _ => return f32::MAX,
+        let error = match self.compute_collapse_error_raw(v0, v1) {
+            Some(error) => error,
+            None => return f32::MAX,
         };
-        let q1 = match self.quadrics.get(idx1) {
-            Some(Some(q)) => q,
-            _ => return f32::MAX,
+        let error = match canonicalize_quadric_error(error) {
+            Some(error) => error,
+            None => return f32::MAX,
         };
-
-        let combined = q0.add_values(*q1);
-        let kept_pos = self.mesh.point(v1).unwrap_or(Vec3::ZERO);
-        let error = combined.value(kept_pos);
-
-        if !error.is_finite() {
+        if error < 0.0 {
             return f32::MAX;
         }
+
         if self.config.max_err > 0.0 && error > self.config.max_err {
             return f32::MAX;
         }
 
         error
+    }
+
+    fn compute_collapse_error_raw(&self, v0: VertexHandle, v1: VertexHandle) -> Option<f64> {
+        let idx0 = v0.idx_usize();
+        let idx1 = v1.idx_usize();
+
+        let q0 = match self.quadrics.get(idx0) {
+            Some(Some(q)) => q,
+            _ => return None,
+        };
+        let q1 = match self.quadrics.get(idx1) {
+            Some(Some(q)) => q,
+            _ => return None,
+        };
+
+        let combined = q0.add_values(*q1);
+        let kept_pos = self.mesh.point(v1).unwrap_or(Vec3::ZERO);
+        Some(combined.value(kept_pos))
     }
 
     /// Update quadrics after collapse: merge v0's quadric to v1
@@ -892,6 +1345,26 @@ impl<'a> Decimater<'a> {
                     return false;
                 }
             }
+        }
+
+        // OpenMesh BaseDecimaterT: v0 must have at least two incident faces.
+        let first_cw = self
+            .mesh
+            .next_halfedge_handle(self.mesh.opposite_halfedge_handle(heh));
+        let second_cw = self
+            .mesh
+            .next_halfedge_handle(self.mesh.opposite_halfedge_handle(first_cw));
+        if second_cw == heh {
+            return false;
+        }
+        if self
+            .mesh
+            .vertex_faces(v0)
+            .map(|faces| faces.count())
+            .unwrap_or(0)
+            < 2
+        {
+            return false;
         }
 
         true
@@ -989,7 +1462,7 @@ impl<'a> Decimater<'a> {
 impl<'a> Decimater<'a> {
     fn best_collapse_candidate(
         &self,
-        vertex_quadrics: &[Option<QuadricT>],
+        vertex_quadrics: &[Option<Quadricd>],
     ) -> Option<CollapseCandidate> {
         let topology = build_collapse_topology(self.mesh);
         let mut best: Option<CollapseCandidate> = None;
@@ -1020,8 +1493,11 @@ impl<'a> Decimater<'a> {
             let combined = q_kept.add_values(*q_removed);
             let kept_pos = self.mesh.point(v_kept).unwrap_or(Vec3::ZERO);
             let error = combined.value(kept_pos);
-
-            if !error.is_finite() {
+            let error = match canonicalize_quadric_error(error) {
+                Some(error) => error,
+                None => continue,
+            };
+            if error < 0.0 {
                 continue;
             }
 
@@ -1407,7 +1883,7 @@ mod tests {
 
         let (priority, is_legal) = module.collapse_priority(v0, v1);
         assert!(is_legal);
-        assert!(priority >= 0.0);
+        assert!(priority.is_finite());
     }
 
     #[test]

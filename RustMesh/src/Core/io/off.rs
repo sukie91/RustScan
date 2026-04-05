@@ -76,6 +76,24 @@ pub fn write_off(mesh: &RustMesh, path: impl AsRef<Path>) -> io::Result<()> {
 
 /// Read mesh from OFF file
 pub fn read_off(path: impl AsRef<Path>) -> io::Result<RustMesh> {
+    read_off_impl(path.as_ref(), OffReadMode::Standard)
+}
+
+/// Read OFF through the OpenMesh-style parity face insertion path.
+///
+/// This is intended for parity/debug workflows and preserves the anchors chosen
+/// by `add_face_openmesh_parity()` instead of normalizing them afterwards.
+pub fn read_off_openmesh_parity(path: impl AsRef<Path>) -> io::Result<RustMesh> {
+    read_off_impl(path.as_ref(), OffReadMode::OpenMeshParity)
+}
+
+#[derive(Clone, Copy)]
+enum OffReadMode {
+    Standard,
+    OpenMeshParity,
+}
+
+fn read_off_impl(path: &Path, mode: OffReadMode) -> io::Result<RustMesh> {
     let file = File::open(path)?;
     let reader = BufReader::new(file);
     let mut lines = reader.lines();
@@ -157,12 +175,21 @@ pub fn read_off(path: impl AsRef<Path>) -> io::Result<RustMesh> {
             face.push(crate::VertexHandle::from_usize(idx));
         }
 
-        mesh.add_face(&face).ok_or_else(|| {
+        let added = match mode {
+            OffReadMode::Standard => mesh.add_face(&face),
+            OffReadMode::OpenMeshParity => mesh.add_face_openmesh_parity(&face),
+        };
+
+        added.ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("failed to add face {face_idx} from OFF input"),
             )
         })?;
+    }
+
+    if matches!(mode, OffReadMode::Standard) {
+        mesh.normalize_boundary_halfedge_handles();
     }
 
     Ok(mesh)

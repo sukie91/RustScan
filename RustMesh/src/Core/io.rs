@@ -13,7 +13,7 @@ pub mod stl;
 
 // Re-export for convenience
 pub use obj::{read_obj, write_obj};
-pub use off::{read_off, write_off};
+pub use off::{read_off, read_off_openmesh_parity, write_off};
 pub use ply::{read_ply, write_ply, PlyFormat};
 pub use stl::{read_stl, write_stl, StlFormat};
 

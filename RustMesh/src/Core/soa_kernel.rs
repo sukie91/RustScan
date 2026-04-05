@@ -329,6 +329,21 @@ impl SoAKernel {
         he0_handle
     }
 
+    #[inline]
+    pub(crate) fn find_halfedge(
+        &self,
+        start_vh: VertexHandle,
+        end_vh: VertexHandle,
+    ) -> Option<HalfedgeHandle> {
+        let key = (start_vh.idx().min(end_vh.idx()), start_vh.idx().max(end_vh.idx()));
+        let &existing_heh = self.edge_map.get(&key)?;
+        if self.to_vertex_handle(existing_heh) == end_vh {
+            Some(existing_heh)
+        } else {
+            self.opposite_halfedge_handle(existing_heh)
+        }
+    }
+
     /// Check if edge already exists
     #[inline]
     pub fn edge_exists(&self, v0: u32, v1: u32) -> bool {
