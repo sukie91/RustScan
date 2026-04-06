@@ -242,6 +242,52 @@ impl BundleAdjuster {
         SE3::exp(&twist).compose(pose)
     }
 
+    fn try_pose_update(
+        &mut self,
+        cam_idx: usize,
+        base_pose: SE3,
+        update: [f32; 6],
+        base_cost: f64,
+    ) {
+        let mut scale = 1.0f32;
+        while scale >= 1.0 / 1024.0 {
+            let mut scaled_update = [0.0f32; 6];
+            for axis in 0..6 {
+                scaled_update[axis] = update[axis] * scale;
+            }
+            self.cameras[cam_idx].pose = SE3::exp(&scaled_update).compose(&base_pose);
+            let candidate_cost = self.total_cost();
+            if candidate_cost.is_finite() && candidate_cost <= base_cost {
+                return;
+            }
+            scale *= 0.5;
+        }
+
+        self.cameras[cam_idx].pose = base_pose;
+    }
+
+    fn try_landmark_update(
+        &mut self,
+        lm_idx: usize,
+        base_position: [f64; 3],
+        update: [f64; 3],
+        base_cost: f64,
+    ) {
+        let mut scale = 1.0f64;
+        while scale >= 1.0 / 1024.0 {
+            for axis in 0..3 {
+                self.landmarks[lm_idx].position[axis] = base_position[axis] + update[axis] * scale;
+            }
+            let candidate_cost = self.total_cost();
+            if candidate_cost.is_finite() && candidate_cost <= base_cost {
+                return;
+            }
+            scale *= 0.5;
+        }
+
+        self.landmarks[lm_idx].position = base_position;
+    }
+
     /// Build and run BA optimization using Gauss-Newton
     pub fn optimize(
         &mut self,
@@ -302,6 +348,7 @@ impl BundleAdjuster {
                     continue;
                 }
 
+                let base_cost = self.total_cost();
                 let base_pose = self.cameras[cam_idx].pose;
                 let mut grad = [0.0f64; 6];
                 for axis in 0..6 {
@@ -321,7 +368,7 @@ impl BundleAdjuster {
                 for axis in 0..6 {
                     update[axis] = (-pose_lr * grad[axis]) as f32;
                 }
-                self.cameras[cam_idx].pose = SE3::exp(&update).compose(&base_pose);
+                self.try_pose_update(cam_idx, base_pose, update, base_cost);
             }
 
             // Optimize landmark positions
@@ -330,6 +377,7 @@ impl BundleAdjuster {
                     continue;
                 }
 
+                let base_cost = self.total_cost();
                 let base = self.landmarks[lm_idx].position;
                 let mut grad = [0.0f64; 3];
                 for axis in 0..3 {
@@ -343,9 +391,11 @@ impl BundleAdjuster {
                     self.landmarks[lm_idx].position[axis] = base[axis];
                 }
 
+                let mut update = [0.0f64; 3];
                 for axis in 0..3 {
-                    self.landmarks[lm_idx].position[axis] -= point_lr * grad[axis];
+                    update[axis] = -point_lr * grad[axis];
                 }
+                self.try_landmark_update(lm_idx, base, update, base_cost);
             }
         }
 

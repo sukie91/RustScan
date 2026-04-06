@@ -931,7 +931,7 @@ mod tests {
     }
 
     #[test]
-    fn test_relocalize_failure_does_not_report_success() {
+    fn test_relocalize_failure_preserves_anchor_pose_for_reinit() {
         let camera = Camera::new(525.0, 525.0, 319.5, 239.5, 640, 480);
         let current_kp = KeyPoint::new(10.0, 10.0);
         let mut current_desc = Descriptors::with_capacity(1, 32);
@@ -957,8 +957,13 @@ mod tests {
         assert_eq!(vo.state(), VOState::Initializing);
         assert_eq!(vo.prev_keypoints.len(), 1);
         assert_eq!(vo.prev_keypoints[0].x(), current_kp.x());
-        assert!(vo.prev_frame_pose.is_none());
         assert!(vo.prev_3d_points.is_empty());
+        assert_eq!(
+            vo.prev_frame_pose
+                .expect("anchor pose should be preserved")
+                .translation(),
+            SE3::identity().translation()
+        );
     }
 
     #[test]
