@@ -7,6 +7,9 @@
 
 pub mod training_pipeline;
 
+#[cfg(feature = "gpu")]
+mod benchmark;
+
 pub mod chunk_planner;
 pub mod clustering;
 pub mod density_controller;
@@ -17,6 +20,12 @@ pub mod pose_embedding;
 
 #[cfg(feature = "gpu")]
 mod data_loading;
+
+#[cfg(feature = "gpu")]
+mod frame_loader;
+
+#[cfg(feature = "gpu")]
+mod init_map;
 
 #[cfg(feature = "gpu")]
 pub mod metal_trainer;
@@ -49,6 +58,10 @@ pub use eval::{
 };
 #[cfg(feature = "gpu")]
 pub use eval::{evaluate_scene, evaluation_device, render_evaluation_frame, trainable_from_scene};
+#[cfg(feature = "gpu")]
+pub use benchmark::{
+    run_metal_training_benchmark, MetalTrainingBenchmarkReport, MetalTrainingBenchmarkSpec,
+};
 pub use parity_harness::{
     compare_loss_curve_samples, default_litegs_parity_fixtures, default_parity_report_path,
     parity_fixture_id_for_input_path, resolve_litegs_parity_fixture_input_path,
@@ -627,6 +640,12 @@ pub struct TrainingConfig {
     /// Disabled by default for RGB-only datasets because pseudo-depth targets
     /// can destabilize geometric optimization.
     pub use_synthetic_depth: bool,
+    /// Number of decoded frames retained by the async prefetch cache.
+    pub frame_cache_capacity: usize,
+    /// Number of future frames queued ahead of the current cursor.
+    pub frame_prefetch_ahead: usize,
+    /// Deterministic shuffle seed for frame ordering. Zero preserves dataset order.
+    pub frame_shuffle_seed: u64,
     /// Render scale used by the Metal backend (relative to input resolution).
     pub metal_render_scale: f32,
     /// Number of Gaussians processed per GPU chunk in the Metal backend.
@@ -681,6 +700,9 @@ impl Default for TrainingConfig {
             min_depth: 0.01,
             max_depth: 10.0,
             use_synthetic_depth: false,
+            frame_cache_capacity: 8,
+            frame_prefetch_ahead: 4,
+            frame_shuffle_seed: 0,
             metal_render_scale: 0.5,
             metal_gaussian_chunk_size: 32,
             metal_profile_steps: false,

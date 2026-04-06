@@ -1,9 +1,9 @@
 #[cfg(feature = "gpu")]
 use super::data_loading::{trainable_from_map, LoadedTrainingData};
 #[cfg(feature = "gpu")]
-use super::metal_trainer::{MetalStepProfileSummary, MetalTrainer};
+use super::metal_trainer::{MetalStepProfile, MetalTrainer};
 #[cfg(feature = "gpu")]
-use super::{train_stream, TrainingConfig, TrainingProfile};
+use super::{TrainingConfig, TrainingProfile};
 #[cfg(feature = "gpu")]
 use crate::diff::diff_splat::DiffCamera;
 #[cfg(feature = "gpu")]
@@ -174,7 +174,6 @@ fn run_step_microbenchmark(
             frame_idx,
             frames.len(),
             true,
-            false,
         )?;
     }
 
@@ -194,7 +193,6 @@ fn run_step_microbenchmark(
             frame_idx,
             frames.len(),
             true,
-            false,
         )?;
         let summary = outcome.profile_summary().ok_or_else(|| {
             TrainingError::TrainingFailed(
@@ -237,12 +235,7 @@ fn run_smoke_training_benchmark(
     let mut gaussians = trainable_from_map(&loaded.initial_map, &device, config)?;
 
     let smoke_start = Instant::now();
-    let stats = train_stream::run_training_loop(
-        &mut trainer,
-        &mut gaussians,
-        &frames,
-        spec.smoke_iterations,
-    )?;
+    let stats = trainer.train(&mut gaussians, &frames, spec.smoke_iterations)?;
     let smoke_training_ms = smoke_start.elapsed().as_secs_f64() * 1000.0;
 
     Ok(SmokeBenchmark {
@@ -259,7 +252,7 @@ fn run_smoke_training_benchmark(
 
 #[cfg(feature = "gpu")]
 fn accumulate_profile(
-    summary: MetalStepProfileSummary,
+    summary: MetalStepProfile,
     forward_ms: &mut f64,
     backward_ms: &mut f64,
     loss_ms: &mut f64,
@@ -403,4 +396,73 @@ fn synthetic_depth_frame(width: usize, height: usize, frame_idx: usize) -> Vec<f
 #[cfg(feature = "gpu")]
 fn duration_ms(duration: std::time::Duration) -> f64 {
     duration.as_secs_f64() * 1000.0
+}
+
+#[cfg(all(test, feature = "gpu"))]
+mod tests {
+    use super::{
+        benchmark_config, run_metal_training_benchmark, synthetic_loaded_training_data,
+        MetalTrainingBenchmarkSpec,
+    };
+    use crate::TrainingProfile;
+    use candle_core::Device;
+
+    #[test]
+    fn benchmark_config_disables_topology_for_guardrail_runs() {
+        let spec = MetalTrainingBenchmarkSpec {
+            gaussian_count: 256,
+            smoke_iterations: 9,
+            warmup_steps: 2,
+            measured_steps: 5,
+            training_profile: TrainingProfile::LiteGsMacV1,
+            ..MetalTrainingBenchmarkSpec::default()
+        };
+
+        let config = benchmark_config(&spec);
+
+        assert_eq!(config.training_profile, TrainingProfile::LiteGsMacV1);
+        assert_eq!(config.max_initial_gaussians, 256);
+        assert_eq!(config.iterations, 9);
+        assert_eq!(config.densify_interval, 0);
+        assert_eq!(config.prune_interval, 0);
+        assert!(config.topology_warmup > config.iterations);
+        assert!(!config.metal_use_native_forward);
+    }
+
+    #[test]
+    fn synthetic_loaded_training_data_matches_requested_fixture_shape() {
+        let spec = MetalTrainingBenchmarkSpec {
+            width: 20,
+            height: 12,
+            frame_count: 4,
+            gaussian_count: 25,
+            ..MetalTrainingBenchmarkSpec::default()
+        };
+
+        let loaded = synthetic_loaded_training_data(&spec, &Device::Cpu).unwrap();
+
+        assert_eq!(loaded.cameras.len(), 4);
+        assert_eq!(loaded.colors.len(), 4);
+        assert_eq!(loaded.depths.len(), 4);
+        assert_eq!(loaded.colors[0].len(), 20 * 12 * 3);
+        assert_eq!(loaded.depths[0].len(), 20 * 12);
+        assert_eq!(loaded.initial_map.len(), 25);
+    }
+
+    #[test]
+    fn benchmark_rejects_invalid_spec_before_requesting_metal() {
+        let err = run_metal_training_benchmark(&MetalTrainingBenchmarkSpec {
+            width: 0,
+            ..MetalTrainingBenchmarkSpec::default()
+        })
+        .expect_err("zero width should fail validation");
+        assert!(err.to_string().contains("width and height must both be > 0"));
+
+        let err = run_metal_training_benchmark(&MetalTrainingBenchmarkSpec {
+            gaussian_count: 0,
+            ..MetalTrainingBenchmarkSpec::default()
+        })
+        .expect_err("zero gaussians should fail validation");
+        assert!(err.to_string().contains("gaussian_count must be > 0"));
+    }
 }

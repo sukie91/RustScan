@@ -128,7 +128,7 @@ pub fn last_metal_training_telemetry() -> Option<LiteGsTrainingTelemetry> {
         .clone()
 }
 
-struct MetalTrainingFrame {
+pub(crate) struct MetalTrainingFrame {
     camera: DiffCamera,
     target_color: Tensor,
     target_depth: Tensor,
@@ -474,13 +474,13 @@ pub struct MetalTrainer {
     cluster_assignment: Option<ClusterAssignment>,
 }
 
-struct MetalTrainingStats {
-    final_loss: f32,
-    final_step_loss: f32,
-    telemetry: LiteGsTrainingTelemetry,
+pub(crate) struct MetalTrainingStats {
+    pub(crate) final_loss: f32,
+    pub(crate) final_step_loss: f32,
+    pub(crate) telemetry: LiteGsTrainingTelemetry,
 }
 
-struct MetalStepOutcome {
+pub(crate) struct MetalStepOutcome {
     loss: f32,
     visible_gaussians: usize,
     total_gaussians: usize,
@@ -712,20 +712,20 @@ struct MetalRenderProfile {
 }
 
 #[derive(Debug, Default, Clone, Copy)]
-struct MetalStepProfile {
-    projection: Duration,
-    sorting: Duration,
-    rasterization: Duration,
+pub(crate) struct MetalStepProfile {
+    pub(crate) projection: Duration,
+    pub(crate) sorting: Duration,
+    pub(crate) rasterization: Duration,
     native_forward: Option<NativeParityProfile>,
-    loss: Duration,
-    backward: Duration,
-    optimizer: Duration,
-    total: Duration,
-    visible_gaussians: usize,
-    total_gaussians: usize,
-    active_tiles: usize,
-    tile_gaussian_refs: usize,
-    max_gaussians_per_tile: usize,
+    pub(crate) loss: Duration,
+    pub(crate) backward: Duration,
+    pub(crate) optimizer: Duration,
+    pub(crate) total: Duration,
+    pub(crate) visible_gaussians: usize,
+    pub(crate) total_gaussians: usize,
+    pub(crate) active_tiles: usize,
+    pub(crate) tile_gaussian_refs: usize,
+    pub(crate) max_gaussians_per_tile: usize,
 }
 
 impl MetalStepProfile {
@@ -797,6 +797,12 @@ impl MetalStepProfile {
             duration_ms(self.backward),
             duration_ms(self.optimizer),
         );
+    }
+}
+
+impl MetalStepOutcome {
+    pub(crate) fn profile_summary(&self) -> Option<MetalStepProfile> {
+        self.profile
     }
 }
 
@@ -2696,7 +2702,7 @@ impl MetalTrainer {
         })
     }
 
-    fn prepare_frames(
+    pub(crate) fn prepare_frames(
         &self,
         loaded: &LoadedTrainingData,
     ) -> Result<Vec<MetalTrainingFrame>, TrainingError> {
@@ -2742,12 +2748,11 @@ impl MetalTrainer {
         Ok(frames)
     }
 
-    fn train(
+    pub(crate) fn initialize_training_session(
         &mut self,
         gaussians: &mut TrainableGaussians,
         frames: &[MetalTrainingFrame],
-        max_iterations: usize,
-    ) -> candle_core::Result<MetalTrainingStats> {
+    ) -> candle_core::Result<()> {
         if frames.is_empty() {
             candle_core::bail!("metal backend received zero training frames");
         }
@@ -2762,6 +2767,16 @@ impl MetalTrainer {
             self.runtime
                 .dispatch_fill_u32(MetalBufferSlot::TileIndices, 0, 1)?;
         }
+        Ok(())
+    }
+
+    pub(crate) fn train(
+        &mut self,
+        gaussians: &mut TrainableGaussians,
+        frames: &[MetalTrainingFrame],
+        max_iterations: usize,
+    ) -> candle_core::Result<MetalTrainingStats> {
+        self.initialize_training_session(gaussians, frames)?;
         let runtime_stats = self.runtime.stats();
 
         log::info!(
@@ -2826,7 +2841,7 @@ impl MetalTrainer {
         })
     }
 
-    fn training_step(
+    pub(crate) fn training_step(
         &mut self,
         gaussians: &mut TrainableGaussians,
         frame: &MetalTrainingFrame,

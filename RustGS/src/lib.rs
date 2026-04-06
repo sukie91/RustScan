@@ -76,8 +76,9 @@ pub use crate::training::{
 #[cfg(feature = "gpu")]
 pub use crate::training::{
     estimate_chunk_capacity, evaluate_scene, evaluation_device, last_metal_training_telemetry,
-    render_evaluation_frame, trainable_from_scene, ChunkCapacityDisposition, ChunkCapacityEstimate,
-    LiteGsOptimizerLrs, LiteGsTrainingTelemetry,
+    render_evaluation_frame, run_metal_training_benchmark, trainable_from_scene,
+    ChunkCapacityDisposition, ChunkCapacityEstimate, LiteGsOptimizerLrs,
+    LiteGsTrainingTelemetry, MetalTrainingBenchmarkReport, MetalTrainingBenchmarkSpec,
 };
 pub use crate::training::{TrainingBackend, TrainingConfig, TrainingResult};
 
@@ -100,6 +101,16 @@ pub(crate) fn preferred_device() -> Device {
             Device::Cpu
         }
     }
+}
+
+#[cfg(feature = "gpu")]
+pub fn metal_available() -> bool {
+    try_metal_device().is_ok()
+}
+
+#[cfg(not(feature = "gpu"))]
+pub fn metal_available() -> bool {
+    false
 }
 
 #[cfg(feature = "gpu")]
