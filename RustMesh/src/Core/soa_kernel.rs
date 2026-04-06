@@ -13,7 +13,12 @@
 use crate::handles::{EdgeHandle, FaceHandle, HalfedgeHandle, VertexHandle};
 use crate::items::{Edge, Face, Halfedge};
 use glam::{Vec2, Vec3, Vec4};
-use std::collections::HashMap;
+
+#[derive(Debug, Clone, Copy)]
+struct EdgeLookupEntry {
+    other_vertex: u32,
+    halfedge: HalfedgeHandle,
+}
 
 /// SoA Kernel - SIMD-friendly mesh storage
 #[derive(Debug, Clone)]
@@ -31,8 +36,9 @@ pub struct SoAKernel {
     edges: Vec<Edge>,
     faces: Vec<Face>,
 
-    // Edge lookup: (min_v, max_v) -> HalfedgeHandle (the one pointing from min to max)
-    edge_map: HashMap<(u32, u32), HalfedgeHandle>,
+    // Edge lookup bucketed by the lower vertex index, then sorted by the higher
+    // vertex index. This keeps lookups cache-friendly on triangle insertion.
+    edge_lookup: Vec<Vec<EdgeLookupEntry>>,
 
     // Track which halfedges have had next set
     next_set: Vec<bool>,
@@ -77,7 +83,7 @@ impl SoAKernel {
             halfedges: Vec::new(),
             edges: Vec::new(),
             faces: Vec::new(),
-            edge_map: HashMap::new(),
+            edge_lookup: Vec::new(),
             next_set: Vec::new(),
             // Attributes
             vertex_normals: None,
@@ -106,7 +112,7 @@ impl SoAKernel {
         self.halfedges.clear();
         self.edges.clear();
         self.faces.clear();
-        self.edge_map.clear();
+        self.edge_lookup.clear();
         self.next_set.clear();
         // Clear attributes
         self.vertex_normals = None;
@@ -134,6 +140,7 @@ impl SoAKernel {
         self.y.push(point.y);
         self.z.push(point.z);
         self.halfedge_handles.push(None);
+        self.edge_lookup.push(Vec::new());
         self.vertex_deleted.push(false);
 
         // Resize attribute arrays if they exist
@@ -267,16 +274,15 @@ impl SoAKernel {
     /// Add a new edge and return the handle to the first halfedge
     #[inline]
     pub fn add_edge(&mut self, start_vh: VertexHandle, end_vh: VertexHandle) -> HalfedgeHandle {
-        let (v0, v1) = if start_vh.idx() < end_vh.idx() {
-            (start_vh.idx(), end_vh.idx())
-        } else {
-            (end_vh.idx(), start_vh.idx())
-        };
+        let (bucket_idx, other_vertex) = Self::edge_lookup_key(start_vh.idx(), end_vh.idx());
 
         // Check if edge already exists
-        if let Some(&existing_heh) = self.edge_map.get(&(v0, v1)) {
+        if let Some(existing_heh) = self.edge_lookup_halfedge(bucket_idx, other_vertex) {
             // Return the halfedge pointing to end_vh
-            let to_v = self.halfedge(existing_heh).map(|he| he.vertex_handle.idx());
+            let to_v = self
+                .halfedges
+                .get(existing_heh.idx_usize())
+                .map(|he| he.vertex_handle.idx());
             if to_v == Some(end_vh.idx()) {
                 return existing_heh;
             } else {
@@ -323,8 +329,7 @@ impl SoAKernel {
         self.halfedge_deleted.push(false);
         self.halfedge_deleted.push(false);
 
-        // Store edge in map for O(1) lookup
-        self.edge_map.insert((v0, v1), he0_handle);
+        self.insert_edge_lookup(bucket_idx, other_vertex, he0_handle);
 
         he0_handle
     }
@@ -335,8 +340,8 @@ impl SoAKernel {
         start_vh: VertexHandle,
         end_vh: VertexHandle,
     ) -> Option<HalfedgeHandle> {
-        let key = (start_vh.idx().min(end_vh.idx()), start_vh.idx().max(end_vh.idx()));
-        let &existing_heh = self.edge_map.get(&key)?;
+        let (bucket_idx, other_vertex) = Self::edge_lookup_key(start_vh.idx(), end_vh.idx());
+        let existing_heh = self.edge_lookup_halfedge(bucket_idx, other_vertex)?;
         if self.to_vertex_handle(existing_heh) == end_vh {
             Some(existing_heh)
         } else {
@@ -347,7 +352,8 @@ impl SoAKernel {
     /// Check if edge already exists
     #[inline]
     pub fn edge_exists(&self, v0: u32, v1: u32) -> bool {
-        self.edge_map.contains_key(&(v0.min(v1), v0.max(v1)))
+        let (bucket_idx, other_vertex) = Self::edge_lookup_key(v0, v1);
+        self.edge_lookup_halfedge(bucket_idx, other_vertex).is_some()
     }
 
     /// Get edge count
@@ -696,9 +702,13 @@ impl SoAKernel {
             // Get the two halfedges before marking as invalid
             let he0 = self.edges[idx].halfedges[0];
             let he1 = self.edges[idx].halfedges[1];
+            let to0 = self.halfedges.get(he0.idx_usize()).map(|he| he.vertex_handle.idx());
+            let to1 = self.halfedges.get(he1.idx_usize()).map(|he| he.vertex_handle.idx());
 
-            self.edge_map
-                .retain(|_, stored_heh| *stored_heh != he0 && *stored_heh != he1);
+            if let (Some(v0), Some(v1)) = (to0, to1) {
+                let (bucket_idx, other_vertex) = Self::edge_lookup_key(v0, v1);
+                self.remove_edge_lookup(bucket_idx, other_vertex);
+            }
             self.edge_deleted[idx] = true;
             self.mark_halfedge_deleted(he0, true);
             self.mark_halfedge_deleted(he1, true);
@@ -706,6 +716,55 @@ impl SoAKernel {
             // Mark halfedges as invalid
             self.edges[idx].halfedges =
                 [HalfedgeHandle::new(u32::MAX), HalfedgeHandle::new(u32::MAX)];
+        }
+    }
+}
+
+impl SoAKernel {
+    #[inline]
+    fn edge_lookup_key(v0: u32, v1: u32) -> (usize, u32) {
+        let min_v = v0.min(v1);
+        let max_v = v0.max(v1);
+        (min_v as usize, max_v)
+    }
+
+    #[inline]
+    fn edge_lookup_halfedge(&self, bucket_idx: usize, other_vertex: u32) -> Option<HalfedgeHandle> {
+        let bucket = self.edge_lookup.get(bucket_idx)?;
+        let pos = bucket
+            .binary_search_by_key(&other_vertex, |entry| entry.other_vertex)
+            .ok()?;
+        Some(bucket[pos].halfedge)
+    }
+
+    #[inline]
+    fn insert_edge_lookup(
+        &mut self,
+        bucket_idx: usize,
+        other_vertex: u32,
+        halfedge: HalfedgeHandle,
+    ) {
+        let bucket = &mut self.edge_lookup[bucket_idx];
+        let insert_at = match bucket.binary_search_by_key(&other_vertex, |entry| entry.other_vertex)
+        {
+            Ok(pos) | Err(pos) => pos,
+        };
+        bucket.insert(
+            insert_at,
+            EdgeLookupEntry {
+                other_vertex,
+                halfedge,
+            },
+        );
+    }
+
+    #[inline]
+    fn remove_edge_lookup(&mut self, bucket_idx: usize, other_vertex: u32) {
+        let Some(bucket) = self.edge_lookup.get_mut(bucket_idx) else {
+            return;
+        };
+        if let Ok(pos) = bucket.binary_search_by_key(&other_vertex, |entry| entry.other_vertex) {
+            bucket.remove(pos);
         }
     }
 }

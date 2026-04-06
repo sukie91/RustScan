@@ -518,6 +518,11 @@ impl RustMesh {
         self.kernel.find_halfedge(start_vh, end_vh)
     }
 
+    /// Find an edge between two vertices.
+    pub fn find_edge_between(&self, v0: VertexHandle, v1: VertexHandle) -> Option<EdgeHandle> {
+        self.find_halfedge_between(v0, v1).map(|heh| self.edge_handle(heh))
+    }
+
     fn boundary_outgoing_halfedge(&self, vh: VertexHandle) -> Option<HalfedgeHandle> {
         if !vh.is_valid() || self.is_vertex_deleted(vh) {
             return None;
@@ -1512,6 +1517,95 @@ impl RustMesh {
         self.kernel.delete_edge(eh);
     }
 
+    /// Split an edge by inserting a new vertex at the provided point.
+    ///
+    /// Adjacent triangle faces are split into two triangles each. For non-triangle
+    /// faces, the new vertex is inserted into the face loop between the edge endpoints.
+    pub fn split_edge(
+        &mut self,
+        eh: EdgeHandle,
+        point: glam::Vec3,
+    ) -> Result<VertexHandle, &'static str> {
+        if !eh.is_valid() || self.is_edge_deleted(eh) {
+            return Err("Invalid edge");
+        }
+
+        let he0 = self.edge_halfedge_handle(eh, 0);
+        if !he0.is_valid() || self.is_halfedge_deleted(he0) {
+            return Err("Invalid halfedge");
+        }
+
+        let v0 = self.from_vertex_handle(he0);
+        let v1 = self.to_vertex_handle(he0);
+        if !v0.is_valid()
+            || !v1.is_valid()
+            || v0 == v1
+            || self.is_vertex_deleted(v0)
+            || self.is_vertex_deleted(v1)
+        {
+            return Err("Invalid edge endpoints");
+        }
+
+        let new_vh = VertexHandle::from_usize(self.n_vertices());
+        let mut replacements: HashMap<usize, Vec<Vec<VertexHandle>>> = HashMap::new();
+
+        for heh in [he0, self.edge_halfedge_handle(eh, 1)] {
+            let Some(fh) = self.face_handle(heh) else {
+                continue;
+            };
+            if self.is_face_deleted(fh) || replacements.contains_key(&fh.idx_usize()) {
+                continue;
+            }
+
+            let face = self.sanitized_face_vertices(fh);
+            let Some(replacement) = split_face_loop_along_edge(&face, v0, v1, new_vh) else {
+                return Err("Edge is not represented by its incident face");
+            };
+            replacements.insert(fh.idx_usize(), replacement);
+        }
+
+        if replacements.is_empty() {
+            return Err("Edge has no incident faces");
+        }
+
+        let inserted = self.add_vertex(point);
+        debug_assert_eq!(inserted, new_vh);
+
+        let rebuilt_faces = self.rebuild_faces_with_replacements(&replacements);
+        self.rebuild_preserving_vertex_indices(&rebuilt_faces);
+
+        Ok(new_vh)
+    }
+
+    /// Split a face by inserting a new vertex at the provided point and
+    /// fan-triangulating the face around it.
+    pub fn split_face(
+        &mut self,
+        fh: FaceHandle,
+        point: glam::Vec3,
+    ) -> Result<VertexHandle, &'static str> {
+        if !fh.is_valid() || self.is_face_deleted(fh) {
+            return Err("Invalid face");
+        }
+
+        let face = self.sanitized_face_vertices(fh);
+        if face.len() < 3 {
+            return Err("Face must have at least three vertices");
+        }
+
+        let new_vh = VertexHandle::from_usize(self.n_vertices());
+        let mut replacements: HashMap<usize, Vec<Vec<VertexHandle>>> = HashMap::new();
+        replacements.insert(fh.idx_usize(), triangulate_face_loop_with_vertex(&face, new_vh));
+
+        let inserted = self.add_vertex(point);
+        debug_assert_eq!(inserted, new_vh);
+
+        let rebuilt_faces = self.rebuild_faces_with_replacements(&replacements);
+        self.rebuild_preserving_vertex_indices(&rebuilt_faces);
+
+        Ok(new_vh)
+    }
+
     /// Rebuild the mesh from currently active faces and vertices.
     ///
     /// This mirrors OpenMesh's `garbage_collection()` at a higher level:
@@ -1627,6 +1721,32 @@ impl RustMesh {
         *self = rebuilt;
     }
 
+    fn rebuild_faces_with_replacements(
+        &self,
+        replacements: &HashMap<usize, Vec<Vec<VertexHandle>>>,
+    ) -> Vec<Vec<VertexHandle>> {
+        let mut faces = Vec::new();
+
+        for fh in self.faces() {
+            if let Some(replacement_faces) = replacements.get(&fh.idx_usize()) {
+                for replacement in replacement_faces {
+                    let sanitized = dedupe_face_vertices(replacement.clone());
+                    if sanitized.len() >= 3 {
+                        faces.push(sanitized);
+                    }
+                }
+                continue;
+            }
+
+            let vertices = self.sanitized_face_vertices(fh);
+            if vertices.len() >= 3 {
+                faces.push(vertices);
+            }
+        }
+
+        faces
+    }
+
     fn rebuild_preserving_vertex_indices(&mut self, faces: &[Vec<VertexHandle>]) {
         let old_vertex_count = self.n_vertices();
         let preserve_normals = self.has_vertex_normals();
@@ -1688,6 +1808,202 @@ impl RustMesh {
         rebuild_polygon_faces(&mut rebuilt, faces);
 
         *self = rebuilt;
+    }
+
+    // =========================================================================
+    // Normal computation
+    // =========================================================================
+
+    /// Compute a normalized face normal.
+    ///
+    /// Returns `Vec3::ZERO` for invalid, deleted, or degenerate faces.
+    pub fn calc_face_normal(&self, fh: FaceHandle) -> glam::Vec3 {
+        let area_normal = self.calc_face_area_normal(fh);
+        if area_normal.length_squared() > 0.0 {
+            area_normal.normalize()
+        } else {
+            glam::Vec3::ZERO
+        }
+    }
+
+    /// Compute an area-weighted vertex normal.
+    ///
+    /// Returns `Vec3::ZERO` for invalid, deleted, or isolated vertices.
+    pub fn calc_vertex_normal(&self, vh: VertexHandle) -> glam::Vec3 {
+        if !vh.is_valid() || self.is_vertex_deleted(vh) {
+            return glam::Vec3::ZERO;
+        }
+
+        let mut accumulated = glam::Vec3::ZERO;
+
+        for fh in self.faces() {
+            if !self.face_contains_vertex(fh, vh) {
+                continue;
+            }
+
+            accumulated += self.calc_face_area_normal(fh);
+        }
+
+        if accumulated.length_squared() > 0.0 {
+            accumulated.normalize()
+        } else {
+            glam::Vec3::ZERO
+        }
+    }
+
+    /// Recompute and store all face normals.
+    pub fn update_face_normals(&mut self) {
+        let normals: Vec<glam::Vec3> = self.faces().map(|fh| self.calc_face_normal(fh)).collect();
+
+        self.request_face_normals();
+        for (idx, normal) in normals.into_iter().enumerate() {
+            self.kernel.set_face_normal(FaceHandle::from_usize(idx), normal);
+        }
+    }
+
+    /// Recompute and store all vertex normals using area-weighted face contributions.
+    pub fn update_vertex_normals(&mut self) {
+        let mut accumulated = vec![glam::Vec3::ZERO; self.n_vertices()];
+
+        for fh in self.faces() {
+            let face_area_normal = self.calc_face_area_normal(fh);
+            if face_area_normal.length_squared() == 0.0 {
+                continue;
+            }
+
+            let Some(first_heh) = self.face_halfedge_handle(fh) else {
+                continue;
+            };
+
+            let mut current_heh = first_heh;
+            let mut steps = 0usize;
+            let max_steps = self.n_halfedges().max(1);
+
+            loop {
+                if steps >= max_steps || !current_heh.is_valid() {
+                    break;
+                }
+                steps += 1;
+
+                let vh = self.to_vertex_handle(current_heh);
+                if vh.is_valid() && !self.is_vertex_deleted(vh) {
+                    accumulated[vh.idx_usize()] += face_area_normal;
+                }
+
+                let next_heh = self.next_halfedge_handle(current_heh);
+                if !next_heh.is_valid() || next_heh == current_heh {
+                    break;
+                }
+
+                current_heh = next_heh;
+                if current_heh == first_heh {
+                    break;
+                }
+            }
+        }
+
+        self.request_vertex_normals();
+        for (idx, normal) in accumulated.into_iter().enumerate() {
+            let normalized = if normal.length_squared() > 0.0 {
+                normal.normalize()
+            } else {
+                glam::Vec3::ZERO
+            };
+            self.kernel
+                .set_vertex_normal(VertexHandle::from_usize(idx), normalized);
+        }
+    }
+
+    /// Recompute both face and vertex normals.
+    pub fn update_normals(&mut self) {
+        self.update_face_normals();
+        self.update_vertex_normals();
+    }
+
+    fn calc_face_area_normal(&self, fh: FaceHandle) -> glam::Vec3 {
+        if !fh.is_valid() || self.is_face_deleted(fh) {
+            return glam::Vec3::ZERO;
+        }
+
+        let Some(first_heh) = self.face_halfedge_handle(fh) else {
+            return glam::Vec3::ZERO;
+        };
+
+        let mut current_heh = first_heh;
+        let mut accumulated = glam::Vec3::ZERO;
+        let mut steps = 0usize;
+        let max_steps = self.n_halfedges().max(1);
+
+        loop {
+            if steps >= max_steps || !current_heh.is_valid() {
+                return glam::Vec3::ZERO;
+            }
+            steps += 1;
+
+            let next_heh = self.next_halfedge_handle(current_heh);
+            if !next_heh.is_valid() {
+                return glam::Vec3::ZERO;
+            }
+
+            let current_vh = self.to_vertex_handle(current_heh);
+            let next_vh = self.to_vertex_handle(next_heh);
+            let (Some(current_point), Some(next_point)) =
+                (self.point(current_vh), self.point(next_vh))
+            else {
+                return glam::Vec3::ZERO;
+            };
+
+            accumulated += current_point.cross(next_point);
+
+            current_heh = next_heh;
+            if current_heh == first_heh {
+                break;
+            }
+        }
+
+        if steps >= 3 {
+            accumulated
+        } else {
+            glam::Vec3::ZERO
+        }
+    }
+
+    fn face_contains_vertex(&self, fh: FaceHandle, vh: VertexHandle) -> bool {
+        if !fh.is_valid() || !vh.is_valid() || self.is_face_deleted(fh) || self.is_vertex_deleted(vh)
+        {
+            return false;
+        }
+
+        let Some(first_heh) = self.face_halfedge_handle(fh) else {
+            return false;
+        };
+
+        let mut current_heh = first_heh;
+        let mut steps = 0usize;
+        let max_steps = self.n_halfedges().max(1);
+
+        loop {
+            if steps >= max_steps || !current_heh.is_valid() {
+                return false;
+            }
+            steps += 1;
+
+            if self.to_vertex_handle(current_heh) == vh {
+                return true;
+            }
+
+            let next_heh = self.next_halfedge_handle(current_heh);
+            if !next_heh.is_valid() || next_heh == current_heh {
+                return false;
+            }
+
+            current_heh = next_heh;
+            if current_heh == first_heh {
+                break;
+            }
+        }
+
+        false
     }
 
     // =========================================================================
@@ -2100,6 +2416,55 @@ fn canonical_face_key(vertices: &[VertexHandle]) -> Vec<usize> {
     best.unwrap_or_default()
 }
 
+fn split_face_loop_along_edge(
+    face: &[VertexHandle],
+    v0: VertexHandle,
+    v1: VertexHandle,
+    new_vh: VertexHandle,
+) -> Option<Vec<Vec<VertexHandle>>> {
+    if face.len() < 3 {
+        return None;
+    }
+
+    for idx in 0..face.len() {
+        let current = face[idx];
+        let next = face[(idx + 1) % face.len()];
+        if !((current == v0 && next == v1) || (current == v1 && next == v0)) {
+            continue;
+        }
+
+        if face.len() == 3 {
+            let opposite = face[(idx + 2) % face.len()];
+            return Some(vec![
+                vec![current, new_vh, opposite],
+                vec![new_vh, next, opposite],
+            ]);
+        }
+
+        let mut updated_loop = Vec::with_capacity(face.len() + 1);
+        for (loop_idx, &vh) in face.iter().enumerate() {
+            updated_loop.push(vh);
+            if loop_idx == idx {
+                updated_loop.push(new_vh);
+            }
+        }
+        return Some(vec![updated_loop]);
+    }
+
+    None
+}
+
+fn triangulate_face_loop_with_vertex(
+    face: &[VertexHandle],
+    new_vh: VertexHandle,
+) -> Vec<Vec<VertexHandle>> {
+    let mut triangles = Vec::with_capacity(face.len());
+    for idx in 0..face.len() {
+        triangles.push(vec![face[idx], face[(idx + 1) % face.len()], new_vh]);
+    }
+    triangles
+}
+
 fn try_add_face_with_rotations(mesh: &mut RustMesh, vertices: &[VertexHandle]) -> bool {
     if vertices.len() < 3 {
         return false;
@@ -2360,6 +2725,107 @@ mod tests_soa {
             mesh.f_color(FaceHandle::new(0)),
             Some(glam::vec4(0.5, 0.5, 0.5, 1.0))
         );
+    }
+
+    #[test]
+    fn test_update_face_normals_and_calc_face_normal() {
+        let mut mesh = RustMesh::new();
+
+        let v0 = mesh.add_vertex(glam::vec3(0.0, 0.0, 0.0));
+        let v1 = mesh.add_vertex(glam::vec3(1.0, 0.0, 0.0));
+        let v2 = mesh.add_vertex(glam::vec3(0.0, 1.0, 0.0));
+        let fh = mesh.add_face(&[v0, v1, v2]).unwrap();
+
+        let expected = glam::vec3(0.0, 0.0, 1.0);
+        let calc = mesh.calc_face_normal(fh);
+        assert!((calc - expected).length() < 1e-6);
+
+        mesh.update_face_normals();
+        let stored = mesh.f_normal(fh).unwrap();
+        assert!((stored - expected).length() < 1e-6);
+    }
+
+    #[test]
+    fn test_update_vertex_normals_area_weighted() {
+        let mut mesh = RustMesh::new();
+
+        let v0 = mesh.add_vertex(glam::vec3(0.0, 0.0, 0.0));
+        let v1 = mesh.add_vertex(glam::vec3(1.0, 0.0, 0.0));
+        let v2 = mesh.add_vertex(glam::vec3(0.0, 1.0, 0.0));
+        let v3 = mesh.add_vertex(glam::vec3(0.0, 0.0, 1.0));
+
+        mesh.add_face(&[v0, v1, v2]).unwrap();
+        mesh.add_face(&[v0, v2, v3]).unwrap();
+
+        let expected = glam::vec3(1.0, 0.0, 1.0).normalize();
+
+        let calc = mesh.calc_vertex_normal(v0);
+        assert!((calc - expected).length() < 1e-6);
+
+        mesh.update_vertex_normals();
+        let stored = mesh.normal(v0).unwrap();
+        assert!((stored - expected).length() < 1e-6);
+    }
+
+    #[test]
+    fn test_update_normals_requests_and_updates_both_arrays() {
+        let mut mesh = RustMesh::new();
+
+        let v0 = mesh.add_vertex(glam::vec3(0.0, 0.0, 0.0));
+        let v1 = mesh.add_vertex(glam::vec3(1.0, 0.0, 0.0));
+        let v2 = mesh.add_vertex(glam::vec3(0.0, 1.0, 0.0));
+        let fh = mesh.add_face(&[v0, v1, v2]).unwrap();
+
+        mesh.update_normals();
+
+        assert!(mesh.has_face_normals());
+        assert!(mesh.has_vertex_normals());
+
+        let expected = glam::vec3(0.0, 0.0, 1.0);
+        assert!((mesh.f_normal(fh).unwrap() - expected).length() < 1e-6);
+        assert!((mesh.normal(v0).unwrap() - expected).length() < 1e-6);
+        assert!((mesh.normal(v1).unwrap() - expected).length() < 1e-6);
+        assert!((mesh.normal(v2).unwrap() - expected).length() < 1e-6);
+    }
+
+    #[test]
+    fn test_split_edge_boundary_triangle_updates_counts() {
+        let mut mesh = RustMesh::new();
+
+        let v0 = mesh.add_vertex(glam::vec3(0.0, 0.0, 0.0));
+        let v1 = mesh.add_vertex(glam::vec3(2.0, 0.0, 0.0));
+        let v2 = mesh.add_vertex(glam::vec3(0.0, 1.0, 0.0));
+        mesh.add_face(&[v0, v1, v2]).unwrap();
+
+        let eh = mesh.find_edge_between(v0, v1).unwrap();
+        let new_vh = mesh.split_edge(eh, glam::vec3(1.0, 0.0, 0.0)).unwrap();
+
+        assert_eq!(mesh.n_vertices(), 4);
+        assert_eq!(mesh.n_edges(), 5);
+        assert_eq!(mesh.n_active_faces(), 2);
+        assert_eq!(mesh.point(new_vh), Some(glam::vec3(1.0, 0.0, 0.0)));
+    }
+
+    #[test]
+    fn test_split_face_triangle_creates_three_triangles() {
+        let mut mesh = RustMesh::new();
+
+        let v0 = mesh.add_vertex(glam::vec3(0.0, 0.0, 0.0));
+        let v1 = mesh.add_vertex(glam::vec3(1.0, 0.0, 0.0));
+        let v2 = mesh.add_vertex(glam::vec3(0.0, 1.0, 0.0));
+        let fh = mesh.add_face(&[v0, v1, v2]).unwrap();
+
+        let new_vh = mesh.split_face(fh, glam::vec3(0.25, 0.25, 0.0)).unwrap();
+
+        assert_eq!(mesh.n_vertices(), 4);
+        assert_eq!(mesh.n_active_faces(), 3);
+        assert_eq!(mesh.point(new_vh), Some(glam::vec3(0.25, 0.25, 0.0)));
+
+        for split_fh in mesh.faces() {
+            let verts = mesh.face_vertices_vec(split_fh);
+            assert_eq!(verts.len(), 3);
+            assert!(verts.contains(&new_vh));
+        }
     }
 
     #[test]

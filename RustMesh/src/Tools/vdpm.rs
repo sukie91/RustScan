@@ -274,6 +274,42 @@ impl ProgressiveMesh {
     pub fn mesh_mut(&mut self) -> &mut RustMesh {
         &mut self.current
     }
+
+    fn lod_target_faces(&self, level: f32) -> usize {
+        let original_faces = self.original_n_faces();
+        if original_faces == 0 {
+            return 0;
+        }
+
+        let clamped = level.clamp(0.0, 1.0);
+        if clamped <= 0.0 {
+            return 0;
+        }
+        if clamped >= 1.0 {
+            return original_faces;
+        }
+
+        ((original_faces as f32) * clamped).round() as usize
+    }
+
+    /// Reposition the progressive mesh to a normalized level-of-detail.
+    ///
+    /// `level = 0.0` requests the maximally simplified mesh reachable by the
+    /// current collapse legality checks, while `level = 1.0` restores the
+    /// original mesh. Intermediate values map to a face-budget ratio.
+    ///
+    /// The current `refine()` / `vertex_split()` path is still approximate, so
+    /// this API replays from the original mesh for deterministic results.
+    pub fn get_lod(&mut self, level: f32) -> &RustMesh {
+        let target_faces = self.lod_target_faces(level);
+
+        reset(self);
+        if target_faces < self.original_n_faces() {
+            simplify(self, target_faces);
+        }
+
+        &self.current
+    }
 }
 
 /// Create a progressive mesh from a standard mesh
@@ -646,5 +682,47 @@ mod tests {
 
         let current = get_mesh(&pm);
         assert_eq!(current.n_faces(), mesh.n_faces());
+    }
+
+    #[test]
+    fn test_get_lod_clamps_to_extremes() {
+        let mesh = generate_sphere(1.0, 12, 12);
+        let original_faces = mesh.n_faces();
+        let mut pm = create_progressive_mesh(&mesh);
+
+        let _ = pm.get_lod(-0.5);
+        let simplified_faces = pm.n_valid_faces();
+        assert!(simplified_faces < original_faces);
+
+        let _ = pm.get_lod(1.5);
+        assert_eq!(pm.n_valid_faces(), original_faces);
+        assert_eq!(pm.n_collapses(), 0);
+    }
+
+    #[test]
+    fn test_get_lod_midpoint_targets_half_face_budget() {
+        let mesh = generate_sphere(1.0, 12, 12);
+        let original_faces = mesh.n_faces();
+        let target_faces = ((original_faces as f32) * 0.5).round() as usize;
+        let tolerance = (original_faces / 8).max(4);
+
+        let mut pm = create_progressive_mesh(&mesh);
+
+        let _ = pm.get_lod(0.0);
+        let fully_simplified_faces = pm.n_valid_faces();
+        assert!(fully_simplified_faces < original_faces);
+
+        let _ = pm.get_lod(0.5);
+        let midpoint_faces = pm.n_valid_faces();
+
+        assert!(midpoint_faces > fully_simplified_faces);
+        assert!(midpoint_faces < original_faces);
+        assert!(
+            midpoint_faces.abs_diff(target_faces) <= tolerance,
+            "midpoint faces {} should be within {} of target {}",
+            midpoint_faces,
+            tolerance,
+            target_faces
+        );
     }
 }
