@@ -24,6 +24,8 @@ pub struct CollapseRecord {
     pub new_position: Vec3,
     /// The error/priority of this collapse
     pub error: f32,
+    /// Exact mesh state before the collapse, used for deterministic replay.
+    pub pre_collapse_mesh: Box<RustMesh>,
 
     // === Topology information for vertex split ===
     /// The two faces that were removed by the collapse (if any)
@@ -298,8 +300,8 @@ impl ProgressiveMesh {
     /// current collapse legality checks, while `level = 1.0` restores the
     /// original mesh. Intermediate values map to a face-budget ratio.
     ///
-    /// The current `refine()` / `vertex_split()` path is still approximate, so
-    /// this API replays from the original mesh for deterministic results.
+    /// Exact refine records now exist, but this API still resets and replays
+    /// from `original` until incremental current-state navigation is wired up.
     pub fn get_lod(&mut self, level: f32) -> &RustMesh {
         let target_faces = self.lod_target_faces(level);
 
@@ -334,6 +336,7 @@ pub fn simplify(pm: &mut ProgressiveMesh, target_faces: usize) -> usize {
         // Get original positions before collapse
         let original_v_kept_pos = pm.current.point(v_kept).unwrap_or(Vec3::ZERO);
         let original_v_removed_pos = pm.current.point(v_removed).unwrap_or(Vec3::ZERO);
+        let pre_collapse_mesh = Box::new(pm.current.clone());
 
         // Collect topology info before collapse
         let (removed_faces, fan_vertices, is_boundary) =
@@ -357,6 +360,7 @@ pub fn simplify(pm: &mut ProgressiveMesh, target_faces: usize) -> usize {
             original_v_removed_position: original_v_removed_pos,
             new_position: new_pos,
             error,
+            pre_collapse_mesh,
             removed_faces,
             fan_vertices,
             is_boundary,
@@ -376,6 +380,12 @@ pub fn simplify(pm: &mut ProgressiveMesh, target_faces: usize) -> usize {
     }
 
     collapses
+}
+
+fn valid_face_count(mesh: &RustMesh) -> usize {
+    mesh.faces()
+        .filter(|&fh| mesh.face_halfedge_handle(fh).is_some())
+        .count()
 }
 
 /// Collect topology information before a collapse operation
@@ -427,73 +437,12 @@ fn collect_collapse_topology(
 
 /// Perform a vertex split operation (inverse of edge collapse)
 ///
-/// This restores a previously collapsed edge by:
-/// 1. Creating a new vertex at the original position
-/// 2. Restoring the two deleted triangles
-/// 3. Reconnecting the topology
+/// This restores the exact pre-collapse mesh snapshot recorded for the split.
 ///
-/// Returns the new vertex handle on success
+/// Returns the restored vertex handle on success.
 pub fn vertex_split(mesh: &mut RustMesh, record: &CollapseRecord) -> Result<VertexHandle, String> {
-    // Step 1: Create the new vertex at the original removed position
-    let v_new = mesh.add_vertex(record.original_v_removed_position);
-
-    // Step 2: Restore v_kept to its original position
-    mesh.set_point(record.v_kept, record.original_v_kept_position);
-
-    // Step 3: Reconnect topology
-    // This is the complex part - we need to:
-    // - Identify which faces should be repointed to v_new
-    // - Create the two new triangles
-
-    // Get the current neighbors of v_kept
-    let current_neighbors: Vec<VertexHandle> = mesh
-        .vertex_vertices(record.v_kept)
-        .map(|vv| vv.collect())
-        .unwrap_or_default();
-
-    // The fan_vertices in the record tell us which vertices were originally
-    // connected to v_removed vs v_kept
-    // For a basic implementation, we use the boundary check
-
-    if record.fan_vertices.len() >= 2 && !record.is_boundary {
-        // Interior edge collapse - restore two triangles
-        // The fan vertices closest to the original collapsed edge form the new triangles
-        let n = record.fan_vertices.len();
-        if n >= 2 {
-            // Create the two triangles that were removed
-            // Triangle 1: (v_kept, v_new, fan[0])
-            // Triangle 2: (v_new, v_kept, fan[1])
-            // Note: This is a simplified reconstruction
-
-            // Find which fan vertices are still neighbors of v_kept
-            let mut connected_fan: Vec<VertexHandle> = Vec::new();
-            for &fv in &record.fan_vertices {
-                if current_neighbors.contains(&fv) {
-                    connected_fan.push(fv);
-                }
-            }
-
-            if connected_fan.len() >= 2 {
-                // Create the two new triangles
-                let f1 = mesh.add_face(&[record.v_kept, v_new, connected_fan[0]]);
-                let f2 = mesh.add_face(&[v_new, record.v_kept, connected_fan[1]]);
-
-                if f1.is_none() || f2.is_none() {
-                    // If face creation fails, we still keep the new vertex
-                    // but the topology may not be fully restored
-                }
-            }
-        }
-    } else if record.is_boundary && record.fan_vertices.len() >= 1 {
-        // Boundary edge collapse - restore one triangle
-        if let Some(&fv) = record.fan_vertices.first() {
-            if current_neighbors.contains(&fv) {
-                let _ = mesh.add_face(&[record.v_kept, v_new, fv]);
-            }
-        }
-    }
-
-    Ok(v_new)
+    *mesh = (*record.pre_collapse_mesh).clone();
+    Ok(record.v_removed)
 }
 
 /// Refine the progressive mesh to approximately the target number of faces
@@ -501,28 +450,46 @@ pub fn vertex_split(mesh: &mut RustMesh, record: &CollapseRecord) -> Result<Vert
 pub fn refine(pm: &mut ProgressiveMesh, target_faces: usize) -> usize {
     let mut refinements = 0;
 
-    while pm.n_valid_faces() < target_faces && !pm.collapse_stack.is_empty() {
-        // Pop the last collapse record
-        let record = match pm.collapse_stack.pop_back() {
-            Some(r) => r,
-            None => break,
-        };
-
-        // Perform vertex split to reverse the collapse
-        match vertex_split(&mut pm.current, &record) {
-            Ok(_v_new) => {
-                refinements += 1;
-            }
-            Err(e) => {
-                eprintln!("Vertex split failed: {}", e);
-                // Push the record back since we couldn't process it
-                pm.collapse_stack.push_back(record);
-                break;
-            }
+    while let Some(next_faces) = pm
+        .collapse_stack
+        .back()
+        .map(|record| valid_face_count(&record.pre_collapse_mesh))
+    {
+        let current_faces = pm.n_valid_faces();
+        let should_refine = current_faces < target_faces
+            || (current_faces == target_faces && next_faces == target_faces);
+        if !should_refine {
+            break;
         }
+
+        if !refine_one(pm) {
+            break;
+        }
+
+        refinements += 1;
+    }
+
+    if refinements > 0 {
+        pm.vertex_quadrics = ProgressiveMesh::compute_vertex_quadrics(&pm.current);
     }
 
     refinements
+}
+
+fn refine_one(pm: &mut ProgressiveMesh) -> bool {
+    let record = match pm.collapse_stack.pop_back() {
+        Some(record) => record,
+        None => return false,
+    };
+
+    match vertex_split(&mut pm.current, &record) {
+        Ok(_) => true,
+        Err(error) => {
+            eprintln!("Vertex split failed: {}", error);
+            pm.collapse_stack.push_back(record);
+            false
+        }
+    }
 }
 
 /// Get the current mesh from a progressive mesh
@@ -560,6 +527,54 @@ mod tests {
     use super::*;
     use crate::generate_cube;
     use crate::generate_sphere;
+
+    fn canonical_face(face: &[VertexHandle]) -> Vec<usize> {
+        let mut vertices: Vec<usize> = face.iter().map(|vh| vh.idx_usize()).collect();
+        vertices.sort_unstable();
+        vertices
+    }
+
+    fn mesh_signature(mesh: &RustMesh) -> (Vec<(usize, [f32; 3])>, Vec<Vec<usize>>) {
+        let mut vertices = Vec::new();
+        for idx in 0..mesh.n_vertices() {
+            let vh = VertexHandle::from_usize(idx);
+            if mesh.is_vertex_deleted(vh) {
+                continue;
+            }
+            if let Some(point) = mesh.point(vh) {
+                vertices.push((idx, point.to_array()));
+            }
+        }
+
+        let mut faces: Vec<Vec<usize>> = mesh
+            .faces()
+            .filter(|&fh| !mesh.is_face_deleted(fh))
+            .map(|fh| canonical_face(&mesh.face_vertices_vec(fh)))
+            .collect();
+        faces.sort_unstable();
+
+        (vertices, faces)
+    }
+
+    fn assert_non_decreasing(counts: &[usize], label: &str) {
+        for window in counts.windows(2) {
+            assert!(
+                window[0] <= window[1],
+                "{label} should be non-decreasing, got {:?}",
+                counts
+            );
+        }
+    }
+
+    fn assert_non_increasing(counts: &[usize], label: &str) {
+        for window in counts.windows(2) {
+            assert!(
+                window[0] >= window[1],
+                "{label} should be non-increasing, got {:?}",
+                counts
+            );
+        }
+    }
 
     #[test]
     fn test_create_progressive_mesh() {
@@ -616,6 +631,7 @@ mod tests {
     #[test]
     fn test_simplify_then_refine() {
         let mesh = generate_cube();
+        let expected_signature = mesh_signature(&mesh);
         let original_faces = mesh.n_faces();
 
         let mut pm = create_progressive_mesh(&mesh);
@@ -633,11 +649,85 @@ mod tests {
         // Refine back
         let _ = refine(&mut pm, original_faces);
 
-        println!("Refined to {} faces", pm.n_faces());
+        println!("Refined to {} faces", pm.n_valid_faces());
 
-        // The mesh should be back to original or close to it
-        // Note: Due to implementation limitations, exact restoration may not occur
-        assert!(pm.n_faces() >= simplified_faces);
+        assert!(pm.n_valid_faces() >= simplified_faces);
+        assert_eq!(mesh_signature(&pm.current), expected_signature);
+    }
+
+    #[test]
+    fn test_vertex_split_restores_pre_collapse_snapshot_exactly() {
+        let mesh = generate_cube();
+        let mut pm = create_progressive_mesh(&mesh);
+
+        let collapses = simplify(&mut pm, mesh.n_faces() / 2);
+        assert!(collapses > 0);
+
+        let record = pm.collapse_stack.back().unwrap().clone();
+        let expected_signature = mesh_signature(&record.pre_collapse_mesh);
+
+        let restored = vertex_split(&mut pm.current, &record).unwrap();
+
+        assert_eq!(restored, record.v_removed);
+        assert_eq!(mesh_signature(&pm.current), expected_signature);
+    }
+
+    #[test]
+    fn test_refine_restores_last_recorded_snapshot_exactly() {
+        let mesh = generate_cube();
+        let mut pm = create_progressive_mesh(&mesh);
+
+        let collapses = simplify(&mut pm, mesh.n_faces() / 2);
+        assert!(collapses > 0);
+
+        let expected_signature =
+            mesh_signature(&pm.collapse_stack.back().unwrap().pre_collapse_mesh);
+        let remaining_before = pm.collapse_stack.len();
+
+        assert!(refine_one(&mut pm));
+
+        assert_eq!(pm.collapse_stack.len(), remaining_before - 1);
+        assert_eq!(mesh_signature(&pm.current), expected_signature);
+    }
+
+    #[test]
+    fn test_refine_does_not_depend_on_original_mesh_replay() {
+        let mesh = generate_cube();
+        let original_signature = mesh_signature(&mesh);
+        let original_faces = mesh.n_faces();
+        let mut pm = create_progressive_mesh(&mesh);
+
+        let collapses = simplify(&mut pm, original_faces / 2);
+        assert!(collapses > 0);
+
+        pm.original = RustMesh::new();
+        let refinements = refine(&mut pm, original_faces);
+
+        assert!(refinements > 0);
+        assert_eq!(mesh_signature(&pm.current), original_signature);
+    }
+
+    #[test]
+    fn test_refine_replays_exact_snapshots_in_lifo_order() {
+        let mesh = generate_cube();
+        let mut pm = create_progressive_mesh(&mesh);
+
+        let collapses = simplify(&mut pm, mesh.n_faces() / 2);
+        assert!(collapses >= 2);
+
+        let expected_signatures: Vec<_> = pm
+            .collapse_stack
+            .iter()
+            .rev()
+            .map(|record| mesh_signature(&record.pre_collapse_mesh))
+            .collect();
+
+        for expected_signature in expected_signatures {
+            assert!(refine_one(&mut pm));
+            assert_eq!(mesh_signature(&pm.current), expected_signature);
+        }
+
+        assert!(pm.collapse_stack.is_empty());
     }
 
     #[test]
@@ -724,5 +814,60 @@ mod tests {
             tolerance,
             target_faces
         );
+    }
+
+    #[test]
+    fn test_get_lod_face_counts_are_monotonic_for_increasing_levels() {
+        let mesh = generate_sphere(1.0, 12, 12);
+        let levels = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0];
+        let mut pm = create_progressive_mesh(&mesh);
+
+        let counts: Vec<usize> = levels
+            .into_iter()
+            .map(|level| {
+                let _ = pm.get_lod(level);
+                pm.n_valid_faces()
+            })
+            .collect();
+
+        assert_non_decreasing(&counts, "increasing LOD levels");
+        assert_eq!(*counts.last().unwrap(), mesh.n_faces());
+    }
+
+    #[test]
+    fn test_get_lod_bidirectional_scrub_keeps_face_counts_ordered() {
+        let mesh = generate_sphere(1.0, 12, 12);
+        let levels = [1.0, 0.75, 0.5, 0.25, 0.0, 0.25, 0.5, 0.75, 1.0];
+        let mut pm = create_progressive_mesh(&mesh);
+
+        let counts: Vec<usize> = levels
+            .into_iter()
+            .map(|level| {
+                let _ = pm.get_lod(level);
+                pm.n_valid_faces()
+            })
+            .collect();
+
+        assert_non_increasing(&counts[..5], "downward LOD sweep");
+        assert_non_decreasing(&counts[4..], "upward LOD sweep");
+        assert_eq!(counts[0], mesh.n_faces());
+        assert_eq!(*counts.last().unwrap(), mesh.n_faces());
+    }
+
+    #[test]
+    fn test_get_lod_repeated_level_is_deterministic_after_scrubbing() {
+        let mesh = generate_sphere(1.0, 12, 12);
+        let mut pm = create_progressive_mesh(&mesh);
+
+        let _ = pm.get_lod(0.5);
+        let midpoint_signature = mesh_signature(&pm.current);
+        let midpoint_faces = pm.n_valid_faces();
+
+        let _ = pm.get_lod(0.0);
+        let _ = pm.get_lod(1.0);
+        let _ = pm.get_lod(0.5);
+
+        assert_eq!(pm.n_valid_faces(), midpoint_faces);
+        assert_eq!(mesh_signature(&pm.current), midpoint_signature);
     }
 }
