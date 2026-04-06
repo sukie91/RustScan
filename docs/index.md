@@ -10,7 +10,7 @@
 |---|---|
 | [RustGS Training Alignment Implementation Plan](plans/2026-04-06-rustgs-training-execution-plan.md) | 当前有效的 RustGS 训练执行方案；基于现有代码 ownership 和真实 TUM 评估结论制定 |
 | [RustGS TUM Profile Comparison 2026-04-06](RustGS-TUM-Profile-Comparison-2026-04-06.md) | 当前有效的 TUM 实验记录；包含 720 iter 下 no-freeze vs freeze80 的 topology 和质量对照 |
-| [RustGS Brush Training Refactor Plan 2026-04-06](RustGS-Brush-Training-Refactor-Plan-2026-04-06.md) | 已过时的外部分析输入，仅保留作对照，不再作为执行计划 |
+| [RustGS Brush Training Refactor Plan](plans/RustGS-Brush-Training-Refactor-Plan.md) | RustGS 重构方案；策略模式设计，初始实现 Brush 风格，后续扩展 LiteGS |
 | [RustGS LiteGS Parity Progress 2026-04-05](RustGS-LiteGS-Parity-Progress-2026-04-05.md) | 历史 parity 进展记录，仅作背景参考 |
 
 ## Core Project Docs
