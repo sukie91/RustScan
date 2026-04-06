@@ -9,7 +9,7 @@
 //! 3. Depth sorting
 //! 4. Alpha blending
 
-use crate::core::{Gaussian3D, GaussianColorRepresentation};
+use crate::core::Gaussian3D;
 
 /// A single Gaussian with all parameters (array-based for rendering)
 #[derive(Debug, Clone)]
@@ -24,11 +24,9 @@ pub struct Gaussian {
     pub opacity: f32,
     /// Color RGB [r, g, b]
     pub color: [f32; 3],
-    /// Whether the Gaussian stores RGB directly or an SH-backed color state.
-    pub color_representation: GaussianColorRepresentation,
-    /// SH DC term (`sh_0`) when present.
-    pub sh_dc: Option<[f32; 3]>,
-    /// Higher-order SH coefficients flattened as coeff-major RGB triplets.
+    /// Higher-order spherical harmonics coefficients (optional).
+    /// Layout: [coeff_count * 3] where coeff_count = (degree+1)^2 - 1.
+    /// For degree 3: 15 coeffs * 3 channels = 45 values.
     pub sh_rest: Option<Vec<f32>>,
 }
 
@@ -46,9 +44,26 @@ impl Gaussian {
             rotation,
             opacity,
             color,
-            color_representation: GaussianColorRepresentation::Rgb,
-            sh_dc: None,
             sh_rest: None,
+        }
+    }
+
+    /// Create with SH coefficients
+    pub fn with_sh(
+        position: [f32; 3],
+        scale: [f32; 3],
+        rotation: [f32; 4],
+        opacity: f32,
+        color: [f32; 3],
+        sh_rest: Vec<f32>,
+    ) -> Self {
+        Self {
+            position,
+            scale,
+            rotation,
+            opacity,
+            color,
+            sh_rest: Some(sh_rest),
         }
     }
 
@@ -64,8 +79,6 @@ impl Gaussian {
                 color[1] as f32 / 255.0,
                 color[2] as f32 / 255.0,
             ],
-            color_representation: GaussianColorRepresentation::Rgb,
-            sh_dc: None,
             sh_rest: None,
         }
     }
@@ -78,9 +91,7 @@ impl Gaussian {
             rotation: [g.rotation.w, g.rotation.x, g.rotation.y, g.rotation.z],
             opacity: g.opacity,
             color: g.color,
-            color_representation: g.color_representation,
-            sh_dc: g.sh_dc,
-            sh_rest: g.sh_rest.clone(),
+            sh_rest: None,
         }
     }
 
@@ -99,19 +110,6 @@ impl Gaussian {
             self.opacity,
             self.color,
         )
-        .with_color_state(self.color_representation, self.sh_dc, self.sh_rest.clone())
-    }
-
-    pub fn with_color_state(
-        mut self,
-        color_representation: GaussianColorRepresentation,
-        sh_dc: Option<[f32; 3]>,
-        sh_rest: Option<Vec<f32>>,
-    ) -> Self {
-        self.color_representation = color_representation;
-        self.sh_dc = sh_dc;
-        self.sh_rest = sh_rest;
-        self
     }
 }
 

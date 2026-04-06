@@ -225,6 +225,7 @@ kernel void tile_backward(
     device atomic_float* grad_colors        [[buffer(12)]],
     constant BwdLossScalars& loss_scalars   [[buffer(13)]],
     device const float* ssim_color_grad     [[buffer(14)]],
+    device atomic_float* grad_projected_positions [[buffer(15)]],
     uint2 gid                               [[thread_position_in_grid]]
 ) {
     if (gid.x >= camera.width || gid.y >= camera.height) return;
@@ -362,6 +363,8 @@ kernel void tile_backward(
         // Gradient w.r.t. projected position
         const float dl_du = dl_dkernel * dk_ddx * (-1.0f / g.sigma_x);
         const float dl_dv = dl_dkernel * dk_ddy * (-1.0f / g.sigma_y);
+        atomic_fetch_add_explicit(&grad_projected_positions[src_idx * 2 + 0], dl_du, memory_order_relaxed);
+        atomic_fetch_add_explicit(&grad_projected_positions[src_idx * 2 + 1], dl_dv, memory_order_relaxed);
 
         // Gradient w.r.t. 2D scale
         float dl_dsigma_x = 0.0f;
@@ -465,6 +468,27 @@ kernel void grad_magnitudes(
     mag += abs(grad_colors[p + 1]);
     mag += abs(grad_colors[p + 2]);
     out_magnitudes[gid] = mag;
+}
+"#;
+
+const METAL_PROJECTED_GRAD_MAGNITUDE_KERNEL: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void projected_grad_magnitudes(
+    device const float* grad_projected_positions [[buffer(0)]],
+    device float* out_magnitudes [[buffer(1)]],
+    constant uint& gaussian_count [[buffer(2)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid >= gaussian_count) {
+        return;
+    }
+
+    const uint p = gid * 2;
+    const float grad_u = grad_projected_positions[p + 0];
+    const float grad_v = grad_projected_positions[p + 1];
+    out_magnitudes[gid] = sqrt(grad_u * grad_u + grad_v * grad_v);
 }
 "#;
 
@@ -629,8 +653,14 @@ kernel void project_gaussians(
                       + proj_x.z * (cc02 * proj_x.x + cc22 * proj_x.z);
     const float cov_y = proj_y.y * (cc11 * proj_y.y + cc12 * proj_y.z)
                       + proj_y.z * (cc12 * proj_y.y + cc22 * proj_y.z);
-    rec.raw_sigma_x = sqrt(max(cov_x, 1e-6f));
-    rec.raw_sigma_y = sqrt(max(cov_y, 1e-6f));
+
+    // Anti-aliasing low-pass filter: add 0.3² to covariance (Gausplat-style)
+    // This prevents aliasing artifacts for small/distant Gaussians
+    const float lowpass_filter = 0.3f;
+    const float lowpass_var = lowpass_filter * lowpass_filter;
+
+    rec.raw_sigma_x = sqrt(max(cov_x + lowpass_var, 1e-6f));
+    rec.raw_sigma_y = sqrt(max(cov_y + lowpass_var, 1e-6f));
 
     if (!isfinite(rec.raw_sigma_x) || !isfinite(rec.raw_sigma_y)) {
         out_records[gid] = rec;
@@ -1218,6 +1248,7 @@ pub(crate) enum MetalBufferSlot {
     ProjectionRecords,
     VisibleSourceIndices,
     GradPositions,
+    GradProjectedPositions,
     GradRotations,
     GradScales,
     GradOpacity,
@@ -1266,6 +1297,7 @@ impl MetalBufferSlot {
             Self::ProjectionRecords => "projection_records",
             Self::VisibleSourceIndices => "visible_source_indices",
             Self::GradPositions => "grad_positions",
+            Self::GradProjectedPositions => "grad_projected_positions",
             Self::GradRotations => "grad_rotations",
             Self::GradScales => "grad_scales",
             Self::GradOpacity => "grad_opacity",
@@ -1316,6 +1348,7 @@ enum MetalKernel {
     TileForward,
     TileBackward,
     GradMagnitudes,
+    ProjectedGradMagnitudes,
 }
 
 impl MetalKernel {
@@ -1334,6 +1367,7 @@ impl MetalKernel {
             Self::TileForward => "tile_forward",
             Self::TileBackward => "tile_backward",
             Self::GradMagnitudes => "grad_magnitudes",
+            Self::ProjectedGradMagnitudes => "projected_grad_magnitudes",
         }
     }
 
@@ -1352,6 +1386,7 @@ impl MetalKernel {
             Self::TileForward => METAL_TILE_FORWARD_KERNEL,
             Self::TileBackward => METAL_TILE_BACKWARD_KERNEL,
             Self::GradMagnitudes => METAL_GRAD_MAGNITUDE_KERNEL,
+            Self::ProjectedGradMagnitudes => METAL_PROJECTED_GRAD_MAGNITUDE_KERNEL,
         }
     }
 }
@@ -1529,6 +1564,12 @@ impl MetalRuntime {
             MetalBufferSlot::GradPositions,
             gaussian_capacity
                 .saturating_mul(3)
+                .saturating_mul(size_of::<f32>()),
+        )?;
+        self.ensure_buffer(
+            MetalBufferSlot::GradProjectedPositions,
+            gaussian_capacity
+                .saturating_mul(2)
                 .saturating_mul(size_of::<f32>()),
         )?;
         self.ensure_buffer(
@@ -2346,6 +2387,12 @@ impl MetalRuntime {
                 .saturating_mul(size_of::<f32>()),
         )?;
         self.ensure_buffer(
+            MetalBufferSlot::GradProjectedPositions,
+            gaussian_count
+                .saturating_mul(2)
+                .saturating_mul(size_of::<f32>()),
+        )?;
+        self.ensure_buffer(
             MetalBufferSlot::GradScales,
             gaussian_count
                 .saturating_mul(3)
@@ -2446,6 +2493,11 @@ impl MetalRuntime {
 
         // Zero out gradient buffers
         self.dispatch_fill_u32(MetalBufferSlot::GradPositions, 0, gaussian_count * 3)?;
+        self.dispatch_fill_u32(
+            MetalBufferSlot::GradProjectedPositions,
+            0,
+            gaussian_count * 2,
+        )?;
         self.dispatch_fill_u32(MetalBufferSlot::GradScales, 0, gaussian_count * 3)?;
         self.dispatch_fill_u32(MetalBufferSlot::GradOpacity, 0, gaussian_count)?;
         self.dispatch_fill_u32(MetalBufferSlot::GradColors, 0, gaussian_count * 3)?;
@@ -2601,6 +2653,17 @@ impl MetalRuntime {
             14,
             self.buffer_handle(MetalBufferSlot::SsimColorGrad)?
                 .map(|b| b.as_ref()),
+            0,
+        );
+        encoder.set_buffer(
+            15,
+            Some(
+                self.buffer_handle(MetalBufferSlot::GradProjectedPositions)?
+                    .ok_or_else(|| {
+                        candle_core::Error::Msg("missing projected position grads".into())
+                    })?
+                    .as_ref(),
+            ),
             0,
         );
 
@@ -2806,6 +2869,72 @@ impl MetalRuntime {
         );
         let count = gaussian_count as u32;
         encoder.set_bytes(5, &count);
+        let threads_per_group = pipeline
+            .max_total_threads_per_threadgroup()
+            .min(gaussian_count)
+            .max(1);
+        encoder.dispatch_threads(
+            MTLSize {
+                width: gaussian_count,
+                height: 1,
+                depth: 1,
+            },
+            MTLSize {
+                width: threads_per_group,
+                height: 1,
+                depth: 1,
+            },
+        );
+        drop(encoder);
+        self.device.synchronize()?;
+        self.tensor_from_buffer(
+            MetalBufferSlot::GradMagnitudes,
+            gaussian_count,
+            DType::F32,
+            (gaussian_count,),
+        )
+    }
+
+    pub(crate) fn compute_projected_grad_magnitudes(
+        &mut self,
+        gaussian_count: usize,
+    ) -> candle_core::Result<Tensor> {
+        if gaussian_count == 0 {
+            return Tensor::zeros((0,), DType::F32, &self.device);
+        }
+        self.ensure_buffer(
+            MetalBufferSlot::GradMagnitudes,
+            gaussian_count.saturating_mul(size_of::<f32>()),
+        )?;
+        let pipeline = self
+            .ensure_pipeline(MetalKernel::ProjectedGradMagnitudes)?
+            .clone();
+        let metal = self.device.as_metal_device()?;
+        let encoder = metal.command_encoder()?;
+        encoder.set_label(MetalKernel::ProjectedGradMagnitudes.function_name());
+        encoder.set_compute_pipeline_state(&pipeline);
+        encoder.set_buffer(
+            0,
+            Some(
+                self.buffer_handle(MetalBufferSlot::GradProjectedPositions)?
+                    .ok_or_else(|| {
+                        candle_core::Error::Msg("missing projected position grads".into())
+                    })?
+                    .as_ref(),
+            ),
+            0,
+        );
+        encoder.set_buffer(
+            1,
+            Some(
+                self.buffer_handle(MetalBufferSlot::GradMagnitudes)?
+                    .ok_or_else(|| candle_core::Error::Msg("missing grad magnitudes".into()))?
+                    .as_ref(),
+            ),
+            0,
+        );
+        let count = gaussian_count as u32;
+        encoder.set_bytes(2, &count);
         let threads_per_group = pipeline
             .max_total_threads_per_threadgroup()
             .min(gaussian_count)

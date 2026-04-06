@@ -9,8 +9,9 @@
 | Document | Purpose |
 |---|---|
 | [RustGS Training Alignment Implementation Plan](plans/2026-04-06-rustgs-training-execution-plan.md) | 当前有效的 RustGS 训练执行方案；基于现有代码 ownership 和真实 TUM 评估结论制定 |
-| [RustGS TUM Profile Comparison 2026-04-06](RustGS-TUM-Profile-Comparison-2026-04-06.md) | 真实 `TUM RGB-D` 上 `legacy-metal` 与 `litegs-mac-v1` 的训练/评估基线 |
-| [RustGS Brush Migration Architecture 2026-04-05](RustGS-Brush-Migration-Architecture-2026-04-05.md) | RustGS 当前训练模块边界、调用流与 rollout 约束 |
+| [RustGS TUM Profile Comparison 2026-04-06](RustGS-TUM-Profile-Comparison-2026-04-06.md) | 当前有效的 TUM 实验记录；包含 720 iter 下 no-freeze vs freeze80 的 topology 和质量对照 |
+| [RustGS Brush Training Refactor Plan 2026-04-06](RustGS-Brush-Training-Refactor-Plan-2026-04-06.md) | 已过时的外部分析输入，仅保留作对照，不再作为执行计划 |
+| [RustGS LiteGS Parity Progress 2026-04-05](RustGS-LiteGS-Parity-Progress-2026-04-05.md) | 历史 parity 进展记录，仅作背景参考 |
 
 ## Core Project Docs
 
@@ -30,7 +31,6 @@
 | [RustMesh README](RustMesh-README.md) | RustMesh 组件说明 |
 | [RustMesh OpenMesh Progress 2026-04-04](RustMesh-OpenMesh-Progress-2026-04-04.md) | RustMesh/OpenMesh 对齐进展 |
 | [RustMesh OpenMesh Test Report 2026-04-04](RustMesh-OpenMesh-Test-Report-2026-04-04.md) | RustMesh/OpenMesh 测试记录 |
-| [RustMesh OpenMesh Parity Roadmap](RustMesh-OpenMesh-Parity-Roadmap.md) | RustMesh 后续路线 |
 | [RustSLAM README](RustSLAM-README.md) | RustSLAM 组件说明 |
 | [RustSLAM Design](RustSLAM-DESIGN.md) | RustSLAM 设计记录 |
 | [RustSLAM ToDo](RustSLAM-ToDo.md) | RustSLAM backlog |
@@ -44,11 +44,3 @@
 | [source-tree-analysis](source-tree-analysis.md) | 源码树分析 |
 | [project-scan-report.json](project-scan-report.json) | 项目扫描原始数据 |
 | [CLAUDE](CLAUDE.md) | Claude 协作约束 |
-
-## Superseded On 2026-04-06
-
-以下 RustGS 训练文档已删除，不再维护：
-
-- `RustGS-LiteGS-Parity-Status-2026-04-04.md`
-- `RustGS-Smoke-Benchmark-Report-2026-04-06.md`
-- `RustGS-Training-Report.md`

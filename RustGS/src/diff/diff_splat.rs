@@ -6,7 +6,7 @@
 
 use crate::diff::analytical_backward::{ForwardIntermediate, GaussianRenderRecord};
 use candle_core::{DType, Device, Tensor, Var};
-use glam::{Mat3, Quat, Vec3};
+use glam::{Mat3, Mat4, Quat, Vec3};
 use rayon::prelude::*;
 
 /// Tile size for parallel rasterization (16x16 matches GPU warp-friendly sizing)
@@ -281,6 +281,7 @@ fn normalize_quaternions(q: &Tensor) -> candle_core::Result<Tensor> {
 }
 
 /// Camera for rendering
+#[derive(Clone)]
 pub struct DiffCamera {
     pub fx: f32,
     pub fy: f32,
@@ -328,6 +329,55 @@ impl DiffCamera {
             translation: *translation,
             extrinsics: Tensor::from_slice(&ext, (3, 4), device)?,
         })
+    }
+
+    /// Compute the view-projection matrix as a glam::Mat4 for frustum culling.
+    ///
+    /// Returns a column-major 4x4 matrix combining view (world-to-camera) and
+    /// projection (perspective) transforms.
+    pub fn view_projection_mat4(&self) -> Mat4 {
+        // Build view matrix from rotation and translation (world-to-camera)
+        // Rotation is row-major, need to convert to column-major for glam
+        let r = self.rotation;
+        let t = self.translation;
+
+        // View matrix: [R | t] with bottom row [0, 0, 0, 1]
+        // glam uses column-major, so we transpose the rotation
+        let view = Mat4::from_cols(
+            glam::Vec4::new(r[0][0], r[1][0], r[2][0], 0.0),
+            glam::Vec4::new(r[0][1], r[1][1], r[2][1], 0.0),
+            glam::Vec4::new(r[0][2], r[1][2], r[2][2], 0.0),
+            glam::Vec4::new(t[0], t[1], t[2], 1.0),
+        );
+
+        // Build projection matrix for perspective projection
+        // Using OpenGL-style clip space: near=0.01, far=100.0
+        let near = 0.01f32;
+        let far = 100.0f32;
+
+        let w = self.width as f32;
+        let h = self.height as f32;
+        let fx = self.fx;
+        let fy = self.fy;
+
+        // Perspective projection matrix:
+        // [fx/w, 0,     cx/w - 0.5,                    0]
+        // [0,    fy/h,  cy/h - 0.5,                    0]
+        // [0,    0,     -(far+near)/(far-near),       -2*far*near/(far-near)]
+        // [0,    0,     -1,                            0]
+        let proj = Mat4::from_cols(
+            glam::Vec4::new(fx / w, 0.0, 0.0, 0.0),
+            glam::Vec4::new(0.0, fy / h, 0.0, 0.0),
+            glam::Vec4::new(
+                self.cx / w - 0.5,
+                self.cy / h - 0.5,
+                -(far + near) / (far - near),
+                -1.0,
+            ),
+            glam::Vec4::new(0.0, 0.0, -2.0 * far * near / (far - near), 0.0),
+        );
+
+        view * proj
     }
 }
 
@@ -1229,9 +1279,14 @@ fn project_covariance_full(
         + s1 * s1 * proj_axis_y[1] * proj_axis_y[1]
         + s2 * s2 * proj_axis_y[2] * proj_axis_y[2];
 
+    // Anti-aliasing low-pass filter: add 0.3² to covariance (Gausplat-style)
+    // This prevents aliasing artifacts for small/distant Gaussians
+    const LOWPASS_FILTER: f32 = 0.3;
+    const LOWPASS_VAR: f32 = LOWPASS_FILTER * LOWPASS_FILTER;
+
     (
-        cov_xx.max(1e-6).sqrt(),
-        cov_yy.max(1e-6).sqrt(),
+        (cov_xx + LOWPASS_VAR).max(1e-6).sqrt(),
+        (cov_yy + LOWPASS_VAR).max(1e-6).sqrt(),
         cov_xy,
         proj_axis_x,
         proj_axis_y,

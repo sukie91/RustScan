@@ -1,235 +1,450 @@
-use crate::{Intrinsics, ScenePose, TrainingDataset, TrainingError, SE3};
-use glam::{Quat, Vec3};
-use std::collections::HashMap;
-use std::fs::{self, File};
+//! COLMAP dataset loader for RustGS.
+//!
+//! Parses COLMAP format cameras.bin/images.bin/points3D.bin files
+//! and converts to TrainingDataset for RustGS pipeline compatibility.
+//!
+//! Supports both binary and text formats.
+
+use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 
+use crate::{Intrinsics, ScenePose, TrainingDataset, TrainingError, SE3};
+
+/// Configuration for loading a COLMAP dataset.
 #[derive(Debug, Clone)]
-struct ColmapCamera {
-    width: u32,
-    height: u32,
-    fx: f32,
-    fy: f32,
-    cx: f32,
-    cy: f32,
+pub struct ColmapConfig {
+    /// Maximum number of frames to load (0 = all).
+    pub max_frames: usize,
+    /// Keep every Nth frame.
+    pub frame_stride: usize,
+    /// Depth scale for converting depth values to meters.
+    pub depth_scale: f32,
 }
 
-#[derive(Debug, Clone)]
-struct ColmapImage {
-    camera_id: u32,
-    name: String,
-    pose: SE3,
+impl Default for ColmapConfig {
+    fn default() -> Self {
+        Self {
+            max_frames: 0,
+            frame_stride: 1,
+            depth_scale: 1.0,
+        }
+    }
 }
 
-pub fn looks_like_colmap_dataset(path: &Path) -> bool {
-    discover_colmap_model_dir(path).is_some()
+/// COLMAP camera model types.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CameraModel {
+    Pinhole,
+    SimpleRadial,
+    Radial,
+    OpenCV,
+    OpenCVFisheye,
+    FullFisheye,
+    ThinPrismFisheye,
 }
 
-pub fn load_colmap_dataset(root: &Path) -> Result<TrainingDataset, TrainingError> {
-    let model_dir = discover_colmap_model_dir(root).ok_or_else(|| {
-        TrainingError::InvalidInput(format!(
-            "{} does not look like a COLMAP reconstruction",
-            root.display()
-        ))
-    })?;
-
-    let cameras = if model_dir.join("cameras.bin").exists() {
-        read_cameras_bin(&model_dir.join("cameras.bin"))?
-    } else {
-        read_cameras_txt(&model_dir.join("cameras.txt"))?
-    };
-    let images = if model_dir.join("images.bin").exists() {
-        read_images_bin(&model_dir.join("images.bin"))?
-    } else {
-        read_images_txt(&model_dir.join("images.txt"))?
-    };
-    if images.is_empty() {
-        return Err(TrainingError::InvalidInput(format!(
-            "COLMAP model {} does not contain any images",
-            model_dir.display()
-        )));
+impl CameraModel {
+    fn from_id(id: u32) -> Option<Self> {
+        match id {
+            1 => Some(CameraModel::Pinhole),
+            2 => Some(CameraModel::SimpleRadial),
+            3 => Some(CameraModel::Radial),
+            4 => Some(CameraModel::OpenCV),
+            5 => Some(CameraModel::OpenCVFisheye),
+            6 => Some(CameraModel::FullFisheye),
+            7 => Some(CameraModel::ThinPrismFisheye),
+            _ => None,
+        }
     }
 
-    let first_camera = cameras.get(&images[0].camera_id).ok_or_else(|| {
-        TrainingError::InvalidInput(format!(
-            "COLMAP image {} references missing camera {}",
-            images[0].name, images[0].camera_id
-        ))
-    })?;
-    let intrinsics = Intrinsics::new(
-        first_camera.fx,
-        first_camera.fy,
-        first_camera.cx,
-        first_camera.cy,
-        first_camera.width,
-        first_camera.height,
-    );
-    let mut dataset = TrainingDataset::new(intrinsics);
-
-    for (frame_idx, image) in images.iter().enumerate() {
-        let camera = cameras.get(&image.camera_id).ok_or_else(|| {
-            TrainingError::InvalidInput(format!(
-                "COLMAP image {} references missing camera {}",
-                image.name, image.camera_id
-            ))
-        })?;
-        if camera.width != dataset.intrinsics.width
-            || camera.height != dataset.intrinsics.height
-            || (camera.fx - dataset.intrinsics.fx).abs() > 1e-5
-            || (camera.fy - dataset.intrinsics.fy).abs() > 1e-5
-            || (camera.cx - dataset.intrinsics.cx).abs() > 1e-5
-            || (camera.cy - dataset.intrinsics.cy).abs() > 1e-5
-        {
-            return Err(TrainingError::InvalidInput(
-                "COLMAP loader currently expects a single shared camera intrinsics set".to_string(),
-            ));
+    /// Number of parameters for this camera model.
+    fn num_params(&self) -> usize {
+        match self {
+            CameraModel::Pinhole => 4,       // fx, fy, cx, cy
+            CameraModel::SimpleRadial => 4,  // f, cx, cy, k1
+            CameraModel::Radial => 5,        // f, cx, cy, k1, k2
+            CameraModel::OpenCV => 8,        // fx, fy, cx, cy, k1, k2, p1, p2
+            CameraModel::OpenCVFisheye => 8, // fx, fy, cx, cy, k1, k2, k3, k4
+            CameraModel::FullFisheye => 12,
+            CameraModel::ThinPrismFisheye => 15,
         }
+    }
 
-        let image_path = resolve_colmap_image_path(root, &model_dir, &image.name)?;
-        dataset.add_pose(ScenePose::new(
-            frame_idx as u64,
-            image_path,
-            image.pose,
-            frame_idx as f64,
+    /// Extract intrinsics from camera parameters.
+    fn intrinsics(&self, width: u32, height: u32, params: &[f64]) -> Option<Intrinsics> {
+        match self {
+            CameraModel::Pinhole => {
+                if params.len() >= 4 {
+                    Some(Intrinsics::new(
+                        params[0] as f32, // fx
+                        params[1] as f32, // fy
+                        params[2] as f32, // cx
+                        params[3] as f32, // cy
+                        width,
+                        height,
+                    ))
+                } else {
+                    None
+                }
+            }
+            CameraModel::SimpleRadial => {
+                if params.len() >= 3 {
+                    Some(Intrinsics::new(
+                        params[0] as f32, // f
+                        params[0] as f32, // f (same for both)
+                        params[1] as f32, // cx
+                        params[2] as f32, // cy
+                        width,
+                        height,
+                    ))
+                } else {
+                    None
+                }
+            }
+            CameraModel::Radial => {
+                if params.len() >= 3 {
+                    Some(Intrinsics::new(
+                        params[0] as f32, // f
+                        params[0] as f32, // f (same for both)
+                        params[1] as f32, // cx
+                        params[2] as f32, // cy
+                        width,
+                        height,
+                    ))
+                } else {
+                    None
+                }
+            }
+            CameraModel::OpenCV => {
+                if params.len() >= 4 {
+                    Some(Intrinsics::new(
+                        params[0] as f32, // fx
+                        params[1] as f32, // fy
+                        params[2] as f32, // cx
+                        params[3] as f32, // cy
+                        width,
+                        height,
+                    ))
+                } else {
+                    None
+                }
+            }
+            _ => None, // Unsupported models, fall back to default
+        }
+    }
+}
+
+/// COLMAP camera entry.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+struct ColmapCamera {
+    camera_id: u32,
+    model: CameraModel,
+    width: u32,
+    height: u32,
+    params: Vec<f64>,
+}
+
+/// COLMAP image entry.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+struct ColmapImage {
+    image_id: u32,
+    qw: f64,
+    qx: f64,
+    qy: f64,
+    qz: f64,
+    tx: f64,
+    ty: f64,
+    tz: f64,
+    camera_id: u32,
+    name: String,
+}
+
+/// COLMAP 3D point entry.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+struct ColmapPoint3D {
+    point_id: u64,
+    x: f64,
+    y: f64,
+    z: f64,
+    r: u8,
+    g: u8,
+    b: u8,
+}
+
+/// Load a COLMAP dataset from a sparse reconstruction directory.
+///
+/// The directory should contain:
+/// - cameras.bin (or cameras.txt)
+/// - images.bin (or images.txt)
+/// - points3D.bin (or points3D.txt)
+/// - images/ directory with actual image files
+///
+/// # Arguments
+/// * `input` - Path to COLMAP sparse reconstruction directory (e.g., "sparse/0")
+/// * `config` - Loading configuration
+///
+/// # Returns
+/// * `TrainingDataset` ready for RustGS training
+pub fn load_colmap_dataset(
+    input: &Path,
+    config: &ColmapConfig,
+) -> Result<TrainingDataset, TrainingError> {
+    // Resolve the sparse directory
+    let sparse_dir = resolve_colmap_sparse_dir(input)?;
+
+    // Determine image directory
+    let image_dir = resolve_image_dir(&sparse_dir)?;
+
+    // Parse cameras
+    let cameras = parse_colmap_cameras(&sparse_dir)?;
+
+    // Parse images
+    let images = parse_colmap_images(&sparse_dir)?;
+
+    // Parse 3D points (optional)
+    let points = parse_colmap_points3d(&sparse_dir)?;
+
+    if cameras.is_empty() {
+        return Err(TrainingError::InvalidInput(
+            "no cameras found in COLMAP dataset".to_string(),
+        ));
+    }
+    if images.is_empty() {
+        return Err(TrainingError::InvalidInput(
+            "no images found in COLMAP dataset".to_string(),
         ));
     }
 
-    if model_dir.join("points3D.bin").exists() {
-        dataset.initial_points = read_points_bin(&model_dir.join("points3D.bin"))?;
-    } else if model_dir.join("points3D.txt").exists() {
-        dataset.initial_points = read_points_txt(&model_dir.join("points3D.txt"))?;
+    // Use first camera for intrinsics (COLMAP datasets typically have one camera)
+    let first_camera = &cameras[0];
+    let intrinsics = first_camera
+        .model
+        .intrinsics(
+            first_camera.width,
+            first_camera.height,
+            &first_camera.params,
+        )
+        .ok_or_else(|| {
+            TrainingError::InvalidInput(format!(
+                "unsupported camera model {:?} or missing parameters",
+                first_camera.model
+            ))
+        })?;
+
+    // Build dataset
+    let mut dataset = TrainingDataset::new(intrinsics).with_depth_scale(config.depth_scale);
+
+    // Add initial points from COLMAP sparse reconstruction
+    for point in &points {
+        dataset.add_point(
+            [point.x as f32, point.y as f32, point.z as f32],
+            Some([
+                point.r as f32 / 255.0,
+                point.g as f32 / 255.0,
+                point.b as f32 / 255.0,
+            ]),
+        );
     }
+
+    // Apply frame selection
+    let considered = if config.max_frames > 0 {
+        config.max_frames.min(images.len())
+    } else {
+        images.len()
+    };
+    let stride = config.frame_stride.max(1);
+
+    // Add poses
+    for (frame_idx, image) in images
+        .into_iter()
+        .take(considered)
+        .step_by(stride)
+        .enumerate()
+    {
+        let image_path = image_dir.join(&image.name);
+        if !image_path.exists() {
+            log::warn!("image {} not found at {}", image.name, image_path.display());
+            continue;
+        }
+
+        // COLMAP stores world-to-camera extrinsics:
+        //   X_cam = R * X_world + t
+        // ScenePose expects camera-to-world, so invert here.
+        let pose = scene_pose_from_colmap_image(&image);
+
+        let scene_pose = ScenePose::new(frame_idx as u64, image_path, pose, image.image_id as f64);
+        dataset.add_pose(scene_pose);
+    }
+
+    if dataset.poses.is_empty() {
+        return Err(TrainingError::InvalidInput(format!(
+            "no valid frames found in {} after image path validation",
+            sparse_dir.display(),
+        )));
+    }
+
+    log::info!(
+        "Loaded COLMAP dataset {} | cameras={} | images_total={} | frames={} | points={} | resolution={}x{}",
+        sparse_dir.display(),
+        cameras.len(),
+        considered,
+        dataset.poses.len(),
+        dataset.initial_points.len(),
+        intrinsics.width,
+        intrinsics.height,
+    );
 
     Ok(dataset)
 }
 
-fn discover_colmap_model_dir(root: &Path) -> Option<PathBuf> {
-    if has_colmap_model_files(root) {
-        return Some(root.to_path_buf());
+pub(crate) fn resolve_colmap_sparse_dir(input: &Path) -> Result<PathBuf, TrainingError> {
+    // Check if input is directly a sparse directory
+    if is_colmap_sparse_dir(input) {
+        return Ok(input.to_path_buf());
     }
-    let candidates = [root.join("sparse"), root.join("sparse/0")];
-    for candidate in candidates {
-        if has_colmap_model_files(&candidate) {
-            return Some(candidate);
-        }
+
+    // Check for sparse subdirectory
+    let sparse = input.join("sparse");
+    if is_colmap_sparse_dir(&sparse) {
+        return Ok(sparse);
     }
-    find_nested_dir(root, &|path| has_colmap_model_files(path))
+
+    // Check for sparse/0 (common COLMAP output structure)
+    let sparse0 = sparse.join("0");
+    if is_colmap_sparse_dir(&sparse0) {
+        return Ok(sparse0);
+    }
+
+    Err(TrainingError::InvalidInput(format!(
+        "could not find COLMAP sparse reconstruction in {}",
+        input.display(),
+    )))
 }
 
-fn has_colmap_model_files(path: &Path) -> bool {
+pub(crate) fn is_colmap_sparse_dir(path: &Path) -> bool {
     path.is_dir()
-        && ((path.join("cameras.txt").exists() && path.join("images.txt").exists())
-            || (path.join("cameras.bin").exists() && path.join("images.bin").exists()))
+        && (path.join("cameras.bin").exists() || path.join("cameras.txt").exists())
+        && (path.join("images.bin").exists() || path.join("images.txt").exists())
 }
 
-fn find_nested_dir(root: &Path, predicate: &dyn Fn(&Path) -> bool) -> Option<PathBuf> {
-    let entries = fs::read_dir(root).ok()?;
-    for entry in entries.filter_map(Result::ok) {
-        let path = entry.path();
-        if predicate(&path) {
-            return Some(path);
-        }
-        if path.is_dir() {
-            if let Some(found) = find_nested_dir(&path, predicate) {
-                return Some(found);
-            }
-        }
-    }
-    None
+fn scene_pose_from_colmap_image(image: &ColmapImage) -> SE3 {
+    let world_to_camera = SE3::new(
+        &[
+            image.qx as f32,
+            image.qy as f32,
+            image.qz as f32,
+            image.qw as f32,
+        ],
+        &[image.tx as f32, image.ty as f32, image.tz as f32],
+    );
+    world_to_camera.inverse()
 }
 
-fn resolve_colmap_image_path(
-    root: &Path,
-    model_dir: &Path,
-    name: &str,
-) -> Result<PathBuf, TrainingError> {
+fn resolve_image_dir(sparse_dir: &Path) -> Result<PathBuf, TrainingError> {
+    // Try common image directory locations
     let candidates = [
-        root.join(name),
-        model_dir.join(name),
-        root.join("images").join(name),
-        model_dir.parent().unwrap_or(root).join(name),
-        model_dir.parent().unwrap_or(root).join("images").join(name),
+        sparse_dir.join("images"),
+        sparse_dir.parent().unwrap().join("images"),
+        sparse_dir
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("images"),
     ];
-    for candidate in candidates {
-        if candidate.exists() {
-            return Ok(candidate);
+
+    for candidate in &candidates {
+        if candidate.is_dir() {
+            return Ok(candidate.clone());
         }
     }
 
-    let basename = Path::new(name)
-        .file_name()
-        .and_then(|value| value.to_str())
-        .unwrap_or(name);
-    find_file_recursive(root, basename).ok_or_else(|| {
-        TrainingError::InvalidInput(format!(
-            "failed to resolve COLMAP image {} under {}",
-            name,
-            root.display()
-        ))
-    })
+    Err(TrainingError::InvalidInput(
+        "could not find images directory".to_string(),
+    ))
 }
 
-fn find_file_recursive(root: &Path, basename: &str) -> Option<PathBuf> {
-    let entries = fs::read_dir(root).ok()?;
-    for entry in entries.filter_map(Result::ok) {
-        let path = entry.path();
-        if path.is_file()
-            && path
-                .file_name()
-                .and_then(|value| value.to_str())
-                .map(|value| value == basename)
-                .unwrap_or(false)
-        {
-            return Some(path);
-        }
-        if path.is_dir() {
-            if let Some(found) = find_file_recursive(&path, basename) {
-                return Some(found);
-            }
-        }
+// Binary parsing helpers
+fn read_u64<T: Read>(reader: &mut T) -> std::io::Result<u64> {
+    let mut buf = [0u8; 8];
+    reader.read_exact(&mut buf)?;
+    Ok(u64::from_le_bytes(buf))
+}
+
+fn read_u32<T: Read>(reader: &mut T) -> std::io::Result<u32> {
+    let mut buf = [0u8; 4];
+    reader.read_exact(&mut buf)?;
+    Ok(u32::from_le_bytes(buf))
+}
+
+fn read_f64<T: Read>(reader: &mut T) -> std::io::Result<f64> {
+    let mut buf = [0u8; 8];
+    reader.read_exact(&mut buf)?;
+    Ok(f64::from_le_bytes(buf))
+}
+
+fn read_string<T: Read>(reader: &mut T) -> std::io::Result<String> {
+    let len = read_u64(reader)? as usize;
+    let mut buf = vec![0u8; len];
+    reader.read_exact(&mut buf)?;
+    Ok(String::from_utf8_lossy(&buf).into_owned())
+}
+
+fn parse_colmap_cameras(dir: &Path) -> Result<Vec<ColmapCamera>, TrainingError> {
+    let bin_path = dir.join("cameras.bin");
+    let txt_path = dir.join("cameras.txt");
+
+    if bin_path.exists() {
+        parse_cameras_binary(&bin_path)
+    } else if txt_path.exists() {
+        parse_cameras_text(&txt_path)
+    } else {
+        Err(TrainingError::InvalidInput(format!(
+            "no cameras file found in {}",
+            dir.display(),
+        )))
     }
-    None
 }
 
-fn read_cameras_txt(path: &Path) -> Result<HashMap<u32, ColmapCamera>, TrainingError> {
-    let file = File::open(path)?;
-    let reader = BufReader::new(file);
-    let mut cameras = HashMap::new();
+fn parse_cameras_binary(path: &Path) -> Result<Vec<ColmapCamera>, TrainingError> {
+    let mut file = File::open(path)?;
+    let num_cameras = read_u64(&mut file)? as usize;
 
-    for (line_num, line) in reader.lines().enumerate() {
-        let line = line?;
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-        let parts = trimmed.split_whitespace().collect::<Vec<_>>();
-        if parts.len() < 5 {
-            return Err(TrainingError::InvalidInput(format!(
-                "{} line {}: expected at least 5 columns",
-                path.display(),
-                line_num + 1
-            )));
-        }
-        let camera_id = parse_u32(parts[0], path, line_num + 1, "camera id")?;
-        let model = parts[1];
-        let width = parse_u32(parts[2], path, line_num + 1, "width")?;
-        let height = parse_u32(parts[3], path, line_num + 1, "height")?;
-        let params = parts[4..]
-            .iter()
-            .map(|value| parse_f64(value, path, line_num + 1, "camera parameter"))
-            .collect::<Result<Vec<_>, _>>()?;
-        cameras.insert(camera_id, camera_from_model(model, width, height, &params)?);
+    let mut cameras = Vec::with_capacity(num_cameras);
+    for _ in 0..num_cameras {
+        let camera_id = read_u32(&mut file)?;
+        let model_id = read_u32(&mut file)?;
+        let width = read_u64(&mut file)? as u32;
+        let height = read_u64(&mut file)? as u32;
+
+        let model = CameraModel::from_id(model_id).ok_or_else(|| {
+            TrainingError::InvalidInput(format!("unknown camera model ID {}", model_id))
+        })?;
+
+        let num_params = model.num_params();
+        let params = (0..num_params)
+            .map(|_| read_f64(&mut file))
+            .collect::<std::io::Result<Vec<_>>>()?;
+
+        cameras.push(ColmapCamera {
+            camera_id,
+            model,
+            width,
+            height,
+            params,
+        });
     }
 
     Ok(cameras)
 }
 
-fn read_images_txt(path: &Path) -> Result<Vec<ColmapImage>, TrainingError> {
-    let file = File::open(path)?;
-    let reader = BufReader::new(file);
-    let mut images = Vec::new();
-    let mut expecting_header = true;
+fn parse_cameras_text(path: &Path) -> Result<Vec<ColmapCamera>, TrainingError> {
+    let reader = BufReader::new(File::open(path)?);
+    let mut cameras = Vec::new();
 
     for (line_num, line) in reader.lines().enumerate() {
         let line = line?;
@@ -237,44 +452,240 @@ fn read_images_txt(path: &Path) -> Result<Vec<ColmapImage>, TrainingError> {
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
-        if !expecting_header {
-            expecting_header = true;
+
+        let parts: Vec<&str> = trimmed.split_whitespace().collect();
+        if parts.len() < 4 {
             continue;
         }
 
-        let parts = trimmed.split_whitespace().collect::<Vec<_>>();
-        if parts.len() < 10 {
-            return Err(TrainingError::InvalidInput(format!(
-                "{} line {}: expected image header with at least 10 columns",
-                path.display(),
-                line_num + 1
-            )));
-        }
-        let qw = parse_f32(parts[1], path, line_num + 1, "qw")?;
-        let qx = parse_f32(parts[2], path, line_num + 1, "qx")?;
-        let qy = parse_f32(parts[3], path, line_num + 1, "qy")?;
-        let qz = parse_f32(parts[4], path, line_num + 1, "qz")?;
-        let tx = parse_f32(parts[5], path, line_num + 1, "tx")?;
-        let ty = parse_f32(parts[6], path, line_num + 1, "ty")?;
-        let tz = parse_f32(parts[7], path, line_num + 1, "tz")?;
-        let camera_id = parse_u32(parts[8], path, line_num + 1, "camera id")?;
-        let world_to_camera =
-            SE3::from_quat_translation(Quat::from_xyzw(qx, qy, qz, qw), Vec3::new(tx, ty, tz));
-        images.push(ColmapImage {
+        let camera_id = parse_u32(path, line_num, "camera_id", parts[0])?;
+        let model_name = parts[1];
+        let width = parse_u32(path, line_num, "width", parts[2])?;
+        let height = parse_u32(path, line_num, "height", parts[3])?;
+
+        let model = parse_camera_model_name(model_name)?;
+        let params: Vec<f64> = parts[4..]
+            .iter()
+            .enumerate()
+            .map(|(i, p)| parse_f64(path, line_num, &format!("param[{}]", i), p))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        cameras.push(ColmapCamera {
             camera_id,
-            name: parts[9].to_string(),
-            pose: world_to_camera.inverse(),
+            model,
+            width,
+            height,
+            params,
         });
-        expecting_header = false;
     }
 
-    images.sort_by(|lhs, rhs| lhs.name.cmp(&rhs.name));
+    Ok(cameras)
+}
+
+fn parse_u32(path: &Path, line_num: usize, field: &str, value: &str) -> Result<u32, TrainingError> {
+    value.parse::<u32>().map_err(|err| {
+        TrainingError::InvalidInput(format!(
+            "{} line {}: invalid {} '{}': {}",
+            path.display(),
+            line_num + 1,
+            field,
+            value,
+            err
+        ))
+    })
+}
+
+fn parse_f64(path: &Path, line_num: usize, field: &str, value: &str) -> Result<f64, TrainingError> {
+    value.parse::<f64>().map_err(|err| {
+        TrainingError::InvalidInput(format!(
+            "{} line {}: invalid {} '{}': {}",
+            path.display(),
+            line_num + 1,
+            field,
+            value,
+            err
+        ))
+    })
+}
+
+fn parse_camera_model_name(name: &str) -> Result<CameraModel, TrainingError> {
+    match name.to_uppercase().as_str() {
+        "PINHOLE" => Ok(CameraModel::Pinhole),
+        "SIMPLE_RADIAL" => Ok(CameraModel::SimpleRadial),
+        "RADIAL" => Ok(CameraModel::Radial),
+        "OPENCV" => Ok(CameraModel::OpenCV),
+        "OPENCV_FISHEYE" => Ok(CameraModel::OpenCVFisheye),
+        "FULL_FISHEYE" => Ok(CameraModel::FullFisheye),
+        "THIN_PRISM_FISHEYE" => Ok(CameraModel::ThinPrismFisheye),
+        _ => Err(TrainingError::InvalidInput(format!(
+            "unknown camera model '{}'",
+            name
+        ))),
+    }
+}
+
+fn parse_colmap_images(dir: &Path) -> Result<Vec<ColmapImage>, TrainingError> {
+    let bin_path = dir.join("images.bin");
+    let txt_path = dir.join("images.txt");
+
+    if bin_path.exists() {
+        parse_images_binary(&bin_path)
+    } else if txt_path.exists() {
+        parse_images_text(&txt_path)
+    } else {
+        Err(TrainingError::InvalidInput(format!(
+            "no images file found in {}",
+            dir.display(),
+        )))
+    }
+}
+
+fn parse_images_binary(path: &Path) -> Result<Vec<ColmapImage>, TrainingError> {
+    let mut file = File::open(path)?;
+    let num_images = read_u64(&mut file)? as usize;
+
+    let mut images = Vec::with_capacity(num_images);
+    for _ in 0..num_images {
+        let image_id = read_u32(&mut file)?;
+        let qw = read_f64(&mut file)?;
+        let qx = read_f64(&mut file)?;
+        let qy = read_f64(&mut file)?;
+        let qz = read_f64(&mut file)?;
+        let tx = read_f64(&mut file)?;
+        let ty = read_f64(&mut file)?;
+        let tz = read_f64(&mut file)?;
+        let camera_id = read_u32(&mut file)?;
+        let name = read_string(&mut file)?;
+
+        // Skip 2D point observations (we don't need them for dataset loading)
+        let num_points2d = read_u64(&mut file)?;
+        for _ in 0..num_points2d {
+            // x, y, point3D_id
+            read_f64(&mut file)?;
+            read_f64(&mut file)?;
+            read_u64(&mut file)?;
+        }
+
+        images.push(ColmapImage {
+            image_id,
+            qw,
+            qx,
+            qy,
+            qz,
+            tx,
+            ty,
+            tz,
+            camera_id,
+            name,
+        });
+    }
+
     Ok(images)
 }
 
-fn read_points_txt(path: &Path) -> Result<Vec<([f32; 3], Option<[f32; 3]>)>, TrainingError> {
-    let file = File::open(path)?;
-    let reader = BufReader::new(file);
+fn parse_images_text(path: &Path) -> Result<Vec<ColmapImage>, TrainingError> {
+    let reader = BufReader::new(File::open(path)?);
+    let mut images = Vec::new();
+
+    for (line_num, line) in reader.lines().enumerate() {
+        let line = line?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+
+        // Image line format: IMAGE_ID, QW, QX, QY, QZ, TX, TY, TZ, CAMERA_ID, NAME
+        // Points line follows (we skip it)
+        let parts: Vec<&str> = trimmed.split_whitespace().collect();
+        if parts.len() < 10 {
+            continue;
+        }
+
+        // Skip lines that don't start with a valid image ID
+        if parts[0].parse::<u32>().is_err() {
+            continue;
+        }
+
+        let image_id = parse_u32(path, line_num, "image_id", parts[0])?;
+        let qw = parse_f64(path, line_num, "qw", parts[1])?;
+        let qx = parse_f64(path, line_num, "qx", parts[2])?;
+        let qy = parse_f64(path, line_num, "qy", parts[3])?;
+        let qz = parse_f64(path, line_num, "qz", parts[4])?;
+        let tx = parse_f64(path, line_num, "tx", parts[5])?;
+        let ty = parse_f64(path, line_num, "ty", parts[6])?;
+        let tz = parse_f64(path, line_num, "tz", parts[7])?;
+        let camera_id = parse_u32(path, line_num, "camera_id", parts[8])?;
+        let name = parts[9].to_string();
+
+        images.push(ColmapImage {
+            image_id,
+            qw,
+            qx,
+            qy,
+            qz,
+            tx,
+            ty,
+            tz,
+            camera_id,
+            name,
+        });
+    }
+
+    Ok(images)
+}
+
+fn parse_colmap_points3d(dir: &Path) -> Result<Vec<ColmapPoint3D>, TrainingError> {
+    let bin_path = dir.join("points3D.bin");
+    let txt_path = dir.join("points3D.txt");
+
+    if bin_path.exists() {
+        parse_points3d_binary(&bin_path)
+    } else if txt_path.exists() {
+        parse_points3d_text(&txt_path)
+    } else {
+        // Points3D is optional - return empty if not found
+        Ok(Vec::new())
+    }
+}
+
+fn parse_points3d_binary(path: &Path) -> Result<Vec<ColmapPoint3D>, TrainingError> {
+    let mut file = File::open(path)?;
+    let num_points = read_u64(&mut file)? as usize;
+
+    let mut points = Vec::with_capacity(num_points);
+    for _ in 0..num_points {
+        let point_id = read_u64(&mut file)?;
+        let x = read_f64(&mut file)?;
+        let y = read_f64(&mut file)?;
+        let z = read_f64(&mut file)?;
+        let r = read_u32(&mut file)? as u8;
+        let g = read_u32(&mut file)? as u8;
+        let b = read_u32(&mut file)? as u8;
+
+        // Skip error and track
+        read_f64(&mut file)?; // error
+        let track_len = read_u64(&mut file)?;
+        for _ in 0..track_len {
+            read_u32(&mut file)?; // image_id
+            read_u32(&mut file)?; // point2d_idx
+        }
+
+        points.push(ColmapPoint3D {
+            point_id,
+            x,
+            y,
+            z,
+            r,
+            g,
+            b,
+        });
+    }
+
+    Ok(points)
+}
+
+fn parse_points3d_text(path: &Path) -> Result<Vec<ColmapPoint3D>, TrainingError> {
+    let reader = BufReader::new(File::open(path)?);
     let mut points = Vec::new();
 
     for (line_num, line) in reader.lines().enumerate() {
@@ -283,266 +694,55 @@ fn read_points_txt(path: &Path) -> Result<Vec<([f32; 3], Option<[f32; 3]>)>, Tra
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
-        let parts = trimmed.split_whitespace().collect::<Vec<_>>();
-        if parts.len() < 7 {
-            return Err(TrainingError::InvalidInput(format!(
-                "{} line {}: expected at least 7 columns",
-                path.display(),
-                line_num + 1
-            )));
+
+        // Point line format: POINT3D_ID, X, Y, Z, R, G, B, ERROR, TRACK[]
+        let parts: Vec<&str> = trimmed.split_whitespace().collect();
+        if parts.len() < 8 {
+            continue;
         }
-        let x = parse_f32(parts[1], path, line_num + 1, "x")?;
-        let y = parse_f32(parts[2], path, line_num + 1, "y")?;
-        let z = parse_f32(parts[3], path, line_num + 1, "z")?;
-        let r = parse_f32(parts[4], path, line_num + 1, "r")? / 255.0;
-        let g = parse_f32(parts[5], path, line_num + 1, "g")? / 255.0;
-        let b = parse_f32(parts[6], path, line_num + 1, "b")? / 255.0;
-        points.push(([x, y, z], Some([r, g, b])));
-    }
 
-    Ok(points)
-}
+        let point_id = parse_u64(path, line_num, "point_id", parts[0])?;
+        let x = parse_f64(path, line_num, "x", parts[1])?;
+        let y = parse_f64(path, line_num, "y", parts[2])?;
+        let z = parse_f64(path, line_num, "z", parts[3])?;
+        let r = parse_u8(path, line_num, "r", parts[4])?;
+        let g = parse_u8(path, line_num, "g", parts[5])?;
+        let b = parse_u8(path, line_num, "b", parts[6])?;
 
-fn read_cameras_bin(path: &Path) -> Result<HashMap<u32, ColmapCamera>, TrainingError> {
-    let mut file = File::open(path)?;
-    let count = read_u64(&mut file)? as usize;
-    let mut cameras = HashMap::with_capacity(count);
-    for _ in 0..count {
-        let camera_id = read_u32(&mut file)?;
-        let model_id = read_u32(&mut file)?;
-        let width = read_u64(&mut file)? as u32;
-        let height = read_u64(&mut file)? as u32;
-        let model_name = camera_model_name(model_id)?;
-        let param_count = camera_param_count(model_id)?;
-        let mut params = Vec::with_capacity(param_count);
-        for _ in 0..param_count {
-            params.push(read_f64(&mut file)?);
-        }
-        cameras.insert(
-            camera_id,
-            camera_from_model(model_name, width, height, &params)?,
-        );
-    }
-    Ok(cameras)
-}
-
-fn read_images_bin(path: &Path) -> Result<Vec<ColmapImage>, TrainingError> {
-    let mut file = File::open(path)?;
-    let count = read_u64(&mut file)? as usize;
-    let mut images = Vec::with_capacity(count);
-    for _ in 0..count {
-        let _image_id = read_u32(&mut file)?;
-        let qw = read_f64(&mut file)? as f32;
-        let qx = read_f64(&mut file)? as f32;
-        let qy = read_f64(&mut file)? as f32;
-        let qz = read_f64(&mut file)? as f32;
-        let tx = read_f64(&mut file)? as f32;
-        let ty = read_f64(&mut file)? as f32;
-        let tz = read_f64(&mut file)? as f32;
-        let camera_id = read_u32(&mut file)?;
-        let name = read_c_string(&mut file)?;
-        let point_count = read_u64(&mut file)? as usize;
-        skip_bytes(&mut file, point_count * (8 + 8 + 8))?;
-        let world_to_camera =
-            SE3::from_quat_translation(Quat::from_xyzw(qx, qy, qz, qw), Vec3::new(tx, ty, tz));
-        images.push(ColmapImage {
-            camera_id,
-            name,
-            pose: world_to_camera.inverse(),
+        points.push(ColmapPoint3D {
+            point_id,
+            x,
+            y,
+            z,
+            r,
+            g,
+            b,
         });
     }
-    images.sort_by(|lhs, rhs| lhs.name.cmp(&rhs.name));
-    Ok(images)
-}
 
-fn read_points_bin(path: &Path) -> Result<Vec<([f32; 3], Option<[f32; 3]>)>, TrainingError> {
-    let mut file = File::open(path)?;
-    let count = read_u64(&mut file)? as usize;
-    let mut points = Vec::with_capacity(count);
-    for _ in 0..count {
-        let _point_id = read_u64(&mut file)?;
-        let x = read_f64(&mut file)? as f32;
-        let y = read_f64(&mut file)? as f32;
-        let z = read_f64(&mut file)? as f32;
-        let mut rgb = [0u8; 3];
-        file.read_exact(&mut rgb)?;
-        let _error = read_f64(&mut file)?;
-        let track_length = read_u64(&mut file)? as usize;
-        skip_bytes(&mut file, track_length * (4 + 4))?;
-        points.push((
-            [x, y, z],
-            Some([
-                rgb[0] as f32 / 255.0,
-                rgb[1] as f32 / 255.0,
-                rgb[2] as f32 / 255.0,
-            ]),
-        ));
-    }
     Ok(points)
 }
 
-fn camera_from_model(
-    model: &str,
-    width: u32,
-    height: u32,
-    params: &[f64],
-) -> Result<ColmapCamera, TrainingError> {
-    let (fx, fy, cx, cy) = match model {
-        "SIMPLE_PINHOLE"
-        | "SIMPLE_RADIAL"
-        | "RADIAL"
-        | "SIMPLE_RADIAL_FISHEYE"
-        | "RADIAL_FISHEYE" => {
-            if params.len() < 3 {
-                return Err(TrainingError::InvalidInput(format!(
-                    "COLMAP camera model {} requires at least 3 parameters",
-                    model
-                )));
-            }
-            (params[0], params[0], params[1], params[2])
-        }
-        "PINHOLE" | "OPENCV" | "OPENCV_FISHEYE" | "FULL_OPENCV" | "THIN_PRISM_FISHEYE" | "FOV" => {
-            if params.len() < 4 {
-                return Err(TrainingError::InvalidInput(format!(
-                    "COLMAP camera model {} requires at least 4 parameters",
-                    model
-                )));
-            }
-            (params[0], params[1], params[2], params[3])
-        }
-        other => {
-            return Err(TrainingError::InvalidInput(format!(
-                "unsupported COLMAP camera model {}",
-                other
-            )))
-        }
-    };
-    Ok(ColmapCamera {
-        width,
-        height,
-        fx: fx as f32,
-        fy: fy as f32,
-        cx: cx as f32,
-        cy: cy as f32,
-    })
-}
-
-fn camera_model_name(model_id: u32) -> Result<&'static str, TrainingError> {
-    match model_id {
-        0 => Ok("SIMPLE_PINHOLE"),
-        1 => Ok("PINHOLE"),
-        2 => Ok("SIMPLE_RADIAL"),
-        3 => Ok("RADIAL"),
-        4 => Ok("OPENCV"),
-        5 => Ok("OPENCV_FISHEYE"),
-        6 => Ok("FULL_OPENCV"),
-        7 => Ok("FOV"),
-        8 => Ok("SIMPLE_RADIAL_FISHEYE"),
-        9 => Ok("RADIAL_FISHEYE"),
-        10 => Ok("THIN_PRISM_FISHEYE"),
-        other => Err(TrainingError::InvalidInput(format!(
-            "unsupported COLMAP camera model id {}",
-            other
-        ))),
-    }
-}
-
-fn camera_param_count(model_id: u32) -> Result<usize, TrainingError> {
-    match model_id {
-        0 => Ok(3),
-        1 => Ok(4),
-        2 => Ok(4),
-        3 => Ok(5),
-        4 => Ok(8),
-        5 => Ok(8),
-        6 => Ok(12),
-        7 => Ok(5),
-        8 => Ok(4),
-        9 => Ok(5),
-        10 => Ok(12),
-        other => Err(TrainingError::InvalidInput(format!(
-            "unsupported COLMAP camera model id {}",
-            other
-        ))),
-    }
-}
-
-fn read_u32<R: Read>(reader: &mut R) -> Result<u32, TrainingError> {
-    let mut bytes = [0u8; 4];
-    reader.read_exact(&mut bytes)?;
-    Ok(u32::from_le_bytes(bytes))
-}
-
-fn read_u64<R: Read>(reader: &mut R) -> Result<u64, TrainingError> {
-    let mut bytes = [0u8; 8];
-    reader.read_exact(&mut bytes)?;
-    Ok(u64::from_le_bytes(bytes))
-}
-
-fn read_f64<R: Read>(reader: &mut R) -> Result<f64, TrainingError> {
-    let mut bytes = [0u8; 8];
-    reader.read_exact(&mut bytes)?;
-    Ok(f64::from_le_bytes(bytes))
-}
-
-fn read_c_string<R: Read>(reader: &mut R) -> Result<String, TrainingError> {
-    let mut bytes = Vec::new();
-    loop {
-        let mut byte = [0u8; 1];
-        reader.read_exact(&mut byte)?;
-        if byte[0] == 0 {
-            break;
-        }
-        bytes.push(byte[0]);
-    }
-    String::from_utf8(bytes)
-        .map_err(|err| TrainingError::InvalidInput(format!("invalid UTF-8 in image name: {}", err)))
-}
-
-fn skip_bytes<R: Read>(reader: &mut R, count: usize) -> Result<(), TrainingError> {
-    let mut remaining = count;
-    let mut buffer = [0u8; 4096];
-    while remaining > 0 {
-        let chunk = remaining.min(buffer.len());
-        reader.read_exact(&mut buffer[..chunk])?;
-        remaining -= chunk;
-    }
-    Ok(())
-}
-
-fn parse_u32(value: &str, path: &Path, line_num: usize, label: &str) -> Result<u32, TrainingError> {
-    value.parse::<u32>().map_err(|err| {
+fn parse_u64(path: &Path, line_num: usize, field: &str, value: &str) -> Result<u64, TrainingError> {
+    value.parse::<u64>().map_err(|err| {
         TrainingError::InvalidInput(format!(
             "{} line {}: invalid {} '{}': {}",
             path.display(),
-            line_num,
-            label,
+            line_num + 1,
+            field,
             value,
             err
         ))
     })
 }
 
-fn parse_f32(value: &str, path: &Path, line_num: usize, label: &str) -> Result<f32, TrainingError> {
-    value.parse::<f32>().map_err(|err| {
+fn parse_u8(path: &Path, line_num: usize, field: &str, value: &str) -> Result<u8, TrainingError> {
+    value.parse::<u8>().map_err(|err| {
         TrainingError::InvalidInput(format!(
             "{} line {}: invalid {} '{}': {}",
             path.display(),
-            line_num,
-            label,
-            value,
-            err
-        ))
-    })
-}
-
-fn parse_f64(value: &str, path: &Path, line_num: usize, label: &str) -> Result<f64, TrainingError> {
-    value.parse::<f64>().map_err(|err| {
-        TrainingError::InvalidInput(format!(
-            "{} line {}: invalid {} '{}': {}",
-            path.display(),
-            line_num,
-            label,
+            line_num + 1,
+            field,
             value,
             err
         ))
@@ -551,31 +751,84 @@ fn parse_f64(value: &str, path: &Path, line_num: usize, label: &str) -> Result<f
 
 #[cfg(test)]
 mod tests {
-    use super::{load_colmap_dataset, looks_like_colmap_dataset};
-    use std::fs;
+    use super::*;
     use tempfile::tempdir;
 
-    #[test]
-    fn loads_text_colmap_dataset_with_sparse_points() {
-        let dir = tempdir().unwrap();
-        fs::create_dir_all(dir.path().join("images")).unwrap();
-        fs::write(dir.path().join("images/frame_000.png"), []).unwrap();
-        fs::write(
-            dir.path().join("cameras.txt"),
-            "1 PINHOLE 640 480 500 500 320 240\n",
-        )
-        .unwrap();
-        fs::write(
-            dir.path().join("images.txt"),
-            "1 1 0 0 0 0 0 0 1 frame_000.png\n0 0 -1\n",
-        )
-        .unwrap();
-        fs::write(dir.path().join("points3D.txt"), "1 0 0 1 255 128 0 0\n").unwrap();
+    fn write_colmap_test_dataset(root: &Path) {
+        // Create sparse directory
+        let sparse = root.join("sparse").join("0");
+        std::fs::create_dir_all(&sparse).unwrap();
 
-        assert!(looks_like_colmap_dataset(dir.path()));
-        let dataset = load_colmap_dataset(dir.path()).unwrap();
-        assert_eq!(dataset.poses.len(), 1);
-        assert_eq!(dataset.initial_points.len(), 1);
-        assert_eq!(dataset.intrinsics.width, 640);
+        // Create images directory
+        let images = root.join("images");
+        std::fs::create_dir_all(&images).unwrap();
+
+        // Write cameras.txt
+        std::fs::write(
+            sparse.join("cameras.txt"),
+            "# Camera list with one line of data per camera:\n1 PINHOLE 1920 1080 1500 1500 960 540\n",
+        )
+        .unwrap();
+
+        // Write images.txt
+        std::fs::write(
+            sparse.join("images.txt"),
+            "# Image list with two lines of data per image:\n1 1.0 0.0 0.0 0.0 0.0 0.0 1.0 1 frame_0001.jpg\n2 1.0 0.0 0.0 0.0 1.0 0.0 2.0 1 frame_0002.jpg\n",
+        )
+        .unwrap();
+
+        // Write points3D.txt
+        std::fs::write(
+            sparse.join("points3D.txt"),
+            "# 3D point list with one line of data per point:\n1 0.0 0.0 1.0 128 128 128 0.1\n2 1.0 0.0 1.0 64 64 64 0.1\n",
+        )
+        .unwrap();
+
+        // Create placeholder images
+        let img_data: Vec<u8> = vec![0u8; 1920 * 1080 * 3];
+        for name in ["frame_0001.jpg", "frame_0002.jpg"] {
+            std::fs::write(images.join(name), &img_data).unwrap();
+        }
+    }
+
+    #[test]
+    fn test_load_colmap_dataset_text_format() {
+        let temp = tempdir().unwrap();
+        write_colmap_test_dataset(temp.path());
+
+        let dataset = load_colmap_dataset(temp.path(), &ColmapConfig::default()).unwrap();
+        assert_eq!(dataset.poses.len(), 2);
+        assert_eq!(dataset.initial_points.len(), 2);
+        assert_eq!(dataset.intrinsics.width, 1920);
+        assert_eq!(dataset.intrinsics.height, 1080);
+        assert!((dataset.intrinsics.fx - 1500.0).abs() < 1e-3);
+        assert_eq!(dataset.poses[0].pose.translation(), [0.0, 0.0, -1.0]);
+        assert_eq!(dataset.poses[1].pose.translation(), [-1.0, 0.0, -2.0]);
+    }
+
+    #[test]
+    fn test_load_colmap_with_stride() {
+        let temp = tempdir().unwrap();
+        write_colmap_test_dataset(temp.path());
+
+        let dataset = load_colmap_dataset(
+            temp.path(),
+            &ColmapConfig {
+                max_frames: 0,
+                frame_stride: 2,
+                depth_scale: 1.0,
+            },
+        )
+        .unwrap();
+        assert_eq!(dataset.poses.len(), 1); // Only first frame with stride 2
+    }
+
+    #[test]
+    fn test_camera_model_intrinsics() {
+        let pinhole = CameraModel::Pinhole;
+        let intrinsics = pinhole.intrinsics(1920, 1080, &[1500.0, 1500.0, 960.0, 540.0]);
+        assert!(intrinsics.is_some());
+        let intrinsics = intrinsics.unwrap();
+        assert!((intrinsics.fx - 1500.0).abs() < 1e-3);
     }
 }

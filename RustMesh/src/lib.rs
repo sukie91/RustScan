@@ -15,28 +15,14 @@
 //! ```
 
 // Re-export types
-pub use analysis::{
-    analyze_mesh, compute_all_curvatures, compute_edge_length_stats, compute_mesh_quality,
-    compute_surface_area, compute_vertex_curvature, compute_volume, export_curvature_field,
-    CurvatureType, EdgeLengthStats, MeshAnalysis, MeshQuality, VertexCurvature,
-};
-pub use attrib_soa_kernel::{
-    AttribSoAKernel, EPropHandle, FPropHandle, HPropHandle, PropHandle, VPropHandle,
-};
+pub use attrib_soa_kernel::AttribSoAKernel;
 pub use circulators::*;
 pub use connectivity::RustMesh;
 pub use decimation::{
     decimate_mesh, CollapseInfo, Decimater, DecimationConfig, DecimationTrace, DecimationTraceStep,
     ModQuadricT,
 };
-pub use decimation_modules::{
-    CollapseInfo as ModuleCollapseInfo, CollapseResult, CombinedModules, DecimationModule,
-    ModAspectRatio, ModBoundary, ModNormal, ModQuadric,
-};
-pub use dualizer::{
-    dual_mesh, dual_mesh_with_boundary, dualize, dualize_with_boundary, is_dualizable,
-    BoundaryDualStrategy, DualError, DualResult,
-};
+pub use dualizer::*;
 pub use geometry::*;
 pub use handles::{BaseHandle, EdgeHandle, FaceHandle, HalfedgeHandle, VertexHandle};
 pub use hole_filling::*;
@@ -125,30 +111,18 @@ mod test_data {
 
 // Tools modules (对应 OpenMesh/Tools)
 pub mod tools {
-    pub mod analysis;
     pub mod decimation;
-    pub mod decimation_modules;
     pub mod dualizer;
     pub mod hole_filling;
     pub mod mesh_repair;
-    pub mod remeshing;
     pub mod smoother;
     pub mod subdivision;
     pub mod vdpm;
 }
 
 // Re-export Tools
-mod analysis {
-    pub use crate::tools::analysis::*;
-}
 mod decimation {
     pub use crate::tools::decimation::*;
-}
-mod decimation_modules {
-    pub use crate::tools::decimation_modules::*;
-}
-mod remeshing {
-    pub use crate::tools::remeshing::*;
 }
 mod smoother {
     pub use crate::tools::smoother::*;

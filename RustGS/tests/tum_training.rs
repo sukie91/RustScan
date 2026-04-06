@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use rustgs::{load_training_dataset, TrainingConfig, TumRgbdConfig};
+use rustgs::{load_training_dataset, select_evaluation_frames, TrainingConfig, TumRgbdConfig};
 
 fn tum_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../test_data/tum")
@@ -33,6 +33,30 @@ fn loads_workspace_tum_directory_as_training_dataset() {
     assert!(dataset.poses.len() >= 3);
     assert_eq!(dataset.depth_scale, 5000.0);
     assert!(dataset.poses.iter().all(|pose| pose.depth_path.is_some()));
+}
+
+#[test]
+fn selects_stable_tum_eval_subset_with_stride() {
+    let Some(root) = tum_root_if_available() else {
+        eprintln!(
+            "skipping test: missing TUM fixture at {}",
+            tum_root().display()
+        );
+        return;
+    };
+    let dataset = load_training_dataset(
+        &root,
+        &TumRgbdConfig {
+            max_frames: 180,
+            frame_stride: 1,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let selected = select_evaluation_frames(&dataset, 180, 30);
+    assert!(!selected.poses.is_empty());
+    assert!(selected.poses.len() <= dataset.poses.len());
 }
 
 #[cfg(feature = "gpu")]

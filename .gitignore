@@ -20,10 +20,16 @@ target/
 Thumbs.db
 
 # Large test data (optional - keep small test files)
-test_data/large/
+test_data/*
+!test_data/large/
+test_data/large/*
 !test_data/large/*.obj
 test_data/video/
-test_data/
+!test_data/fixtures/
+!test_data/fixtures/litegs/
+!test_data/fixtures/litegs/colmap-small/
+!test_data/fixtures/litegs/colmap-small/README.md
+!test_data/fixtures/litegs/colmap-small/parity-reference.json
 
 # OpenMesh source (external dependency)
 Mirror/
