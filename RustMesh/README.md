@@ -1,202 +1,107 @@
 # RustMesh
 
-A high-performance mesh processing library in pure Rust, inspired by OpenMesh with SIMD optimizations.
+RustMesh is a mesh processing crate in pure Rust, inspired by OpenMesh and built around a half-edge connectivity core plus SoA-oriented storage.
 
-## Features
+This README is the canonical RustMesh overview for the current workspace. Branch-specific parity details live in [`../docs/RustMesh-OpenMesh-Progress-2026-04-05.md`](../docs/RustMesh-OpenMesh-Progress-2026-04-05.md).
 
-### Core Data Structures
-- **Half-Edge Mesh**: Industry-standard connectivity representation
-- **SoA Layout**: Structure-of-Arrays memory layout for SIMD performance
-- **Smart Handles**: Type-safe vertex/edge/face/halfedge handles
+## Verified Status
 
-### IO Support
-- **OBJ**: Complete read/write support with normals and texcoords ✅
-- **OFF**: Read/write support for polygon meshes ✅
-- **PLY**: Export (ASCII/Binary) ✅, import (planned)
-- **Conversion API**: `from_triangle_mesh()` for easy integration ✅
+Validated on 2026-04-06 in the `rm-opt` worktree:
 
-### Mesh Algorithms
-- Decimation (Quadric-based)
-- Subdivision (Loop, Catmull-Clark, Sqrt3)
-- Smoothing (Laplace, Tangential)
-- Hole Filling
-- Mesh Repair
-- Dualization
+- `cargo test --manifest-path RustMesh/Cargo.toml --lib --quiet`: `250 passed; 0 failed`
+- `cargo test --manifest-path RustMesh/Cargo.toml --lib tools::decimation::tests --quiet`: `12 passed; 0 failed`
+- `cargo test --manifest-path RustMesh/Cargo.toml --lib tools::remeshing::tests --quiet`: `8 passed; 0 failed`
+- `cargo test --manifest-path RustMesh/Cargo.toml --lib tools::vdpm::tests --quiet`: `16 passed; 0 failed`
+- `cargo test --manifest-path RustMesh/Cargo.toml --example openmesh_compare_decimation_trace --quiet`: example builds cleanly
+- `env RUSTFLAGS=-Awarnings cargo run --manifest-path RustMesh/Cargo.toml --release --example openmesh_compare_decimation_trace --quiet -- 10`: RustMesh matches OpenMesh for the first 10 traced decimation steps under the default `OpenMeshParity` import mode
 
-### Performance
-- SIMD-optimized operations via `glam`
-- Separate x/y/z coordinate storage for vectorization
-- Zero-cost abstractions
+## Core Capabilities
 
-## Quick Start
+### Data Structures
 
-```rust
-use rustmesh::{RustMesh, Vec3};
+- Half-edge mesh connectivity
+- Smart typed handles for vertices, halfedges, edges, and faces
+- SoA and attribute-aware kernels
+- Status flags and smart range iteration helpers
 
-// Create mesh
-let mut mesh = RustMesh::new();
-
-// Add vertices
-let v0 = mesh.add_vertex(Vec3::new(0.0, 0.0, 0.0));
-let v1 = mesh.add_vertex(Vec3::new(1.0, 0.0, 0.0));
-let v2 = mesh.add_vertex(Vec3::new(0.0, 1.0, 0.0));
-
-// Add face
-mesh.add_face(&[v0, v1, v2]);
-
-// Export
-rustmesh::io::write_obj(&mesh, "output.obj")?;
-```
-
-## Integration with RustSLAM
-
-RustMesh provides seamless integration with RustSLAM's 3DGS mesh extraction:
-
-```rust
-use rustslam::fusion::MeshExtractor;
-use rustmesh::RustMesh;
-
-// Extract mesh from 3D Gaussians
-let slam_mesh = extractor.extract_with_postprocessing();
-
-// Convert to RustMesh
-let vertices: Vec<Vec3> = slam_mesh.vertices.iter()
-    .map(|v| v.position).collect();
-let triangles: Vec<[usize; 3]> = slam_mesh.triangles.iter()
-    .map(|t| t.indices).collect();
-let normals: Vec<Vec3> = slam_mesh.vertices.iter()
-    .map(|v| v.normal).collect();
-let colors: Vec<[f32; 3]> = slam_mesh.vertices.iter()
-    .map(|v| v.color).collect();
-
-let mesh = RustMesh::from_triangle_mesh(
-    &vertices,
-    &triangles,
-    Some(&normals),
-    Some(&colors),
-);
-
-// Export
-rustmesh::io::write_obj(&mesh, "scan.obj")?;
-```
-
-## Examples
-
-```bash
-# End-to-end export example
-cargo run --example e2e_export
-
-# Smart handles demo
-cargo run --example smart_handles_demo
-
-# OpenMesh benchmark parity
-cargo run --release --example openmesh_compare_benchmark
-
-# OpenMesh tutorial parity
-cargo run --release --example openmesh_compare_examples
-
-# OpenMesh smoothing comparison
-cargo run --release --example openmesh_compare_smoothing
-
-# OpenMesh decimation comparison
-cargo run --release --example openmesh_compare_decimation
-
-# OpenMesh VectorT benchmark parity
-cargo run --release --example openmesh_compare_vector_benchmark
-```
-
-## Testing
-
-```bash
-cargo test --lib          # Run all tests (129 passing)
-cargo test core::io::     # IO tests only
-cargo bench               # Benchmarks
-```
-
-**Test Status**: 129/129 tests passing ✅
-
-## Architecture
-
-```
-src/
-├── Core/
-│   ├── handles.rs          # Type-safe handles
-│   ├── connectivity.rs     # RustMesh main struct
-│   ├── soa_kernel.rs       # SIMD-optimized storage
-│   ├── geometry.rs         # Geometric primitives
-│   └── io/                 # File I/O
-│       ├── obj.rs          # OBJ format ✅
-│       └── ply.rs          # PLY format ✅
-├── Tools/
-│   ├── decimation.rs       # Mesh simplification
-│   ├── subdivision.rs      # Refinement
-│   ├── smoother.rs         # Smoothing
-│   ├── hole_filling.rs     # Hole repair
-│   └── mesh_repair.rs      # Mesh fixing
-└── Utils/
-    ├── circulators.rs      # Mesh traversal
-    ├── quadric.rs          # Error metrics
-    └── smart_ranges.rs     # Range iterators
-```
-
-## Comparison with OpenMesh
-
-| Feature | OpenMesh | RustMesh |
-|---------|----------|----------|
-| Language | C++ | Rust |
-| Memory Safety | Manual | Automatic |
-| SIMD | Partial | Built-in (SoA) |
-| Half-Edge | ✅ | ✅ |
-| Smart Handles | ❌ | ✅ |
-| Iterator Ranges | Limited | ✅ |
-| OBJ I/O | ✅ | ✅ |
-| OFF I/O | ✅ | ✅ |
-| PLY I/O | ✅ | ⚠️ Export only |
-
-## File Format Support
+### IO
 
 | Format | Read | Write | Notes |
 |--------|------|-------|-------|
-| OBJ    | ✅   | ✅    | Normals, texcoords, colors |
-| PLY    | ⏳   | ✅    | ASCII/Binary export |
-| STL    | ⏳   | ⏳    | Placeholder created |
-| OFF    | ✅   | ✅    | Polygon mesh roundtrip |
+| OBJ | Yes | Yes | normals, texcoords, colors |
+| PLY | Yes | Yes | ASCII and binary |
+| STL | Yes | Yes | ASCII and binary |
+| OFF | Yes | Yes | includes `read_off_openmesh_parity()` helper |
 
-## Status
+### Algorithms
 
-**Current Progress: ~85%**
+| Area | Status | Notes |
+|------|--------|-------|
+| Decimation | Implemented | quadric decimation plus OpenMesh comparison tooling |
+| Decimation modules | Implemented | modular constraints including quadric, normal, aspect ratio, boundary |
+| Smoothing | Implemented | uniform and tangential paths |
+| Subdivision | Implemented | Loop, Catmull-Clark, sqrt3, midpoint, butterfly |
+| Hole filling | Implemented | mesh repair support |
+| Mesh repair | Implemented | topology cleanup utilities |
+| Dualization | Implemented | includes boundary-aware dualization |
+| Analysis | Implemented | curvature, quality, area, volume, edge-length stats |
+| Circulators | Implemented | vertex/face/edge plus HH and EE circulators |
+| Remeshing | Implemented and regression-covered on the shared primitive path | split/collapse/flip/valence/isotropic remesh are present; representative acceptance tests now validate topology and long-edge threshold behavior |
+| Progressive mesh | Partial | simplify, exact-record refine, reset, `simplification_progress()`, vertex split, and `get_lod(level)` exist; `get_lod(level)` still resets to `original` instead of navigating incrementally from current state |
 
-✅ **Complete**:
-- Half-edge data structure with SoA kernel
-- OBJ read/write (normals, texcoords, colors)
-- OFF read/write
-- PLY export (ASCII/Binary)
-- Conversion API (`from_triangle_mesh`)
-- Mesh algorithms (decimation, subdivision, smoothing, hole filling, repair)
-- Smart handles with type-safe navigation
-- OpenMesh comparison examples and benchmark parity harnesses
-- All core tests passing (129/129) ✅
+## OpenMesh Comparison
 
-⏳ **In Progress**:
-- PLY import
-- STL format support
-- Performance optimizations
-- Advanced attribute system
+RustMesh is not globally "feature parity complete" with OpenMesh, but the current branch has a solid verified baseline:
 
-## Building
+- The default decimation trace example now uses `OpenMeshParity` import mode.
+- On that baseline, the first 10 traced decimation steps match OpenMesh exactly.
+- Result-level summary also matches on the comparison mesh: `collapsed=61, boundary=31, interior=30, final V=60, final F=109`.
+- A dedicated `openmesh_compare_normals` example now measures `update_face_normals`, `update_vertex_normals`, and `update_normals` against a local OpenMesh driver on the same deterministic OFF input.
+- The legacy `standard` import mode remains available for debugging and still diverges earlier, so it is not treated as the default parity baseline.
+
+Use these examples for comparison work:
 
 ```bash
-cargo build --release
-cargo test
-cargo bench
+cargo run --release --example openmesh_compare_decimation
+cargo run --release --example openmesh_compare_decimation_trace -- 10
+env RUSTFLAGS=-Awarnings cargo run --manifest-path RustMesh/Cargo.toml --release --example openmesh_compare_normals --quiet
+cargo run --release --example openmesh_compare_smoothing
+cargo run --release --example openmesh_compare_io
 ```
 
-## License
+## Current Gaps
 
-[Add your license here]
+- The detailed RustMesh-vs-OpenMesh comparison matrix lives in [`../docs/RustMesh-OpenMesh-Progress-2026-04-05.md`](../docs/RustMesh-OpenMesh-Progress-2026-04-05.md).
+- The current performance-gap execution notes live in [`../docs/RustMesh-OpenMesh-Gap-Analysis-2026-04-06.md`](../docs/RustMesh-OpenMesh-Gap-Analysis-2026-04-06.md).
+- The authoritative implementation backlog now lives in [`../docs/RustMesh-OpenMesh-Parity-Roadmap.md`](../docs/RustMesh-OpenMesh-Parity-Roadmap.md) and is organized as epics/stories instead of another flat checklist.
+- `AttribSoAKernel` dynamic properties now have typed per-entity handles, automatic resize, supported PLY round-trips for `f32`, `i32`, and `Vec3`, and deterministic propagation on the maintained `collapse` / `split_edge` / triangle `split_face` path; the remaining scope decision is whether rebuild-backed n-gon fallbacks should gain the same propagation contract, while `Vec2` / `Vec4` persistence still fails explicitly.
+- `split_edge()` and triangle `split_face()` now use local half-edge surgery on the maintained topology path, while `triangulate_face()` and non-triangle `split_face()` still use controlled rebuild-backed baselines.
+- Remeshing acceptance on the shared split/collapse/flip path is now regression-covered; the remaining topology gap is whether non-triangle `split_face()` / `triangulate_face()` should stay rebuild-backed or gain deeper local surgery.
+- Vertex-normal semantics and refresh policy are now explicit: RustMesh defaults to area-weighted accumulation, `VertexNormalWeighting::FaceAverage` provides an OpenMesh-compatible equal-face-weight path, maintained topology edits do not auto-refresh normals, and rebuild-backed topology paths drop face-normal storage until explicit refresh; the remaining normals gap is durable comparison coverage rather than raw speed.
+- Progressive mesh now exposes exact refine / `vertex_split()` replay records plus monotonic LOD regression coverage, but `get_lod(level)` still resets to `original` because incremental current-state navigation is not wired yet.
+- OpenMesh verification is strongest around decimation; broader algorithm-by-algorithm comparison coverage is still selective.
+- Some helper/test-data paths still contain older TODO markers that do not affect the verified library surface.
 
-## References
+## Key Commands
 
-- [OpenMesh](https://www.openmesh.org/) - Original inspiration
-- [glam](https://github.com/bitshifter/glam-rs) - SIMD math library
-- [RustScan](../README.md) - Parent project
+```bash
+# Build
+cargo build --manifest-path RustMesh/Cargo.toml --release
+
+# Full library test suite
+cargo test --manifest-path RustMesh/Cargo.toml --lib
+
+# Focused RustMesh areas
+cargo test --manifest-path RustMesh/Cargo.toml --lib tools::decimation::tests
+cargo test --manifest-path RustMesh/Cargo.toml --lib tools::remeshing::tests
+cargo test --manifest-path RustMesh/Cargo.toml --lib tools::vdpm::tests
+
+# Reproducible normals parity check
+env RUSTFLAGS=-Awarnings cargo run --manifest-path RustMesh/Cargo.toml --release --example openmesh_compare_normals --quiet
+```
+
+## Related Docs
+
+- Workspace overview: [`../README.md`](../README.md)
+- RustMesh `rm-opt` status: [`../docs/RustMesh-OpenMesh-Progress-2026-04-05.md`](../docs/RustMesh-OpenMesh-Progress-2026-04-05.md)
+- RustMesh epic/story backlog: [`../docs/RustMesh-OpenMesh-Parity-Roadmap.md`](../docs/RustMesh-OpenMesh-Parity-Roadmap.md)

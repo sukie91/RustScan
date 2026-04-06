@@ -103,11 +103,12 @@ impl DecimationModule for ModQuadric {
         let error = compute_quadric_error(mesh, info.v_from, info.v_to, info.target_position);
 
         // Apply boundary factor
-        let adjusted_error = if is_boundary_vertex(mesh, info.v_from) || is_boundary_vertex(mesh, info.v_to) {
-            error * self.boundary_factor
-        } else {
-            error
-        };
+        let adjusted_error =
+            if is_boundary_vertex(mesh, info.v_from) || is_boundary_vertex(mesh, info.v_to) {
+                error * self.boundary_factor
+            } else {
+                error
+            };
 
         if adjusted_error > self.max_error {
             None
@@ -278,7 +279,7 @@ impl DecimationModule for ModBoundary {
             if is_boundary_vertex(mesh, info.v_from) || is_boundary_vertex(mesh, info.v_to) {
                 Some(0.01) // Low priority for boundary
             } else {
-            Some(0.0)
+                Some(0.0)
             }
         } else {
             None
@@ -300,7 +301,9 @@ pub struct CombinedModules {
 
 impl CombinedModules {
     pub fn new() -> Self {
-        Self { modules: Vec::new() }
+        Self {
+            modules: Vec::new(),
+        }
     }
 
     pub fn add<M: DecimationModule + 'static>(&mut self, module: M) {
@@ -380,7 +383,11 @@ fn compute_normal_deviation(mesh: &RustMesh, info: &CollapseInfo) -> f32 {
     }
 }
 
-fn get_affected_faces(mesh: &RustMesh, v_from: VertexHandle, v_to: VertexHandle) -> Vec<Vec<VertexHandle>> {
+fn get_affected_faces(
+    mesh: &RustMesh,
+    v_from: VertexHandle,
+    v_to: VertexHandle,
+) -> Vec<Vec<VertexHandle>> {
     let mut faces = Vec::new();
 
     // Get all faces adjacent to v_from that don't contain v_to
@@ -525,6 +532,9 @@ mod tests {
         let v2 = mesh.add_vertex(Vec3::new(0.5, 0.866, 0.0));
 
         let ratio = compute_aspect_ratio(&mesh, &[v0, v1, v2]);
-        assert!((ratio - 1.0).abs() < 0.01, "Equilateral triangle should have aspect ratio ~1.0");
+        assert!(
+            (ratio - 1.0).abs() < 0.01,
+            "Equilateral triangle should have aspect ratio ~1.0"
+        );
     }
 }

@@ -8,7 +8,10 @@ mod openmesh_compare_common;
 use openmesh_compare_common::{
     cleanup_paths, measure, mesh_digest, print_header, print_mesh_digest, MeshDigest,
 };
-use rustmesh::{generate_cube, generate_sphere, read_ply, read_stl, write_ply, write_stl, PlyFormat, RustMesh, StlFormat};
+use rustmesh::{
+    generate_cube, generate_sphere, read_ply, read_stl, write_ply, write_stl, PlyFormat, RustMesh,
+    StlFormat,
+};
 use std::fs;
 use std::io::{self, BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -44,11 +47,15 @@ fn ply_digest(path: &Path) -> io::Result<MeshDigest> {
         if trimmed.starts_with("format") {
             format = trimmed.split_whitespace().nth(1).unwrap_or("").to_string();
         } else if trimmed.starts_with("element vertex") {
-            vertex_count = trimmed.split_whitespace().nth(2)
+            vertex_count = trimmed
+                .split_whitespace()
+                .nth(2)
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(0);
         } else if trimmed.starts_with("element face") {
-            face_count = trimmed.split_whitespace().nth(2)
+            face_count = trimmed
+                .split_whitespace()
+                .nth(2)
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(0);
         } else if trimmed == "end_header" {
@@ -76,7 +83,9 @@ fn ply_digest(path: &Path) -> io::Result<MeshDigest> {
         line.clear();
         reader.read_line(&mut line)?;
         let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.is_empty() { continue; }
+        if parts.is_empty() {
+            continue;
+        }
         let n: usize = parts[0].parse().unwrap_or(0);
         for i in 1..=n.min(parts.len() - 1) {
             let idx: usize = parts[i].parse().unwrap_or(0);
@@ -94,7 +103,9 @@ fn ply_digest(path: &Path) -> io::Result<MeshDigest> {
     let mut checksum = 0.0f32;
 
     for (idx, point) in vertices.iter().copied().enumerate() {
-        if !used.get(idx).copied().unwrap_or(false) { continue; }
+        if !used.get(idx).copied().unwrap_or(false) {
+            continue;
+        }
         min = min.min(point);
         max = max.max(point);
         sum += point;
@@ -104,9 +115,12 @@ fn ply_digest(path: &Path) -> io::Result<MeshDigest> {
 
     if count == 0 {
         return Ok(MeshDigest {
-            vertices: 0, faces: 0,
-            bbox_min: glam::Vec3::ZERO, bbox_max: glam::Vec3::ZERO,
-            centroid: glam::Vec3::ZERO, checksum_l1: 0.0,
+            vertices: 0,
+            faces: 0,
+            bbox_min: glam::Vec3::ZERO,
+            bbox_max: glam::Vec3::ZERO,
+            centroid: glam::Vec3::ZERO,
+            checksum_l1: 0.0,
         });
     }
 
@@ -161,9 +175,12 @@ fn stl_ascii_digest(path: &Path) -> io::Result<MeshDigest> {
     let count = vertices_set.len();
     if count == 0 {
         return Ok(MeshDigest {
-            vertices: 0, faces: 0,
-            bbox_min: glam::Vec3::ZERO, bbox_max: glam::Vec3::ZERO,
-            centroid: glam::Vec3::ZERO, checksum_l1: 0.0,
+            vertices: 0,
+            faces: 0,
+            bbox_min: glam::Vec3::ZERO,
+            bbox_max: glam::Vec3::ZERO,
+            centroid: glam::Vec3::ZERO,
+            checksum_l1: 0.0,
         });
     }
 
@@ -211,10 +228,14 @@ fn test_ply_roundtrip_ascii(mesh: &RustMesh, label: &str) {
     );
 
     // Verify
-    assert_eq!(loaded_digest.vertices, original_digest.vertices,
-        "Vertex count mismatch");
-    assert_eq!(loaded_digest.faces, original_digest.faces,
-        "Face count mismatch");
+    assert_eq!(
+        loaded_digest.vertices, original_digest.vertices,
+        "Vertex count mismatch"
+    );
+    assert_eq!(
+        loaded_digest.faces, original_digest.faces,
+        "Face count mismatch"
+    );
 
     cleanup_paths(&[&path]);
     println!("✓ PLY ASCII roundtrip verified");
@@ -226,7 +247,8 @@ fn test_ply_roundtrip_binary(mesh: &RustMesh, label: &str) {
     let path = temp_path(label, "ply");
 
     // Binary little-endian
-    let (write_time, ()) = measure(|| write_ply(mesh, &path, PlyFormat::BinaryLittleEndian).unwrap());
+    let (write_time, ()) =
+        measure(|| write_ply(mesh, &path, PlyFormat::BinaryLittleEndian).unwrap());
     let (read_time, loaded) = measure(|| read_ply(&path).unwrap());
 
     let original_digest = mesh_digest(mesh);
@@ -241,10 +263,14 @@ fn test_ply_roundtrip_binary(mesh: &RustMesh, label: &str) {
         read_time.as_secs_f64() * 1_000.0
     );
 
-    assert_eq!(loaded_digest.vertices, original_digest.vertices,
-        "Vertex count mismatch");
-    assert_eq!(loaded_digest.faces, original_digest.faces,
-        "Face count mismatch");
+    assert_eq!(
+        loaded_digest.vertices, original_digest.vertices,
+        "Vertex count mismatch"
+    );
+    assert_eq!(
+        loaded_digest.faces, original_digest.faces,
+        "Face count mismatch"
+    );
 
     cleanup_paths(&[&path]);
     println!("✓ PLY Binary roundtrip verified");
@@ -274,9 +300,13 @@ fn test_stl_roundtrip_ascii(mesh: &RustMesh, label: &str) {
 
     // STL triangulates polygons and deduplicates vertices
     // Face count may differ due to triangulation and vertex merging
-    println!("Original: {}V {}F, Loaded: {}V {}F",
-        original_digest.vertices, original_digest.faces,
-        loaded_digest.vertices, loaded_digest.faces);
+    println!(
+        "Original: {}V {}F, Loaded: {}V {}F",
+        original_digest.vertices,
+        original_digest.faces,
+        loaded_digest.vertices,
+        loaded_digest.faces
+    );
 
     // Verify bounding box is preserved
     let bbox_ok = (loaded_digest.bbox_min - original_digest.bbox_min).length() < 0.01
@@ -311,11 +341,16 @@ fn test_stl_roundtrip_binary(mesh: &RustMesh, label: &str) {
     let metadata = fs::metadata(&path).unwrap();
     let expected_min_size = 80 + 4 + (original_digest.faces as u64) * 50;
     let actual_triangles = (metadata.len() - 84) / 50;
-    println!("Binary STL contains {} triangles (original {} faces, some may be triangulated)",
-        actual_triangles, original_digest.faces);
-    assert!(metadata.len() >= expected_min_size,
+    println!(
+        "Binary STL contains {} triangles (original {} faces, some may be triangulated)",
+        actual_triangles, original_digest.faces
+    );
+    assert!(
+        metadata.len() >= expected_min_size,
         "Binary STL file size mismatch: {} < {}",
-        metadata.len(), expected_min_size);
+        metadata.len(),
+        expected_min_size
+    );
 
     cleanup_paths(&[&path]);
     println!("✓ STL Binary roundtrip verified");
@@ -349,13 +384,22 @@ fn test_ply_with_attributes() {
     // Read back and verify attributes exist
     let loaded = read_ply(&path).unwrap();
 
-    assert!(loaded.has_vertex_normals(), "Loaded mesh should have normals");
+    assert!(
+        loaded.has_vertex_normals(),
+        "Loaded mesh should have normals"
+    );
     assert!(loaded.has_vertex_colors(), "Loaded mesh should have colors");
 
-    println!("Original: normals={}, colors={}",
-        mesh.has_vertex_normals(), mesh.has_vertex_colors());
-    println!("Loaded: normals={}, colors={}",
-        loaded.has_vertex_normals(), loaded.has_vertex_colors());
+    println!(
+        "Original: normals={}, colors={}",
+        mesh.has_vertex_normals(),
+        mesh.has_vertex_colors()
+    );
+    println!(
+        "Loaded: normals={}, colors={}",
+        loaded.has_vertex_normals(),
+        loaded.has_vertex_colors()
+    );
 
     cleanup_paths(&[&path]);
     println!("✓ PLY with attributes verified");
@@ -390,9 +434,18 @@ fn compare_with_openmesh_reference() {
     let ply_digest = mesh_digest(&ply_loaded);
     let stl_digest = mesh_digest(&stl_loaded);
 
-    println!("Original sphere: {}V {}F", original_digest.vertices, original_digest.faces);
-    println!("PLY roundtrip: {}V {}F", ply_digest.vertices, ply_digest.faces);
-    println!("STL roundtrip: {}V {}F", stl_digest.vertices, stl_digest.faces);
+    println!(
+        "Original sphere: {}V {}F",
+        original_digest.vertices, original_digest.faces
+    );
+    println!(
+        "PLY roundtrip: {}V {}F",
+        ply_digest.vertices, ply_digest.faces
+    );
+    println!(
+        "STL roundtrip: {}V {}F",
+        stl_digest.vertices, stl_digest.faces
+    );
 
     cleanup_paths(&[&rm_ply_path, &rm_stl_path]);
     println!("✓ OpenMesh reference comparison complete");

@@ -52,7 +52,11 @@ fn write_stl_ascii(mesh: &RustMesh, path: impl AsRef<Path>) -> io::Result<()> {
         let edge2 = p2 - p0;
         let normal = edge1.cross(edge2).normalize_or_zero();
 
-        writeln!(writer, "facet normal {} {} {}", normal.x, normal.y, normal.z)?;
+        writeln!(
+            writer,
+            "facet normal {} {} {}",
+            normal.x, normal.y, normal.z
+        )?;
         writeln!(writer, "  outer loop")?;
 
         for vh in &verts {
@@ -168,7 +172,12 @@ pub fn read_stl(path: impl AsRef<Path>) -> io::Result<RustMesh> {
     // For binary STL: file_size = 80 + 4 + n_triangles * 50
     // Check if file size matches binary format
     let n_triangles_bytes = &header_plus_count[80..84];
-    let n_triangles = u32::from_le_bytes([n_triangles_bytes[0], n_triangles_bytes[1], n_triangles_bytes[2], n_triangles_bytes[3]]);
+    let n_triangles = u32::from_le_bytes([
+        n_triangles_bytes[0],
+        n_triangles_bytes[1],
+        n_triangles_bytes[2],
+        n_triangles_bytes[3],
+    ]);
     let expected_binary_size = 84 + (n_triangles as u64) * 50;
     let is_binary_size = file_size == expected_binary_size;
 
@@ -251,7 +260,10 @@ fn read_stl_ascii(mut reader: BufReader<File>) -> io::Result<RustMesh> {
 }
 
 /// Read binary STL file with triangle count already read
-fn read_stl_binary_with_count(mut reader: BufReader<File>, n_triangles: u32) -> io::Result<RustMesh> {
+fn read_stl_binary_with_count(
+    mut reader: BufReader<File>,
+    n_triangles: u32,
+) -> io::Result<RustMesh> {
     let mut mesh = RustMesh::new();
 
     // Vertex deduplication
@@ -268,14 +280,17 @@ fn read_stl_binary_with_count(mut reader: BufReader<File>, n_triangles: u32) -> 
             let mut vert_bytes = [0u8; 12];
             reader.read_exact(&mut vert_bytes)?;
 
-            let x = f32::from_le_bytes([vert_bytes[0], vert_bytes[1], vert_bytes[2], vert_bytes[3]]);
-            let y = f32::from_le_bytes([vert_bytes[4], vert_bytes[5], vert_bytes[6], vert_bytes[7]]);
-            let z = f32::from_le_bytes([vert_bytes[8], vert_bytes[9], vert_bytes[10], vert_bytes[11]]);
+            let x =
+                f32::from_le_bytes([vert_bytes[0], vert_bytes[1], vert_bytes[2], vert_bytes[3]]);
+            let y =
+                f32::from_le_bytes([vert_bytes[4], vert_bytes[5], vert_bytes[6], vert_bytes[7]]);
+            let z =
+                f32::from_le_bytes([vert_bytes[8], vert_bytes[9], vert_bytes[10], vert_bytes[11]]);
 
             let key = float_key(x, y, z);
-            let vh = *vertex_map.entry(key).or_insert_with(|| {
-                mesh.add_vertex(glam::Vec3::new(x, y, z))
-            });
+            let vh = *vertex_map
+                .entry(key)
+                .or_insert_with(|| mesh.add_vertex(glam::Vec3::new(x, y, z)));
             verts.push(vh);
         }
 
@@ -315,9 +330,9 @@ fn parse_vertex_line(
         let z = parts[3].parse().unwrap_or(0.0);
         let key = float_key(x, y, z);
 
-        *vertex_map.entry(key).or_insert_with(|| {
-            mesh.add_vertex(glam::Vec3::new(x, y, z))
-        })
+        *vertex_map
+            .entry(key)
+            .or_insert_with(|| mesh.add_vertex(glam::Vec3::new(x, y, z)))
     } else {
         crate::VertexHandle::invalid()
     }

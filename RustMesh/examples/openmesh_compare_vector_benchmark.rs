@@ -52,6 +52,10 @@ fn run_rust_cases() -> BTreeMap<String, f64> {
     cases.insert("Vec3f_times_scalar".into(), bench_vec3_times_scalar());
 
     cases.insert("Vec4f_add_compare".into(), bench_vec4_add_compare());
+    cases.insert(
+        "Vec4f_add_compare_glam_eq".into(),
+        bench_vec4_add_compare_glam_eq(),
+    );
     cases.insert("Vec4f_scalar_product".into(), bench_vec4_scalar_product());
     cases.insert("Vec4f_norm".into(), bench_vec4_norm());
     cases.insert("Vec4f_times_scalar".into(), bench_vec4_times_scalar());
@@ -177,6 +181,22 @@ fn bench_vec4_add_compare() -> f64 {
     for _ in 0..ITERATIONS {
         v1 += Vec4::new(1.1, 1.2, 1.3, 1.4);
         v2 -= Vec4::new(1.1, 1.2, 1.3, 1.4);
+        if vec4_eq_components(v1, v2) {
+            v1 -= v2;
+            v2 += v1;
+        }
+    }
+    std::hint::black_box(v1.length() + v2.length());
+    start.elapsed().as_nanos() as f64 / ITERATIONS as f64
+}
+
+fn bench_vec4_add_compare_glam_eq() -> f64 {
+    let mut v1 = Vec4::ZERO;
+    let mut v2 = Vec4::splat(1000.0);
+    let start = Instant::now();
+    for _ in 0..ITERATIONS {
+        v1 += Vec4::new(1.1, 1.2, 1.3, 1.4);
+        v2 -= Vec4::new(1.1, 1.2, 1.3, 1.4);
         if v1 == v2 {
             v1 -= v2;
             v2 += v1;
@@ -184,6 +204,11 @@ fn bench_vec4_add_compare() -> f64 {
     }
     std::hint::black_box(v1.length() + v2.length());
     start.elapsed().as_nanos() as f64 / ITERATIONS as f64
+}
+
+#[inline(always)]
+fn vec4_eq_components(lhs: Vec4, rhs: Vec4) -> bool {
+    lhs.x == rhs.x && lhs.y == rhs.y && lhs.z == rhs.z && lhs.w == rhs.w
 }
 
 fn bench_vec4_scalar_product() -> f64 {

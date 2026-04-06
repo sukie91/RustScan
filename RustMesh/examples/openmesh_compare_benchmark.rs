@@ -155,7 +155,8 @@ fn main() {
     );
 
     print_header("Case 4: Triangle Area");
-    let (area_time, (area_iterations, accumulated_area)) = measure(|| measure_triangle_area(&sphere));
+    let (area_time, (area_iterations, accumulated_area)) =
+        measure(|| measure_triangle_area(&sphere));
     println!(
         "Triangle area iterations: {area_iterations}, accumulated area checksum: {:.6}",
         accumulated_area

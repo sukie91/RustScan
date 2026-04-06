@@ -149,28 +149,37 @@ pub fn compute_centroid_simd(vertices: &[PackedVertex]) -> (f32, f32, f32) {
             let offset = i * 4;
 
             // Load 4 x values
-            let vx = vld1q_f32([
-                vertices[offset].x,
-                vertices[offset + 1].x,
-                vertices[offset + 2].x,
-                vertices[offset + 3].x,
-            ].as_ptr());
+            let vx = vld1q_f32(
+                [
+                    vertices[offset].x,
+                    vertices[offset + 1].x,
+                    vertices[offset + 2].x,
+                    vertices[offset + 3].x,
+                ]
+                .as_ptr(),
+            );
 
             // Load 4 y values
-            let vy = vld1q_f32([
-                vertices[offset].y,
-                vertices[offset + 1].y,
-                vertices[offset + 2].y,
-                vertices[offset + 3].y,
-            ].as_ptr());
+            let vy = vld1q_f32(
+                [
+                    vertices[offset].y,
+                    vertices[offset + 1].y,
+                    vertices[offset + 2].y,
+                    vertices[offset + 3].y,
+                ]
+                .as_ptr(),
+            );
 
             // Load 4 z values
-            let vz = vld1q_f32([
-                vertices[offset].z,
-                vertices[offset + 1].z,
-                vertices[offset + 2].z,
-                vertices[offset + 3].z,
-            ].as_ptr());
+            let vz = vld1q_f32(
+                [
+                    vertices[offset].z,
+                    vertices[offset + 1].z,
+                    vertices[offset + 2].z,
+                    vertices[offset + 3].z,
+                ]
+                .as_ptr(),
+            );
 
             acc_x = vaddq_f32(acc_x, vx);
             acc_y = vaddq_f32(acc_y, vy);
@@ -193,7 +202,11 @@ pub fn compute_centroid_simd(vertices: &[PackedVertex]) -> (f32, f32, f32) {
         }
 
         let count = len as f32;
-        ((sum_x + remainder_x) / count, (sum_y + remainder_y) / count, (sum_z + remainder_z) / count)
+        (
+            (sum_x + remainder_x) / count,
+            (sum_y + remainder_y) / count,
+            (sum_z + remainder_z) / count,
+        )
     }
 
     #[cfg(all(not(target_arch = "aarch64"), target_feature = "sse"))]
@@ -256,7 +269,11 @@ pub fn compute_centroid_simd(vertices: &[PackedVertex]) -> (f32, f32, f32) {
         }
 
         let count = len as f32;
-        ((sum_x + remainder_x) / count, (sum_y + remainder_y) / count, (sum_z + remainder_z) / count)
+        (
+            (sum_x + remainder_x) / count,
+            (sum_y + remainder_y) / count,
+            (sum_z + remainder_z) / count,
+        )
     }
 
     #[cfg(all(not(target_arch = "aarch64"), not(target_feature = "sse")))]
@@ -302,24 +319,33 @@ pub fn compute_bbox_simd(vertices: &[PackedVertex]) -> (f32, f32, f32, f32, f32,
         for i in 0..chunks {
             let offset = i * 4;
 
-            let vx = vld1q_f32([
-                vertices[offset].x,
-                vertices[offset + 1].x,
-                vertices[offset + 2].x,
-                vertices[offset + 3].x,
-            ].as_ptr());
-            let vy = vld1q_f32([
-                vertices[offset].y,
-                vertices[offset + 1].y,
-                vertices[offset + 2].y,
-                vertices[offset + 3].y,
-            ].as_ptr());
-            let vz = vld1q_f32([
-                vertices[offset].z,
-                vertices[offset + 1].z,
-                vertices[offset + 2].z,
-                vertices[offset + 3].z,
-            ].as_ptr());
+            let vx = vld1q_f32(
+                [
+                    vertices[offset].x,
+                    vertices[offset + 1].x,
+                    vertices[offset + 2].x,
+                    vertices[offset + 3].x,
+                ]
+                .as_ptr(),
+            );
+            let vy = vld1q_f32(
+                [
+                    vertices[offset].y,
+                    vertices[offset + 1].y,
+                    vertices[offset + 2].y,
+                    vertices[offset + 3].y,
+                ]
+                .as_ptr(),
+            );
+            let vz = vld1q_f32(
+                [
+                    vertices[offset].z,
+                    vertices[offset + 1].z,
+                    vertices[offset + 2].z,
+                    vertices[offset + 3].z,
+                ]
+                .as_ptr(),
+            );
 
             min_x = vminq_f32(min_x, vx);
             min_y = vminq_f32(min_y, vy);
@@ -439,11 +465,7 @@ where
 ///
 /// More efficient than individual updates due to reduced bounds checking
 #[inline]
-pub fn batch_update_positions(
-    positions: &mut [f32],
-    indices: &[usize],
-    new_values: &[[f32; 3]],
-) {
+pub fn batch_update_positions(positions: &mut [f32], indices: &[usize], new_values: &[[f32; 3]]) {
     debug_assert_eq!(indices.len(), new_values.len());
 
     for (&idx, &val) in indices.iter().zip(new_values.iter()) {
@@ -624,15 +646,34 @@ mod tests {
     #[test]
     fn test_compute_bbox_simd() {
         let vertices = vec![
-            PackedVertex { x: 0.0, y: 0.0, z: 0.0 },
-            PackedVertex { x: 1.0, y: 2.0, z: 3.0 },
-            PackedVertex { x: -1.0, y: -2.0, z: -3.0 },
-            PackedVertex { x: 0.5, y: 1.0, z: 1.5 },
+            PackedVertex {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            PackedVertex {
+                x: 1.0,
+                y: 2.0,
+                z: 3.0,
+            },
+            PackedVertex {
+                x: -1.0,
+                y: -2.0,
+                z: -3.0,
+            },
+            PackedVertex {
+                x: 0.5,
+                y: 1.0,
+                z: 1.5,
+            },
         ];
 
         let (min_x, min_y, min_z, max_x, max_y, max_z) = compute_bbox_simd(&vertices);
 
-        println!("BBox: min=({}, {}, {}), max=({}, {}, {})", min_x, min_y, min_z, max_x, max_y, max_z);
+        println!(
+            "BBox: min=({}, {}, {}), max=({}, {}, {})",
+            min_x, min_y, min_z, max_x, max_y, max_z
+        );
 
         assert!((min_x - (-1.0)).abs() < 0.01);
         assert!((min_y - (-2.0)).abs() < 0.01);
@@ -645,9 +686,9 @@ mod tests {
     #[test]
     fn test_batch_gather_positions() {
         let positions = vec![
-            0.0, 0.0, 0.0,  // vertex 0
-            1.0, 0.0, 0.0,  // vertex 1
-            0.0, 1.0, 0.0,  // vertex 2
+            0.0, 0.0, 0.0, // vertex 0
+            1.0, 0.0, 0.0, // vertex 1
+            0.0, 1.0, 0.0, // vertex 2
         ];
 
         let indices = vec![0, 2];

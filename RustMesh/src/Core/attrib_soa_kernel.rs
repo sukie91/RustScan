@@ -7,6 +7,7 @@ use crate::handles::{EdgeHandle, FaceHandle, HalfedgeHandle, VertexHandle};
 use crate::items::{Edge, Face, Halfedge};
 use glam::{Vec2, Vec3, Vec4};
 use std::collections::HashMap;
+use std::marker::PhantomData;
 
 /// Attribute type enumeration
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -23,12 +24,42 @@ pub enum AttributeType {
     Custom(u32),
 }
 
-/// Property handle for dynamic attributes
-#[derive(Debug, Clone)]
-pub struct PropHandle {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PropertyHandle<T, Domain> {
     id: u32,
-    name: String,
+    _marker: PhantomData<fn() -> (T, Domain)>,
 }
+
+impl<T, Domain> PropertyHandle<T, Domain> {
+    fn new(id: u32) -> Self {
+        Self {
+            id,
+            _marker: PhantomData,
+        }
+    }
+
+    fn id(self) -> u32 {
+        self.id
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum VertexPropertyTag {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EdgePropertyTag {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FacePropertyTag {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum HalfedgePropertyTag {}
+
+pub type VPropHandle<T> = PropertyHandle<T, VertexPropertyTag>;
+pub type EPropHandle<T> = PropertyHandle<T, EdgePropertyTag>;
+pub type FPropHandle<T> = PropertyHandle<T, FacePropertyTag>;
+pub type HPropHandle<T> = PropertyHandle<T, HalfedgePropertyTag>;
+pub type PropHandle<T> = VPropHandle<T>;
 
 /// Dynamic property storage
 #[derive(Debug, Clone)]
@@ -41,10 +72,6 @@ pub enum DynamicProperty {
 }
 
 impl DynamicProperty {
-    fn new<T: PropValue>(&self) -> Self {
-        T::create_dynamic()
-    }
-
     fn resize(&mut self, size: usize) {
         match self {
             DynamicProperty::Float(v) => v.resize(size, 0.0),
@@ -55,25 +82,172 @@ impl DynamicProperty {
         }
     }
 
-    fn len(&self) -> usize {
+    fn copy_index(&mut self, from: usize, to: usize) {
         match self {
-            DynamicProperty::Float(v) => v.len(),
-            DynamicProperty::Vec2(v) => v.len(),
-            DynamicProperty::Vec3(v) => v.len(),
-            DynamicProperty::Vec4(v) => v.len(),
-            DynamicProperty::Int(v) => v.len(),
+            DynamicProperty::Float(values) => {
+                if let (Some(src), Some(dst)) = (values.get(from).copied(), values.get_mut(to)) {
+                    *dst = src;
+                }
+            }
+            DynamicProperty::Vec2(values) => {
+                if let (Some(src), Some(dst)) = (values.get(from).copied(), values.get_mut(to)) {
+                    *dst = src;
+                }
+            }
+            DynamicProperty::Vec3(values) => {
+                if let (Some(src), Some(dst)) = (values.get(from).copied(), values.get_mut(to)) {
+                    *dst = src;
+                }
+            }
+            DynamicProperty::Vec4(values) => {
+                if let (Some(src), Some(dst)) = (values.get(from).copied(), values.get_mut(to)) {
+                    *dst = src;
+                }
+            }
+            DynamicProperty::Int(values) => {
+                if let (Some(src), Some(dst)) = (values.get(from).copied(), values.get_mut(to)) {
+                    *dst = src;
+                }
+            }
+        }
+    }
+
+    fn blend2_index(&mut self, a: usize, b: usize, to: usize) {
+        match self {
+            DynamicProperty::Float(values) => {
+                if let (Some(va), Some(vb), Some(dst)) = (
+                    values.get(a).copied(),
+                    values.get(b).copied(),
+                    values.get_mut(to),
+                ) {
+                    *dst = (va + vb) * 0.5;
+                }
+            }
+            DynamicProperty::Vec2(values) => {
+                if let (Some(va), Some(vb), Some(dst)) = (
+                    values.get(a).copied(),
+                    values.get(b).copied(),
+                    values.get_mut(to),
+                ) {
+                    *dst = (va + vb) * 0.5;
+                }
+            }
+            DynamicProperty::Vec3(values) => {
+                if let (Some(va), Some(vb), Some(dst)) = (
+                    values.get(a).copied(),
+                    values.get(b).copied(),
+                    values.get_mut(to),
+                ) {
+                    *dst = (va + vb) * 0.5;
+                }
+            }
+            DynamicProperty::Vec4(values) => {
+                if let (Some(va), Some(vb), Some(dst)) = (
+                    values.get(a).copied(),
+                    values.get(b).copied(),
+                    values.get_mut(to),
+                ) {
+                    *dst = (va + vb) * 0.5;
+                }
+            }
+            DynamicProperty::Int(values) => {
+                if let (Some(va), Some(vb), Some(dst)) = (
+                    values.get(a).copied(),
+                    values.get(b).copied(),
+                    values.get_mut(to),
+                ) {
+                    *dst = ((va as i64 + vb as i64) / 2) as i32;
+                }
+            }
+        }
+    }
+
+    fn blend3_index(&mut self, a: usize, b: usize, c: usize, to: usize) {
+        match self {
+            DynamicProperty::Float(values) => {
+                if let (Some(va), Some(vb), Some(vc), Some(dst)) = (
+                    values.get(a).copied(),
+                    values.get(b).copied(),
+                    values.get(c).copied(),
+                    values.get_mut(to),
+                ) {
+                    *dst = (va + vb + vc) / 3.0;
+                }
+            }
+            DynamicProperty::Vec2(values) => {
+                if let (Some(va), Some(vb), Some(vc), Some(dst)) = (
+                    values.get(a).copied(),
+                    values.get(b).copied(),
+                    values.get(c).copied(),
+                    values.get_mut(to),
+                ) {
+                    *dst = (va + vb + vc) / 3.0;
+                }
+            }
+            DynamicProperty::Vec3(values) => {
+                if let (Some(va), Some(vb), Some(vc), Some(dst)) = (
+                    values.get(a).copied(),
+                    values.get(b).copied(),
+                    values.get(c).copied(),
+                    values.get_mut(to),
+                ) {
+                    *dst = (va + vb + vc) / 3.0;
+                }
+            }
+            DynamicProperty::Vec4(values) => {
+                if let (Some(va), Some(vb), Some(vc), Some(dst)) = (
+                    values.get(a).copied(),
+                    values.get(b).copied(),
+                    values.get(c).copied(),
+                    values.get_mut(to),
+                ) {
+                    *dst = (va + vb + vc) / 3.0;
+                }
+            }
+            DynamicProperty::Int(values) => {
+                if let (Some(va), Some(vb), Some(vc), Some(dst)) = (
+                    values.get(a).copied(),
+                    values.get(b).copied(),
+                    values.get(c).copied(),
+                    values.get_mut(to),
+                ) {
+                    *dst = ((va as i64 + vb as i64 + vc as i64) / 3) as i32;
+                }
+            }
         }
     }
 }
 
 /// Trait for property value types
-pub trait PropValue: 'static + Clone + Default {
+pub trait PropValue: 'static + Copy + Clone + Default {
     fn create_dynamic() -> DynamicProperty;
+    fn get_dynamic(prop: &DynamicProperty, idx: usize) -> Option<Self>;
+    fn set_dynamic(prop: &mut DynamicProperty, idx: usize, value: Self) -> bool;
 }
 
 impl PropValue for f32 {
     fn create_dynamic() -> DynamicProperty {
         DynamicProperty::Float(Vec::new())
+    }
+
+    fn get_dynamic(prop: &DynamicProperty, idx: usize) -> Option<Self> {
+        match prop {
+            DynamicProperty::Float(v) => v.get(idx).copied(),
+            _ => None,
+        }
+    }
+
+    fn set_dynamic(prop: &mut DynamicProperty, idx: usize, value: Self) -> bool {
+        match prop {
+            DynamicProperty::Float(v) => match v.get_mut(idx) {
+                Some(slot) => {
+                    *slot = value;
+                    true
+                }
+                None => false,
+            },
+            _ => false,
+        }
     }
 }
 
@@ -81,11 +255,51 @@ impl PropValue for Vec2 {
     fn create_dynamic() -> DynamicProperty {
         DynamicProperty::Vec2(Vec::new())
     }
+
+    fn get_dynamic(prop: &DynamicProperty, idx: usize) -> Option<Self> {
+        match prop {
+            DynamicProperty::Vec2(v) => v.get(idx).copied(),
+            _ => None,
+        }
+    }
+
+    fn set_dynamic(prop: &mut DynamicProperty, idx: usize, value: Self) -> bool {
+        match prop {
+            DynamicProperty::Vec2(v) => match v.get_mut(idx) {
+                Some(slot) => {
+                    *slot = value;
+                    true
+                }
+                None => false,
+            },
+            _ => false,
+        }
+    }
 }
 
 impl PropValue for Vec3 {
     fn create_dynamic() -> DynamicProperty {
         DynamicProperty::Vec3(Vec::new())
+    }
+
+    fn get_dynamic(prop: &DynamicProperty, idx: usize) -> Option<Self> {
+        match prop {
+            DynamicProperty::Vec3(v) => v.get(idx).copied(),
+            _ => None,
+        }
+    }
+
+    fn set_dynamic(prop: &mut DynamicProperty, idx: usize, value: Self) -> bool {
+        match prop {
+            DynamicProperty::Vec3(v) => match v.get_mut(idx) {
+                Some(slot) => {
+                    *slot = value;
+                    true
+                }
+                None => false,
+            },
+            _ => false,
+        }
     }
 }
 
@@ -93,11 +307,172 @@ impl PropValue for Vec4 {
     fn create_dynamic() -> DynamicProperty {
         DynamicProperty::Vec4(Vec::new())
     }
+
+    fn get_dynamic(prop: &DynamicProperty, idx: usize) -> Option<Self> {
+        match prop {
+            DynamicProperty::Vec4(v) => v.get(idx).copied(),
+            _ => None,
+        }
+    }
+
+    fn set_dynamic(prop: &mut DynamicProperty, idx: usize, value: Self) -> bool {
+        match prop {
+            DynamicProperty::Vec4(v) => match v.get_mut(idx) {
+                Some(slot) => {
+                    *slot = value;
+                    true
+                }
+                None => false,
+            },
+            _ => false,
+        }
+    }
 }
 
 impl PropValue for i32 {
     fn create_dynamic() -> DynamicProperty {
         DynamicProperty::Int(Vec::new())
+    }
+
+    fn get_dynamic(prop: &DynamicProperty, idx: usize) -> Option<Self> {
+        match prop {
+            DynamicProperty::Int(v) => v.get(idx).copied(),
+            _ => None,
+        }
+    }
+
+    fn set_dynamic(prop: &mut DynamicProperty, idx: usize, value: Self) -> bool {
+        match prop {
+            DynamicProperty::Int(v) => match v.get_mut(idx) {
+                Some(slot) => {
+                    *slot = value;
+                    true
+                }
+                None => false,
+            },
+            _ => false,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct NamedProperty {
+    name: String,
+    values: DynamicProperty,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum VertexPropertyRef<'a> {
+    Float { name: &'a str, values: &'a [f32] },
+    Vec2 { name: &'a str, values: &'a [Vec2] },
+    Vec3 { name: &'a str, values: &'a [Vec3] },
+    Vec4 { name: &'a str, values: &'a [Vec4] },
+    Int { name: &'a str, values: &'a [i32] },
+}
+
+impl DynamicProperty {
+    fn as_vertex_property_ref<'a>(&'a self, name: &'a str) -> VertexPropertyRef<'a> {
+        match self {
+            DynamicProperty::Float(values) => VertexPropertyRef::Float { name, values },
+            DynamicProperty::Vec2(values) => VertexPropertyRef::Vec2 { name, values },
+            DynamicProperty::Vec3(values) => VertexPropertyRef::Vec3 { name, values },
+            DynamicProperty::Vec4(values) => VertexPropertyRef::Vec4 { name, values },
+            DynamicProperty::Int(values) => VertexPropertyRef::Int { name, values },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct PropertyStore {
+    props: HashMap<u32, NamedProperty>,
+    next_prop_id: u32,
+}
+
+impl PropertyStore {
+    pub(crate) fn clear(&mut self) {
+        self.props.clear();
+        self.next_prop_id = 0;
+    }
+
+    pub(crate) fn add<T: PropValue, Domain>(
+        &mut self,
+        name: &str,
+        size: usize,
+    ) -> PropertyHandle<T, Domain> {
+        let id = self.next_prop_id;
+        self.next_prop_id += 1;
+
+        let mut values = T::create_dynamic();
+        values.resize(size);
+        self.props.insert(
+            id,
+            NamedProperty {
+                name: name.to_string(),
+                values,
+            },
+        );
+
+        PropertyHandle::new(id)
+    }
+
+    pub(crate) fn get<T: PropValue, Domain>(
+        &self,
+        handle: PropertyHandle<T, Domain>,
+        idx: usize,
+    ) -> Option<T> {
+        self.props
+            .get(&handle.id())
+            .and_then(|prop| T::get_dynamic(&prop.values, idx))
+    }
+
+    pub(crate) fn set<T: PropValue, Domain>(
+        &mut self,
+        handle: PropertyHandle<T, Domain>,
+        idx: usize,
+        value: T,
+    ) -> bool {
+        match self.props.get_mut(&handle.id()) {
+            Some(prop) => T::set_dynamic(&mut prop.values, idx, value),
+            None => false,
+        }
+    }
+
+    pub(crate) fn contains<T, Domain>(&self, handle: PropertyHandle<T, Domain>) -> bool {
+        self.props.contains_key(&handle.id())
+    }
+
+    pub(crate) fn name<T, Domain>(&self, handle: PropertyHandle<T, Domain>) -> Option<&str> {
+        self.props.get(&handle.id()).map(|prop| prop.name.as_str())
+    }
+
+    pub(crate) fn resize_all(&mut self, size: usize) {
+        for prop in self.props.values_mut() {
+            prop.values.resize(size);
+        }
+    }
+
+    pub(crate) fn copy_index(&mut self, from: usize, to: usize) {
+        for prop in self.props.values_mut() {
+            prop.values.copy_index(from, to);
+        }
+    }
+
+    pub(crate) fn blend2_index(&mut self, a: usize, b: usize, to: usize) {
+        for prop in self.props.values_mut() {
+            prop.values.blend2_index(a, b, to);
+        }
+    }
+
+    pub(crate) fn blend3_index(&mut self, a: usize, b: usize, c: usize, to: usize) {
+        for prop in self.props.values_mut() {
+            prop.values.blend3_index(a, b, c, to);
+        }
+    }
+
+    fn sorted_refs(&self) -> Vec<&NamedProperty> {
+        let mut props: Vec<_> = self.props.iter().collect();
+        props.sort_by_key(|(id, _)| *id);
+        props.into_iter().map(|(_, prop)| prop).collect()
     }
 }
 
@@ -138,8 +513,10 @@ pub struct AttribSoAKernel {
     face_colors: Option<Vec<Vec4>>,
 
     // === Dynamic Properties ===
-    dynamic_props: HashMap<u32, DynamicProperty>,
-    next_prop_id: u32,
+    vertex_props: PropertyStore,
+    halfedge_props: PropertyStore,
+    edge_props: PropertyStore,
+    face_props: PropertyStore,
 }
 
 impl AttribSoAKernel {
@@ -167,8 +544,10 @@ impl AttribSoAKernel {
             face_normals: None,
             face_colors: None,
             // Dynamic properties
-            dynamic_props: HashMap::new(),
-            next_prop_id: 0,
+            vertex_props: PropertyStore::default(),
+            halfedge_props: PropertyStore::default(),
+            edge_props: PropertyStore::default(),
+            face_props: PropertyStore::default(),
         }
     }
 
@@ -195,8 +574,10 @@ impl AttribSoAKernel {
         self.face_normals = None;
         self.face_colors = None;
         // Clear dynamic properties
-        self.dynamic_props.clear();
-        self.next_prop_id = 0;
+        self.vertex_props.clear();
+        self.halfedge_props.clear();
+        self.edge_props.clear();
+        self.face_props.clear();
     }
 
     // ========================
@@ -223,10 +604,7 @@ impl AttribSoAKernel {
             texcoords.push(Vec2::ZERO);
         }
 
-        // Resize dynamic properties
-        for prop in self.dynamic_props.values_mut() {
-            prop.resize(self.x.len());
-        }
+        self.vertex_props.resize_all(self.x.len());
 
         VertexHandle::new(idx)
     }
@@ -360,6 +738,9 @@ impl AttribSoAKernel {
 
         // Resize attribute arrays
         self.resize_halfedge_attrs();
+        self.resize_edge_attrs();
+        self.halfedge_props.resize_all(self.halfedges.len());
+        self.edge_props.resize_all(self.edges.len());
 
         heh1
     }
@@ -415,6 +796,8 @@ impl AttribSoAKernel {
     pub fn add_face(&mut self, halfedge_handle: Option<HalfedgeHandle>) -> FaceHandle {
         let fh = FaceHandle::new(self.faces.len() as u32);
         self.faces.push(Face::new(halfedge_handle));
+        self.resize_face_attrs();
+        self.face_props.resize_all(self.faces.len());
         fh
     }
 
@@ -565,6 +948,23 @@ impl AttribSoAKernel {
         }
         if let Some(ref mut texcoords) = self.halfedge_texcoords {
             texcoords.resize(size, Vec2::ZERO);
+        }
+    }
+
+    fn resize_edge_attrs(&mut self) {
+        let size = self.edges.len();
+        if let Some(ref mut colors) = self.edge_colors {
+            colors.resize(size, Vec4::ZERO);
+        }
+    }
+
+    fn resize_face_attrs(&mut self) {
+        let size = self.faces.len();
+        if let Some(ref mut normals) = self.face_normals {
+            normals.resize(size, Vec3::ZERO);
+        }
+        if let Some(ref mut colors) = self.face_colors {
+            colors.resize(size, Vec4::ZERO);
         }
     }
 
@@ -849,132 +1249,162 @@ impl AttribSoAKernel {
     // Dynamic Properties
     // ========================
 
-    /// Add a dynamic property (simplified version - returns handle but doesn't store type info)
-    pub fn add_property<T: PropValue>(&mut self, name: &str) -> PropHandle {
-        let id = self.next_prop_id;
-        self.next_prop_id += 1;
-
-        let mut prop = T::create_dynamic();
-        prop.resize(self.x.len());
-
-        self.dynamic_props.insert(id, prop);
-
-        PropHandle {
-            id,
-            name: name.to_string(),
-        }
+    pub fn add_vertex_property<T: PropValue>(&mut self, name: &str) -> VPropHandle<T> {
+        self.vertex_props.add(name, self.n_vertices())
     }
 
-    /// Get dynamic property value (simplified - only works for f32)
-    pub fn get_property<T: PropValue + Copy + TryFrom<f32>>(
+    pub fn add_halfedge_property<T: PropValue>(&mut self, name: &str) -> HPropHandle<T> {
+        self.halfedge_props.add(name, self.n_halfedges())
+    }
+
+    pub fn add_edge_property<T: PropValue>(&mut self, name: &str) -> EPropHandle<T> {
+        self.edge_props.add(name, self.n_edges())
+    }
+
+    pub fn add_face_property<T: PropValue>(&mut self, name: &str) -> FPropHandle<T> {
+        self.face_props.add(name, self.n_faces())
+    }
+
+    pub fn vertex_property<T: PropValue>(
         &self,
-        handle: PropHandle,
-        idx: usize,
-    ) -> Option<T>
-    where
-        T: TryFrom<DynamicProperty> + Default,
-    {
-        self.dynamic_props
-            .get(&handle.id)
-            .and_then(|prop| match prop {
-                DynamicProperty::Float(v) => v.get(idx).and_then(|&val| T::try_from(val).ok()),
-                _ => None,
-            })
+        handle: VPropHandle<T>,
+        vh: VertexHandle,
+    ) -> Option<T> {
+        self.vertex_props.get(handle, vh.idx() as usize)
     }
 
-    /// Set dynamic property value (simplified - only works for f32)
-    pub fn set_property<T: PropValue + Copy + Into<f32>>(
+    pub fn halfedge_property<T: PropValue>(
+        &self,
+        handle: HPropHandle<T>,
+        heh: HalfedgeHandle,
+    ) -> Option<T> {
+        self.halfedge_props.get(handle, heh.idx() as usize)
+    }
+
+    pub fn edge_property<T: PropValue>(&self, handle: EPropHandle<T>, eh: EdgeHandle) -> Option<T> {
+        self.edge_props.get(handle, eh.idx() as usize)
+    }
+
+    pub fn face_property<T: PropValue>(&self, handle: FPropHandle<T>, fh: FaceHandle) -> Option<T> {
+        self.face_props.get(handle, fh.idx() as usize)
+    }
+
+    pub fn set_vertex_property<T: PropValue>(
         &mut self,
-        handle: PropHandle,
+        handle: VPropHandle<T>,
+        vh: VertexHandle,
+        value: T,
+    ) -> bool {
+        self.vertex_props.set(handle, vh.idx() as usize, value)
+    }
+
+    pub fn set_halfedge_property<T: PropValue>(
+        &mut self,
+        handle: HPropHandle<T>,
+        heh: HalfedgeHandle,
+        value: T,
+    ) -> bool {
+        self.halfedge_props.set(handle, heh.idx() as usize, value)
+    }
+
+    pub fn set_edge_property<T: PropValue>(
+        &mut self,
+        handle: EPropHandle<T>,
+        eh: EdgeHandle,
+        value: T,
+    ) -> bool {
+        self.edge_props.set(handle, eh.idx() as usize, value)
+    }
+
+    pub fn set_face_property<T: PropValue>(
+        &mut self,
+        handle: FPropHandle<T>,
+        fh: FaceHandle,
+        value: T,
+    ) -> bool {
+        self.face_props.set(handle, fh.idx() as usize, value)
+    }
+
+    pub fn has_vertex_property<T>(&self, handle: VPropHandle<T>) -> bool {
+        self.vertex_props.contains(handle)
+    }
+
+    pub fn has_halfedge_property<T>(&self, handle: HPropHandle<T>) -> bool {
+        self.halfedge_props.contains(handle)
+    }
+
+    pub fn has_edge_property<T>(&self, handle: EPropHandle<T>) -> bool {
+        self.edge_props.contains(handle)
+    }
+
+    pub fn has_face_property<T>(&self, handle: FPropHandle<T>) -> bool {
+        self.face_props.contains(handle)
+    }
+
+    pub fn vertex_property_name<T>(&self, handle: VPropHandle<T>) -> Option<&str> {
+        self.vertex_props.name(handle)
+    }
+
+    pub fn halfedge_property_name<T>(&self, handle: HPropHandle<T>) -> Option<&str> {
+        self.halfedge_props.name(handle)
+    }
+
+    pub fn edge_property_name<T>(&self, handle: EPropHandle<T>) -> Option<&str> {
+        self.edge_props.name(handle)
+    }
+
+    pub fn face_property_name<T>(&self, handle: FPropHandle<T>) -> Option<&str> {
+        self.face_props.name(handle)
+    }
+
+    // Compatibility wrappers for the legacy vertex-only dynamic property helpers.
+    pub fn add_property<T: PropValue>(&mut self, name: &str) -> PropHandle<T> {
+        self.add_vertex_property(name)
+    }
+
+    pub fn get_property<T: PropValue>(&self, handle: PropHandle<T>, idx: usize) -> Option<T> {
+        self.vertex_props.get(handle, idx)
+    }
+
+    pub fn set_property<T: PropValue>(
+        &mut self,
+        handle: PropHandle<T>,
         idx: usize,
         value: T,
-    ) {
-        if let Some(prop) = self.dynamic_props.get_mut(&handle.id) {
-            match prop {
-                DynamicProperty::Float(v) => {
-                    if let Some(v) = v.get_mut(idx) {
-                        *v = value.into();
-                    }
-                }
-                _ => {}
-            }
-        }
+    ) -> bool {
+        self.vertex_props.set(handle, idx, value)
     }
 
-    /// Set f32 property value
-    pub fn set_property_f32(&mut self, handle: PropHandle, idx: usize, value: f32) {
-        if let Some(prop) = self.dynamic_props.get_mut(&handle.id) {
-            if let DynamicProperty::Float(v) = prop {
-                if let Some(v) = v.get_mut(idx) {
-                    *v = value;
-                }
-            }
-        }
+    pub fn set_property_f32(&mut self, handle: PropHandle<f32>, idx: usize, value: f32) -> bool {
+        self.set_property(handle, idx, value)
     }
 
-    /// Set Vec2 property value
-    pub fn set_property_vec2(&mut self, handle: PropHandle, idx: usize, value: Vec2) {
-        if let Some(prop) = self.dynamic_props.get_mut(&handle.id) {
-            if let DynamicProperty::Vec2(v) = prop {
-                if let Some(v) = v.get_mut(idx) {
-                    *v = value;
-                }
-            }
-        }
+    pub fn set_property_vec2(&mut self, handle: PropHandle<Vec2>, idx: usize, value: Vec2) -> bool {
+        self.set_property(handle, idx, value)
     }
 
-    /// Set Vec3 property value
-    pub fn set_property_vec3(&mut self, handle: PropHandle, idx: usize, value: Vec3) {
-        if let Some(prop) = self.dynamic_props.get_mut(&handle.id) {
-            if let DynamicProperty::Vec3(v) = prop {
-                if let Some(v) = v.get_mut(idx) {
-                    *v = value;
-                }
-            }
-        }
+    pub fn set_property_vec3(&mut self, handle: PropHandle<Vec3>, idx: usize, value: Vec3) -> bool {
+        self.set_property(handle, idx, value)
     }
 
-    /// Set Vec4 property value
-    pub fn set_property_vec4(&mut self, handle: PropHandle, idx: usize, value: Vec4) {
-        if let Some(prop) = self.dynamic_props.get_mut(&handle.id) {
-            if let DynamicProperty::Vec4(v) = prop {
-                if let Some(v) = v.get_mut(idx) {
-                    *v = value;
-                }
-            }
-        }
+    pub fn set_property_vec4(&mut self, handle: PropHandle<Vec4>, idx: usize, value: Vec4) -> bool {
+        self.set_property(handle, idx, value)
     }
 
-    /// Set i32 property value
-    pub fn set_property_i32(&mut self, handle: PropHandle, idx: usize, value: i32) {
-        if let Some(prop) = self.dynamic_props.get_mut(&handle.id) {
-            if let DynamicProperty::Int(v) = prop {
-                if let Some(v) = v.get_mut(idx) {
-                    *v = value;
-                }
-            }
-        }
+    pub fn set_property_i32(&mut self, handle: PropHandle<i32>, idx: usize, value: i32) -> bool {
+        self.set_property(handle, idx, value)
     }
 
-    /// Check if property exists
-    pub fn has_property(&self, handle: PropHandle) -> bool {
-        self.dynamic_props.contains_key(&handle.id)
+    pub fn has_property<T>(&self, handle: PropHandle<T>) -> bool {
+        self.has_vertex_property(handle)
     }
-}
 
-// Helper trait for converting from DynamicProperty
-pub trait TryFromDynamic: Sized {
-    fn try_from_dynamic(prop: &DynamicProperty, idx: usize) -> Option<Self>
-    where
-        Self: Default;
-}
-
-impl TryFromDynamic for f32 {
-    fn try_from_dynamic(prop: &DynamicProperty, idx: usize) -> Option<Self> {
-        match prop {
-            DynamicProperty::Float(v) => v.get(idx).copied(),
-            _ => None,
-        }
+    pub(crate) fn vertex_property_refs(&self) -> Vec<VertexPropertyRef<'_>> {
+        self.vertex_props
+            .sorted_refs()
+            .into_iter()
+            .map(|prop| prop.values.as_vertex_property_ref(prop.name.as_str()))
+            .collect()
     }
 }
 
@@ -1030,12 +1460,86 @@ mod tests {
     #[test]
     fn test_dynamic_property() {
         let mut kernel = AttribSoAKernel::new();
-        kernel.add_vertex(Vec3::new(1.0, 2.0, 3.0));
+        let vh = kernel.add_vertex(Vec3::new(1.0, 2.0, 3.0));
+        let prop = kernel.add_vertex_property::<f32>("custom_float");
 
-        // Add custom property
-        let _prop = kernel.add_property::<f32>("custom_float");
+        assert!(kernel.has_vertex_property(prop));
+        assert_eq!(kernel.vertex_property_name(prop), Some("custom_float"));
+        assert_eq!(kernel.vertex_property(prop, vh), Some(0.0));
+        assert!(kernel.set_vertex_property(prop, vh, 2.5));
+        assert_eq!(kernel.vertex_property(prop, vh), Some(2.5));
+    }
 
-        // Dynamic property simplified - just verify it compiles
-        assert_eq!(kernel.n_vertices(), 1);
+    #[test]
+    fn test_vertex_property_auto_resizes() {
+        let mut kernel = AttribSoAKernel::new();
+        let first = kernel.add_vertex(Vec3::new(0.0, 0.0, 0.0));
+        let quality = kernel.add_vertex_property::<f32>("quality");
+        assert!(kernel.set_vertex_property(quality, first, 1.0));
+
+        let second = kernel.add_vertex(Vec3::new(1.0, 0.0, 0.0));
+        assert_eq!(kernel.vertex_property(quality, first), Some(1.0));
+        assert_eq!(kernel.vertex_property(quality, second), Some(0.0));
+    }
+
+    #[test]
+    fn test_edge_and_halfedge_properties_auto_resize() {
+        let mut kernel = AttribSoAKernel::new();
+        let v0 = kernel.add_vertex(Vec3::new(0.0, 0.0, 0.0));
+        let v1 = kernel.add_vertex(Vec3::new(1.0, 0.0, 0.0));
+
+        let edge_quality = kernel.add_edge_property::<i32>("edge_quality");
+        let halfedge_flow = kernel.add_halfedge_property::<Vec2>("halfedge_flow");
+
+        let heh = kernel.add_edge(v0, v1);
+        let opp = kernel.opposite_halfedge_handle(heh).unwrap();
+        let eh = kernel.edge_handle(heh);
+
+        assert_eq!(
+            kernel.edge_property_name(edge_quality),
+            Some("edge_quality")
+        );
+        assert_eq!(
+            kernel.halfedge_property_name(halfedge_flow),
+            Some("halfedge_flow")
+        );
+        assert_eq!(kernel.edge_property(edge_quality, eh), Some(0));
+        assert_eq!(
+            kernel.halfedge_property(halfedge_flow, heh),
+            Some(Vec2::ZERO)
+        );
+        assert_eq!(
+            kernel.halfedge_property(halfedge_flow, opp),
+            Some(Vec2::ZERO)
+        );
+
+        assert!(kernel.set_edge_property(edge_quality, eh, 7));
+        assert!(kernel.set_halfedge_property(halfedge_flow, heh, Vec2::new(1.0, 2.0)));
+
+        assert_eq!(kernel.edge_property(edge_quality, eh), Some(7));
+        assert_eq!(
+            kernel.halfedge_property(halfedge_flow, heh),
+            Some(Vec2::new(1.0, 2.0))
+        );
+        assert_eq!(
+            kernel.halfedge_property(halfedge_flow, opp),
+            Some(Vec2::ZERO)
+        );
+    }
+
+    #[test]
+    fn test_face_property_auto_resizes() {
+        let mut kernel = AttribSoAKernel::new();
+        let priority = kernel.add_face_property::<Vec3>("priority");
+        let fh = kernel.add_face(None);
+
+        assert!(kernel.has_face_property(priority));
+        assert_eq!(kernel.face_property_name(priority), Some("priority"));
+        assert_eq!(kernel.face_property(priority, fh), Some(Vec3::ZERO));
+        assert!(kernel.set_face_property(priority, fh, Vec3::new(1.0, 2.0, 3.0)));
+        assert_eq!(
+            kernel.face_property(priority, fh),
+            Some(Vec3::new(1.0, 2.0, 3.0))
+        );
     }
 }

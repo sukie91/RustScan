@@ -4,7 +4,7 @@
 mod openmesh_compare_common;
 
 use openmesh_compare_common::print_header;
-use rustmesh::{Decimater, write_off, RustMesh, loop_subdivide};
+use rustmesh::{loop_subdivide, write_off, Decimater, RustMesh};
 use std::time::Instant;
 
 /// Create a subdivided sphere for large-scale testing using Loop subdivision
@@ -24,11 +24,11 @@ fn create_octahedron() -> RustMesh {
     let mut mesh = RustMesh::new();
 
     // Add 6 vertices
-    let v0 = mesh.add_vertex(glam::Vec3::new(0.0, 1.0, 0.0));  // top
+    let v0 = mesh.add_vertex(glam::Vec3::new(0.0, 1.0, 0.0)); // top
     let v1 = mesh.add_vertex(glam::Vec3::new(0.0, -1.0, 0.0)); // bottom
-    let v2 = mesh.add_vertex(glam::Vec3::new(1.0, 0.0, 0.0));  // right
+    let v2 = mesh.add_vertex(glam::Vec3::new(1.0, 0.0, 0.0)); // right
     let v3 = mesh.add_vertex(glam::Vec3::new(-1.0, 0.0, 0.0)); // left
-    let v4 = mesh.add_vertex(glam::Vec3::new(0.0, 0.0, 1.0));  // front
+    let v4 = mesh.add_vertex(glam::Vec3::new(0.0, 0.0, 1.0)); // front
     let v5 = mesh.add_vertex(glam::Vec3::new(0.0, 0.0, -1.0)); // back
 
     // Add 8 triangular faces (top half)
@@ -48,7 +48,8 @@ fn create_octahedron() -> RustMesh {
 fn raw_face_diagnostics(mesh: &rustmesh::RustMesh) -> (usize, usize, usize) {
     let mut active_faces = 0usize;
     let mut degenerate_faces = 0usize;
-    let mut edge_use: std::collections::HashMap<(usize, usize), usize> = std::collections::HashMap::new();
+    let mut edge_use: std::collections::HashMap<(usize, usize), usize> =
+        std::collections::HashMap::new();
 
     for fh in mesh.faces() {
         let vertices = mesh.face_vertices_vec(fh);
@@ -93,7 +94,10 @@ fn main() {
 
     let initial_v = mesh.n_vertices();
     let initial_f = mesh.n_faces();
-    println!("Mesh generation time: {:.3} ms", gen_time.as_secs_f64() * 1000.0);
+    println!(
+        "Mesh generation time: {:.3} ms",
+        gen_time.as_secs_f64() * 1000.0
+    );
     println!("Initial mesh: V={}, F={}", initial_v, initial_f);
 
     // Target: decimate to 50% of original vertices
@@ -122,15 +126,20 @@ fn main() {
     println!("\n============================================================");
     println!("RustMesh Results");
     println!("============================================================");
-    println!("Decimation time: {:.3} ms", elapsed_rm.as_secs_f64() * 1000.0);
+    println!(
+        "Decimation time: {:.3} ms",
+        elapsed_rm.as_secs_f64() * 1000.0
+    );
     println!("Collapsed: {}", collapsed_rm);
     println!("Boundary collapses: {}", boundary_rm);
     println!("Interior collapses: {}", interior_rm);
     println!("Final V: {}", final_v_rm);
     println!("Final E: {}", final_e_rm);
     println!("Final F: {}", final_f_rm);
-    println!("Raw diagnostics: active_faces={}, degenerate={}, non_manifold_edges={}",
-        raw_faces, raw_degenerate, raw_non_manifold);
+    println!(
+        "Raw diagnostics: active_faces={}, degenerate={}, non_manifold_edges={}",
+        raw_faces, raw_degenerate, raw_non_manifold
+    );
 
     // Write RustMesh output
     let rust_output = std::env::temp_dir().join("rustmesh-large-decimated.off");
@@ -154,10 +163,16 @@ fn main() {
         println!("   - No non-manifold edges");
     } else {
         if !v_close {
-            println!("❌ Vertex count out of range: {} (target: {})", final_v_rm, target_vertices);
+            println!(
+                "❌ Vertex count out of range: {} (target: {})",
+                final_v_rm, target_vertices
+            );
         }
         if !topology_ok {
-            println!("❌ Topology issues: degenerate={}, non_manifold={}", raw_degenerate, raw_non_manifold);
+            println!(
+                "❌ Topology issues: degenerate={}, non_manifold={}",
+                raw_degenerate, raw_non_manifold
+            );
         }
     }
 
@@ -167,11 +182,15 @@ fn main() {
     println!("============================================================");
     let collapses_per_ms = collapsed_rm as f64 / elapsed_rm.as_secs_f64() * 1000.0;
     println!("Collapses/ms: {:.1}", collapses_per_ms);
-    println!("Vertices/ms: {:.1}", (initial_v - final_v_rm) as f64 / elapsed_rm.as_secs_f64() * 1000.0);
+    println!(
+        "Vertices/ms: {:.1}",
+        (initial_v - final_v_rm) as f64 / elapsed_rm.as_secs_f64() * 1000.0
+    );
 
     // Memory estimate
-    println!("\nMesh size: {:.2} MB vertices, {:.2} MB faces",
-        initial_v as f64 * 12.0 / 1e6,  // 3 floats per vertex
-        initial_f as f64 * 12.0 / 1e6   // 3 indices per face
+    println!(
+        "\nMesh size: {:.2} MB vertices, {:.2} MB faces",
+        initial_v as f64 * 12.0 / 1e6, // 3 floats per vertex
+        initial_f as f64 * 12.0 / 1e6  // 3 indices per face
     );
 }

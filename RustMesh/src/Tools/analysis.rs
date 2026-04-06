@@ -4,8 +4,8 @@
 //! bounding sphere computation, and quality metrics.
 
 use crate::geometry::{
-    bounding_sphere, gaussian_curvature, mean_curvature, principal_curvatures,
-    triangle_area, triangle_quality, voronoi_area,
+    bounding_sphere, gaussian_curvature, mean_curvature, principal_curvatures, triangle_area,
+    triangle_quality, voronoi_area,
 };
 use crate::{FaceHandle, RustMesh, Vec3, VertexHandle};
 
@@ -98,7 +98,9 @@ pub fn compute_vertex_curvature(mesh: &RustMesh, vh: VertexHandle) -> VertexCurv
 
 /// Compute curvatures for all vertices
 pub fn compute_all_curvatures(mesh: &RustMesh) -> Vec<VertexCurvature> {
-    mesh.vertices().map(|vh| compute_vertex_curvature(mesh, vh)).collect()
+    mesh.vertices()
+        .map(|vh| compute_vertex_curvature(mesh, vh))
+        .collect()
 }
 
 /// Compute mesh quality metrics
@@ -141,9 +143,17 @@ pub fn compute_mesh_quality(mesh: &RustMesh) -> MeshQuality {
     }
 
     MeshQuality {
-        min_quality: if total_triangles > 0 { min_quality } else { 0.0 },
+        min_quality: if total_triangles > 0 {
+            min_quality
+        } else {
+            0.0
+        },
         max_quality,
-        mean_quality: if total_triangles > 0 { quality_sum / total_triangles as f32 } else { 0.0 },
+        mean_quality: if total_triangles > 0 {
+            quality_sum / total_triangles as f32
+        } else {
+            0.0
+        },
         degenerate_count,
         total_triangles,
     }
@@ -224,10 +234,7 @@ pub fn analyze_mesh(mesh: &RustMesh) -> MeshAnalysis {
     let mut bbox_min = Vec3::splat(f32::INFINITY);
     let mut bbox_max = Vec3::splat(f32::NEG_INFINITY);
 
-    let points: Vec<Vec3> = mesh
-        .vertices()
-        .filter_map(|vh| mesh.point(vh))
-        .collect();
+    let points: Vec<Vec3> = mesh.vertices().filter_map(|vh| mesh.point(vh)).collect();
 
     for &p in &points {
         bbox_min = bbox_min.min(p);
@@ -260,10 +267,7 @@ pub fn analyze_mesh(mesh: &RustMesh) -> MeshAnalysis {
 /// Export curvature values as a scalar field for visualization
 ///
 /// Returns a vector of (vertex_index, curvature_value) pairs
-pub fn export_curvature_field(
-    mesh: &RustMesh,
-    curvature_type: CurvatureType,
-) -> Vec<(usize, f32)> {
+pub fn export_curvature_field(mesh: &RustMesh, curvature_type: CurvatureType) -> Vec<(usize, f32)> {
     let curvatures = compute_all_curvatures(mesh);
 
     curvatures
@@ -333,9 +337,11 @@ pub fn compute_edge_length_stats(mesh: &RustMesh) -> EdgeLengthStats {
     let mean_length = lengths.iter().sum::<f32>() / n as f32;
 
     let variance = if n > 1 {
-        lengths.iter()
+        lengths
+            .iter()
             .map(|&l| (l - mean_length).powi(2))
-            .sum::<f32>() / (n - 1) as f32
+            .sum::<f32>()
+            / (n - 1) as f32
     } else {
         0.0
     };
@@ -363,7 +369,10 @@ mod tests {
         let vh = VertexHandle::new(mesh.n_vertices() as u32 / 2);
         let curv = compute_vertex_curvature(&mesh, vh);
 
-        println!("Sphere vertex curvature: gaussian={}, mean={}", curv.gaussian, curv.mean);
+        println!(
+            "Sphere vertex curvature: gaussian={}, mean={}",
+            curv.gaussian, curv.mean
+        );
 
         // For a sphere of radius 1: K = 1/R² = 1, H = 1/R = 1
         // Our estimate won't be exact due to discretization
@@ -377,8 +386,14 @@ mod tests {
         let mesh = generate_sphere(1.0, 16, 16);
         let quality = compute_mesh_quality(&mesh);
 
-        println!("Mesh quality: min={}, max={}, mean={}", quality.min_quality, quality.max_quality, quality.mean_quality);
-        println!("Degenerate triangles: {} / {}", quality.degenerate_count, quality.total_triangles);
+        println!(
+            "Mesh quality: min={}, max={}, mean={}",
+            quality.min_quality, quality.max_quality, quality.mean_quality
+        );
+        println!(
+            "Degenerate triangles: {} / {}",
+            quality.degenerate_count, quality.total_triangles
+        );
 
         assert!(quality.mean_quality > 0.3);
         // Some discretizations may have near-degenerate triangles
@@ -405,11 +420,20 @@ mod tests {
         println!("Mesh analysis:");
         println!("  Vertices: {}", analysis.n_vertices);
         println!("  Faces: {}", analysis.n_faces);
-        println!("  Bounding box: {:?} .. {:?}", analysis.bounding_box.0, analysis.bounding_box.1);
-        println!("  Bounding sphere: center={:?}, radius={}", analysis.bounding_sphere.0, analysis.bounding_sphere.1);
+        println!(
+            "  Bounding box: {:?} .. {:?}",
+            analysis.bounding_box.0, analysis.bounding_box.1
+        );
+        println!(
+            "  Bounding sphere: center={:?}, radius={}",
+            analysis.bounding_sphere.0, analysis.bounding_sphere.1
+        );
         println!("  Surface area: {}", analysis.surface_area);
         println!("  Volume: {:?}", analysis.volume);
-        println!("  Quality: min={}, mean={}", analysis.quality.min_quality, analysis.quality.mean_quality);
+        println!(
+            "  Quality: min={}, mean={}",
+            analysis.quality.min_quality, analysis.quality.mean_quality
+        );
 
         assert_eq!(analysis.n_vertices, 8);
         assert_eq!(analysis.n_faces, 6);
@@ -421,8 +445,10 @@ mod tests {
         let mesh = generate_cube();
         let stats = compute_edge_length_stats(&mesh);
 
-        println!("Edge length stats: min={}, max={}, mean={}, std={}",
-            stats.min_length, stats.max_length, stats.mean_length, stats.std_dev);
+        println!(
+            "Edge length stats: min={}, max={}, mean={}, std={}",
+            stats.min_length, stats.max_length, stats.mean_length, stats.std_dev
+        );
 
         // Cube edges should all be length 2
         assert!((stats.min_length - 2.0).abs() < 0.01);
