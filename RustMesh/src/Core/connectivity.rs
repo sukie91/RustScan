@@ -670,10 +670,12 @@ impl RustMesh {
         if let Some(fh) = fh_left {
             if self.face_vertices_vec(fh).len() == 3 {
                 let one = self.opposite_halfedge_handle(self.next_halfedge_handle(heh));
-                let two = self.opposite_halfedge_handle(self.next_halfedge_handle(
-                    self.next_halfedge_handle(heh),
-                ));
-                if let (Some(face_one), Some(face_two)) = (self.face_handle(one), self.face_handle(two)) {
+                let two = self.opposite_halfedge_handle(
+                    self.next_halfedge_handle(self.next_halfedge_handle(heh)),
+                );
+                if let (Some(face_one), Some(face_two)) =
+                    (self.face_handle(one), self.face_handle(two))
+                {
                     if face_one == face_two && self.face_vertices_vec(face_one).len() != 3 {
                         return false;
                     }
@@ -684,10 +686,12 @@ impl RustMesh {
         if let Some(fh) = fh_right {
             if self.face_vertices_vec(fh).len() == 3 {
                 let one = self.opposite_halfedge_handle(self.next_halfedge_handle(heh_opp));
-                let two = self.opposite_halfedge_handle(self.next_halfedge_handle(
-                    self.next_halfedge_handle(heh_opp),
-                ));
-                if let (Some(face_one), Some(face_two)) = (self.face_handle(one), self.face_handle(two)) {
+                let two = self.opposite_halfedge_handle(
+                    self.next_halfedge_handle(self.next_halfedge_handle(heh_opp)),
+                );
+                if let (Some(face_one), Some(face_two)) =
+                    (self.face_handle(one), self.face_handle(two))
+                {
                     if face_one == face_two && self.face_vertices_vec(face_one).len() != 3 {
                         return false;
                     }
@@ -764,7 +768,6 @@ impl RustMesh {
         neighbors
     }
 
-
     /// Collapse a halfedge: move v0 to v1 and remove v0 and adjacent faces
     /// Returns Ok if successful, Err with message if failed
     pub fn collapse(&mut self, heh: HalfedgeHandle) -> Result<(), &'static str> {
@@ -812,7 +815,9 @@ impl RustMesh {
 
         for heh_idx in 0..self.n_halfedges() {
             let incoming = HalfedgeHandle::new(heh_idx as u32);
-            if self.is_halfedge_deleted(incoming) || self.is_edge_deleted(self.edge_handle(incoming)) {
+            if self.is_halfedge_deleted(incoming)
+                || self.is_edge_deleted(self.edge_handle(incoming))
+            {
                 continue;
             }
             if self.to_vertex_handle(incoming) == vo {
@@ -843,7 +848,10 @@ impl RustMesh {
     }
 
     fn collapse_loop_local(&mut self, heh: HalfedgeHandle) {
-        if !heh.is_valid() || self.is_halfedge_deleted(heh) || self.is_edge_deleted(self.edge_handle(heh)) {
+        if !heh.is_valid()
+            || self.is_halfedge_deleted(heh)
+            || self.is_edge_deleted(self.edge_handle(heh))
+        {
             return;
         }
 
@@ -1051,7 +1059,10 @@ impl RustMesh {
                 );
             }
             if preserve_texcoords {
-                texcoords.push(self.vertex_texcoord_by_index(idx).unwrap_or(glam::Vec2::ZERO));
+                texcoords.push(
+                    self.vertex_texcoord_by_index(idx)
+                        .unwrap_or(glam::Vec2::ZERO),
+                );
             }
         }
 
@@ -1129,7 +1140,10 @@ impl RustMesh {
         };
         let texcoords: Vec<glam::Vec2> = if preserve_texcoords {
             (0..old_vertex_count)
-                .map(|idx| self.vertex_texcoord_by_index(idx).unwrap_or(glam::Vec2::ZERO))
+                .map(|idx| {
+                    self.vertex_texcoord_by_index(idx)
+                        .unwrap_or(glam::Vec2::ZERO)
+                })
                 .collect()
         } else {
             Vec::new()
@@ -1608,7 +1622,13 @@ fn rebuild_polygon_faces(mesh: &mut RustMesh, faces: &[Vec<VertexHandle>]) {
 fn rebuild_oriented_triangles(mesh: &mut RustMesh, faces: &[Vec<VertexHandle>]) {
     let triangles: Vec<[usize; 3]> = faces
         .iter()
-        .map(|face| [face[0].idx_usize(), face[1].idx_usize(), face[2].idx_usize()])
+        .map(|face| {
+            [
+                face[0].idx_usize(),
+                face[1].idx_usize(),
+                face[2].idx_usize(),
+            ]
+        })
         .collect();
 
     let flips = orient_triangle_faces(&triangles);
@@ -1692,7 +1712,10 @@ fn orient_triangle_faces(triangles: &[[usize; 3]]) -> Vec<bool> {
         }
     }
 
-    flips.into_iter().map(|flip| flip.unwrap_or(false)).collect()
+    flips
+        .into_iter()
+        .map(|flip| flip.unwrap_or(false))
+        .collect()
 }
 
 #[cfg(test)]

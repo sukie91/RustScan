@@ -583,12 +583,18 @@ impl SoAKernel {
 
     #[inline]
     pub fn is_edge_deleted(&self, eh: EdgeHandle) -> bool {
-        self.edge_deleted.get(eh.idx_usize()).copied().unwrap_or(true)
+        self.edge_deleted
+            .get(eh.idx_usize())
+            .copied()
+            .unwrap_or(true)
     }
 
     #[inline]
     pub fn is_face_deleted(&self, fh: FaceHandle) -> bool {
-        self.face_deleted.get(fh.idx_usize()).copied().unwrap_or(true)
+        self.face_deleted
+            .get(fh.idx_usize())
+            .copied()
+            .unwrap_or(true)
     }
 
     #[inline]

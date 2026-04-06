@@ -56,20 +56,28 @@ pub use crate::render::{
 
 // Re-export training types
 pub use crate::training::{
-    default_litegs_parity_fixtures, default_parity_report_path, parity_fixture_id_for_input_path,
-    LiteGsConfig, LiteGsOpacityResetMode, LiteGsPruneMode, LiteGsTileSize, ParityFixtureKind,
-    ParityFixtureSpec, ParityHarnessReport, ParityLossTerms, ParityMetricSnapshot,
-    ParityThresholds, ParityTimingMetrics, ParityTopologyMetrics, TrainingProfile,
+    compare_loss_curve_samples, default_litegs_parity_fixtures, default_parity_report_path,
+    parity_fixture_id_for_input_path, resolve_litegs_parity_fixture_input_path,
+    resolve_litegs_parity_reference_report_path, EvaluationDevice, EvaluationFrameMetric,
+    FinalTrainingMetrics, LiteGsConfig, LiteGsOpacityResetMode, LiteGsPruneMode, LiteGsTileSize,
+    ParityCheckOutcome, ParityCheckStatus, ParityFixtureKind, ParityFixtureSpec,
+    ParityGateEvaluation, ParityGateStatus, ParityHarnessReport, ParityLossCurveSample,
+    ParityLossTerms, ParityMetricSnapshot, ParityReferenceComparison, ParityThresholds,
+    ParityTimingMetrics, ParityTopologyMetrics, PsnrSummary, SceneEvaluationConfig,
+    SceneEvaluationError, SceneEvaluationResult, SceneEvaluationSummary, TrainingProfile,
     DEFAULT_CONVERGENCE_FIXTURE_ID, DEFAULT_TINY_FIXTURE_ID,
+};
+pub use crate::training::{
+    compute_psnr_f32, materialize_chunk_dataset, plan_spatial_chunks, scaled_dimensions,
+    select_evaluation_frames, summarize_psnr_samples, summarize_training_metrics,
+    worst_frame_metrics, ChunkBounds, ChunkBoundsSource, ChunkDisposition, ChunkPlan,
+    MaterializedChunkDataset, PlannedChunk,
 };
 #[cfg(feature = "gpu")]
 pub use crate::training::{
-    estimate_chunk_capacity, last_metal_training_telemetry, ChunkCapacityDisposition,
-    ChunkCapacityEstimate, LiteGsOptimizerLrs, LiteGsTrainingTelemetry,
-};
-pub use crate::training::{
-    materialize_chunk_dataset, plan_spatial_chunks, ChunkBounds, ChunkBoundsSource,
-    ChunkDisposition, ChunkPlan, MaterializedChunkDataset, PlannedChunk,
+    estimate_chunk_capacity, evaluate_scene, evaluation_device, last_metal_training_telemetry,
+    render_evaluation_frame, trainable_from_scene, ChunkCapacityDisposition, ChunkCapacityEstimate,
+    LiteGsOptimizerLrs, LiteGsTrainingTelemetry,
 };
 pub use crate::training::{TrainingBackend, TrainingConfig, TrainingResult};
 

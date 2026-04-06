@@ -13,8 +13,10 @@ pub(crate) struct MetalBackwardGrads {
 
 pub(crate) struct MetalBackwardPass {
     pub grads: MetalBackwardGrads,
-    /// Gradient magnitudes per Gaussian (tiny readback for densification stats).
+    /// Parameter gradient magnitudes per Gaussian.
     pub grad_magnitudes: Vec<f32>,
+    /// Projected-space (u, v) gradient magnitudes per Gaussian.
+    pub projected_grad_magnitudes: Vec<f32>,
 }
 
 /// GPU-accelerated backward pass using Metal compute kernel.
@@ -31,6 +33,9 @@ pub(crate) fn backward_weighted_l1(
 
     let grad_magnitude_tensor = runtime.compute_grad_magnitudes(n_gaussians)?;
     let grad_magnitudes = runtime.read_tensor_flat::<f32>(&grad_magnitude_tensor)?;
+    let projected_grad_magnitude_tensor = runtime.compute_projected_grad_magnitudes(n_gaussians)?;
+    let projected_grad_magnitudes =
+        runtime.read_tensor_flat::<f32>(&projected_grad_magnitude_tensor)?;
 
     let grads = MetalBackwardGrads {
         positions: frame.grad_positions,
@@ -42,5 +47,6 @@ pub(crate) fn backward_weighted_l1(
     Ok(MetalBackwardPass {
         grads,
         grad_magnitudes,
+        projected_grad_magnitudes,
     })
 }

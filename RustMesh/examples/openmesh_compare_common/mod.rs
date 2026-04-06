@@ -50,12 +50,8 @@ pub fn openmesh_benchmark_binary() -> PathBuf {
 }
 
 pub fn openmesh_tool(binary_name: &str) -> Command {
-    let mut command =
-        Command::new(openmesh_root().join(format!("build/Build/bin/{binary_name}")));
-    command.env(
-        "DYLD_LIBRARY_PATH",
-        openmesh_root().join("build/Build/lib"),
-    );
+    let mut command = Command::new(openmesh_root().join(format!("build/Build/bin/{binary_name}")));
+    command.env("DYLD_LIBRARY_PATH", openmesh_root().join("build/Build/lib"));
     command.current_dir(reference_root());
     command
 }

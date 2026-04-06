@@ -10,6 +10,7 @@ pub mod training_pipeline;
 pub mod chunk_planner;
 pub mod clustering;
 pub mod density_controller;
+pub mod eval;
 pub mod morton;
 pub mod parity_harness;
 pub mod pose_embedding;
@@ -40,10 +41,21 @@ pub use chunk_planner::{
     materialize_chunk_dataset, plan_spatial_chunks, ChunkBounds, ChunkBoundsSource,
     ChunkDisposition, ChunkPlan, MaterializedChunkDataset, PlannedChunk,
 };
+pub use eval::{
+    compute_psnr_f32, scaled_dimensions, select_evaluation_frames, summarize_psnr_samples,
+    summarize_training_metrics, worst_frame_metrics, EvaluationDevice, EvaluationFrameMetric,
+    FinalTrainingMetrics, PsnrSummary, SceneEvaluationConfig, SceneEvaluationError,
+    SceneEvaluationResult, SceneEvaluationSummary,
+};
+#[cfg(feature = "gpu")]
+pub use eval::{evaluate_scene, evaluation_device, render_evaluation_frame, trainable_from_scene};
 pub use parity_harness::{
-    default_litegs_parity_fixtures, default_parity_report_path, parity_fixture_id_for_input_path,
-    ParityFixtureKind, ParityFixtureSpec, ParityHarnessReport, ParityLossTerms,
-    ParityMetricSnapshot, ParityThresholds, ParityTimingMetrics, ParityTopologyMetrics,
+    compare_loss_curve_samples, default_litegs_parity_fixtures, default_parity_report_path,
+    parity_fixture_id_for_input_path, resolve_litegs_parity_fixture_input_path,
+    resolve_litegs_parity_reference_report_path, ParityCheckOutcome, ParityCheckStatus,
+    ParityFixtureKind, ParityFixtureSpec, ParityGateEvaluation, ParityGateStatus,
+    ParityHarnessReport, ParityLossCurveSample, ParityLossTerms, ParityMetricSnapshot,
+    ParityReferenceComparison, ParityThresholds, ParityTimingMetrics, ParityTopologyMetrics,
     DEFAULT_CONVERGENCE_FIXTURE_ID, DEFAULT_TINY_FIXTURE_ID,
 };
 
@@ -478,7 +490,18 @@ pub struct LiteGsConfig {
     pub enable_depth: bool,
     pub densify_from: usize,
     pub densify_until: Option<usize>,
+    /// Freeze all topology updates at or after this epoch.
+    /// When set, later epochs only optimize Gaussian parameters.
+    pub topology_freeze_after_epoch: Option<usize>,
+    /// Brush-style refine cadence in training iterations.
+    pub refine_every: usize,
     pub densification_interval: usize,
+    /// Brush-style xy-gradient threshold for growth candidates.
+    pub growth_grad_threshold: f32,
+    /// Fraction of above-threshold candidates selected for additional growth.
+    pub growth_select_fraction: f32,
+    /// Stop selecting additional growth candidates after this training iteration.
+    pub growth_stop_iter: usize,
     pub opacity_reset_interval: usize,
     /// How many epochs to offset prune from densify.
     /// Default is 0 (densify and prune in same epoch, LiteGS semantics).
@@ -518,7 +541,12 @@ impl Default for LiteGsConfig {
             enable_depth: false,
             densify_from: 3,
             densify_until: None,
+            topology_freeze_after_epoch: None,
+            refine_every: 200,
             densification_interval: 5,
+            growth_grad_threshold: LITEGS_DEFAULT_GROWTH_GRAD_THRESHOLD,
+            growth_select_fraction: 0.2,
+            growth_stop_iter: 15_000,
             opacity_reset_interval: 10,
             prune_offset_epochs: 0, // No offset - densify/prune together like LiteGS
             prune_min_age: 5,       // Must survive 5 iterations (more protection)
@@ -537,6 +565,8 @@ impl Default for LiteGsConfig {
 fn normalize_config_token(value: &str) -> String {
     value.trim().to_ascii_lowercase().replace('_', "-")
 }
+
+const LITEGS_DEFAULT_GROWTH_GRAD_THRESHOLD: f32 = 0.00015;
 
 /// Training configuration.
 #[derive(Debug, Clone)]
@@ -574,6 +604,17 @@ pub struct TrainingConfig {
     pub topology_log_interval: usize,
     /// Pruning threshold
     pub prune_threshold: f32,
+    /// Legacy Metal densify threshold used by the production Metal trainer path.
+    /// Kept explicit here so the runtime no longer depends on legacy/reference defaults.
+    pub legacy_densify_grad_threshold: f32,
+    /// Maximum Gaussian scale eligible for clone in the legacy topology path.
+    pub legacy_clone_scale_threshold: f32,
+    /// Minimum Gaussian scale eligible for split in the legacy topology path.
+    pub legacy_split_scale_threshold: f32,
+    /// Maximum Gaussian scale kept during legacy topology prune.
+    pub legacy_prune_scale_threshold: f32,
+    /// Maximum number of Gaussians the legacy topology path may add per update.
+    pub legacy_max_densify_per_update: usize,
     /// Maximum number of Gaussians created during initialization
     pub max_initial_gaussians: usize,
     /// Sampling step for frame-to-Gaussian initialization (0 = auto)
@@ -630,6 +671,11 @@ impl Default for TrainingConfig {
             topology_warmup: 100,
             topology_log_interval: 500,
             prune_threshold: 0.005,
+            legacy_densify_grad_threshold: 0.0002,
+            legacy_clone_scale_threshold: 0.1,
+            legacy_split_scale_threshold: 0.3,
+            legacy_prune_scale_threshold: 0.5,
+            legacy_max_densify_per_update: 2_000,
             max_initial_gaussians: 100_000,
             sampling_step: 0,
             min_depth: 0.01,
@@ -771,6 +817,21 @@ fn validate_litegs_mac_v1_config(config: &TrainingConfig) -> Result<(), Training
     }
     if config.litegs.densification_interval == 0 {
         unsupported.push("densification_interval must be >= 1".to_string());
+    }
+    if config.litegs.refine_every == 0 {
+        unsupported.push("refine_every must be >= 1".to_string());
+    }
+    if !config.litegs.growth_grad_threshold.is_finite() || config.litegs.growth_grad_threshold < 0.0
+    {
+        unsupported.push("growth_grad_threshold must be finite and >= 0".to_string());
+    }
+    if !config.litegs.growth_select_fraction.is_finite()
+        || !(0.0..=1.0).contains(&config.litegs.growth_select_fraction)
+    {
+        unsupported.push("growth_select_fraction must be in [0, 1]".to_string());
+    }
+    if config.litegs.growth_stop_iter == 0 {
+        unsupported.push("growth_stop_iter must be >= 1".to_string());
     }
     if config.litegs.opacity_reset_interval == 0 {
         unsupported.push("opacity_reset_interval must be >= 1".to_string());
@@ -1077,6 +1138,7 @@ mod tests {
     use super::{
         validate_litegs_mac_v1_config, LiteGsConfig, LiteGsOpacityResetMode, LiteGsPruneMode,
         LiteGsTileSize, TrainingBackend, TrainingConfig, TrainingProfile,
+        LITEGS_DEFAULT_GROWTH_GRAD_THRESHOLD,
     };
     use std::str::FromStr;
 
@@ -1099,6 +1161,16 @@ mod tests {
     }
 
     #[test]
+    fn training_config_exposes_explicit_legacy_topology_defaults() {
+        let config = TrainingConfig::default();
+        assert_eq!(config.legacy_densify_grad_threshold, 0.0002);
+        assert_eq!(config.legacy_clone_scale_threshold, 0.1);
+        assert_eq!(config.legacy_split_scale_threshold, 0.3);
+        assert_eq!(config.legacy_prune_scale_threshold, 0.5);
+        assert_eq!(config.legacy_max_densify_per_update, 2_000);
+    }
+
+    #[test]
     fn litegs_config_defaults_match_mac_bootstrap_plan() {
         let litegs = LiteGsConfig::default();
         assert_eq!(litegs.sh_degree, 3);
@@ -1110,7 +1182,15 @@ mod tests {
         assert!(!litegs.enable_depth);
         assert_eq!(litegs.densify_from, 3);
         assert_eq!(litegs.densify_until, None);
+        assert_eq!(litegs.topology_freeze_after_epoch, None);
+        assert_eq!(litegs.refine_every, 200);
         assert_eq!(litegs.densification_interval, 5);
+        assert_eq!(
+            litegs.growth_grad_threshold,
+            LITEGS_DEFAULT_GROWTH_GRAD_THRESHOLD
+        );
+        assert_eq!(litegs.growth_select_fraction, 0.2);
+        assert_eq!(litegs.growth_stop_iter, 15_000);
         assert_eq!(litegs.opacity_reset_interval, 10);
         assert_eq!(litegs.prune_offset_epochs, 0); // densify/prune together
         assert_eq!(litegs.prune_min_age, 5);
@@ -1167,7 +1247,11 @@ mod tests {
                 enable_transmittance: true,
                 densify_from: 4,
                 densify_until: Some(16),
+                refine_every: 64,
                 densification_interval: 3,
+                growth_grad_threshold: 0.001,
+                growth_select_fraction: 0.35,
+                growth_stop_iter: 2_048,
                 opacity_reset_interval: 6,
                 opacity_reset_mode: LiteGsOpacityResetMode::Reset,
                 prune_mode: LiteGsPruneMode::Threshold,

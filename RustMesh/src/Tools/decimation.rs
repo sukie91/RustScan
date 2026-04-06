@@ -190,7 +190,9 @@ impl DecimationHeap {
             // Choose smaller child
             let mut child_idx = left_idx;
             let right_idx = left_idx + 1;
-            if right_idx < size && Self::less(self.entries[right_idx], self.entries[left_idx], props) {
+            if right_idx < size
+                && Self::less(self.entries[right_idx], self.entries[left_idx], props)
+            {
                 child_idx = right_idx;
             }
 
@@ -214,8 +216,14 @@ impl DecimationHeap {
 
     /// Compare priorities: vh0 < vh1 means vh0 has higher priority (min-heap)
     fn less(vh0: VertexHandle, vh1: VertexHandle, props: &[VertexProps]) -> bool {
-        let p0 = props.get(vh0.idx_usize()).map(|p| p.priority).unwrap_or(f32::MAX);
-        let p1 = props.get(vh1.idx_usize()).map(|p| p.priority).unwrap_or(f32::MAX);
+        let p0 = props
+            .get(vh0.idx_usize())
+            .map(|p| p.priority)
+            .unwrap_or(f32::MAX);
+        let p1 = props
+            .get(vh1.idx_usize())
+            .map(|p| p.priority)
+            .unwrap_or(f32::MAX);
         p0 < p1
     }
 }
@@ -534,7 +542,9 @@ impl<'a> Decimater<'a> {
     }
 
     pub fn collapse_info(&mut self, heh: HalfedgeHandle) -> Option<CollapseInfo> {
-        if self.mesh.is_halfedge_deleted(heh) || self.mesh.is_edge_deleted(self.mesh.edge_handle(heh)) {
+        if self.mesh.is_halfedge_deleted(heh)
+            || self.mesh.is_edge_deleted(self.mesh.edge_handle(heh))
+        {
             return None;
         }
 
@@ -655,7 +665,8 @@ impl<'a> Decimater<'a> {
             }
 
             // === KEY: Store one-ring BEFORE collapse ===
-            let support: Vec<VertexHandle> = self.mesh
+            let support: Vec<VertexHandle> = self
+                .mesh
                 .vertex_vertices(v0)
                 .map(|iter| iter.collect())
                 .unwrap_or_default();
@@ -670,8 +681,8 @@ impl<'a> Decimater<'a> {
             let priority = self.vertex_props[vp.idx_usize()].priority;
             // is_boundary: check if the halfedge is on boundary (OpenMesh style)
             let heh_opp = self.mesh.opposite_halfedge_handle(v0v1);
-            let is_boundary = self.mesh.face_handle(v0v1).is_none()
-                || self.mesh.face_handle(heh_opp).is_none();
+            let is_boundary =
+                self.mesh.face_handle(v0v1).is_none() || self.mesh.face_handle(heh_opp).is_none();
             let faces_removed = self.count_faces_removed(v0v1);
 
             // Perform collapse
@@ -729,8 +740,9 @@ impl<'a> Decimater<'a> {
         if let Some(he_iter) = self.mesh.vertex_halfedges(vh) {
             for heh in he_iter {
                 // Skip deleted halfedges
-                if self.mesh.is_halfedge_deleted(heh) ||
-                   self.mesh.is_edge_deleted(self.mesh.edge_handle(heh)) {
+                if self.mesh.is_halfedge_deleted(heh)
+                    || self.mesh.is_edge_deleted(self.mesh.edge_handle(heh))
+                {
                     continue;
                 }
 
@@ -849,12 +861,19 @@ impl<'a> Decimater<'a> {
     }
 
     /// OpenMesh-style collapse legality check (including boundary constraints)
-    fn is_collapse_legal_openmesh(&self, v0: VertexHandle, v1: VertexHandle, heh: HalfedgeHandle) -> bool {
+    fn is_collapse_legal_openmesh(
+        &self,
+        v0: VertexHandle,
+        v1: VertexHandle,
+        heh: HalfedgeHandle,
+    ) -> bool {
         // Basic validity
         if !heh.is_valid() || !v0.is_valid() || !v1.is_valid() {
             return false;
         }
-        if self.mesh.is_halfedge_deleted(heh) || self.mesh.is_edge_deleted(self.mesh.edge_handle(heh)) {
+        if self.mesh.is_halfedge_deleted(heh)
+            || self.mesh.is_edge_deleted(self.mesh.edge_handle(heh))
+        {
             return false;
         }
         if self.mesh.is_vertex_deleted(v0) || self.mesh.is_vertex_deleted(v1) {
@@ -885,8 +904,12 @@ impl<'a> Decimater<'a> {
 
             // Only check vl/vr if this is NOT a boundary edge (both faces exist)
             if fh_left.is_some() && fh_right.is_some() {
-                let vl = self.mesh.to_vertex_handle(self.mesh.next_halfedge_handle(heh));
-                let vr = self.mesh.to_vertex_handle(self.mesh.next_halfedge_handle(heh_opp));
+                let vl = self
+                    .mesh
+                    .to_vertex_handle(self.mesh.next_halfedge_handle(heh));
+                let vr = self
+                    .mesh
+                    .to_vertex_handle(self.mesh.next_halfedge_handle(heh_opp));
                 // Both vl and vr valid means not a simple boundary collapse
                 if vl.is_valid() && vr.is_valid() {
                     return false;
@@ -996,7 +1019,9 @@ impl<'a> Decimater<'a> {
 
         for heh_idx in 0..self.mesh.n_halfedges() {
             let heh = HalfedgeHandle::new(heh_idx as u32);
-            if self.mesh.is_halfedge_deleted(heh) || self.mesh.is_edge_deleted(self.mesh.edge_handle(heh)) {
+            if self.mesh.is_halfedge_deleted(heh)
+                || self.mesh.is_edge_deleted(self.mesh.edge_handle(heh))
+            {
                 continue;
             }
             if !is_collapse_ok_with_topology(self.mesh, &topology, heh) {
@@ -1039,19 +1064,25 @@ impl<'a> Decimater<'a> {
                         .mesh
                         .face_handle(self.mesh.opposite_halfedge_handle(heh))
                         .is_none(),
-                faces_removed: if self.mesh.face_handle(heh).is_some() { 1 } else { 0 }
-                    + if self
-                        .mesh
-                        .face_handle(self.mesh.opposite_halfedge_handle(heh))
-                        .is_some()
-                    {
-                        1
-                    } else {
-                        0
-                    },
+                faces_removed: if self.mesh.face_handle(heh).is_some() {
+                    1
+                } else {
+                    0
+                } + if self
+                    .mesh
+                    .face_handle(self.mesh.opposite_halfedge_handle(heh))
+                    .is_some()
+                {
+                    1
+                } else {
+                    0
+                },
             };
 
-            if best.as_ref().is_none_or(|current| is_better_candidate(&candidate, current)) {
+            if best
+                .as_ref()
+                .is_none_or(|current| is_better_candidate(&candidate, current))
+            {
                 best = Some(candidate);
             }
         }
@@ -1129,7 +1160,11 @@ fn build_collapse_topology(mesh: &RustMesh) -> CollapseTopology {
     }
 }
 
-fn push_unique_neighbor(neighbors: &mut Vec<VertexHandle>, candidate: VertexHandle, center: VertexHandle) {
+fn push_unique_neighbor(
+    neighbors: &mut Vec<VertexHandle>,
+    candidate: VertexHandle,
+    center: VertexHandle,
+) {
     if candidate != center && !neighbors.contains(&candidate) {
         neighbors.push(candidate);
     }
@@ -1149,10 +1184,7 @@ fn is_collapse_ok_with_topology(
 
     let v0 = mesh.from_vertex_handle(heh);
     let v1 = mesh.to_vertex_handle(heh);
-    if !v0.is_valid()
-        || !v1.is_valid()
-        || mesh.is_vertex_deleted(v0)
-        || mesh.is_vertex_deleted(v1)
+    if !v0.is_valid() || !v1.is_valid() || mesh.is_vertex_deleted(v0) || mesh.is_vertex_deleted(v1)
     {
         return false;
     }
@@ -1258,10 +1290,11 @@ fn is_collapse_ok_with_topology(
             == 3
         {
             let one = mesh.opposite_halfedge_handle(mesh.next_halfedge_handle(heh));
-            let two = mesh.opposite_halfedge_handle(mesh.next_halfedge_handle(
-                mesh.next_halfedge_handle(heh),
-            ));
-            if let (Some(face_one), Some(face_two)) = (mesh.face_handle(one), mesh.face_handle(two)) {
+            let two = mesh.opposite_halfedge_handle(
+                mesh.next_halfedge_handle(mesh.next_halfedge_handle(heh)),
+            );
+            if let (Some(face_one), Some(face_two)) = (mesh.face_handle(one), mesh.face_handle(two))
+            {
                 if face_one == face_two
                     && topology
                         .face_valences
@@ -1285,10 +1318,11 @@ fn is_collapse_ok_with_topology(
             == 3
         {
             let one = mesh.opposite_halfedge_handle(mesh.next_halfedge_handle(heh_opp));
-            let two = mesh.opposite_halfedge_handle(mesh.next_halfedge_handle(
-                mesh.next_halfedge_handle(heh_opp),
-            ));
-            if let (Some(face_one), Some(face_two)) = (mesh.face_handle(one), mesh.face_handle(two)) {
+            let two = mesh.opposite_halfedge_handle(
+                mesh.next_halfedge_handle(mesh.next_halfedge_handle(heh_opp)),
+            );
+            if let (Some(face_one), Some(face_two)) = (mesh.face_handle(one), mesh.face_handle(two))
+            {
                 if face_one == face_two
                     && topology
                         .face_valences
@@ -1513,6 +1547,9 @@ mod tests {
         assert!(trace.collapsed > 0);
         assert_eq!(trace.steps.len(), 5);
         assert_eq!(trace.steps[0].step, 1);
-        assert!(trace.steps.windows(2).all(|pair| pair[0].step < pair[1].step));
+        assert!(trace
+            .steps
+            .windows(2)
+            .all(|pair| pair[0].step < pair[1].step));
     }
 }
