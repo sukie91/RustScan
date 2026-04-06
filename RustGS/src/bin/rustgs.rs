@@ -252,16 +252,12 @@ fn main() -> anyhow::Result<()> {
                 let gaussians: Vec<rustgs::Gaussian> = scene
                     .gaussians()
                     .iter()
-                    .map(|g| {
-                        rustgs::Gaussian::new(
-                            g.position.into(),
-                            g.scale.into(),
-                            [g.rotation.w, g.rotation.x, g.rotation.y, g.rotation.z],
-                            g.opacity,
-                            g.color,
-                        )
-                    })
+                    .map(rustgs::Gaussian::from_gaussian3d)
                     .collect();
+                let color_representation = gaussians
+                    .first()
+                    .map(|gaussian| gaussian.color_representation)
+                    .unwrap_or_default();
                 let metadata = rustgs::SceneMetadata {
                     iterations: config.iterations,
                     final_loss: training_telemetry
@@ -269,6 +265,8 @@ fn main() -> anyhow::Result<()> {
                         .and_then(|telemetry| telemetry.loss_terms.total)
                         .unwrap_or(0.0),
                     gaussian_count: gaussians.len(),
+                    color_representation,
+                    ..rustgs::SceneMetadata::default()
                 };
                 rustgs::save_scene_ply(&args.output, &gaussians, &metadata)?;
                 log::info!("Saved scene to {:?}", args.output);
@@ -852,6 +850,7 @@ mod tests {
                 iterations: 1,
                 final_loss: 0.0,
                 gaussian_count: gaussians.len(),
+                ..rustgs::SceneMetadata::default()
             },
         )
         .unwrap();
@@ -911,6 +910,7 @@ mod tests {
                 iterations: 1,
                 final_loss: 0.0,
                 gaussian_count: gaussians.len(),
+                ..rustgs::SceneMetadata::default()
             },
         )
         .unwrap();

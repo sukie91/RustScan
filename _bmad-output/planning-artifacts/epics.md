@@ -1,830 +1,640 @@
 ---
 stepsCompleted: [1, 2, 3, 4]
 inputDocuments:
-  - _bmad-output/planning-artifacts/prd.md
-  - _bmad-output/planning-artifacts/architecture.md
-  - _bmad-output/implementation-artifacts/tech-spec-rust-viewer-3d-gui.md
+  - /Users/tfjiang/Projects/brush/crates/brush-process/src/train_stream.rs
+  - /Users/tfjiang/Projects/brush/crates/brush-dataset/src/scene_loader.rs
+  - /Users/tfjiang/Projects/brush/crates/brush-train/src/train.rs
+  - /Users/tfjiang/Projects/brush/crates/brush-serde/src/import.rs
+  - /Users/tfjiang/Projects/brush/crates/brush-serde/src/export.rs
+  - /Users/tfjiang/Projects/RustScan/RustGS/src/training/mod.rs
+  - /Users/tfjiang/Projects/RustScan/RustGS/src/training/metal_trainer.rs
+  - /Users/tfjiang/Projects/RustScan/RustGS/src/training/data_loading.rs
+  - /Users/tfjiang/Projects/RustScan/RustGS/src/training/training_pipeline.rs
+  - /Users/tfjiang/Projects/RustScan/RustGS/src/io/scene_io.rs
 ---
 
 # RustScan - Epic Breakdown
 
 ## Overview
 
-This document provides the complete epic and story breakdown for RustScan, decomposing the requirements from the PRD, UX Design if it exists, and Architecture requirements into implementable stories.
+This document provides the complete epic and story breakdown for RustScan, decomposing the Brush-inspired RustGS migration plan into implementable stories. The purpose of this plan is not to port Brush into RustGS, but to migrate the parts of Brush that improve RustGS engineering quality: training orchestration, data loading, dataset onboarding, topology state management, persistence hardening, and validation infrastructure.
 
 ## Requirements Inventory
 
 ### Functional Requirements
 
-FR1: Users can input iPhone video files (MP4/MOV/HEVC)
-FR2: System validates video format and reports errors
-FR3: System extracts features (ORB/Harris/FAST)
-FR4: System performs feature matching between frames
-FR5: System estimates camera poses
-FR6: System executes bundle adjustment
-FR7: System detects and closes loops
-FR8: System performs 3DGS training with depth constraints
-FR9: System utilizes GPU acceleration (Metal/MPS)
-FR10: System outputs trained 3DGS scene files
-FR11: System fuses depth maps into TSDF volume
-FR12: System extracts mesh via Marching Cubes
-FR13: System outputs exportable mesh files (OBJ/PLY)
-FR14: Users execute complete pipeline via command line
-FR15: System runs in non-interactive mode
-FR16: System outputs structured data (JSON)
-FR17: System reads configuration files (YAML/TOML)
-FR18: Command-line arguments override config settings
-FR19: System outputs configurable log levels
-FR20: System provides clear error messages with recovery suggestions
-FR21: System provides diagnostic information on failure
+FR1: RustGS routes training execution through a dedicated orchestration module that owns initialization, loop scheduling, evaluation, export, and telemetry.
+FR2: RustGS separates step-level Metal execution from lifecycle management so `metal_trainer` focuses on forward, backward, and parameter update work.
+FR3: RustGS provides a high-throughput frame loader with asynchronous prefetch, bounded caching, and randomized batch delivery for color and depth data.
+FR4: RustGS preserves existing synthetic-depth fallback and current frame preprocessing semantics when moving frame ingestion out of `data_loading.rs`.
+FR5: RustGS can load COLMAP datasets directly, including camera and image parsing, sparse-point initialization, and eval split support.
+FR6: RustGS can load Nerfstudio datasets directly, including `transforms*.json`, optional init splats, and eval or test split support.
+FR7: RustGS supports dataset-local training configuration overlays that can be overridden from the CLI without code changes.
+FR8: RustGS extracts initial-map construction, topology decisions, and optimizer-state reshaping into focused modules that preserve current LiteGS and Legacy semantics.
+FR9: RustGS provides richer scene persistence with versioned metadata, dynamic SH-aware import and export, and round-trip safety.
+FR10: RustGS adds training, loader, persistence, and topology regression coverage together with benchmark harnesses for forward, backward, and training smoke runs.
+FR11: RustGS preserves current non-chunked, chunked, `LegacyMetal`, and `LiteGsMacV1` entry behavior while the migration lands incrementally.
+FR12: Each migration increment is shippable as a standalone story that a single dev agent can complete without waiting for future stories in the same epic.
 
 ### NonFunctional Requirements
 
-NFR1: Processing Time: ≤30 minutes (2-3 minute video)
-NFR2: 3DGS Rendering Quality: PSNR > 28 dB
-NFR3: SLAM Tracking Success Rate: >95%
-NFR4: Mesh Quality: <1% isolated triangles
-NFR5: Output Formats: OBJ, PLY mesh files
-NFR6: Compatibility: Blender and Unity importable
+NFR1: Keep Metal and Candle as the runtime backbone; do not port RustGS to Burn, WGPU, or WGSL as part of this migration.
+NFR2: Bound new loader memory usage and avoid unbounded CPU image accumulation during training.
+NFR3: Preserve compatibility of existing CLI commands and scene outputs unless an explicit versioned format change is introduced.
+NFR4: New modules must reduce trainer cognitive load by making ownership boundaries explicit and testable.
+NFR5: Persistence changes must ship with round-trip and backward-compatibility regression coverage.
+NFR6: The final architecture must support reproducible benchmarking and developer handoff across long-running workstreams.
 
 ### Additional Requirements
 
-**From Architecture Document:**
-- Use glam as the only math library, remove nalgebra dependency
-- Metal/MPS backend for Apple Silicon GPU acceleration
-- Parallel processing using rayon for data parallelism, crossbeam-channel for thread communication
-- Error handling: library code returns Result/Option, use thiserror for custom error types
-- 3DGS → Mesh extraction: TSDF volume + Marching Cubes with post-processing (cluster filtering, normal smoothing)
-- Configuration management: TOML config files + serde validation
-- Logging system: log + env_logger + structured output options
-- Performance optimization: Use default config for MVP, defer optimization to Phase 2
-- Pipeline integration: Sequential execution + checkpoint mechanism for reliability and debugging
-
-**From RustViewer Tech Spec (tech-spec-rust-viewer-3d-gui.md):**
-- New `RustViewer/` crate: Interactive 3D visualization GUI for SLAM results
-- Offline file loading: `slam_checkpoint.json` (camera trajectory + map points), `scene.ply` (Gaussian point cloud), `mesh.obj/ply` (extracted mesh)
-- 3D rendering layer (wgpu): Camera trajectory polylines, sparse point clouds, Gaussian point clouds, Mesh wireframe and solid faces
-- egui control panel: File selection, layer visibility toggles, rendering mode switching
-- 3D camera control: Mouse drag rotation, wheel zoom, right-click panning (arcball camera)
-- Cargo workspace configuration: Add RustViewer as workspace member alongside RustMesh and RustSLAM
-- RustSLAM feature gating: Add `viewer-types` feature to gate heavy dependencies (ffmpeg-next, candle-core, candle-metal)
-- GPU rendering pipelines: Point cloud/Gaussian pipeline, trajectory polyline pipeline, Mesh pipeline
-- Unit testing for data loading and camera calculations
-- 11 acceptance criteria for GUI functionality and user interaction
+- Do not migrate Brush UI, mobile, browser, or viewer subsystems into RustGS.
+- Do not replace `chunk_planner`, Metal kernels, or the analytical backward path in phase one; wrap them behind clearer orchestration boundaries instead.
+- Keep `training_pipeline.rs` as legacy or reference utilities during migration instead of adding new production responsibilities.
+- Prefer facade-first refactors that preserve public APIs while internal modules are split.
+- Capture module ownership, rollout toggles, and migration notes in docs as part of the rollout epic.
+- Use maintainer, researcher, and training-operator outcomes as the user-value lens for epics and stories.
 
 ### FR Coverage Map
 
-FR1, FR2 → Epic 1: 视频输入处理
-FR3, FR4, FR5, FR6, FR7 → Epic 2: SLAM处理管道
-FR8, FR9, FR10 → Epic 3: 3DGS训练和场景生成 → **迁移至 Epic 9: RustGS**
-FR11, FR12, FR13 → Epic 4: 网格提取和导出 → **迁移至 Epic 10: RustMesh网格提取**
-FR14, FR15, FR16, FR17, FR18, FR19, FR20, FR21 → Epic 5: CLI接口和配置管理
-NFR1, NFR2, NFR3, NFR4 → Epic 6: 端到端管道集成 → **重构为 Epic 11: 管道集成更新**
-架构技术需求 → Epic 7: 基础设施质量保证
-RustViewer需求 → Epic 8: RustViewer 3D可视化GUI
+FR1: Epic 1 - Predictable Training Lifecycle
+FR2: Epic 1 - Predictable Training Lifecycle
+FR3: Epic 2 - Fast Frame Input Pipeline
+FR4: Epic 2 - Fast Frame Input Pipeline
+FR5: Epic 3 - Direct Dataset Onboarding
+FR6: Epic 3 - Direct Dataset Onboarding
+FR7: Epic 3 - Direct Dataset Onboarding
+FR8: Epic 4 - Safe Gaussian Topology Evolution
+FR9: Epic 5 - Reliable Scene Interchange
+FR10: Epic 6 - Regression-Safe Rollout
+FR11: Epic 6 - Regression-Safe Rollout
+FR12: Epic 6 - Regression-Safe Rollout
 
 ## Epic List
 
-### Epic 1: 视频输入处理
-用户可以输入iPhone视频文件，系统验证格式并提供清晰的错误反馈
+### Epic 1: Predictable Training Lifecycle
+RustGS maintainers can reason about and extend training runs through a dedicated orchestration layer instead of a monolithic trainer file.
 **FRs covered:** FR1, FR2
 
-### Epic 2: SLAM处理管道
-系统可以提取特征、匹配帧、估计相机位姿、优化地图并检测回环
-**FRs covered:** FR3, FR4, FR5, FR6, FR7
+### Epic 2: Fast Frame Input Pipeline
+Training operators can feed large RGB and depth datasets through bounded, asynchronous, reusable frame-loading infrastructure without degrading current output semantics.
+**FRs covered:** FR3, FR4
 
-### Epic 3: 3DGS训练和场景生成
-系统可以使用GPU加速训练3D高斯体，并输出可渲染的场景文件
-**FRs covered:** FR8, FR9, FR10
+### Epic 3: Direct Dataset Onboarding
+Researchers can train RustGS directly from COLMAP and Nerfstudio datasets and apply per-dataset configuration without custom one-off conversion scripts.
+**FRs covered:** FR5, FR6, FR7
 
-### Epic 4: 网格提取和导出
-系统可以将深度图融合成TSDF体积，提取网格并导出为行业标准格式
-**FRs covered:** FR11, FR12, FR13
+### Epic 4: Safe Gaussian Topology Evolution
+Maintainers can change densify, prune, and opacity-reset behavior and associated optimizer state without expanding `metal_trainer.rs` into another monolith.
+**FRs covered:** FR8
 
-### Epic 5: CLI接口和配置管理
-用户可以通过命令行运行完整管道，使用配置文件自定义参数，并获得结构化输出
-**FRs covered:** FR14, FR15, FR16, FR17, FR18, FR19, FR20, FR21
+### Epic 5: Reliable Scene Interchange
+Users can save, load, and round-trip richer RustGS scene data safely across experiments and future SH-capable formats.
+**FRs covered:** FR9
 
-### Epic 6: 端到端管道集成
-系统可以顺序执行所有阶段，支持检查点和恢复，提供进度反馈
-**FRs covered:** NFR1, NFR2, NFR3, NFR4
+### Epic 6: Regression-Safe Rollout
+The team can land the migration incrementally with confidence through smoke tests, benchmarks, docs, and compatibility gates.
+**FRs covered:** FR10, FR11, FR12
 
-### Epic 7: 基础设施质量保证
-系统具有线程安全的架构、统一配置、参数验证和错误处理
-**FRs covered:** 架构需求（数学库统一、GPU加速、并行处理、错误处理、配置管理等）
+## Epic 1: Predictable Training Lifecycle
 
-### Epic 8: RustViewer 3D可视化GUI
-用户可以交互式查看SLAM重建结果，包括相机轨迹、稀疏点云、高斯体和网格
-**FRs covered:** RustViewer技术规范中的所有需求
+Create a dedicated training orchestration layer that owns run lifecycle concerns, leaving `metal_trainer` responsible for step-level execution only.
 
-### Epic 9: RustGS Crate 提取
-将3DGS训练代码从RustSLAM分离到独立的RustGS crate，实现离线3DGS训练
-**FRs covered:** FR8, FR9, FR10 (从 Epic 3 迁移)
-**Stories:**
-- 9-1: 创建 rustscan-types 共享 crate
-- 9-2: 创建 RustGS crate 结构
-- 9-3: 迁移核心 Gaussian 文件
-- 9-4: 迁移渲染文件
-- 9-5: 迁移可微渲染
-- 9-6: 迁移训练文件
-- 9-7: 迁移 IO 和初始化
-- 9-8: 创建 RustGS CLI
-- 9-9: 更新 RustSLAM 依赖
+### Story 1.1: Introduce `train_stream.rs` as the Training Lifecycle Facade
 
-### Epic 10: RustMesh 网格提取集成
-将网格提取功能从RustSLAM迁移到RustMesh，RustGS提供深度渲染API
-**FRs covered:** FR11, FR12, FR13 (从 Epic 4 迁移)
-**Stories:**
-- 10-1: 迁移 TSDF 到 RustMesh
-- 10-2: 迁移 Marching Cubes
-- 10-3: 迁移网格提取器
-- 10-4: 集成 RustGS 深度渲染
-- 10-5: 创建网格提取 CLI
+As a RustGS maintainer,
+I want `training::train()` to delegate to a dedicated orchestration module,
+So that lifecycle flow is explicit and `metal_trainer` no longer acts as the only control surface.
 
-### Epic 11: 管道集成更新
-更新端到端管道以支持新的架构：RustSLAM → RustGS → RustMesh
-**FRs covered:** NFR1, NFR2, NFR3, NFR4 (重构)
-**Stories:**
-- 11-1: 更新 RustSLAM 输出格式
-- 11-2: 创建端到端管道脚本
-- 11-3: 更新文档
-
-### Epic 12: 分块训练入口与预算控制
-用户可以显式启用分块训练，并用内存预算驱动训练规模，使 RustGS 在 16GB 机器上避免直接 OOM
-**FRs covered:** FR1, FR2, FR5, FR6, FR7, FR11, FR12
-
-### Epic 13: 空间分块与相机子集构建
-系统可以从 SlamOutput/TrainingDataset 自动生成空间块、overlap 和块级相机子集，为逐块训练准备稳定输入
-**FRs covered:** FR3, FR4, FR5
-
-### Epic 14: 逐块训练执行与块级产物导出
-系统可以顺序训练每个 chunk，自动应用块级参数覆盖，并输出可合并的块级场景结果
-**FRs covered:** FR6, FR7, FR8, FR11
-
-### Epic 15: 场景合并与核心区保留
-系统可以将多个 chunk 的训练结果合并为单个场景文件，并通过 merge-core-only 控制 overlap 区域的保留策略
-**FRs covered:** FR8, FR9, FR10
-
-### Epic 16: 状态跟踪、恢复上下文与长期开发可维护性
-开发者可以基于文档 frontmatter 和每条 Story 状态字段持续推进长期开发，并在更换电脑或中断后快速恢复上下文
-**FRs covered:** FR13, NFR4, NFR8
-
-### Epic 17: LiteGS 对齐分析与验收 Harness
-为 LiteGS-on-RustGS Mac 方案建立权威差异矩阵、固定 fixtures 和统一验收阈值，确保后续开发围绕同一套 parity 标准推进
-**FRs covered:** FR8, FR9, FR10, NFR1, NFR2
-
-### Epic 18: LiteGS Mac MVP 训练路径
-在保留现有 LegacyMetal 行为的前提下，为 Apple Silicon 引入 LiteGS 兼容训练 profile、配置面和 Metal 训练入口
-**FRs covered:** FR8, FR9, FR10, NFR1, NFR2
-
-### Epic 19: LiteGS Cluster 与 Sparse-Gradient 路径
-将 LiteGS 的 cluster、稀疏梯度和空间重排机制引入 RustGS Metal 运行时，实现 clustered parity
-**FRs covered:** FR8, FR9, FR10, NFR1, NFR2
-
-### Epic 20: LiteGS Densify/Prune/Opacity Reset 对齐
-实现 LiteGS/TamingGS 的统计、densify、prune 与优化器状态变更语义，使拓扑编辑与上游保持一致
-**FRs covered:** FR8, FR9, FR10, NFR1, NFR2
-
-### Epic 21: 运行时对齐、导出恢复与默认切换
-补齐 LiteGS 兼容路径的评估、checkpoint、PLY 往返、Mac 操作文档，并在验收通过后升级默认 profile
-**FRs covered:** FR8, FR9, FR10, NFR1, NFR2, FR20, FR21
-
-## Epic 12: 分块训练入口与预算控制
-
-让 RustGS 具备正式的 chunked training 入口、预算模型和模式路由，使 16GB 机器能够以可预期方式启动分块训练。
-
-### Story 12.1: Chunked Training CLI and Config Entry
-
-Status: done
-
-As a RustGS CLI user,
-I want to enable chunked training and provide chunk-related options from the command line,
-So that I can run training under a fixed memory budget on a 16GB machine without changing code.
+**Implements:** FR1, FR2, FR11.
 
 **Acceptance Criteria:**
 
-**Given** the existing `rustgs train` command
-**When** I pass chunked-training flags
-**Then** the CLI parses them successfully into `rustgs::TrainingConfig`
+**Given** an existing `TrainingDataset` and `TrainingConfig`
+**When** `training::train()` is called
+**Then** execution is routed through `training/train_stream.rs`
+**And** the public return type and caller-facing API remain unchanged.
 
-**Given** no chunk-related flags are passed
+**Given** `chunked_training` is enabled or disabled
+**When** route selection runs
+**Then** the existing standard and chunked execution paths are preserved
+**And** no caller changes are required to select them.
+
+### Story 1.2: Extract Evaluation Scheduling into `training/eval.rs`
+
+As a RustGS maintainer,
+I want evaluation scheduling and metric calculation to live in a dedicated module,
+So that training-loop control and metric logic can evolve independently.
+
+**Implements:** FR1, FR2, FR11.
+
+**Acceptance Criteria:**
+
+**Given** a training run with evaluation enabled
+**When** the configured evaluation interval is reached
+**Then** `training/eval.rs` owns evaluation dispatch and metric aggregation
+**And** `metal_trainer` is no longer responsible for orchestration-level eval timing.
+
+**Given** an evaluation failure occurs
+**When** the failure is surfaced to the caller
+**Then** the error message identifies the evaluation phase clearly
+**And** the surrounding training state remains diagnosable.
+
+### Story 1.3: Extract Export and Checkpoint Scheduling into `training/export.rs`
+
+As a training operator,
+I want export scheduling to be controlled by a dedicated module,
+So that checkpoint behavior is consistent across training routes and easier to test.
+
+**Implements:** FR1, FR11.
+
+**Acceptance Criteria:**
+
+**Given** a training run with periodic export enabled
+**When** an export boundary is reached
+**Then** `training/export.rs` decides the output path, naming, and persistence action
+**And** the orchestration layer can call it without embedding export rules inline.
+
+**Given** export is disabled or unchanged from current defaults
+**When** training runs normally
+**Then** no extra export side effects occur
+**And** current output behavior remains compatible.
+
+### Story 1.4: Extract Training Telemetry Assembly into `training/telemetry.rs`
+
+As a RustGS maintainer,
+I want telemetry assembly and last-step reporting to be centralized,
+So that training metrics can be extended without adding more lifecycle code to `metal_trainer`.
+
+**Implements:** FR1, FR2, FR11.
+
+**Acceptance Criteria:**
+
+**Given** per-step timing, loss, and topology data are produced during training
+**When** telemetry is updated
+**Then** `training/telemetry.rs` owns snapshot assembly and persistence hooks
+**And** `metal_trainer` only returns raw step-level signals.
+
+**Given** `LiteGsMacV1` telemetry fields already exist
+**When** the new telemetry module is introduced
+**Then** those fields remain available to existing callers
+**And** no profile-specific data is dropped during migration.
+
+## Epic 2: Fast Frame Input Pipeline
+
+Introduce reusable frame-loading infrastructure with bounded memory, deterministic prefetch, and randomized batch delivery for RGB and depth supervision.
+
+### Story 2.1: Extract Frame Decode Helpers from `data_loading.rs`
+
+As a RustGS maintainer,
+I want image and depth decoding logic moved into a dedicated frame-loader module,
+So that raw IO is separated from training-state assembly.
+
+**Implements:** FR3, FR4.
+
+**Acceptance Criteria:**
+
+**Given** the current color and depth paths in `data_loading.rs`
+**When** decode helpers are moved into `training/frame_loader.rs`
+**Then** the decoded tensor-ready outputs match the previous implementation
+**And** existing unit tests for image and depth loading continue to pass.
+
+**Given** synthetic depth fallback is enabled
+**When** a frame lacks a depth map
+**Then** the extracted loader still produces the same synthetic-depth behavior
+**And** no caller needs to know whether the depth was real or synthetic.
+
+### Story 2.2: Add a Bounded Prefetch Cache for Training Frames
+
+As a training operator,
+I want RustGS to prefetch and cache a bounded set of frames,
+So that the training loop is less likely to stall on synchronous disk IO.
+
+**Implements:** FR3, NFR2.
+
+**Acceptance Criteria:**
+
+**Given** a dataset larger than the immediate batch window
 **When** training starts
-**Then** the current non-chunked path behaves exactly as before
+**Then** the frame loader starts background prefetch for upcoming samples
+**And** cache growth is bounded by an explicit capacity policy.
 
-**Given** invalid chunk parameters are passed
-**When** argument validation runs
-**Then** the CLI returns a clear error message describing the invalid value and expected range
+**Given** the cache reaches its configured limit
+**When** more frames are requested
+**Then** RustGS evicts or skips caching according to the defined policy
+**And** memory usage does not grow without bound.
 
-### Story 12.2: Budget-Driven Chunk Capacity Estimation
+### Story 2.3: Add a Deterministic Randomized Batch Iterator
 
-Status: done
+As a RustGS researcher,
+I want frame batches to be shuffled deterministically from a seed,
+So that training remains reproducible while still avoiding fixed-frame ordering.
 
-As a RustGS training operator,
-I want chunk capacity to be derived from a memory budget,
-So that chunk sizing is predictable and safe on a 16GB machine.
+**Implements:** FR3, FR12.
 
 **Acceptance Criteria:**
 
-**Given** a chunk memory budget in GiB
-**When** the estimator runs
-**Then** it computes a maximum allowable per-chunk training scale using the existing Metal memory estimate model
+**Given** a fixed seed and the same dataset
+**When** the batch iterator is created twice
+**Then** it emits the same shuffled frame order
+**And** reproducibility can be asserted in tests.
 
-**Given** a training input and budget
-**When** the estimator predicts a chunk would exceed budget
-**Then** the system marks the chunk for further subdivision or degradation rather than attempting unsafe training
+**Given** a different seed is supplied
+**When** batch iteration begins
+**Then** the frame order changes
+**And** the iterator still respects dataset bounds and cache rules.
 
-### Story 12.3: Chunked Path Selection and Early Guardrails
+### Story 2.4: Integrate the Frame Loader into `train_stream.rs`
 
-Status: done
+As a RustGS maintainer,
+I want the new frame loader to be the only training-loop source of frame batches,
+So that orchestration, batching, and preprocessing are controlled from one place.
+
+**Implements:** FR3, FR4, FR11.
+
+**Acceptance Criteria:**
+
+**Given** the new frame loader exists
+**When** `train_stream.rs` runs a training session
+**Then** batch acquisition happens through the loader abstraction
+**And** direct synchronous per-step file reads are removed from orchestration code.
+
+**Given** existing training datasets with and without depth maps
+**When** they are trained through the integrated loader
+**Then** current synthetic-depth and preprocessing semantics are preserved
+**And** training outputs remain behaviorally compatible at smoke-test scope.
+
+## Epic 3: Direct Dataset Onboarding
+
+Let RustGS consume common reconstruction datasets and per-dataset configuration directly, removing the need for one-off conversion steps for core training workflows.
+
+### Story 3.1: Introduce a Unified Dataset Loader Facade
+
+As a RustGS integrator,
+I want a single dataset-loading facade for supported dataset types,
+So that training entrypoints can consume multiple dataset formats through one normalized contract.
+
+**Implements:** FR5, FR6, FR7.
+
+**Acceptance Criteria:**
+
+**Given** a RustGS training input path
+**When** dataset discovery runs
+**Then** a unified dataset facade selects the appropriate loader implementation
+**And** the resulting dataset descriptor is normalized for downstream training code.
+
+**Given** an unsupported dataset layout
+**When** loader discovery fails
+**Then** RustGS returns a clear format-specific error
+**And** the caller can see which dataset types were expected.
+
+### Story 3.2: Add Direct COLMAP Dataset Support
+
+As a RustGS researcher,
+I want to train directly from a COLMAP reconstruction,
+So that I can use standard camera, image, and sparse-point outputs without writing a converter first.
+
+**Implements:** FR5.
+
+**Acceptance Criteria:**
+
+**Given** a COLMAP dataset with camera and image metadata
+**When** the COLMAP loader runs
+**Then** RustGS produces normalized poses, intrinsics, and image references
+**And** world-to-camera data is converted into the camera convention expected by RustGS.
+
+**Given** COLMAP sparse points are present
+**When** initialization is prepared
+**Then** the loader exposes sparse-point initialization data to RustGS
+**And** eval split support can be applied without breaking dataset loading.
+
+### Story 3.3: Add Direct Nerfstudio Dataset Support
+
+As a RustGS researcher,
+I want to train directly from a Nerfstudio dataset,
+So that I can use `transforms*.json` scenes and optional init splats without manual restructuring.
+
+**Implements:** FR6.
+
+**Acceptance Criteria:**
+
+**Given** a Nerfstudio dataset with `transforms.json` or train and val variants
+**When** the Nerfstudio loader runs
+**Then** RustGS loads train views and optional eval views correctly
+**And** pose and intrinsics data are normalized for the RustGS trainer.
+
+**Given** the dataset references an initialization PLY
+**When** that PLY is accessible
+**Then** the loader surfaces it as initialization input
+**And** missing optional init splats degrade gracefully rather than failing the whole load.
+
+### Story 3.4: Add Dataset-Local Config Overlay with CLI Override Merge
+
+As a training operator,
+I want dataset-local settings to live next to the dataset and still be overridable from the CLI,
+So that experiments are reproducible without hard-coding per-dataset parameters.
+
+**Implements:** FR7, FR12.
+
+**Acceptance Criteria:**
+
+**Given** a dataset-local config file is present
+**When** RustGS starts training from that dataset
+**Then** the config overlay is loaded automatically into the training configuration
+**And** the effective config is visible to the caller or logs.
+
+**Given** a CLI flag overrides the same field
+**When** the final config is assembled
+**Then** the CLI value wins
+**And** the precedence rule is documented and test-covered.
+
+### Story 3.5: Move Initial Map Construction into `training/init_map.rs`
+
+As a RustGS maintainer,
+I want initial-map construction to be its own module,
+So that sparse-point initialization and frame-based fallback are no longer coupled to raw frame IO code.
+
+**Implements:** FR5, FR6, FR8.
+
+**Acceptance Criteria:**
+
+**Given** a dataset with sparse initialization points
+**When** `training/init_map.rs` builds the initial map
+**Then** it uses sparse-point initialization through a dedicated path
+**And** downstream training code receives the same `GaussianMap` contract as before.
+
+**Given** sparse initialization is absent
+**When** initial-map construction runs
+**Then** frame-based fallback is used through the same module
+**And** the caller does not need separate initialization logic.
+
+## Epic 4: Safe Gaussian Topology Evolution
+
+Make Gaussian topology edits explicit and testable by separating parameter views, refine scheduling, and optimizer-state reshaping from step-level Metal execution.
+
+### Story 4.1: Introduce a Compact Splat Parameter View and Validation Helpers
+
+As a RustGS maintainer,
+I want a consistent trainable splat parameter view with shape validation,
+So that topology edits can operate on one clear representation instead of ad hoc tensor slices.
+
+**Implements:** FR8, NFR4.
+
+**Acceptance Criteria:**
+
+**Given** current trainable Gaussian parameters in RustGS
+**When** the compact parameter view is introduced
+**Then** means, rotations, log-scales, opacity, and color or SH state are addressable through one normalized abstraction
+**And** no runtime backend migration is introduced.
+
+**Given** malformed dimensions or incompatible parameter lengths
+**When** validation helpers run
+**Then** RustGS reports invariant violations clearly
+**And** the failures are test-covered before topology edits execute.
+
+### Story 4.2: Extract Topology Decision Logic into `training/topology.rs`
+
+As a RustGS maintainer,
+I want densify, prune, and opacity-reset decisions moved into a dedicated topology module,
+So that behavior changes can be made without rewriting training-loop control flow.
+
+**Implements:** FR8, FR11.
+
+**Acceptance Criteria:**
+
+**Given** the current topology heuristics in `metal_trainer.rs`
+**When** they are extracted into `training/topology.rs`
+**Then** scheduling and candidate selection logic live outside the step-level trainer
+**And** current profile semantics are preserved at regression-test scope.
+
+**Given** a future heuristic change is needed
+**When** a maintainer updates topology policy
+**Then** the change can be localized to topology modules
+**And** the orchestration and Metal execution layers do not need unrelated edits.
+
+### Story 4.3: Extract Optimizer-State Reshape Helpers into `training/optimizer_state.rs`
+
+As a RustGS maintainer,
+I want prune, clone, and split operations to update optimizer state through dedicated helpers,
+So that parameter resizing remains correct when topology changes occur.
+
+**Implements:** FR8, NFR4.
+
+**Acceptance Criteria:**
+
+**Given** a topology edit removes or adds Gaussians
+**When** optimizer-state reshape helpers run
+**Then** all affected optimizer tensors are resized consistently with the parameter tensors
+**And** the operation does not rely on scattered one-off logic inside `metal_trainer.rs`.
+
+**Given** a topology edit does not change tensor count
+**When** optimizer-state helpers are invoked
+**Then** they preserve existing state without introducing unnecessary copies
+**And** tests cover prune and split paths separately.
+
+### Story 4.4: Route Topology Scheduling Through `train_stream.rs`
+
+As a RustGS maintainer,
+I want topology scheduling to be called explicitly from the orchestration layer,
+So that lifecycle control determines when refine work happens and the trainer only performs step-level computation.
+
+**Implements:** FR1, FR8, FR11.
+
+**Acceptance Criteria:**
+
+**Given** a training run reaches a topology boundary
+**When** the orchestration layer evaluates scheduling rules
+**Then** `train_stream.rs` calls topology modules explicitly
+**And** `metal_trainer` no longer embeds orchestration-level refine timing.
+
+**Given** topology work is disabled by configuration or schedule
+**When** the same training run executes
+**Then** the orchestration layer skips topology actions cleanly
+**And** step-level training continues without behavior regressions.
+
+## Epic 5: Reliable Scene Interchange
+
+Strengthen RustGS persistence so scene files can evolve safely, preserve richer metadata, and survive round-trip tests as SH-aware formats are introduced.
+
+### Story 5.1: Introduce Versioned Scene Metadata
 
 As a RustGS user,
-I want the training entrypoint to route into chunked orchestration only when requested,
-So that normal training and chunked training remain clearly separated.
+I want scene files to carry explicit format metadata,
+So that future import and export changes can remain backward compatible.
+
+**Implements:** FR9, NFR3, NFR5.
 
 **Acceptance Criteria:**
 
-**Given** `chunked_training == true`
-**When** training begins
-**Then** the system enters the chunked training orchestration path
-
-**Given** `chunked_training == false`
-**When** training begins
-**Then** the system uses the existing normal training path
-
-### Story 12.4: Non-Chunked Compatibility and Entry Regression
-
-Status: done
-
-As a maintainer,
-I want regression coverage around the new chunked entrypoint,
-So that adding chunked mode does not break the existing trainer.
-
-**Acceptance Criteria:**
-
-**Given** existing non-chunked test inputs
-**When** tests run
-**Then** existing training behavior still passes unchanged
-
-**Given** chunked mode is enabled on a small fixture
-**When** integration tests run
-**Then** the entrypoint reaches the chunk planner and completes without changing tracked file formats
-
-## Epic 13: 空间分块与相机子集构建
-
-让 RustGS 能从弱几何输入中自动切分空间块并构建块级相机子集，为逐块训练提供稳定数据准备能力。
-
-### Story 13.1: Spatial Chunk Generation from Sparse Geometry or Camera Trajectory
-
-Status: done
-
-As a chunk planner,
-I want to generate spatial chunks from sparse points or fallback camera trajectory bounds,
-So that chunking works for SlamOutput-style inputs without per-frame depth.
-
-**Acceptance Criteria:**
-
-**Given** `initial_points` is present
-**When** chunk planning starts
-**Then** chunk bounds are derived from the point-cloud bounding box
-
-**Given** `initial_points` is empty
-**When** chunk planning starts
-**Then** chunk bounds fall back to camera-trajectory bounds
-
-### Story 13.2: Camera Assignment and Weak-Chunk Filtering
-
-Status: done
-
-As a chunk planner,
-I want to assign cameras to chunks and filter weak chunks,
-So that each chunk has enough observations to be trainable.
-
-**Acceptance Criteria:**
-
-**Given** a set of chunks and camera poses
-**When** assignment runs
-**Then** a camera is included in a chunk if its center or relevant sparse points intersect the chunk overlap region
-
-**Given** a chunk has fewer than the configured minimum cameras
-**When** chunk validation runs
-**Then** the chunk is merged, skipped, or degraded according to a deterministic rule
-
-### Story 13.3: Per-Chunk Dataset Materialization
-
-Status: done
-
-As a chunked trainer,
-I want per-chunk datasets to be materialized from the global input,
-So that each chunk can train independently on local views and local initialization.
-
-**Acceptance Criteria:**
-
-**Given** a validated chunk
-**When** dataset materialization runs
-**Then** the chunk dataset contains only the assigned poses and only the local initial points relevant to that chunk
-
-**Given** a chunk has no usable local points
-**When** dataset materialization runs
-**Then** the system falls back to frame-based initialization or fails with a clear chunk-scoped diagnostic
-
-### Story 13.4: Chunk Planning and Boundary Regression Tests
-
-Status: done
-
-As a maintainer,
-I want deterministic tests for chunk planning and assignment,
-So that planner behavior stays stable as training evolves.
-
-**Acceptance Criteria:**
-
-**Given** synthetic bounding boxes, points, and camera poses
-**When** unit tests run
-**Then** chunk count, overlap expansion, and camera assignment are deterministic
-
-**Given** boundary cameras and overlap regions
-**When** tests run
-**Then** edge assignment cases are explicitly validated
-
-## Epic 14: 逐块训练执行与块级产物导出
-
-让 RustGS 能顺序训练每个 chunk、根据预算应用块级覆盖参数，并输出可合并的块级结果和执行报告。
-
-### Story 14.1: Sequential Chunk Training Orchestrator
-
-Status: done
-
-As a RustGS user on a 16GB machine,
-I want chunks to train one by one,
-So that peak memory remains bounded.
-
-**Acceptance Criteria:**
-
-**Given** a list of trainable chunks
-**When** chunked training starts
-**Then** chunks are processed strictly sequentially rather than in parallel
-
-**Given** one chunk finishes
-**When** the next chunk begins
-**Then** the previous chunk's heavy training state is released before continuing
-
-### Story 14.2: Per-Chunk Adaptive Parameter Overrides
-
-Status: done
-
-As a chunked trainer,
-I want to override training parameters per chunk when needed,
-So that over-budget chunks can still finish under 16GB constraints.
-
-**Acceptance Criteria:**
-
-**Given** a chunk exceeds budget at default settings
-**When** adaptive planning runs
-**Then** the system first tries spatial subdivision, then chunk-local gaussian limits, then render-scale reduction
-
-**Given** a chunk still cannot be made safe
-**When** the planner exhausts allowed degradation
-**Then** the chunk is marked failed or skipped with a clear reason
-
-### Story 14.3: Chunk Artifact and Report Persistence
-
-Status: done
-
-As a maintainer,
-I want chunk training to emit explicit intermediate outputs,
-So that merge and debugging have stable inputs.
-
-**Acceptance Criteria:**
-
-**Given** a chunk finishes training successfully
-**When** the trainer persists outputs
-**Then** it produces a chunk scene artifact and a machine-readable chunk report entry
-
-**Given** chunked training completes
-**When** the overall report is written
-**Then** it contains one entry per chunk with final status and effective parameters
-
-### Story 14.4: Lifecycle Cleanup and Memory-Bounded Regression Validation
-
-Status: done
-
-As a maintainer,
-I want proof that chunked execution actually limits memory pressure,
-So that the feature meets its core goal.
-
-**Acceptance Criteria:**
-
-**Given** chunk-local resources are released
-**When** moving from one chunk to the next
-**Then** tests or diagnostics confirm stale trainer state is not retained across chunks
-
-**Given** chunked training on a bounded fixture
-**When** profiling or estimator-based regression tests run
-**Then** per-chunk memory remains within the configured budget envelope
-
-## Epic 15: 场景合并与核心区保留
-
-让 RustGS 能把多个 chunk 的训练结果稳定合并为单场景输出，同时控制 overlap 区的高斯保留策略。
-
-### Story 15.1: Core-Only Merge Filtering
-
-Status: done
-
-As a chunked training pipeline,
-I want to keep only core-region gaussians by default,
-So that overlap regions do not create duplicated seam geometry.
-
-**Acceptance Criteria:**
-
-**Given** a trained chunk with core and overlap AABBs
-**When** merge-core-only is enabled
-**Then** only gaussians whose centers fall inside the core AABB are retained for merge
-
-### Story 15.2: Final Merged Scene Output
-
-Status: done
-
-As a RustGS user,
-I want chunked training to still produce one final scene file,
-So that downstream tooling does not need a new consumption model.
-
-**Acceptance Criteria:**
-
-**Given** multiple successful chunk outputs
-**When** merge completes
-**Then** the system produces one merged `GaussianMap` and one final PLY scene file
-
-### Story 15.3: Merge Correctness and Seam Regression Tests
-
-Status: done
-
-As a maintainer,
-I want tests around chunk merge correctness,
-So that seam handling stays stable as training code evolves.
-
-**Acceptance Criteria:**
-
-**Given** synthetic chunk outputs with overlapping gaussians
-**When** merge-core-only tests run
-**Then** only expected core-region gaussians remain
-
-## Epic 16: 状态跟踪、恢复上下文与长期开发可维护性
-
-让长期开发和跨机器恢复有统一的状态字段、handoff 约定和工作流程，而不是依赖口头同步。
-
-### Story 16.1: Story Status Field Convention
-
-Status: done
-
-As a project maintainer,
-I want every story to carry an explicit status field,
-So that progress is visible and durable across long-running development.
-
-**Acceptance Criteria:**
-
-**Given** the chunked-training epic/story document
-**When** story sections are finalized
-**Then** each story includes a required status field initialized to `todo`
-
-### Story 16.2: Handoff Note Convention for Interrupted Work
-
-Status: done
-
-As a developer who may switch computers,
-I want a lightweight handoff note per story,
-So that I can resume work without reconstructing context from scratch.
-
-**Acceptance Criteria:**
-
-**Given** a story is in `in_progress` or `blocked`
-**When** the developer pauses work
-**Then** the story includes a short handoff note describing current state, next step, and known blocker
-
-### Story 16.3: Chunked Training Development Workflow Documentation
-
-Status: done
-
-As a maintainer,
-I want the chunked-training development workflow documented,
-So that implementation, review, and status maintenance stay consistent over a long project duration.
-
-**Acceptance Criteria:**
-
-**Given** the chunked-training epic section
-**When** documentation is finalized
-**Then** it defines the required story lifecycle, status values, and completion/update rules
-
-## Epic 17: LiteGS 对齐分析与验收 Harness
-
-让 RustGS 的 LiteGS-on-Mac 开发以统一的差异矩阵、固定 fixture 和可复用验收阈值为依据，而不是在实现过程中临时解释“什么叫对齐”。
-
-### Story 17.1: Full LiteGS-vs-RustGS Parity Matrix
-
-Status: done
+**Given** a RustGS scene is exported
+**When** metadata is written
+**Then** the file includes an explicit format version and relevant scene metadata fields
+**And** existing metadata such as iteration and loss remain available.
+
+**Given** an older scene file is loaded
+**When** the version field is absent or older
+**Then** RustGS falls back to compatible parsing behavior
+**And** the caller receives a warning only when compatibility assumptions matter.
+
+### Story 5.2: Split PLY Import and Export Behind the Existing `scene_io` Facade
 
 As a RustGS maintainer,
-I want one authoritative subsystem-by-subsystem parity matrix,
-So that every later LiteGS story has an explicit source of truth, mismatch statement, migration decision, acceptance metric, and owner.
+I want import and export code split into focused modules behind the current facade,
+So that persistence logic can grow without turning `scene_io.rs` into another monolith.
+
+**Implements:** FR9, NFR4.
 
 **Acceptance Criteria:**
 
-**Given** the LiteGS mirror and current RustGS implementation
-**When** the parity document is written
-**Then** it contains sections for training loop, dataset/camera model, Gaussian parameterization, render preprocess, loss, optimizer, densify/prune/reset, clustering/sparse-grad, evaluation/export, and Mac-specific constraints
+**Given** the current `save_scene_ply` and `load_scene_ply` API
+**When** import and export logic are split into dedicated modules
+**Then** existing callers continue to use the facade unchanged
+**And** the new internal module boundaries are explicit and documented.
 
-**Given** a mismatch row in the matrix
-**When** a maintainer reads it
-**Then** the row points to both LiteGS and RustGS source files and names the owning story
+**Given** a persistence bug is fixed in import or export logic
+**When** the fix is made
+**Then** it can be localized to the relevant module
+**And** no unrelated caller-facing API churn is introduced.
 
-### Story 17.2: Fixed Reference Fixtures for Parity Work
+### Story 5.3: Add Dynamic SH-Aware Scene Serialization
 
-Status: done
+As a RustGS researcher,
+I want scene serialization to preserve active SH degree and related parameter state,
+So that richer color representations can survive save and load boundaries.
 
-As a parity harness owner,
-I want two named reference fixtures with stable metadata,
-So that correctness and convergence checks do not drift as implementation changes.
-
-**Acceptance Criteria:**
-
-**Given** the parity harness registry
-**When** fixtures are enumerated
-**Then** it defines one tiny correctness fixture and one Apple Silicon convergence fixture with stable IDs and notes
-
-**Given** the canonical small COLMAP fixture is not yet checked in
-**When** the harness is bootstrapped locally
-**Then** the registry still records the intended COLMAP path and the temporary bootstrap dataset used meanwhile
-
-### Story 17.3: Parity Harness Metrics Schema
-
-Status: in_progress
-
-As a LiteGS parity developer,
-I want a reusable harness report format,
-So that later training runs can record the same initialization, loss, topology, export, and timing metrics across every story.
+**Implements:** FR9, NFR3, NFR5.
 
 **Acceptance Criteria:**
 
-**Given** a parity run
-**When** metrics are persisted
-**Then** the schema can record initialization counts, active SH degree, loss terms, PSNR, Gaussian counts, densify/prune events, export outputs, checkpoint/export round-trips, and wall-clock timing
+**Given** a scene uses RGB-only or SH-based color state
+**When** it is exported
+**Then** the persistence layer records the active color representation and SH degree explicitly
+**And** import reconstructs the same representation or fails clearly if unsupported.
 
-**Given** a stored parity report
-**When** it is loaded back
-**Then** the JSON round-trip is deterministic
+**Given** a scene does not use richer SH data
+**When** it is saved and loaded
+**Then** current RGB-only compatibility is preserved
+**And** no legacy caller must supply extra metadata manually.
 
-### Story 17.4: Shared Acceptance Thresholds
-
-Status: done
-
-As a project maintainer,
-I want one shared set of pass/fail thresholds,
-So that every later LiteGS story validates against the same rules.
-
-**Acceptance Criteria:**
-
-**Given** the parity harness defaults
-**When** thresholds are read
-**Then** they require no NaNs, no OOM on Apple Silicon, non-clustered PSNR delta ≤ 0.5 dB, non-clustered Gaussian-count delta ≤ 10%, clustered PSNR delta ≤ 0.7 dB, and deterministic export/load round-trip
-
-## Epic 18: LiteGS Mac MVP 训练路径
-
-让 RustGS 在 Apple Silicon 上拥有一条显式的 LiteGS 兼容训练入口，先实现可运行、可验证的 non-clustered MVP，再继续追 cluster/sparse-grad 与 densify parity。
-
-### Story 18.1: Public LiteGS Mac Training Profile and CLI Surface
-
-Status: done
-
-As a RustGS user,
-I want a new LiteGS-compatible training profile and nested config surface,
-So that I can opt into parity work without silently changing existing LegacyMetal behavior.
-
-**Acceptance Criteria:**
-
-**Given** the RustGS public training API
-**When** I inspect `TrainingConfig`
-**Then** it includes `training_profile` plus nested `litegs` config rather than scattering LiteGS-only knobs across the top level
-
-**Given** the `rustgs train` CLI
-**When** I pass `--training-profile` and `--litegs-*` options
-**Then** the values parse and map into the nested config surface
-
-**Given** I do not opt into the new profile
-**When** I train with default config
-**Then** the existing LegacyMetal path remains the default behavior
-
-### Story 18.2: LiteGS-Compatible Initialization Defaults
-
-Status: done
-
-As a LiteGS parity developer,
-I want initialization to match LiteGS defaults,
-So that RustGS starts from comparable xyz/scale/opacity/SH state on Mac.
-
-**Acceptance Criteria:**
-
-**Given** COLMAP sparse points are available
-**When** LiteGsMacV1 initialization runs
-**Then** it prefers sparse-point initialization over frame-sampling fallback
-
-**Given** a point-initialized Gaussian
-**When** scale and opacity are initialized
-**Then** scale uses distance-based log scale and opacity uses inverse-sigmoid(0.1)
-
-### Story 18.3: LiteGS Activation and SH-Based Rendering Inputs
-
-Status: in_progress
-
-As a LiteGS parity developer,
-I want Metal-side activation to consume LiteGS-style trainable tensors,
-So that rendering derives RGB from SH instead of storing trained RGB directly.
-
-**Acceptance Criteria:**
-
-**Given** LiteGsMacV1 trainable Gaussians
-**When** a render step begins
-**Then** rotations are normalized, scales are exponentiated, opacities are sigmoided, and per-view color is derived from `sh_0/sh_rest`
-
-### Story 18.4: LiteGS Loss Semantics for Mac V1
-
-Status: todo
-
-As a LiteGS parity developer,
-I want Mac V1 to use LiteGS-style objective terms,
-So that optimization pressure matches LiteGS more closely.
-
-**Acceptance Criteria:**
-
-**Given** LiteGsMacV1 default training
-**When** loss is computed
-**Then** the primary objective is L1+SSIM, scale regularization is optional, transmittance penalty is optional, and depth is disabled by default
-
-### Story 18.5: LiteGS Parameter Groups and XYZ LR Decay
-
-Status: todo
-
-As a LiteGS parity developer,
-I want optimizer groups to match LiteGS naming and learning-rate behavior,
-So that parameter updates follow the same coarse schedule as the reference.
-
-**Acceptance Criteria:**
-
-**Given** LiteGsMacV1 optimizer setup
-**When** parameter groups are built
-**Then** groups exist for `xyz`, `sh_0`, `sh_rest`, `opacity`, `scale`, and `rot`
-
-**Given** learning-rate scheduling runs
-**When** the schedule advances
-**Then** only xyz learning rate decays exponentially while other groups retain their initial learning rates
-
-### Story 18.6: Rotation-Learning Guardrail
-
-Status: todo
+### Story 5.4: Add Round-Trip and Compatibility Regression Coverage for Scene IO
 
 As a RustGS maintainer,
-I want rotation learning disabled unless the backward path is truly correct,
-So that the LiteGS profile never fakes rotation updates.
+I want persistence changes guarded by regression tests,
+So that scene interchange can evolve without silent corruption.
+
+**Implements:** FR9, FR10, NFR5.
 
 **Acceptance Criteria:**
 
-**Given** rotation backward parity is incomplete
-**When** LiteGsMacV1 trains
-**Then** rotation learning remains explicitly disabled or inert rather than pretending to update correctly
+**Given** representative RustGS scene fixtures
+**When** round-trip tests run
+**Then** exported scenes can be re-imported with matching metadata and parameter counts
+**And** failures identify the field or representation that drifted.
 
-## Epic 19: LiteGS Cluster 与 Sparse-Gradient 路径
+**Given** compatibility fixtures from earlier scene versions
+**When** import regression tests run
+**Then** supported legacy files still load or fail with explicit versioned errors
+**And** the expected compatibility matrix is documented.
 
-让 RustGS 的 Metal runtime 具备 LiteGS clustered training 所需的数据表示、可见性压缩和稀疏优化语义。
+## Epic 6: Regression-Safe Rollout
 
-### Story 19.1: Cluster Representation and AABB Frustum Culling
+Land the migration incrementally and safely through route-level smoke tests, benchmark harnesses, ownership docs, and compatibility gates.
 
-Status: todo
-
-As a LiteGS parity developer,
-I want clustered Gaussian representation and cluster-level frustum culling,
-So that Apple Silicon can follow LiteGS visibility behavior without depending on RustGS chunk orchestration.
-
-### Story 19.2: Visible-Chunk and Visible-Primitive Compaction
-
-Status: todo
-
-As a LiteGS parity developer,
-I want compacted visibility bookkeeping,
-So that sparse-grad mode can update only visible data.
-
-### Story 19.3: Morton-Order Spatial Refine
-
-Status: todo
-
-As a LiteGS parity developer,
-I want Morton-order reordering and cluster-bound refresh scheduling,
-So that clustered topology and cache locality stay aligned with LiteGS expectations.
-
-### Story 19.4: Sparse-Adam Parity on Metal
-
-Status: todo
-
-As a LiteGS parity developer,
-I want sparse-Adam semantics equivalent to LiteGS for clustered and non-clustered paths,
-So that visibility-gated updates match the reference optimizer.
-
-### Story 19.5: Clustered Apple Silicon Parity Validation
-
-Status: todo
-
-As a project maintainer,
-I want clustered parity runs validated with harness thresholds,
-So that clustered PSNR and topology behavior stay within agreed tolerances on Apple Silicon.
-
-## Epic 20: LiteGS Densify/Prune/Opacity Reset 对齐
-
-让 RustGS 在拓扑编辑时收集与 LiteGS/TamingGS 对应的统计信息，并在 append/prune/reorder/recluster 过程中正确维护优化器状态。
-
-### Story 20.1: Statistics Helper Equivalent
-
-Status: todo
-
-As a LiteGS parity developer,
-I want Rust-side statistic accumulation equivalent to LiteGS,
-So that densify and prune logic can consume the same high-level signals.
-
-### Story 20.2: Official Density Controller Behavior
-
-Status: todo
-
-As a LiteGS parity developer,
-I want clone/split/prune/reset behavior matching the official controller,
-So that non-clustered topology work behaves like LiteGS before TamingGS extensions.
-
-### Story 20.3: TamingGS Target Primitive and Weighted Prune Behavior
-
-Status: todo
-
-As a LiteGS parity developer,
-I want TamingGS-specific target scheduling and weighted pruning,
-So that RustGS can follow the full LiteGS densification strategy rather than only the official subset.
-
-### Story 20.4: Optimizer-State Mutation Parity
-
-Status: todo
-
-As a LiteGS parity developer,
-I want optimizer state to survive append/replace/prune/reorder/recluster edits,
-So that topology work remains numerically stable across long training runs.
-
-### Story 20.5: Mac-Safe Topology Guardrails
-
-Status: todo
+### Story 6.1: Add End-to-End Training Route Smoke Tests
 
 As a RustGS maintainer,
-I want deterministic and explicitly timed topology mutations on Mac,
-So that parity work remains debuggable on 16 GB Apple Silicon hardware.
+I want smoke tests that exercise the main training routes,
+So that orchestration refactors do not silently break standard, chunked, or profile-specific entry behavior.
 
-## Epic 21: 运行时对齐、导出恢复与默认切换
+**Implements:** FR10, FR11.
 
-让 LiteGS 兼容训练路径具备可持续运维能力，包括评估、checkpoint、PLY 往返、Mac 操作文档，以及验收通过后的默认 profile 升级。
+**Acceptance Criteria:**
 
-### Story 21.1: LiteGS-Style Evaluation and Progress Reporting
+**Given** representative tiny training fixtures
+**When** the smoke suite runs
+**Then** it exercises standard and chunked route selection through the new orchestration layer
+**And** verifies that `LegacyMetal` and `LiteGsMacV1` still reach their expected execution paths.
 
-Status: todo
+**Given** a route regression is introduced
+**When** smoke tests fail
+**Then** the failure identifies the broken route clearly
+**And** maintainers can see whether the breakage was in orchestration, trainer selection, or config assembly.
 
-As a RustGS operator,
-I want stable PSNR evaluation and progress reporting from LiteGsMacV1,
-So that fixture runs produce comparable outputs to the LiteGS reference.
-
-### Story 21.2: Checkpoint Save/Resume Parity
-
-Status: todo
-
-As a LiteGS parity developer,
-I want checkpoint save and resume to preserve SH tensors and optimizer state,
-So that long Mac runs can be resumed without losing LiteGS-compatible state.
-
-### Story 21.3: PLY Export/Import Parity
-
-Status: todo
+### Story 6.2: Add Loader, Topology, and Persistence Regression Suites
 
 As a RustGS maintainer,
-I want LiteGS-compatible PLY export/import to round-trip without data loss,
-So that RustGS IO remains stable as the trainable parameter set expands.
+I want focused regression suites for the new modules,
+So that internal refactors remain safe even when route-level smoke tests are too coarse.
 
-### Story 21.4: Mac Operator Workflow Documentation
+**Implements:** FR10, FR11.
 
-Status: todo
+**Acceptance Criteria:**
 
-As a Mac operator,
-I want one document that explains supported hardware, memory envelope, known gaps, and recommended flags,
-So that I can run LiteGsMacV1 predictably on Apple Silicon.
+**Given** the new loader, topology, and persistence modules
+**When** targeted regression tests run
+**Then** each module has fixtures that validate its core invariants independently
+**And** failures are localized to one subsystem instead of one giant training test.
 
-### Story 21.5: Default Promotion Gate
+**Given** a dataset-specific or topology-specific bug is fixed
+**When** a regression is added
+**Then** that regression lands in the focused module test suite
+**And** future maintainers can reproduce the failure without running the full pipeline.
 
-Status: todo
+### Story 6.3: Add Forward, Backward, and Training Benchmark Harnesses
 
-As a project maintainer,
-I want LiteGsMacV1 promoted only after the fixture suite passes the Epic 17 thresholds,
-So that the default switch is backed by measured parity rather than optimism.
+As a RustGS performance owner,
+I want benchmark harnesses for the core execution paths,
+So that the migration can be measured instead of judged only by code structure.
 
-### Story 21.6: Simplified Training Pipeline Retirement
+**Implements:** FR10, NFR6.
 
-Status: todo
+**Acceptance Criteria:**
+
+**Given** representative benchmark fixtures
+**When** the benchmark harness runs
+**Then** it reports forward, backward, and training-step timing separately
+**And** the harness can be reused after later optimizer or topology changes.
+
+**Given** a performance regression is introduced
+**When** benchmark results are compared across revisions
+**Then** the affected phase can be identified quickly
+**And** the results are reproducible enough for developer handoff.
+
+### Story 6.4: Publish Migration Ownership and Rollout Documentation
 
 As a RustGS maintainer,
-I want `training_pipeline` removed from production-path ownership,
-So that the intended algorithm is defined by the LiteGS-compatible Metal path instead of the simplified reference implementation.
+I want the migrated architecture and rollout rules documented,
+So that future contributors can extend the system without rediscovering module boundaries.
+
+**Implements:** FR10, FR12, NFR4, NFR6.
+
+**Acceptance Criteria:**
+
+**Given** the new module layout lands
+**When** documentation is updated
+**Then** it explains module ownership, call flow, rollout toggles, and compatibility constraints
+**And** it explicitly states which Brush ideas were adopted and which were intentionally rejected.
+
+**Given** a new contributor joins the project later
+**When** they read the migration documentation
+**Then** they can identify where orchestration, loading, topology, and persistence changes belong
+**And** they do not need to infer ownership from a single giant trainer file.
+
+### Story 6.5: Demote `training_pipeline.rs` to a Legacy and Reference Role After Validation Gates Pass
+
+As a RustGS maintainer,
+I want legacy pipeline utilities clearly separated from production training ownership,
+So that new work stops accumulating in the wrong module once the migrated path is validated.
+
+**Implements:** FR11, FR12, NFR4.
+
+**Acceptance Criteria:**
+
+**Given** orchestration, loading, topology, and persistence replacements are validated
+**When** the migration cleanup story runs
+**Then** `training_pipeline.rs` is explicitly marked and documented as legacy or reference-only
+**And** new production responsibilities are routed to the new modules instead.
+
+**Given** cleanup would break current callers or tests
+**When** the story is executed
+**Then** the migration stops short of unsafe deletion
+**And** the file is only reduced to the extent supported by passing compatibility gates.

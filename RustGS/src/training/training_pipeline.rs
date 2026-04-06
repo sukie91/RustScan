@@ -1,12 +1,15 @@
-//! Complete 3DGS Training Pipeline
+//! Legacy / reference 3DGS training pipeline helpers.
 //!
-//! Implements the full training loop from 3D Gaussian Splatting paper:
-//! - Densification (clone & split)
-//! - Pruning (opacity threshold)
-//! - Opacity reset
-//! - Learning rate schedule
-//! - SSIM loss
-//! - Progressive training
+//! This module is no longer the production owner of RustGS training orchestration.
+//! The active runtime path lives in:
+//! - `train_stream.rs` for orchestration and route selection
+//! - `frame_loader.rs` / `data_loading.rs` for frame ingestion
+//! - `metal_trainer.rs` for step execution
+//! - `topology.rs` / `optimizer_state.rs` / `splat_params.rs` for Gaussian evolution state
+//! - `io/scene_io.rs` for scene persistence
+//!
+//! `training_pipeline.rs` remains in-tree for legacy compatibility, shared utility losses,
+//! reference heuristics, and older helper surfaces that have not been deleted intentionally.
 
 use crate::render::tiled_renderer::{Gaussian, RenderBuffer, TiledRenderer};
 use std::path::{Path, PathBuf};

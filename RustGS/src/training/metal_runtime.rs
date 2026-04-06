@@ -2315,6 +2315,20 @@ impl MetalRuntime {
         pixel_count: usize,
     ) -> candle_core::Result<()> {
         self.ensure_buffer(
+            MetalBufferSlot::OutputColor,
+            pixel_count
+                .saturating_mul(3)
+                .saturating_mul(size_of::<f32>()),
+        )?;
+        self.ensure_buffer(
+            MetalBufferSlot::OutputDepth,
+            pixel_count.saturating_mul(size_of::<f32>()),
+        )?;
+        self.ensure_buffer(
+            MetalBufferSlot::OutputAlpha,
+            pixel_count.saturating_mul(size_of::<f32>()),
+        )?;
+        self.ensure_buffer(
             MetalBufferSlot::TargetColor,
             pixel_count
                 .saturating_mul(3)

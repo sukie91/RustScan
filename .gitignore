@@ -30,6 +30,8 @@ Mirror/
 
 .claude
 .gemini
+.github/
+openspec/
 
 # Generated outputs
 /output/

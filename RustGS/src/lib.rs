@@ -57,7 +57,8 @@ pub use crate::render::{
 // Re-export training types
 pub use crate::training::{
     default_litegs_parity_fixtures, default_parity_report_path, parity_fixture_id_for_input_path,
-    LiteGsConfig, LiteGsOpacityResetMode, LiteGsPruneMode, LiteGsTileSize, ParityFixtureKind,
+    run_metal_training_benchmark, LiteGsConfig, LiteGsOpacityResetMode, LiteGsPruneMode,
+    LiteGsTileSize, MetalTrainingBenchmarkReport, MetalTrainingBenchmarkSpec, ParityFixtureKind,
     ParityFixtureSpec, ParityHarnessReport, ParityLossTerms, ParityMetricSnapshot,
     ParityThresholds, ParityTimingMetrics, ParityTopologyMetrics, TrainingProfile,
     DEFAULT_CONVERGENCE_FIXTURE_ID, DEFAULT_TINY_FIXTURE_ID,
@@ -74,6 +75,10 @@ pub use crate::training::{
 pub use crate::training::{TrainingBackend, TrainingConfig, TrainingResult};
 
 // Re-export IO types
+pub use crate::io::dataset_loader::{
+    load_training_dataset_resolved, resolve_training_input, DatasetFormat, ResolvedTrainingDataset,
+    ResolvedTrainingInput,
+};
 pub use crate::io::scene_io::{load_scene_ply, save_scene_ply, SceneIoError, SceneMetadata};
 pub use crate::io::tum_dataset::{load_tum_rgbd_dataset, TumRgbdConfig};
 pub use crate::io::TrainingCheckpoint;
@@ -91,6 +96,11 @@ pub(crate) fn preferred_device() -> Device {
             Device::Cpu
         }
     }
+}
+
+#[cfg(feature = "gpu")]
+pub fn metal_available() -> bool {
+    try_metal_device().is_ok()
 }
 
 #[cfg(feature = "gpu")]
@@ -132,23 +142,7 @@ pub fn load_training_dataset(
     input: &Path,
     tum_config: &TumRgbdConfig,
 ) -> Result<TrainingDataset, TrainingError> {
-    if input.is_dir() {
-        return load_tum_rgbd_dataset(input, tum_config);
-    }
-
-    let input_buf = input.to_path_buf();
-    match SlamOutput::load(&input_buf) {
-        Ok(slam_output) => Ok(slam_output.to_dataset()),
-        Err(slam_err) => match TrainingDataset::load(&input_buf) {
-            Ok(dataset) => Ok(dataset),
-            Err(dataset_err) => Err(TrainingError::InvalidInput(format!(
-                "failed to load {} as SlamOutput JSON ({}) or TrainingDataset JSON ({})",
-                input.display(),
-                slam_err,
-                dataset_err,
-            ))),
-        },
-    }
+    Ok(load_training_dataset_resolved(input, tum_config)?.dataset)
 }
 
 /// Train a 3DGS scene from a SLAM output.
@@ -180,8 +174,22 @@ pub fn train_from_path(
     tum_config: &TumRgbdConfig,
     config: &TrainingConfig,
 ) -> Result<GaussianMap, TrainingError> {
-    let dataset = load_training_dataset(input, tum_config)?;
-    training::train(&dataset, config)
+    let resolved = resolve_training_input(input, tum_config, config)?;
+    if let Some(overlay_path) = resolved.overlay_path.as_ref() {
+        log::info!(
+            "Resolved dataset {} as {:?} with dataset-local config overlay {}",
+            resolved.source_path.display(),
+            resolved.format,
+            overlay_path.display(),
+        );
+    } else {
+        log::info!(
+            "Resolved dataset {} as {:?} without dataset-local config overlay",
+            resolved.source_path.display(),
+            resolved.format,
+        );
+    }
+    training::train(&resolved.dataset, &resolved.effective_config)
 }
 
 /// Training error type.

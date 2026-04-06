@@ -9,7 +9,7 @@
 //! 3. Depth sorting
 //! 4. Alpha blending
 
-use crate::core::Gaussian3D;
+use crate::core::{Gaussian3D, GaussianColorRepresentation};
 
 /// A single Gaussian with all parameters (array-based for rendering)
 #[derive(Debug, Clone)]
@@ -24,6 +24,12 @@ pub struct Gaussian {
     pub opacity: f32,
     /// Color RGB [r, g, b]
     pub color: [f32; 3],
+    /// Whether the Gaussian stores RGB directly or an SH-backed color state.
+    pub color_representation: GaussianColorRepresentation,
+    /// SH DC term (`sh_0`) when present.
+    pub sh_dc: Option<[f32; 3]>,
+    /// Higher-order SH coefficients flattened as coeff-major RGB triplets.
+    pub sh_rest: Option<Vec<f32>>,
 }
 
 impl Gaussian {
@@ -40,6 +46,9 @@ impl Gaussian {
             rotation,
             opacity,
             color,
+            color_representation: GaussianColorRepresentation::Rgb,
+            sh_dc: None,
+            sh_rest: None,
         }
     }
 
@@ -55,6 +64,9 @@ impl Gaussian {
                 color[1] as f32 / 255.0,
                 color[2] as f32 / 255.0,
             ],
+            color_representation: GaussianColorRepresentation::Rgb,
+            sh_dc: None,
+            sh_rest: None,
         }
     }
 
@@ -66,6 +78,9 @@ impl Gaussian {
             rotation: [g.rotation.w, g.rotation.x, g.rotation.y, g.rotation.z],
             opacity: g.opacity,
             color: g.color,
+            color_representation: g.color_representation,
+            sh_dc: g.sh_dc,
+            sh_rest: g.sh_rest.clone(),
         }
     }
 
@@ -84,6 +99,19 @@ impl Gaussian {
             self.opacity,
             self.color,
         )
+        .with_color_state(self.color_representation, self.sh_dc, self.sh_rest.clone())
+    }
+
+    pub fn with_color_state(
+        mut self,
+        color_representation: GaussianColorRepresentation,
+        sh_dc: Option<[f32; 3]>,
+        sh_rest: Option<Vec<f32>>,
+    ) -> Self {
+        self.color_representation = color_representation;
+        self.sh_dc = sh_dc;
+        self.sh_rest = sh_rest;
+        self
     }
 }
 
@@ -209,7 +237,7 @@ impl TiledRenderer {
             // 3. Camera-space covariance: Σ_cam = C_rot * Σ_world * C_rot^T.
             //    Only the upper-left 3×3 is needed; compute the 6 unique entries.
             let c = r; // camera rotation matrix (world-to-camera)
-            // Intermediate: M = C_rot * Σ_world  (3×3)
+                       // Intermediate: M = C_rot * Σ_world  (3×3)
             let m00 = c[0][0] * cw00 + c[0][1] * cw01 + c[0][2] * cw02;
             let m01 = c[0][0] * cw01 + c[0][1] * cw11 + c[0][2] * cw12;
             let m02 = c[0][0] * cw02 + c[0][1] * cw12 + c[0][2] * cw22;
@@ -534,15 +562,8 @@ mod tests {
         );
 
         let rotation = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
-        let projected = renderer.project_gaussians(
-            &[g],
-            500.0,
-            500.0,
-            0.0,
-            0.0,
-            &rotation,
-            &[0.0, 0.0, 0.0],
-        );
+        let projected =
+            renderer.project_gaussians(&[g], 500.0, 500.0, 0.0, 0.0, &rotation, &[0.0, 0.0, 0.0]);
 
         assert!(!projected.is_empty());
         let p = &projected[0];
@@ -575,15 +596,8 @@ mod tests {
         );
 
         let rotation = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
-        let projected = renderer.project_gaussians(
-            &[g],
-            500.0,
-            500.0,
-            0.0,
-            0.0,
-            &rotation,
-            &[0.0, 0.0, 0.0],
-        );
+        let projected =
+            renderer.project_gaussians(&[g], 500.0, 500.0, 0.0, 0.0, &rotation, &[0.0, 0.0, 0.0]);
 
         assert!(!projected.is_empty());
         let p = &projected[0];

@@ -142,6 +142,20 @@ pub fn load_tum_rgbd_dataset(
     Ok(dataset)
 }
 
+pub fn looks_like_tum_dataset(input: &Path) -> bool {
+    if is_tum_root(input) {
+        return true;
+    }
+    input.is_dir()
+        && std::fs::read_dir(input)
+            .map(|entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .any(|entry| is_tum_root(&entry.path()))
+            })
+            .unwrap_or(false)
+}
+
 fn summarize_frame_selection(
     total_rgb_frames: usize,
     max_frames: usize,

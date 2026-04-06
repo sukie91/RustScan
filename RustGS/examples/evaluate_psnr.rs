@@ -3,8 +3,9 @@ use std::time::Instant;
 
 use candle_core::Device;
 use image::{ImageBuffer, RgbImage};
+use rustgs::core::GaussianColorRepresentation;
 use rustgs::diff::{DiffCamera, DiffSplatRenderer, TrainableGaussians};
-use rustgs::{load_scene_ply, load_training_dataset, Gaussian, TumRgbdConfig};
+use rustgs::{load_scene_ply, load_training_dataset, Gaussian, SceneMetadata, TumRgbdConfig};
 use rustscan_types::TrainingDataset;
 
 fn main() -> anyhow::Result<()> {
@@ -15,7 +16,8 @@ fn main() -> anyhow::Result<()> {
     let (scene, metadata) = load_scene_ply(&args.scene)?;
 
     let device = if args.device == "metal" {
-        Device::new_metal(0).map_err(|err| anyhow::anyhow!("failed to create Metal device: {err}"))?
+        Device::new_metal(0)
+            .map_err(|err| anyhow::anyhow!("failed to create Metal device: {err}"))?
     } else {
         Device::Cpu
     };
@@ -25,7 +27,7 @@ fn main() -> anyhow::Result<()> {
         dataset.intrinsics.height as usize,
         args.render_scale,
     );
-    let trainable = trainable_from_scene(&scene, &device)?;
+    let trainable = trainable_from_scene(&scene, &metadata, &device)?;
     let mut renderer = DiffSplatRenderer::with_device(render_width, render_height, device.clone());
 
     let start = Instant::now();
@@ -77,10 +79,11 @@ fn main() -> anyhow::Result<()> {
         args.max_frames
     );
     println!(
-        "scene_metadata iterations={} gaussian_count={} final_loss={}",
+        "scene_metadata iterations={} gaussian_count={} final_loss={} color_representation={:?}",
         metadata.iterations,
         metadata.gaussian_count,
-        metadata.final_loss
+        metadata.final_loss,
+        metadata.color_representation
     );
     println!(
         "psnr_mean_db={:.4}\npsnr_median_db={:.4}\npsnr_min_db={:.4}\npsnr_max_db={:.4}\npsnr_std_db={:.4}\nelapsed_seconds={:.2}",
@@ -191,10 +194,7 @@ impl Args {
     }
 }
 
-fn next_value(
-    args: &mut impl Iterator<Item = String>,
-    flag: &str,
-) -> anyhow::Result<String> {
+fn next_value(args: &mut impl Iterator<Item = String>, flag: &str) -> anyhow::Result<String> {
     args.next()
         .ok_or_else(|| anyhow::anyhow!("missing value for {flag}"))
 }
@@ -221,13 +221,22 @@ struct FrameMetric {
     image_path: PathBuf,
 }
 
-fn select_frames(dataset: &TrainingDataset, max_frames: usize, frame_stride: usize) -> TrainingDataset {
-    let mut selected = TrainingDataset::new(dataset.intrinsics).with_depth_scale(dataset.depth_scale);
+fn select_frames(
+    dataset: &TrainingDataset,
+    max_frames: usize,
+    frame_stride: usize,
+) -> TrainingDataset {
+    let mut selected =
+        TrainingDataset::new(dataset.intrinsics).with_depth_scale(dataset.depth_scale);
     selected.initial_points = dataset.initial_points.clone();
     for pose in dataset
         .poses
         .iter()
-        .take(if max_frames == 0 { dataset.poses.len() } else { max_frames })
+        .take(if max_frames == 0 {
+            dataset.poses.len()
+        } else {
+            max_frames
+        })
         .step_by(frame_stride.max(1))
     {
         selected.add_pose(pose.clone());
@@ -235,7 +244,11 @@ fn select_frames(dataset: &TrainingDataset, max_frames: usize, frame_stride: usi
     selected
 }
 
-fn trainable_from_scene(scene: &[Gaussian], device: &Device) -> candle_core::Result<TrainableGaussians> {
+fn trainable_from_scene(
+    scene: &[Gaussian],
+    metadata: &SceneMetadata,
+    device: &Device,
+) -> candle_core::Result<TrainableGaussians> {
     let mut positions = Vec::with_capacity(scene.len() * 3);
     let mut scales = Vec::with_capacity(scene.len() * 3);
     let mut rotations = Vec::with_capacity(scene.len() * 4);
@@ -251,10 +264,47 @@ fn trainable_from_scene(scene: &[Gaussian], device: &Device) -> candle_core::Res
         ]);
         rotations.extend_from_slice(&gaussian.rotation);
         opacities.push(opacity_to_logit(gaussian.opacity));
-        colors.extend_from_slice(&gaussian.color);
+        colors.extend_from_slice(
+            &gaussian
+                .sh_dc
+                .unwrap_or(gaussian.color),
+        );
     }
 
-    TrainableGaussians::new(&positions, &scales, &rotations, &opacities, &colors, device)
+    match metadata.color_representation {
+        GaussianColorRepresentation::Rgb => {
+            TrainableGaussians::new(&positions, &scales, &rotations, &opacities, &colors, device)
+        }
+        GaussianColorRepresentation::SphericalHarmonics { degree } => {
+            let sh_rest_coeff_count = (degree + 1).saturating_mul(degree + 1).saturating_sub(1);
+            let mut sh_rest = Vec::with_capacity(scene.len() * sh_rest_coeff_count * 3);
+            for (idx, gaussian) in scene.iter().enumerate() {
+                let coeffs = gaussian.sh_rest.as_ref().ok_or_else(|| {
+                    candle_core::Error::Msg(format!(
+                        "gaussian {idx} is missing sh_rest for SH degree {degree}"
+                    ))
+                })?;
+                let expected = sh_rest_coeff_count * 3;
+                if coeffs.len() != expected {
+                    return Err(candle_core::Error::Msg(format!(
+                        "gaussian {idx} has {} SH-rest values, expected {expected} for degree {degree}",
+                        coeffs.len()
+                    )));
+                }
+                sh_rest.extend_from_slice(coeffs);
+            }
+            TrainableGaussians::new_with_sh(
+                &positions,
+                &scales,
+                &rotations,
+                &opacities,
+                &colors,
+                &sh_rest,
+                degree,
+                device,
+            )
+        }
+    }
 }
 
 fn opacity_to_logit(opacity: f32) -> f32 {
@@ -357,7 +407,9 @@ fn load_resized_target(
         .into_iter()
         .map(|v| v as f32 / 255.0)
         .collect();
-    Ok(resize_rgb_box(&src, src_width, src_height, dst_width, dst_height))
+    Ok(resize_rgb_box(
+        &src, src_width, src_height, dst_width, dst_height,
+    ))
 }
 
 fn resize_rgb_box(
@@ -435,7 +487,11 @@ fn default_export_dir(scene: &std::path::Path) -> PathBuf {
 
 fn print_worst_frames(frame_metrics: &[FrameMetric], count: usize) {
     let mut sorted = frame_metrics.to_vec();
-    sorted.sort_by(|a, b| a.psnr.partial_cmp(&b.psnr).unwrap_or(std::cmp::Ordering::Equal));
+    sorted.sort_by(|a, b| {
+        a.psnr
+            .partial_cmp(&b.psnr)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     let count = count.max(5).min(sorted.len());
     for (rank, metric) in sorted.into_iter().take(count).enumerate() {
         println!(
@@ -463,8 +519,14 @@ fn export_worst_frames(
     std::fs::create_dir_all(export_dir)?;
 
     let mut sorted = frame_metrics.to_vec();
-    sorted.sort_by(|a, b| a.psnr.partial_cmp(&b.psnr).unwrap_or(std::cmp::Ordering::Equal));
-    let worst = sorted.into_iter().take(export_worst_k.min(frame_metrics.len()));
+    sorted.sort_by(|a, b| {
+        a.psnr
+            .partial_cmp(&b.psnr)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let worst = sorted
+        .into_iter()
+        .take(export_worst_k.min(frame_metrics.len()));
 
     let mut summary = String::from("rank\tdataset_index\tframe_id\tpsnr_db\timage_path\n");
     for (rank, metric) in worst.enumerate() {
@@ -481,7 +543,13 @@ fn export_worst_frames(
         let target_u8 = rgb_f32_to_u8(&target);
         let rendered_u8 = rgb_f32_to_u8(&rendered);
         let diff_u8 = diff_visualization(&target, &rendered);
-        let strip_u8 = make_strip(&target_u8, &rendered_u8, &diff_u8, render_width, render_height);
+        let strip_u8 = make_strip(
+            &target_u8,
+            &rendered_u8,
+            &diff_u8,
+            render_width,
+            render_height,
+        );
 
         let prefix = format!(
             "rank_{:02}_frame_{:04}_psnr_{:.2}",
@@ -548,19 +616,14 @@ fn diff_visualization(target: &[f32], rendered: &[f32]) -> Vec<u8> {
     out
 }
 
-fn make_strip(
-    left: &[u8],
-    middle: &[u8],
-    right: &[u8],
-    width: usize,
-    height: usize,
-) -> Vec<u8> {
+fn make_strip(left: &[u8], middle: &[u8], right: &[u8], width: usize, height: usize) -> Vec<u8> {
     let row_bytes = width * 3;
     let mut out = vec![0u8; width * 3 * height * 3];
     for y in 0..height {
         let src_start = y * row_bytes;
         let dst_start = y * row_bytes * 3;
-        out[dst_start..dst_start + row_bytes].copy_from_slice(&left[src_start..src_start + row_bytes]);
+        out[dst_start..dst_start + row_bytes]
+            .copy_from_slice(&left[src_start..src_start + row_bytes]);
         out[dst_start + row_bytes..dst_start + row_bytes * 2]
             .copy_from_slice(&middle[src_start..src_start + row_bytes]);
         out[dst_start + row_bytes * 2..dst_start + row_bytes * 3]
@@ -569,14 +632,11 @@ fn make_strip(
     out
 }
 
-fn save_rgb_png(
-    path: PathBuf,
-    width: usize,
-    height: usize,
-    data: &[u8],
-) -> anyhow::Result<()> {
+fn save_rgb_png(path: PathBuf, width: usize, height: usize, data: &[u8]) -> anyhow::Result<()> {
     let image: RgbImage = ImageBuffer::from_raw(width as u32, height as u32, data.to_vec())
-        .ok_or_else(|| anyhow::anyhow!("failed to construct image buffer for {}", path.display()))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!("failed to construct image buffer for {}", path.display())
+        })?;
     image.save(&path)?;
     Ok(())
 }

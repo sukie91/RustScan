@@ -10,6 +10,28 @@
 use glam::{Mat3, Quat, Vec3};
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GaussianColorRepresentation {
+    Rgb,
+    SphericalHarmonics { degree: usize },
+}
+
+impl Default for GaussianColorRepresentation {
+    fn default() -> Self {
+        Self::Rgb
+    }
+}
+
+impl GaussianColorRepresentation {
+    pub fn sh_degree(self) -> usize {
+        match self {
+            Self::Rgb => 0,
+            Self::SphericalHarmonics { degree } => degree,
+        }
+    }
+}
+
 /// A single 3D Gaussian primitive
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Gaussian3D {
@@ -25,6 +47,15 @@ pub struct Gaussian3D {
     /// Stored as [DC, C1, C2, ...] per channel (RGB)
     /// For simplicity, we use RGB (3 channels) with DC only for now
     pub color: [f32; 3],
+    /// Whether this Gaussian stores plain RGB or SH parameters.
+    #[serde(default)]
+    pub color_representation: GaussianColorRepresentation,
+    /// SH DC term (`sh_0`) when the Gaussian originated from SH-based training.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub sh_dc: Option<[f32; 3]>,
+    /// Higher-order SH coefficients flattened as coeff-major RGB triplets.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub sh_rest: Option<Vec<f32>>,
     /// Feature vector (optional, for tracking)
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub features: Option<Vec<f32>>,
@@ -58,6 +89,9 @@ impl Gaussian3D {
                 color[1] as f32 / 255.0,
                 color[2] as f32 / 255.0,
             ],
+            color_representation: GaussianColorRepresentation::Rgb,
+            sh_dc: None,
+            sh_rest: None,
             features: None,
             state: GaussianState::New,
         }
@@ -71,6 +105,9 @@ impl Gaussian3D {
             rotation,
             opacity,
             color,
+            color_representation: GaussianColorRepresentation::Rgb,
+            sh_dc: None,
+            sh_rest: None,
             features: None,
             state: GaussianState::default(),
         }
@@ -130,6 +167,18 @@ impl Gaussian3D {
         self.scale = scale;
         self
     }
+
+    pub fn with_color_state(
+        mut self,
+        color_representation: GaussianColorRepresentation,
+        sh_dc: Option<[f32; 3]>,
+        sh_rest: Option<Vec<f32>>,
+    ) -> Self {
+        self.color_representation = color_representation;
+        self.sh_dc = sh_dc;
+        self.sh_rest = sh_rest;
+        self
+    }
 }
 
 impl Default for Gaussian3D {
@@ -140,6 +189,9 @@ impl Default for Gaussian3D {
             rotation: Quat::IDENTITY,
             opacity: 0.5,
             color: [0.5, 0.5, 0.5],
+            color_representation: GaussianColorRepresentation::Rgb,
+            sh_dc: None,
+            sh_rest: None,
             features: None,
             state: GaussianState::New,
         }

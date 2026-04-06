@@ -1,10 +1,34 @@
 //! Training module for 3D Gaussian Splatting.
 //!
 //! Primary runtime path:
-//! - `metal_trainer` - Metal-native training loop used by the top-level API.
+//! - `train_stream` - orchestration and route selection.
+//! - `frame_loader` / `data_loading` - bounded frame ingestion and trainable assembly.
+//! - `metal_trainer` - Metal-native step execution, loss, backward, and optimizer work.
+//! - `topology` / `optimizer_state` / `splat_params` - Gaussian evolution state management.
 //!
-//! - `training_pipeline` - Shared densify/prune heuristics and utility losses.
+//! `training_pipeline` is retained as a legacy/reference module for older utility helpers and
+//! compatibility surfaces. New production training ownership belongs to the modules above.
 
+#[cfg(feature = "gpu")]
+mod benchmark;
+#[cfg(feature = "gpu")]
+mod eval;
+#[cfg(feature = "gpu")]
+mod export;
+#[cfg(feature = "gpu")]
+mod frame_loader;
+#[cfg(feature = "gpu")]
+mod init_map;
+#[cfg(feature = "gpu")]
+mod optimizer_state;
+#[cfg(feature = "gpu")]
+mod splat_params;
+#[cfg(feature = "gpu")]
+mod telemetry;
+#[cfg(feature = "gpu")]
+mod topology;
+#[cfg(feature = "gpu")]
+mod train_stream;
 pub mod training_pipeline;
 
 pub mod chunk_planner;
@@ -44,16 +68,24 @@ pub use parity_harness::{
 };
 
 #[cfg(feature = "gpu")]
-pub use metal_trainer::{
-    estimate_chunk_capacity, last_metal_training_telemetry, ChunkCapacityDisposition,
-    ChunkCapacityEstimate, LiteGsOptimizerLrs, LiteGsTrainingTelemetry, MetalTrainer,
+pub use benchmark::{
+    run_metal_training_benchmark, MetalTrainingBenchmarkReport, MetalTrainingBenchmarkSpec,
 };
+#[cfg(feature = "gpu")]
+pub use metal_trainer::{
+    estimate_chunk_capacity, ChunkCapacityDisposition, ChunkCapacityEstimate, MetalTrainer,
+};
+#[cfg(feature = "gpu")]
+pub use telemetry::{last_metal_training_telemetry, LiteGsOptimizerLrs, LiteGsTrainingTelemetry};
 
 use crate::TrainingError;
 use crate::{GaussianMap, TrainingDataset};
+#[cfg(all(test, feature = "gpu"))]
+use export::persist_gaussian_map_scene;
+#[cfg(feature = "gpu")]
+use export::ChunkPersistenceContext;
 use serde::{Deserialize, Serialize};
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::str::FromStr;
 
 #[cfg(feature = "gpu")]
@@ -81,200 +113,11 @@ struct ChunkTrainingOverridePlan {
     lowered_render_scale: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-enum ChunkReportStatus {
-    Success,
-    Skipped,
-    Failed,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ChunkReportEntry {
-    chunk_id: usize,
-    status: ChunkReportStatus,
-    message: Option<String>,
-    scene_path: Option<PathBuf>,
-    pose_count: usize,
-    local_points: usize,
-    used_frame_based_initialization: bool,
-    effective_max_initial_gaussians: Option<usize>,
-    effective_render_scale: Option<f32>,
-    estimated_peak_gib: Option<f64>,
-    output_gaussians: Option<usize>,
-    core_filter_removed: Option<usize>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ChunkTrainingReport {
-    merge_core_only: bool,
-    requested_chunks: usize,
-    trainable_chunks: usize,
-    entries: Vec<ChunkReportEntry>,
-}
-
-struct ChunkPersistenceContext {
-    output_dir: Option<PathBuf>,
-    report: ChunkTrainingReport,
-}
-
-impl ChunkPersistenceContext {
-    fn new(
-        output_dir: Option<PathBuf>,
-        config: &TrainingConfig,
-        chunk_plan: &ChunkPlan,
-    ) -> Result<Self, TrainingError> {
-        if let Some(dir) = output_dir.as_ref() {
-            fs::create_dir_all(dir).map_err(|err| {
-                TrainingError::TrainingFailed(format!(
-                    "failed to create chunk artifact directory {}: {}",
-                    dir.display(),
-                    err
-                ))
-            })?;
-        }
-
-        let mut this = Self {
-            output_dir,
-            report: ChunkTrainingReport {
-                merge_core_only: config.merge_core_only,
-                requested_chunks: chunk_plan.chunks.len(),
-                trainable_chunks: chunk_plan.trainable_chunks().count(),
-                entries: Vec::new(),
-            },
-        };
-        this.flush_report()?;
-        Ok(this)
-    }
-
-    fn report_path(&self) -> Option<PathBuf> {
-        self.output_dir
-            .as_ref()
-            .map(|dir| dir.join("chunk-report.json"))
-    }
-
-    fn scene_path(&self, chunk_id: usize) -> Option<PathBuf> {
-        self.output_dir
-            .as_ref()
-            .map(|dir| dir.join(format!("chunk-{chunk_id:03}.ply")))
-    }
-
-    fn record_skipped(
-        &mut self,
-        chunk: &PlannedChunk,
-        config: &TrainingConfig,
-    ) -> Result<(), TrainingError> {
-        self.report.entries.push(ChunkReportEntry {
-            chunk_id: chunk.chunk_id,
-            status: ChunkReportStatus::Skipped,
-            message: Some(format!(
-                "insufficient cameras: assigned {} < required {}",
-                chunk.pose_indices.len(),
-                config.min_cameras_per_chunk
-            )),
-            scene_path: None,
-            pose_count: chunk.pose_indices.len(),
-            local_points: chunk.point_indices.len(),
-            used_frame_based_initialization: chunk.point_indices.is_empty(),
-            effective_max_initial_gaussians: None,
-            effective_render_scale: None,
-            estimated_peak_gib: None,
-            output_gaussians: None,
-            core_filter_removed: None,
-        });
-        self.flush_report()
-    }
-
-    fn record_success(
-        &mut self,
-        chunk: &PlannedChunk,
-        materialized: &MaterializedChunkDataset,
-        override_plan: &ChunkTrainingOverridePlan,
-        chunk_scene: &GaussianMap,
-        core_filter_removed: usize,
-    ) -> Result<(), TrainingError> {
-        let scene_path = if let Some(path) = self.scene_path(chunk.chunk_id) {
-            persist_gaussian_map_scene(
-                &path,
-                chunk_scene,
-                override_plan.effective_config.iterations,
-            )?;
-            Some(path)
-        } else {
-            None
-        };
-
-        self.report.entries.push(ChunkReportEntry {
-            chunk_id: chunk.chunk_id,
-            status: ChunkReportStatus::Success,
-            message: None,
-            scene_path,
-            pose_count: materialized.dataset.poses.len(),
-            local_points: materialized.dataset.initial_points.len(),
-            used_frame_based_initialization: materialized.used_frame_based_initialization,
-            effective_max_initial_gaussians: Some(
-                override_plan.effective_config.max_initial_gaussians,
-            ),
-            effective_render_scale: Some(override_plan.effective_config.metal_render_scale),
-            estimated_peak_gib: Some(override_plan.estimate.estimated_peak_gib()),
-            output_gaussians: Some(chunk_scene.len()),
-            core_filter_removed: Some(core_filter_removed),
-        });
-        self.flush_report()
-    }
-
-    fn record_failure(
-        &mut self,
-        chunk: &PlannedChunk,
-        materialized: &MaterializedChunkDataset,
-        message: String,
-        override_plan: Option<&ChunkTrainingOverridePlan>,
-    ) -> Result<(), TrainingError> {
-        self.report.entries.push(ChunkReportEntry {
-            chunk_id: chunk.chunk_id,
-            status: ChunkReportStatus::Failed,
-            message: Some(message),
-            scene_path: None,
-            pose_count: materialized.dataset.poses.len(),
-            local_points: materialized.dataset.initial_points.len(),
-            used_frame_based_initialization: materialized.used_frame_based_initialization,
-            effective_max_initial_gaussians: override_plan
-                .map(|plan| plan.effective_config.max_initial_gaussians),
-            effective_render_scale: override_plan
-                .map(|plan| plan.effective_config.metal_render_scale),
-            estimated_peak_gib: override_plan.map(|plan| plan.estimate.estimated_peak_gib()),
-            output_gaussians: None,
-            core_filter_removed: None,
-        });
-        self.flush_report()
-    }
-
-    fn flush_report(&mut self) -> Result<(), TrainingError> {
-        let Some(report_path) = self.report_path() else {
-            return Ok(());
-        };
-        let json = serde_json::to_string_pretty(&self.report).map_err(|err| {
-            TrainingError::TrainingFailed(format!(
-                "failed to serialize chunk report {}: {}",
-                report_path.display(),
-                err
-            ))
-        })?;
-        fs::write(&report_path, json).map_err(|err| {
-            TrainingError::TrainingFailed(format!(
-                "failed to write chunk report {}: {}",
-                report_path.display(),
-                err
-            ))
-        })
-    }
-}
-
 /// Training backend selection.
 ///
 /// RustGS training now standardizes on the Metal backend. The enum is kept so
 /// existing config construction code does not break abruptly.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum TrainingBackend {
     /// Metal-native training path that keeps render/loss/backward/optimizer on GPU.
     Metal,
@@ -505,9 +348,9 @@ impl Default for LiteGsConfig {
             densify_until: None,
             densification_interval: 5,
             opacity_reset_interval: 10,
-            prune_offset_epochs: 2,      // Prune 2 epochs after densify
-            prune_min_age: 3,            // Must survive 3 iterations
-            prune_invisible_epochs: 2,   // Must be invisible for 2+ epochs
+            prune_offset_epochs: 2,    // Prune 2 epochs after densify
+            prune_min_age: 3,          // Must survive 3 iterations
+            prune_invisible_epochs: 2, // Must be invisible for 2+ epochs
             opacity_reset_mode: LiteGsOpacityResetMode::Decay,
             prune_mode: LiteGsPruneMode::Weight,
             target_primitives: 1_000_000,
@@ -521,7 +364,7 @@ fn normalize_config_token(value: &str) -> String {
 }
 
 /// Training configuration.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrainingConfig {
     /// Training backend implementation to use.
     ///
@@ -568,6 +411,12 @@ pub struct TrainingConfig {
     /// Disabled by default for RGB-only datasets because pseudo-depth targets
     /// can destabilize geometric optimization.
     pub use_synthetic_depth: bool,
+    /// Maximum number of decoded frames to keep in the CPU-side prefetch cache.
+    pub frame_cache_capacity: usize,
+    /// Number of upcoming frames to queue for background prefetch.
+    pub frame_prefetch_ahead: usize,
+    /// Deterministic shuffle seed for frame order (0 preserves dataset order).
+    pub frame_shuffle_seed: u64,
     /// Render scale used by the Metal backend (relative to input resolution).
     pub metal_render_scale: f32,
     /// Number of Gaussians processed per GPU chunk in the Metal backend.
@@ -617,6 +466,9 @@ impl Default for TrainingConfig {
             min_depth: 0.01,
             max_depth: 10.0,
             use_synthetic_depth: false,
+            frame_cache_capacity: 8,
+            frame_prefetch_ahead: 4,
+            frame_shuffle_seed: 0,
             metal_render_scale: 0.5,
             metal_gaussian_chunk_size: 32,
             metal_profile_steps: false,
@@ -652,79 +504,7 @@ pub fn train(
     dataset: &TrainingDataset,
     config: &TrainingConfig,
 ) -> Result<GaussianMap, TrainingError> {
-    match config.training_profile {
-        TrainingProfile::LegacyMetal => train_legacy_metal(dataset, config),
-        TrainingProfile::LiteGsMacV1 => train_litegs_mac_v1(dataset, config),
-    }
-}
-
-#[cfg(feature = "gpu")]
-fn train_legacy_metal(
-    dataset: &TrainingDataset,
-    config: &TrainingConfig,
-) -> Result<GaussianMap, TrainingError> {
-    let plan = select_training_execution_plan(dataset, config)?;
-    execute_training_plan(dataset, config, plan)
-}
-
-#[cfg(feature = "gpu")]
-fn train_litegs_mac_v1(
-    dataset: &TrainingDataset,
-    config: &TrainingConfig,
-) -> Result<GaussianMap, TrainingError> {
-    validate_litegs_mac_v1_config(config)?;
-    log::info!(
-        "Training with LiteGS Mac V1 profile | sh_degree={} | cluster_size={} | tile_size={} | sparse_grad={} | reg_weight={:.4} | enable_transmittance={} | enable_depth={}",
-        config.litegs.sh_degree,
-        config.litegs.cluster_size,
-        config.litegs.tile_size,
-        config.litegs.sparse_grad,
-        config.litegs.reg_weight,
-        config.litegs.enable_transmittance,
-        config.litegs.enable_depth,
-    );
-
-    let plan = select_training_execution_plan(dataset, config)?;
-    execute_training_plan(dataset, config, plan)
-}
-
-#[cfg(feature = "gpu")]
-fn execute_training_plan(
-    dataset: &TrainingDataset,
-    config: &TrainingConfig,
-    plan: TrainingExecutionPlan,
-) -> Result<GaussianMap, TrainingError> {
-    match plan.route {
-        TrainingExecutionRoute::Standard => metal_trainer::train(dataset, config),
-        TrainingExecutionRoute::ChunkedSingleChunk => {
-            if let Some(estimate) = plan.chunk_estimate.as_ref() {
-                log::info!(
-                    "Chunked planner selected single-chunk pass-through | requested_gaussians={} | affordable_gaussians={} | estimated_peak≈{:.1} GiB | effective_budget≈{:.1} GiB",
-                    estimate.requested_initial_gaussians,
-                    estimate.affordable_initial_gaussians,
-                    estimate.estimated_peak_gib(),
-                    estimate.effective_budget_gib(),
-                );
-            }
-            metal_trainer::train(dataset, config)
-        }
-        TrainingExecutionRoute::ChunkedSequential => {
-            let chunk_plan = plan
-                .chunk_plan
-                .as_ref()
-                .expect("sequential route requires chunk plan");
-            if let Some(estimate) = plan.chunk_estimate.as_ref() {
-                log::info!(
-                    "Chunked planner selected sequential chunk execution | requested_gaussians={} | affordable_gaussians={} | chunks={} | trainable_chunks={}",
-                    estimate.requested_initial_gaussians,
-                    estimate.affordable_initial_gaussians,
-                    chunk_plan.chunks.len(),
-                    chunk_plan.trainable_chunks().count(),
-                );
-            }
-            train_chunked_sequentially(dataset, config, chunk_plan)
-        }
-    }
+    train_stream::train(dataset, config)
 }
 
 fn validate_litegs_mac_v1_config(config: &TrainingConfig) -> Result<(), TrainingError> {
@@ -886,19 +666,21 @@ fn train_chunked_sequentially(
             override_plan.estimate.estimated_peak_gib(),
         );
 
-        let mut chunk_scene =
-            match metal_trainer::train(&materialized.dataset, &override_plan.effective_config) {
-                Ok(scene) => scene,
-                Err(err) => {
-                    persistence.record_failure(
-                        chunk,
-                        &materialized,
-                        err.to_string(),
-                        Some(&override_plan),
-                    )?;
-                    return Err(err);
-                }
-            };
+        let mut chunk_scene = match train_stream::train_materialized_dataset(
+            &materialized.dataset,
+            &override_plan.effective_config,
+        ) {
+            Ok(scene) => scene,
+            Err(err) => {
+                persistence.record_failure(
+                    chunk,
+                    &materialized,
+                    err.to_string(),
+                    Some(&override_plan),
+                )?;
+                return Err(err);
+            }
+        };
         let core_filter_removed = merge_chunk_scene(
             &mut merged_scene,
             &mut chunk_scene,
@@ -988,34 +770,6 @@ fn merge_chunk_scene(
     removed
 }
 
-fn persist_gaussian_map_scene(
-    path: &Path,
-    scene: &GaussianMap,
-    iterations: usize,
-) -> Result<(), TrainingError> {
-    let gaussians = scene
-        .gaussians()
-        .iter()
-        .map(|g| {
-            crate::Gaussian::new(
-                g.position.into(),
-                g.scale.into(),
-                [g.rotation.w, g.rotation.x, g.rotation.y, g.rotation.z],
-                g.opacity,
-                g.color,
-            )
-        })
-        .collect::<Vec<_>>();
-    let metadata = crate::SceneMetadata {
-        iterations,
-        final_loss: 0.0,
-        gaussian_count: gaussians.len(),
-    };
-    crate::save_scene_ply(path, &gaussians, &metadata).map_err(|err| {
-        TrainingError::TrainingFailed(format!("failed to persist {}: {}", path.display(), err))
-    })
-}
-
 #[cfg(feature = "gpu")]
 fn adapt_chunk_training_config(
     dataset: &TrainingDataset,
@@ -1035,9 +789,9 @@ fn adapt_chunk_training_config(
     }
 
     while estimate.requires_subdivision_or_degradation()
-        && effective_config.metal_render_scale > 0.125
+        && effective_config.metal_render_scale > 0.0625
     {
-        let next_scale = (effective_config.metal_render_scale * 0.75).max(0.125);
+        let next_scale = (effective_config.metal_render_scale * 0.75).max(0.0625);
         if (next_scale - effective_config.metal_render_scale).abs() < f32::EPSILON {
             break;
         }
@@ -1089,6 +843,9 @@ mod tests {
         assert_eq!(config.max_chunks, 0);
         assert!(config.merge_core_only);
         assert!(config.chunk_artifact_dir.is_none());
+        assert_eq!(config.frame_cache_capacity, 8);
+        assert_eq!(config.frame_prefetch_ahead, 4);
+        assert_eq!(config.frame_shuffle_seed, 0);
         assert_eq!(config.litegs, LiteGsConfig::default());
     }
 
@@ -1335,10 +1092,10 @@ mod gpu_tests {
 
     #[test]
     fn adaptive_chunk_config_reduces_render_scale_when_gaussian_cap_is_not_enough() {
-        let dataset = make_dataset(40, 1920, 1080);
+        let dataset = make_dataset(3, 1280, 720);
         let config = TrainingConfig {
             chunked_training: true,
-            chunk_budget_gb: 0.35,
+            chunk_budget_gb: 0.4,
             max_initial_gaussians: 8,
             metal_render_scale: 1.0,
             ..TrainingConfig::default()
@@ -1441,7 +1198,7 @@ mod gpu_tests {
 
     #[test]
     fn adaptive_chunk_configs_keep_each_trainable_chunk_within_budget_envelope() {
-        let mut dataset = make_dataset(6, 1920, 1080);
+        let mut dataset = make_dataset(6, 1280, 720);
         dataset.add_point([0.0, 0.0, 1.0], None);
         dataset.add_point([1.0, 0.0, 1.0], None);
         dataset.add_point([2.0, 0.0, 1.0], None);
@@ -1457,7 +1214,7 @@ mod gpu_tests {
 
         let config = TrainingConfig {
             chunked_training: true,
-            chunk_budget_gb: 0.35,
+            chunk_budget_gb: 0.4,
             max_initial_gaussians: 64,
             metal_render_scale: 1.0,
             min_cameras_per_chunk: 1,

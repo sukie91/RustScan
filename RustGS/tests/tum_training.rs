@@ -45,6 +45,10 @@ fn trains_directly_from_workspace_tum_directory() {
         );
         return;
     };
+    if !rustgs::metal_available() {
+        eprintln!("skipping test: Metal unavailable in current environment");
+        return;
+    }
     let mut config = TrainingConfig::default();
     config.iterations = 1;
     config.max_initial_gaussians = 10_000;

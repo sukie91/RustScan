@@ -1,30 +1,26 @@
 #[cfg(feature = "gpu")]
-use std::fs;
+use super::frame_loader::{ordered_frame_indices, FrameLoaderOptions, PrefetchFrameLoader};
 #[cfg(feature = "gpu")]
-use std::path::Path;
-
+use super::init_map::build_initial_map;
 #[cfg(feature = "gpu")]
-use candle_core::Device;
+use crate::core::{Gaussian3D, GaussianColorRepresentation, GaussianMap, GaussianState};
 #[cfg(feature = "gpu")]
-use image::{DynamicImage, GenericImageView, ImageReader};
-
-#[cfg(feature = "gpu")]
-use crate::core::{Gaussian3D, GaussianMap, GaussianState};
-#[cfg(feature = "gpu")]
-use crate::diff::diff_splat::{rgb_to_sh0_value, DiffCamera, TrainableGaussians};
-#[cfg(feature = "gpu")]
-use crate::init::{initialize_gaussian3d_from_points, GaussianInitConfig};
+use crate::diff::diff_splat::{
+    rgb_to_sh0_value, DiffCamera, TrainableColorRepresentation, TrainableGaussians,
+};
 #[cfg(feature = "gpu")]
 use crate::{TrainingDataset, TrainingError, SE3};
+#[cfg(feature = "gpu")]
+use candle_core::Device;
 
 #[cfg(feature = "gpu")]
-struct FrameSample {
-    camera: DiffCamera,
-    color_u8: Vec<u8>,
-    color_f32: Vec<f32>,
-    depth: Vec<f32>,
-    rotation: [[f32; 3]; 3],
-    translation: [f32; 3],
+pub(super) struct FrameSample {
+    pub(super) camera: DiffCamera,
+    pub(super) color_u8: Vec<u8>,
+    pub(super) color_f32: Vec<f32>,
+    pub(super) depth: Vec<f32>,
+    pub(super) rotation: [[f32; 3]; 3],
+    pub(super) translation: [f32; 3],
 }
 
 #[cfg(feature = "gpu")]
@@ -49,40 +45,23 @@ pub(crate) fn load_training_data(
 
     let width = dataset.intrinsics.width as usize;
     let height = dataset.intrinsics.height as usize;
-    let expected_color = width.saturating_mul(height).saturating_mul(3);
-    let expected_depth = width.saturating_mul(height);
 
     let mut frames = Vec::with_capacity(dataset.poses.len());
+    let mut loader = PrefetchFrameLoader::new(
+        dataset,
+        config,
+        FrameLoaderOptions {
+            cache_capacity: config.frame_cache_capacity,
+            prefetch_ahead: config.frame_prefetch_ahead,
+        },
+    )?;
+    let frame_order = ordered_frame_indices(dataset.poses.len(), 1, config.frame_shuffle_seed);
     let mut real_depth_frames = 0usize;
-    for pose in &dataset.poses {
-        let color_u8 = load_color_image(&pose.image_path, width, height)?;
-        if color_u8.len() != expected_color {
-            return Err(TrainingError::InvalidInput(format!(
-                "image {} produced {} bytes, expected {}",
-                pose.image_path.display(),
-                color_u8.len(),
-                expected_color,
-            )));
-        }
-
-        let depth = match &pose.depth_path {
-            Some(path) => {
-                real_depth_frames += 1;
-                load_depth_image(path, width, height, dataset.depth_scale)?
-            }
-            None if config.use_synthetic_depth => {
-                synthetic_depth(&color_u8, width, height, config.min_depth, config.max_depth)
-            }
-            None => vec![0.0; expected_depth],
-        };
-        if depth.len() != expected_depth {
-            return Err(TrainingError::InvalidInput(format!(
-                "depth for frame {} produced {} values, expected {}",
-                pose.frame_id,
-                depth.len(),
-                expected_depth,
-            )));
-        }
+    for (cursor, &pose_idx) in frame_order.iter().enumerate() {
+        loader.prefetch_order_window(&frame_order, cursor)?;
+        let pose = &dataset.poses[pose_idx];
+        let decoded = loader.get(pose_idx)?;
+        real_depth_frames += usize::from(decoded.used_real_depth);
 
         let rotation = pose.pose.rotation();
         let translation = pose.pose.translation();
@@ -99,38 +78,15 @@ pub(crate) fn load_training_data(
 
         frames.push(FrameSample {
             camera,
-            color_f32: color_u8.iter().map(|v| *v as f32 / 255.0).collect(),
-            color_u8,
-            depth,
+            color_f32: decoded.color_u8.iter().map(|v| *v as f32 / 255.0).collect(),
+            color_u8: decoded.color_u8.clone(),
+            depth: decoded.depth.clone(),
             rotation,
             translation,
         });
     }
 
-    let initial_map = if dataset.initial_points.is_empty() {
-        if config.training_profile == super::TrainingProfile::LiteGsMacV1 {
-            log::warn!(
-                "LiteGsMacV1 did not receive sparse-point initialization; falling back to frame-based initialization for this dataset"
-            );
-        }
-        build_initial_map_from_frames(dataset, &frames, config)?
-    } else {
-        let init_config = gaussian_init_config_for_training(config);
-        let mut gaussians =
-            initialize_gaussian3d_from_points(&dataset.initial_points, &init_config);
-        let max_initial = config.max_initial_gaussians.max(1);
-        if gaussians.len() > max_initial {
-            log::warn!(
-                "Truncating point-initialized chunk from {} to {} gaussians to respect max_initial_gaussians",
-                gaussians.len(),
-                max_initial,
-            );
-            gaussians.truncate(max_initial);
-        }
-        let mut map = GaussianMap::from_gaussians(gaussians);
-        map.update_states();
-        map
-    };
+    let initial_map = build_initial_map(dataset, &frames, config)?;
 
     let mut cameras = Vec::with_capacity(frames.len());
     let mut colors = Vec::with_capacity(frames.len());
@@ -153,18 +109,6 @@ pub(crate) fn load_training_data(
         depths,
         initial_map,
     })
-}
-
-#[cfg(feature = "gpu")]
-fn gaussian_init_config_for_training(config: &super::TrainingConfig) -> GaussianInitConfig {
-    let mut init = GaussianInitConfig::default();
-    if config.training_profile == super::TrainingProfile::LiteGsMacV1 {
-        init.min_scale = 0.000_316_227_76;
-        init.max_scale = 10_000.0;
-        init.scale_factor = 1.0;
-        init.opacity = 0.1;
-    }
-    init
 }
 
 #[cfg(feature = "gpu")]
@@ -220,6 +164,11 @@ pub(crate) fn trainable_from_map(
     } else {
         0
     };
+    let mut sh_rest = if use_litegs_sh {
+        Vec::with_capacity(map.len() * sh_rest_coeff_count * 3)
+    } else {
+        Vec::new()
+    };
 
     for gaussian in map.gaussians() {
         positions.extend_from_slice(&[
@@ -240,14 +189,37 @@ pub(crate) fn trainable_from_map(
         ]);
         opacities.push(opacity_to_logit(gaussian.opacity));
         if use_litegs_sh {
-            base_color_params.extend(gaussian.color.iter().copied().map(rgb_to_sh0_value));
+            match gaussian.color_representation {
+                GaussianColorRepresentation::Rgb => {
+                    base_color_params.extend(gaussian.color.iter().copied().map(rgb_to_sh0_value));
+                    sh_rest.resize(sh_rest.len() + sh_rest_coeff_count * 3, 0.0);
+                }
+                GaussianColorRepresentation::SphericalHarmonics { degree } => {
+                    if degree != sh_degree {
+                        candle_core::bail!(
+                            "gaussian map mixes SH degree {degree} with requested degree {sh_degree}"
+                        );
+                    }
+                    base_color_params.extend_from_slice(
+                        &gaussian
+                            .sh_dc
+                            .unwrap_or_else(|| gaussian.color.map(rgb_to_sh0_value)),
+                    );
+                    let source_rest = gaussian.sh_rest.as_deref().unwrap_or(&[]);
+                    let expected = sh_rest_coeff_count * 3;
+                    let copied = source_rest.len().min(expected);
+                    sh_rest.extend_from_slice(&source_rest[..copied]);
+                    if copied < expected {
+                        sh_rest.resize(sh_rest.len() + (expected - copied), 0.0);
+                    }
+                }
+            }
         } else {
             base_color_params.extend_from_slice(&gaussian.color);
         }
     }
 
     if use_litegs_sh {
-        let sh_rest = vec![0.0; map.len() * sh_rest_coeff_count * 3];
         TrainableGaussians::new_with_sh(
             &positions,
             &scales,
@@ -279,6 +251,14 @@ pub(crate) fn map_from_trainable(
     let rotations = gaussians.rotations()?.to_vec2::<f32>()?;
     let opacities = gaussians.opacities()?.to_vec1::<f32>()?;
     let colors = gaussians.render_colors()?.to_vec2::<f32>()?;
+    let base_color_params = gaussians.colors().to_vec2::<f32>()?;
+    let sh_rest = gaussians.sh_rest().to_vec3::<f32>()?;
+    let color_representation = match gaussians.color_representation() {
+        TrainableColorRepresentation::Rgb => GaussianColorRepresentation::Rgb,
+        TrainableColorRepresentation::SphericalHarmonics { degree } => {
+            GaussianColorRepresentation::SphericalHarmonics { degree }
+        }
+    };
 
     let mut output = Vec::with_capacity(gaussians.len());
     for idx in 0..gaussians.len() {
@@ -293,6 +273,21 @@ pub(crate) fn map_from_trainable(
             ),
             opacity: opacities[idx].clamp(0.0, 1.0),
             color: [colors[idx][0], colors[idx][1], colors[idx][2]],
+            color_representation,
+            sh_dc: matches!(
+                color_representation,
+                GaussianColorRepresentation::SphericalHarmonics { .. }
+            )
+            .then_some([
+                base_color_params[idx][0],
+                base_color_params[idx][1],
+                base_color_params[idx][2],
+            ]),
+            sh_rest: matches!(
+                color_representation,
+                GaussianColorRepresentation::SphericalHarmonics { .. }
+            )
+            .then_some(sh_rest[idx].iter().flatten().copied().collect::<Vec<f32>>()),
             features: None,
             state: GaussianState::Stable,
         });
@@ -304,272 +299,6 @@ pub(crate) fn map_from_trainable(
 }
 
 #[cfg(feature = "gpu")]
-fn build_initial_map_from_frames(
-    dataset: &TrainingDataset,
-    frames: &[FrameSample],
-    config: &super::TrainingConfig,
-) -> Result<GaussianMap, TrainingError> {
-    let width = dataset.intrinsics.width as usize;
-    let height = dataset.intrinsics.height as usize;
-    let mut map = GaussianMap::new(config.max_initial_gaussians.max(1));
-
-    let frame_budget = config
-        .max_initial_gaussians
-        .checked_div(frames.len().max(1))
-        .unwrap_or(1)
-        .max(1);
-    let sampling_step = if config.sampling_step == 0 {
-        compute_sampling_step(width, height, frame_budget)
-    } else {
-        config.sampling_step.max(1)
-    };
-
-    log::info!(
-        "Initializing gaussians from {} frames | resolution={}x{} | frame_budget={} | sampling_step={}",
-        frames.len(),
-        width,
-        height,
-        frame_budget,
-        sampling_step
-    );
-
-    for frame in frames {
-        let rotation = glam::Mat3::from_cols(
-            glam::Vec3::new(
-                frame.rotation[0][0],
-                frame.rotation[0][1],
-                frame.rotation[0][2],
-            ),
-            glam::Vec3::new(
-                frame.rotation[1][0],
-                frame.rotation[1][1],
-                frame.rotation[1][2],
-            ),
-            glam::Vec3::new(
-                frame.rotation[2][0],
-                frame.rotation[2][1],
-                frame.rotation[2][2],
-            ),
-        );
-        let translation = glam::Vec3::new(
-            frame.translation[0],
-            frame.translation[1],
-            frame.translation[2],
-        );
-
-        for y in (0..height).step_by(sampling_step) {
-            for x in (0..width).step_by(sampling_step) {
-                let idx = y * width + x;
-                let depth = frame.depth[idx];
-                if depth < config.min_depth || depth > config.max_depth {
-                    continue;
-                }
-
-                let x_cam = (x as f32 - dataset.intrinsics.cx) * depth / dataset.intrinsics.fx;
-                let y_cam = (y as f32 - dataset.intrinsics.cy) * depth / dataset.intrinsics.fy;
-                let camera_point = glam::Vec3::new(x_cam, y_cam, depth);
-                let world_point = rotation * camera_point + translation;
-                let color_base = idx * 3;
-                let gaussian = Gaussian3D::from_depth_point(
-                    world_point.x,
-                    world_point.y,
-                    world_point.z,
-                    [
-                        frame.color_u8[color_base],
-                        frame.color_u8[color_base + 1],
-                        frame.color_u8[color_base + 2],
-                    ],
-                );
-                let _ = map.add(gaussian);
-            }
-        }
-    }
-
-    if map.is_empty() {
-        return Err(TrainingError::InvalidInput(
-            "failed to build any initial gaussians from the training frames".to_string(),
-        ));
-    }
-
-    if sampling_step > 1 && map.len() > config.max_initial_gaussians.max(1) {
-        log::warn!(
-            "initial Gaussian map exceeded budget ({} > {}) with sampling step {}",
-            map.len(),
-            config.max_initial_gaussians,
-            sampling_step,
-        );
-    }
-
-    map.update_states();
-    log::info!("Initialized {} gaussians from training frames", map.len());
-    Ok(map)
-}
-
-#[cfg(feature = "gpu")]
-fn load_color_image(path: &Path, width: usize, height: usize) -> Result<Vec<u8>, TrainingError> {
-    match path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .map(|ext| ext.to_ascii_lowercase())
-        .as_deref()
-    {
-        Some("rgb") => {
-            let bytes = fs::read(path)?;
-            let expected = width.saturating_mul(height).saturating_mul(3);
-            if bytes.len() != expected {
-                return Err(TrainingError::InvalidInput(format!(
-                    "raw RGB frame {} has {} bytes, expected {}",
-                    path.display(),
-                    bytes.len(),
-                    expected,
-                )));
-            }
-            Ok(bytes)
-        }
-        _ => {
-            let image = ImageReader::open(path)
-                .map_err(TrainingError::Io)?
-                .with_guessed_format()
-                .map_err(|err| TrainingError::InvalidInput(err.to_string()))?
-                .decode()
-                .map_err(|err| TrainingError::InvalidInput(err.to_string()))?;
-
-            let (actual_width, actual_height) = image.dimensions();
-            if actual_width as usize != width || actual_height as usize != height {
-                return Err(TrainingError::InvalidInput(format!(
-                    "image {} has size {}x{}, expected {}x{}",
-                    path.display(),
-                    actual_width,
-                    actual_height,
-                    width,
-                    height,
-                )));
-            }
-
-            Ok(image.to_rgb8().into_raw())
-        }
-    }
-}
-
-#[cfg(feature = "gpu")]
-fn load_depth_image(
-    path: &Path,
-    width: usize,
-    height: usize,
-    depth_scale: f32,
-) -> Result<Vec<f32>, TrainingError> {
-    match path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .map(|ext| ext.to_ascii_lowercase())
-        .as_deref()
-    {
-        Some("depth") => load_raw_depth(path, width, height),
-        _ => load_raster_depth(path, width, height, depth_scale),
-    }
-}
-
-#[cfg(feature = "gpu")]
-fn load_raw_depth(path: &Path, width: usize, height: usize) -> Result<Vec<f32>, TrainingError> {
-    let bytes = fs::read(path)?;
-    let expected = width
-        .saturating_mul(height)
-        .saturating_mul(std::mem::size_of::<f32>());
-    if bytes.len() != expected {
-        return Err(TrainingError::InvalidInput(format!(
-            "raw depth frame {} has {} bytes, expected {}",
-            path.display(),
-            bytes.len(),
-            expected,
-        )));
-    }
-
-    Ok(bytes
-        .chunks_exact(std::mem::size_of::<f32>())
-        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-        .collect())
-}
-
-#[cfg(feature = "gpu")]
-fn load_raster_depth(
-    path: &Path,
-    width: usize,
-    height: usize,
-    depth_scale: f32,
-) -> Result<Vec<f32>, TrainingError> {
-    if depth_scale <= 0.0 {
-        return Err(TrainingError::InvalidInput(format!(
-            "depth scale must be > 0, got {depth_scale}",
-        )));
-    }
-
-    let image = ImageReader::open(path)
-        .map_err(TrainingError::Io)?
-        .with_guessed_format()
-        .map_err(|err| TrainingError::InvalidInput(err.to_string()))?
-        .decode()
-        .map_err(|err| TrainingError::InvalidInput(err.to_string()))?;
-
-    let (actual_width, actual_height) = image.dimensions();
-    if actual_width as usize != width || actual_height as usize != height {
-        return Err(TrainingError::InvalidInput(format!(
-            "depth image {} has size {}x{}, expected {}x{}",
-            path.display(),
-            actual_width,
-            actual_height,
-            width,
-            height,
-        )));
-    }
-
-    match image {
-        DynamicImage::ImageLuma16(luma) => Ok(luma
-            .pixels()
-            .map(|pixel| pixel.0[0] as f32 / depth_scale)
-            .collect()),
-        _ => Err(TrainingError::InvalidInput(format!(
-            "unsupported depth image format for {}",
-            path.display(),
-        ))),
-    }
-}
-
-#[cfg(feature = "gpu")]
-fn synthetic_depth(
-    color: &[u8],
-    width: usize,
-    height: usize,
-    min_depth: f32,
-    max_depth: f32,
-) -> Vec<f32> {
-    let expected = width.saturating_mul(height).saturating_mul(3);
-    let mut depth = Vec::with_capacity(width.saturating_mul(height));
-    if color.len() < expected || min_depth >= max_depth {
-        depth.resize(width.saturating_mul(height), min_depth.max(0.01));
-        return depth;
-    }
-
-    let range = max_depth - min_depth;
-    for chunk in color.chunks_exact(3) {
-        let r = chunk[0] as f32 / 255.0;
-        let g = chunk[1] as f32 / 255.0;
-        let b = chunk[2] as f32 / 255.0;
-        let luma = 0.299 * r + 0.587 * g + 0.114 * b;
-        let value = max_depth - luma * range;
-        depth.push(value.clamp(min_depth, max_depth));
-    }
-
-    depth
-}
-
-#[cfg(feature = "gpu")]
-fn compute_sampling_step(width: usize, height: usize, max_gaussians: usize) -> usize {
-    let pixels = width.saturating_mul(height).max(1);
-    let ratio = (pixels as f32 / max_gaussians.max(1) as f32).sqrt();
-    ratio.ceil().max(2.0) as usize
-}
-
-#[cfg(feature = "gpu")]
 fn opacity_to_logit(opacity: f32) -> f32 {
     let clamped = opacity.clamp(1e-6, 1.0 - 1e-6);
     (clamped / (1.0 - clamped)).ln()
@@ -578,40 +307,6 @@ fn opacity_to_logit(opacity: f32) -> f32 {
 #[cfg(all(test, feature = "gpu"))]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
-
-    #[test]
-    fn test_load_raw_rgb() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("frame.rgb");
-        fs::write(&path, [1u8, 2, 3, 4, 5, 6]).unwrap();
-
-        let loaded = load_color_image(&path, 2, 1).unwrap();
-        assert_eq!(loaded, vec![1, 2, 3, 4, 5, 6]);
-    }
-
-    #[test]
-    fn test_load_raw_depth() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("frame.depth");
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&1.25f32.to_le_bytes());
-        bytes.extend_from_slice(&2.5f32.to_le_bytes());
-        fs::write(&path, bytes).unwrap();
-
-        let loaded = load_depth_image(&path, 2, 1, 1.0).unwrap();
-        assert_eq!(loaded, vec![1.25, 2.5]);
-    }
-
-    #[test]
-    fn test_synthetic_depth_range() {
-        let color = vec![0u8, 0, 0, 255, 255, 255];
-        let depth = synthetic_depth(&color, 2, 1, 0.1, 2.0);
-        assert_eq!(depth.len(), 2);
-        assert!(depth[0] >= 0.1 && depth[0] <= 2.0);
-        assert!(depth[1] >= 0.1 && depth[1] <= 2.0);
-        assert!(depth[0] > depth[1]);
-    }
 
     #[test]
     fn test_diff_camera_uses_world_to_camera_view_pose() {
@@ -629,21 +324,6 @@ mod tests {
         assert!((camera.translation[0] + 1.0).abs() < 1e-6);
         assert!((camera.translation[1] - 2.0).abs() < 1e-6);
         assert!((camera.translation[2] + 3.5).abs() < 1e-6);
-    }
-
-    #[test]
-    fn litegs_profile_uses_litegs_point_init_defaults() {
-        let legacy = gaussian_init_config_for_training(&super::super::TrainingConfig::default());
-        assert_eq!(legacy.opacity, 0.5);
-        assert_eq!(legacy.scale_factor, 0.5);
-
-        let litegs = gaussian_init_config_for_training(&super::super::TrainingConfig {
-            training_profile: super::super::TrainingProfile::LiteGsMacV1,
-            ..super::super::TrainingConfig::default()
-        });
-        assert!((litegs.min_scale - 0.000_316_227_76).abs() < 1e-9);
-        assert_eq!(litegs.scale_factor, 1.0);
-        assert_eq!(litegs.opacity, 0.1);
     }
 
     #[test]

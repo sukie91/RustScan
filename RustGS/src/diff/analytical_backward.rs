@@ -424,9 +424,8 @@ pub fn backward_weighted_l1_from_buffers(
                 for k in 0..3 {
                     let pax = rec.proj_axis_x[k];
                     let pay = rec.proj_axis_y[k];
-                    let dl_dsk2 = dl_dcov_xx * pax * pax
-                        + dl_dcov_xy * pax * pay
-                        + dl_dcov_yy * pay * pay;
+                    let dl_dsk2 =
+                        dl_dcov_xx * pax * pax + dl_dcov_xy * pax * pay + dl_dcov_yy * pay * pay;
                     grad_log_scale[gi + k] += dl_dsk2 * 2.0 * s3[k] * s3[k];
                 }
 
@@ -807,18 +806,25 @@ mod tests {
         let angle = std::f32::consts::FRAC_PI_4;
         let gaussians = TrainableGaussians::new(
             &[0.0f32, 0.0, 3.0],
-            &[(-2.0f32).exp().ln(), (-4.0f32).exp().ln(), (-4.0f32).exp().ln()], // log-scales
+            &[
+                (-2.0f32).exp().ln(),
+                (-4.0f32).exp().ln(),
+                (-4.0f32).exp().ln(),
+            ], // log-scales
             &[(angle / 2.0).cos(), 0.0, 0.0, (angle / 2.0).sin()], // quaternion [w,x,y,z]
-            &[0.5f32], // opacity logit
+            &[0.5f32],                                             // opacity logit
             &[0.8f32, 0.4, 0.2],
             &device,
         )
         .unwrap();
 
         let camera = DiffCamera::new(
-            50.0, 50.0,
-            (w / 2) as f32, (h / 2) as f32,
-            w, h,
+            50.0,
+            50.0,
+            (w / 2) as f32,
+            (h / 2) as f32,
+            w,
+            h,
             &[[1., 0., 0.], [0., 1., 0.], [0., 0., 1.]],
             &[0., 0., 0.],
             &device,
@@ -826,7 +832,9 @@ mod tests {
         .unwrap();
 
         let mut renderer = DiffSplatRenderer::with_device(w, h, device.clone());
-        let (_, inter) = renderer.render_with_intermediates(&gaussians, &camera).unwrap();
+        let (_, inter) = renderer
+            .render_with_intermediates(&gaussians, &camera)
+            .unwrap();
 
         assert_eq!(inter.records.len(), 1);
         let rec = &inter.records[0];
@@ -840,7 +848,9 @@ mod tests {
 
         // Backward pass should produce non-zero scale gradients
         let target = vec![0.0f32; w * h * 3];
-        let grads = backward(&inter, &target, 1, camera.fx, camera.fy, camera.cx, camera.cy);
+        let grads = backward(
+            &inter, &target, 1, camera.fx, camera.fy, camera.cx, camera.cy,
+        );
         let scale_grad_magnitude: f32 = grads.log_scales.iter().map(|g: &f32| g.abs()).sum();
         assert!(
             scale_grad_magnitude > 1e-6,

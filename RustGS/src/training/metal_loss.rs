@@ -383,16 +383,24 @@ mod tests {
         let width: usize = 8;
         let height: usize = 8;
         let pixel_count = width * height * 3;
-        let rendered: Vec<f32> = (0..pixel_count).map(|i| i as f32 / pixel_count as f32).collect();
+        let rendered: Vec<f32> = (0..pixel_count)
+            .map(|i| i as f32 / pixel_count as f32)
+            .collect();
         let target: Vec<f32> = (0..pixel_count)
             .map(|i| 1.0f32 - i as f32 / pixel_count as f32)
             .collect();
 
         let (ssim, grad) = ssim_gradient(&rendered, &target, width, height);
         // SSIM < 1 for different images.
-        assert!(ssim < 1.0f32, "SSIM should be < 1.0 for different images, got {ssim}");
+        assert!(
+            ssim < 1.0f32,
+            "SSIM should be < 1.0 for different images, got {ssim}"
+        );
         // At least some gradients should be non-zero.
         let any_nonzero = grad.iter().any(|g: &f32| g.abs() > 1e-8);
-        assert!(any_nonzero, "gradient should have non-zero entries for different images");
+        assert!(
+            any_nonzero,
+            "gradient should have non-zero entries for different images"
+        );
     }
 }
