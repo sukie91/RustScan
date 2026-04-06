@@ -110,9 +110,9 @@ cd RustMesh
 ls examples/
 
 # Run an example
-cargo run --example smart_handles_demo
-cargo run --example decimation_demo
-cargo run --example subdivision_demo
+cargo run --example test_smart
+cargo run --release --example openmesh_compare_decimation_trace -- 10
+cargo run --example test_subdivision
 ```
 
 ### RustSLAM
@@ -120,11 +120,11 @@ cargo run --example subdivision_demo
 ```bash
 cd RustSLAM
 
-# Run Visual Odometry example
-cargo run --release --example run_vo
+# Load a dataset example
+cargo run --release --example load_tum_dataset -- --dataset path/to/dataset
 
-# Run with dataset
-cargo run --release --example run_vo -- --dataset path/to/dataset
+# Run end-to-end mesh extraction example
+cargo run --release --example e2e_slam_to_mesh
 
 # Run full pipeline via CLI
 cargo run --release -- --input ../test_data/video/sofa.MOV --output ./output
@@ -278,10 +278,10 @@ cargo doc --no-deps --document-private-items --open
 ```bash
 # Set log level
 export RUST_LOG=debug
-cargo run --example run_vo
+cargo run --example e2e_slam_to_mesh
 
 # Or inline
-RUST_LOG=debug cargo run --example run_vo
+RUST_LOG=debug cargo run --example e2e_slam_to_mesh
 ```
 
 ### Debug Build
@@ -303,7 +303,7 @@ rust-lldb target/debug/my_binary
 cargo install flamegraph
 
 # Profile
-cargo flamegraph --example run_vo
+cargo flamegraph --example e2e_slam_to_mesh
 ```
 
 ### Using Instruments (macOS)

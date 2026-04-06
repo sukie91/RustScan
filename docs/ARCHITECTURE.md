@@ -2,14 +2,17 @@
 
 ## Overview
 
-RustScan is a pure Rust implementation of 3D scanning algorithms, comprising two main libraries that work together to provide a complete 3D reconstruction pipeline.
+RustScan is a Rust workspace for 3D reconstruction. The main algorithm crates are RustMesh and RustSLAM, with additional crates for Gaussian training, visualization, and shared types.
 
 ## Project Structure
 
-```
+```text
 RustScan/
 ├── RustMesh/          # Mesh processing library
 ├── RustSLAM/          # Visual SLAM library
+├── RustGS/            # Gaussian splatting crate
+├── RustViewer/        # Visualization crate
+├── rustscan-types/    # Shared types
 ├── docs/              # Documentation
 ├── test_data/         # Test datasets
 └── README.md          # Project overview
@@ -55,7 +58,7 @@ RustScan/
 - **Tracker Layer**: Visual Odometry pipeline
 - **Optimizer Layer**: Bundle Adjustment
 - **Loop Closing Layer**: Loop detection and relocalization
-- **Fusion Layer**: 3D Gaussian Splatting and mesh extraction
+- **Fusion Layer**: mesh extraction and related fusion support
 - **Pipeline Layer**: Real-time SLAM pipeline
 - **I/O Layer**: Dataset loading and video processing
 
@@ -87,21 +90,16 @@ RustScan/
 - `relocalization.rs` - Relocalization module
 
 #### Fusion (`fusion/`)
-- `gaussian.rs` - 3D Gaussian data structures
-- `renderer.rs` - Forward renderer
-- `diff_renderer.rs` - Differentiable renderer (CPU)
-- `diff_splat.rs` - GPU differentiable splatting
-- `autodiff.rs` - True autodiff with backward propagation
-- `tiled_renderer.rs` - Tiled rasterization with densify/prune
-- `training_pipeline.rs` - Training with SSIM loss
-- `complete_trainer.rs` - Complete trainer with LR scheduler
-- `autodiff_trainer.rs` - GPU trainer
-- `tracker.rs` - Gaussian tracking (ICP)
-- `mapper.rs` - Incremental Gaussian mapping
-- `slam_integrator.rs` - Sparse + Dense SLAM integration
+- `gaussian.rs` - Gaussian data structures
+- `renderer.rs` - Rendering support
+- `tiled_renderer.rs` - Tiled rasterization
+- `tracker.rs` - Gaussian tracking support
+- `mapper.rs` - Incremental mapping support
+- `slam_integrator.rs` - sparse/dense integration
 - `tsdf_volume.rs` - TSDF volume fusion
 - `marching_cubes.rs` - Marching Cubes mesh extraction
-- `mesh_extractor.rs` - High-level mesh extraction API
+- `mesh_extractor.rs` - high-level mesh extraction API
+- `mesh_io.rs`, `mesh_metadata.rs`, `scene_io.rs` - mesh and scene IO helpers
 
 #### Pipeline (`pipeline/`)
 - `realtime.rs` - Real-time SLAM pipeline
@@ -219,9 +217,8 @@ RustSLAM uses Apple Metal Performance Shaders (MPS) via `candle-metal`:
 
 ### RustSLAM
 - Unit tests in `#[cfg(test)]` modules
-- Integration tests in `examples/`
-- Test utilities in `test_utils.rs`
-- Recent additions: Comprehensive tests for Marching Cubes, VideoLoader, and optimization threads
+- Integration-style coverage in `examples/`
+- Current worktree note: the RustSLAM library suite is not fully green, so architectural presence should not be read as release readiness
 
 ## Build Configuration
 
