@@ -1,7 +1,11 @@
 mod openmesh_compare_common;
 
-use openmesh_compare_common::{measure, mesh_digest, print_duration_compare, print_header, print_mesh_digest};
-use rustmesh::{generate_noisy_sphere, laplace_smooth, RustMesh, SmootherConfig, Vec3, VertexHandle};
+use openmesh_compare_common::{
+    measure, mesh_digest, print_duration_compare, print_header, print_mesh_digest,
+};
+use rustmesh::{
+    generate_noisy_sphere, laplace_smooth, RustMesh, SmootherConfig, Vec3, VertexHandle,
+};
 use std::time::Duration;
 
 fn tutorial_style_smooth(mesh: &mut RustMesh, iterations: usize) {

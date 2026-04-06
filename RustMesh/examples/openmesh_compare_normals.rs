@@ -13,8 +13,64 @@ use std::time::Duration;
 
 const ITERATIONS: usize = 200;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FaceMode {
+    TimedRefresh,
+    PrecomputedOnce,
+}
+
+impl FaceMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::TimedRefresh => "timed_refresh",
+            Self::PrecomputedOnce => "precomputed_once",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "timed_refresh" => Some(Self::TimedRefresh),
+            "precomputed_once" => Some(Self::PrecomputedOnce),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VertexMode {
+    None,
+    AreaWeighted,
+    FaceAverage,
+}
+
+impl VertexMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::AreaWeighted => "area_weighted",
+            Self::FaceAverage => "face_average",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "none" => Some(Self::None),
+            "area_weighted" => Some(Self::AreaWeighted),
+            "face_average" => Some(Self::FaceAverage),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NormalContract {
+    face_mode: FaceMode,
+    vertex_mode: VertexMode,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct NormalBenchResult {
+    contract: NormalContract,
     elapsed: Duration,
     face_checksum: f64,
     vertex_checksum: f64,
@@ -33,6 +89,12 @@ fn main() {
     println!(
         "Note: vertex-normal timing precomputes face normals once before the timed loop to match OpenMesh's documented contract."
     );
+    println!(
+        "Semantics: RustMesh default vertex normals are area-weighted; OpenMesh defaults to equal-weight face averaging."
+    );
+    println!(
+        "Contract keys: face_mode={{timed_refresh|precomputed_once}} vertex_mode={{none|area_weighted|face_average}}"
+    );
 
     let input = generate_sphere(1.0, 64, 64);
     print_mesh_digest("Input mesh", mesh_digest(&input));
@@ -48,23 +110,11 @@ fn main() {
 
     for (name, rust_result) in &rust_cases {
         print_header(name);
-        println!(
-            "RustMesh: V={} F={} face_checksum={:.6} vertex_checksum={:.6}",
-            rust_result.vertices,
-            rust_result.faces,
-            rust_result.face_checksum,
-            rust_result.vertex_checksum
-        );
+        print_result("RustMesh", rust_result);
 
         match openmesh_cases.as_ref().and_then(|cases| cases.get(name)) {
             Some(openmesh_result) => {
-                println!(
-                    "OpenMesh: V={} F={} face_checksum={:.6} vertex_checksum={:.6}",
-                    openmesh_result.vertices,
-                    openmesh_result.faces,
-                    openmesh_result.face_checksum,
-                    openmesh_result.vertex_checksum
-                );
+                print_result("OpenMesh", openmesh_result);
                 println!(
                     "Checksum deltas: face={:.6}, vertex={:.6}",
                     (rust_result.face_checksum - openmesh_result.face_checksum).abs(),
@@ -83,10 +133,25 @@ fn main() {
     }
 }
 
+fn print_result(label: &str, result: &NormalBenchResult) {
+    println!(
+        "{label}: V={} F={} face_checksum={:.6} vertex_checksum={:.6}",
+        result.vertices, result.faces, result.face_checksum, result.vertex_checksum
+    );
+    println!(
+        "  Contract: face_mode={} vertex_mode={}",
+        result.contract.face_mode.as_str(),
+        result.contract.vertex_mode.as_str()
+    );
+}
+
 fn run_rust_cases(input: &RustMesh) -> BTreeMap<String, NormalBenchResult> {
     let mut cases = BTreeMap::new();
     cases.insert("update_face_normals".into(), bench_rust_face_normals(input));
-    cases.insert("update_vertex_normals".into(), bench_rust_vertex_normals(input));
+    cases.insert(
+        "update_vertex_normals".into(),
+        bench_rust_vertex_normals(input),
+    );
     cases.insert("update_normals".into(), bench_rust_full_normals(input));
     cases
 }
@@ -102,6 +167,10 @@ fn bench_rust_face_normals(input: &RustMesh) -> NormalBenchResult {
     });
 
     NormalBenchResult {
+        contract: NormalContract {
+            face_mode: FaceMode::TimedRefresh,
+            vertex_mode: VertexMode::None,
+        },
         elapsed,
         face_checksum: face_normal_checksum(&mesh),
         vertex_checksum: 0.0,
@@ -123,6 +192,10 @@ fn bench_rust_vertex_normals(input: &RustMesh) -> NormalBenchResult {
     });
 
     NormalBenchResult {
+        contract: NormalContract {
+            face_mode: FaceMode::PrecomputedOnce,
+            vertex_mode: VertexMode::AreaWeighted,
+        },
         elapsed,
         face_checksum: face_normal_checksum(&mesh),
         vertex_checksum: vertex_normal_checksum(&mesh),
@@ -143,6 +216,10 @@ fn bench_rust_full_normals(input: &RustMesh) -> NormalBenchResult {
     });
 
     NormalBenchResult {
+        contract: NormalContract {
+            face_mode: FaceMode::TimedRefresh,
+            vertex_mode: VertexMode::AreaWeighted,
+        },
         elapsed,
         face_checksum: face_normal_checksum(&mesh),
         vertex_checksum: vertex_normal_checksum(&mesh),
@@ -235,41 +312,8 @@ fn parse_openmesh_cases(stdout: &str) -> io::Result<BTreeMap<String, NormalBench
         let Some(rest) = line.strip_prefix("CASE ") else {
             continue;
         };
-
-        let mut name = None;
-        let mut elapsed_ns = None;
-        let mut face_checksum = 0.0;
-        let mut vertex_checksum = 0.0;
-        let mut faces = None;
-        let mut vertices = None;
-
-        for (key, value) in parse_kv_fields(rest) {
-            match key {
-                "name" => name = Some(value.to_string()),
-                "elapsed_ns" => elapsed_ns = value.parse::<f64>().ok(),
-                "face_checksum" => face_checksum = value.parse::<f64>().unwrap_or(0.0),
-                "vertex_checksum" => vertex_checksum = value.parse::<f64>().unwrap_or(0.0),
-                "faces" => faces = value.parse::<usize>().ok(),
-                "vertices" => vertices = value.parse::<usize>().ok(),
-                _ => {}
-            }
-        }
-
-        let Some(name) = name else { continue };
-        let Some(elapsed_ns) = elapsed_ns else { continue };
-        let Some(faces) = faces else { continue };
-        let Some(vertices) = vertices else { continue };
-
-        cases.insert(
-            name,
-            NormalBenchResult {
-                elapsed: Duration::from_secs_f64(elapsed_ns / 1_000_000_000.0),
-                face_checksum,
-                vertex_checksum,
-                faces,
-                vertices,
-            },
-        );
+        let (name, result) = parse_openmesh_case(rest)?;
+        cases.insert(name, result);
     }
 
     if cases.is_empty() {
@@ -286,6 +330,61 @@ fn parse_kv_fields(line: &str) -> Vec<(&str, &str)> {
     line.split_whitespace()
         .filter_map(|field| field.split_once('='))
         .collect()
+}
+
+fn parse_openmesh_case(rest: &str) -> io::Result<(String, NormalBenchResult)> {
+    let mut name = None;
+    let mut elapsed_ns = None;
+    let mut face_checksum = 0.0;
+    let mut vertex_checksum = 0.0;
+    let mut faces = None;
+    let mut vertices = None;
+    let mut face_mode = None;
+    let mut vertex_mode = None;
+
+    for (key, value) in parse_kv_fields(rest) {
+        match key {
+            "name" => name = Some(value.to_string()),
+            "elapsed_ns" => elapsed_ns = value.parse::<f64>().ok(),
+            "face_checksum" => face_checksum = value.parse::<f64>().unwrap_or(0.0),
+            "vertex_checksum" => vertex_checksum = value.parse::<f64>().unwrap_or(0.0),
+            "faces" => faces = value.parse::<usize>().ok(),
+            "vertices" => vertices = value.parse::<usize>().ok(),
+            "face_mode" => face_mode = FaceMode::parse(value),
+            "vertex_mode" => vertex_mode = VertexMode::parse(value),
+            _ => {}
+        }
+    }
+
+    let name = name.ok_or_else(|| invalid_case_output(rest, "missing name"))?;
+    let elapsed_ns = elapsed_ns.ok_or_else(|| invalid_case_output(rest, "missing elapsed_ns"))?;
+    let faces = faces.ok_or_else(|| invalid_case_output(rest, "missing faces"))?;
+    let vertices = vertices.ok_or_else(|| invalid_case_output(rest, "missing vertices"))?;
+    let face_mode = face_mode.ok_or_else(|| invalid_case_output(rest, "missing face_mode"))?;
+    let vertex_mode =
+        vertex_mode.ok_or_else(|| invalid_case_output(rest, "missing vertex_mode"))?;
+
+    Ok((
+        name,
+        NormalBenchResult {
+            contract: NormalContract {
+                face_mode,
+                vertex_mode,
+            },
+            elapsed: Duration::from_secs_f64(elapsed_ns / 1_000_000_000.0),
+            face_checksum,
+            vertex_checksum,
+            faces,
+            vertices,
+        },
+    ))
+}
+
+fn invalid_case_output(rest: &str, detail: &str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::Other,
+        format!("invalid OpenMesh normal benchmark output ({detail}): {rest}"),
+    )
 }
 
 fn openmesh_cpp_source() -> &'static str {
@@ -335,7 +434,14 @@ double measure_ns(Fn&& fn, std::size_t iterations) {
   return std::chrono::duration<double, std::nano>(end - start).count();
 }
 
-void print_case(const char* name, const Mesh& mesh, double elapsed_ns, bool include_face, bool include_vertex) {
+void print_case(
+    const char* name,
+    const Mesh& mesh,
+    double elapsed_ns,
+    bool include_face,
+    bool include_vertex,
+    const char* face_mode,
+    const char* vertex_mode) {
   std::cout << "CASE"
             << " name=" << name
             << " elapsed_ns=" << elapsed_ns
@@ -343,6 +449,8 @@ void print_case(const char* name, const Mesh& mesh, double elapsed_ns, bool incl
             << " vertices=" << mesh.n_vertices()
             << " face_checksum=" << (include_face ? face_checksum(mesh) : 0.0)
             << " vertex_checksum=" << (include_vertex ? vertex_checksum(mesh) : 0.0)
+            << " face_mode=" << face_mode
+            << " vertex_mode=" << vertex_mode
             << '\n';
 }
 
@@ -367,7 +475,7 @@ int main(int argc, char** argv) {
     Mesh mesh = base;
     mesh.request_face_normals();
     const double elapsed_ns = measure_ns([&mesh]() { mesh.update_face_normals(); }, iterations);
-    print_case("update_face_normals", mesh, elapsed_ns, true, false);
+    print_case("update_face_normals", mesh, elapsed_ns, true, false, "timed_refresh", "none");
   }
 
   {
@@ -376,7 +484,14 @@ int main(int argc, char** argv) {
     mesh.request_vertex_normals();
     mesh.update_face_normals();
     const double elapsed_ns = measure_ns([&mesh]() { mesh.update_vertex_normals(); }, iterations);
-    print_case("update_vertex_normals", mesh, elapsed_ns, true, true);
+    print_case(
+        "update_vertex_normals",
+        mesh,
+        elapsed_ns,
+        true,
+        true,
+        "precomputed_once",
+        "face_average");
   }
 
   {
@@ -384,10 +499,39 @@ int main(int argc, char** argv) {
     mesh.request_face_normals();
     mesh.request_vertex_normals();
     const double elapsed_ns = measure_ns([&mesh]() { mesh.update_normals(); }, iterations);
-    print_case("update_normals", mesh, elapsed_ns, true, true);
+    print_case("update_normals", mesh, elapsed_ns, true, true, "timed_refresh", "face_average");
   }
 
   return 0;
 }
 "#
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_openmesh_cases_requires_explicit_contract_fields() {
+        let output = "CASE name=update_normals elapsed_ns=100.0 faces=10 vertices=8 face_checksum=1.0 vertex_checksum=2.0";
+        let error = parse_openmesh_cases(output).unwrap_err();
+        assert!(error.to_string().contains("face_mode"));
+    }
+
+    #[test]
+    fn parse_openmesh_cases_preserves_contract_metadata() {
+        let output = concat!(
+            "CASE name=update_vertex_normals elapsed_ns=100.0 faces=10 vertices=8 ",
+            "face_checksum=1.0 vertex_checksum=2.0 face_mode=precomputed_once ",
+            "vertex_mode=face_average\n",
+        );
+
+        let cases = parse_openmesh_cases(output).unwrap();
+        let result = cases.get("update_vertex_normals").unwrap();
+
+        assert_eq!(result.contract.face_mode, FaceMode::PrecomputedOnce);
+        assert_eq!(result.contract.vertex_mode, VertexMode::FaceAverage);
+        assert_eq!(result.faces, 10);
+        assert_eq!(result.vertices, 8);
+    }
 }

@@ -1,6 +1,6 @@
 # RustScan Scan Summary
 
-**Updated:** 2026-04-05
+**Updated:** 2026-04-06
 **Type:** Workspace snapshot summary
 
 This file is a lightweight structural summary, not a primary status source.
@@ -18,11 +18,11 @@ This file is a lightweight structural summary, not a primary status source.
 
 ## Verification Snapshot
 
-- RustMesh library tests: `214 passed; 0 failed`
-- RustMesh remeshing tests: `7 passed; 0 failed`
-- RustMesh VDPM tests: `7 passed; 0 failed`
+- RustMesh library tests: `234 passed; 0 failed`
+- RustMesh remeshing tests: `8 passed; 0 failed`
+- RustMesh VDPM tests: `9 passed; 0 failed`
 - RustMesh decimation trace example: matches OpenMesh for the first 10 traced steps under the default baseline
-- RustSLAM library tests: `261 passed; 2 failed`
+- RustMesh normals benchmark: current release-mode harness shows RustMesh ahead of OpenMesh; remaining gap is semantic rather than raw-speed driven
 
 ## Canonical Documents
 

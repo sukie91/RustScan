@@ -10,6 +10,9 @@
 //! - halfedge_handles: Vec<Option<HalfedgeHandle>>
 //!
 
+use crate::attrib_soa_kernel::{
+    EPropHandle, FPropHandle, HPropHandle, PropValue, PropertyStore, VPropHandle,
+};
 use crate::handles::{EdgeHandle, FaceHandle, HalfedgeHandle, VertexHandle};
 use crate::items::{Edge, Face, Halfedge};
 use glam::{Vec2, Vec3, Vec4};
@@ -64,6 +67,12 @@ pub struct SoAKernel {
     face_normals: Option<Vec<Vec3>>,
     face_colors: Option<Vec<Vec4>>,
 
+    // Dynamic properties
+    vertex_props: PropertyStore,
+    halfedge_props: PropertyStore,
+    edge_props: PropertyStore,
+    face_props: PropertyStore,
+
     // Deleted-state flags used by local topology edits before garbage collection.
     vertex_deleted: Vec<bool>,
     halfedge_deleted: Vec<bool>,
@@ -72,6 +81,36 @@ pub struct SoAKernel {
 }
 
 impl SoAKernel {
+    fn resize_halfedge_attrs(&mut self) {
+        let size = self.halfedges.len();
+        if let Some(ref mut normals) = self.halfedge_normals {
+            normals.resize(size, Vec3::ZERO);
+        }
+        if let Some(ref mut colors) = self.halfedge_colors {
+            colors.resize(size, Vec4::new(0.5, 0.5, 0.5, 1.0));
+        }
+        if let Some(ref mut texcoords) = self.halfedge_texcoords {
+            texcoords.resize(size, Vec2::ZERO);
+        }
+    }
+
+    fn resize_edge_attrs(&mut self) {
+        let size = self.edges.len();
+        if let Some(ref mut colors) = self.edge_colors {
+            colors.resize(size, Vec4::new(0.5, 0.5, 0.5, 1.0));
+        }
+    }
+
+    fn resize_face_attrs(&mut self) {
+        let size = self.faces.len();
+        if let Some(ref mut normals) = self.face_normals {
+            normals.resize(size, Vec3::ZERO);
+        }
+        if let Some(ref mut colors) = self.face_colors {
+            colors.resize(size, Vec4::new(0.8, 0.8, 0.8, 1.0));
+        }
+    }
+
     /// Create a new empty SoA kernel
     #[inline]
     pub fn new() -> Self {
@@ -95,6 +134,10 @@ impl SoAKernel {
             edge_colors: None,
             face_normals: None,
             face_colors: None,
+            vertex_props: PropertyStore::default(),
+            halfedge_props: PropertyStore::default(),
+            edge_props: PropertyStore::default(),
+            face_props: PropertyStore::default(),
             vertex_deleted: Vec::new(),
             halfedge_deleted: Vec::new(),
             edge_deleted: Vec::new(),
@@ -124,6 +167,10 @@ impl SoAKernel {
         self.edge_colors = None;
         self.face_normals = None;
         self.face_colors = None;
+        self.vertex_props.clear();
+        self.halfedge_props.clear();
+        self.edge_props.clear();
+        self.face_props.clear();
         self.vertex_deleted.clear();
         self.halfedge_deleted.clear();
         self.edge_deleted.clear();
@@ -153,6 +200,7 @@ impl SoAKernel {
         if let Some(ref mut texcoords) = self.vertex_texcoords {
             texcoords.push(Vec2::ZERO);
         }
+        self.vertex_props.resize_all(self.x.len());
 
         VertexHandle::new(idx)
     }
@@ -328,6 +376,10 @@ impl SoAKernel {
         self.next_set.push(false);
         self.halfedge_deleted.push(false);
         self.halfedge_deleted.push(false);
+        self.resize_edge_attrs();
+        self.resize_halfedge_attrs();
+        self.halfedge_props.resize_all(self.halfedges.len());
+        self.edge_props.resize_all(self.edges.len());
 
         self.insert_edge_lookup(bucket_idx, other_vertex, he0_handle);
 
@@ -353,7 +405,8 @@ impl SoAKernel {
     #[inline]
     pub fn edge_exists(&self, v0: u32, v1: u32) -> bool {
         let (bucket_idx, other_vertex) = Self::edge_lookup_key(v0, v1);
-        self.edge_lookup_halfedge(bucket_idx, other_vertex).is_some()
+        self.edge_lookup_halfedge(bucket_idx, other_vertex)
+            .is_some()
     }
 
     /// Get edge count
@@ -394,7 +447,155 @@ impl SoAKernel {
         let idx = self.faces.len() as u32;
         self.faces.push(Face::new(halfedge_handle));
         self.face_deleted.push(false);
+        self.resize_face_attrs();
+        self.face_props.resize_all(self.faces.len());
         FaceHandle::new(idx)
+    }
+
+    pub fn add_vertex_property<T: PropValue>(&mut self, name: &str) -> VPropHandle<T> {
+        self.vertex_props.add(name, self.n_vertices())
+    }
+
+    pub fn add_halfedge_property<T: PropValue>(&mut self, name: &str) -> HPropHandle<T> {
+        self.halfedge_props.add(name, self.n_halfedges())
+    }
+
+    pub fn add_edge_property<T: PropValue>(&mut self, name: &str) -> EPropHandle<T> {
+        self.edge_props.add(name, self.n_edges())
+    }
+
+    pub fn add_face_property<T: PropValue>(&mut self, name: &str) -> FPropHandle<T> {
+        self.face_props.add(name, self.n_faces())
+    }
+
+    pub fn vertex_property<T: PropValue>(
+        &self,
+        handle: VPropHandle<T>,
+        vh: VertexHandle,
+    ) -> Option<T> {
+        self.vertex_props.get(handle, vh.idx_usize())
+    }
+
+    pub fn halfedge_property<T: PropValue>(
+        &self,
+        handle: HPropHandle<T>,
+        heh: HalfedgeHandle,
+    ) -> Option<T> {
+        self.halfedge_props.get(handle, heh.idx_usize())
+    }
+
+    pub fn edge_property<T: PropValue>(&self, handle: EPropHandle<T>, eh: EdgeHandle) -> Option<T> {
+        self.edge_props.get(handle, eh.idx_usize())
+    }
+
+    pub fn face_property<T: PropValue>(&self, handle: FPropHandle<T>, fh: FaceHandle) -> Option<T> {
+        self.face_props.get(handle, fh.idx_usize())
+    }
+
+    pub fn set_vertex_property<T: PropValue>(
+        &mut self,
+        handle: VPropHandle<T>,
+        vh: VertexHandle,
+        value: T,
+    ) -> bool {
+        self.vertex_props.set(handle, vh.idx_usize(), value)
+    }
+
+    pub fn set_halfedge_property<T: PropValue>(
+        &mut self,
+        handle: HPropHandle<T>,
+        heh: HalfedgeHandle,
+        value: T,
+    ) -> bool {
+        self.halfedge_props.set(handle, heh.idx_usize(), value)
+    }
+
+    pub fn set_edge_property<T: PropValue>(
+        &mut self,
+        handle: EPropHandle<T>,
+        eh: EdgeHandle,
+        value: T,
+    ) -> bool {
+        self.edge_props.set(handle, eh.idx_usize(), value)
+    }
+
+    pub fn set_face_property<T: PropValue>(
+        &mut self,
+        handle: FPropHandle<T>,
+        fh: FaceHandle,
+        value: T,
+    ) -> bool {
+        self.face_props.set(handle, fh.idx_usize(), value)
+    }
+
+    pub fn has_vertex_property<T>(&self, handle: VPropHandle<T>) -> bool {
+        self.vertex_props.contains(handle)
+    }
+
+    pub fn has_halfedge_property<T>(&self, handle: HPropHandle<T>) -> bool {
+        self.halfedge_props.contains(handle)
+    }
+
+    pub fn has_edge_property<T>(&self, handle: EPropHandle<T>) -> bool {
+        self.edge_props.contains(handle)
+    }
+
+    pub fn has_face_property<T>(&self, handle: FPropHandle<T>) -> bool {
+        self.face_props.contains(handle)
+    }
+
+    pub fn vertex_property_name<T>(&self, handle: VPropHandle<T>) -> Option<&str> {
+        self.vertex_props.name(handle)
+    }
+
+    pub fn halfedge_property_name<T>(&self, handle: HPropHandle<T>) -> Option<&str> {
+        self.halfedge_props.name(handle)
+    }
+
+    pub fn edge_property_name<T>(&self, handle: EPropHandle<T>) -> Option<&str> {
+        self.edge_props.name(handle)
+    }
+
+    pub fn face_property_name<T>(&self, handle: FPropHandle<T>) -> Option<&str> {
+        self.face_props.name(handle)
+    }
+
+    pub(crate) fn interpolate_vertex_props_pair(
+        &mut self,
+        a: VertexHandle,
+        b: VertexHandle,
+        dst: VertexHandle,
+    ) {
+        self.vertex_props
+            .blend2_index(a.idx_usize(), b.idx_usize(), dst.idx_usize());
+    }
+
+    pub(crate) fn interpolate_vertex_props_triangle(
+        &mut self,
+        a: VertexHandle,
+        b: VertexHandle,
+        c: VertexHandle,
+        dst: VertexHandle,
+    ) {
+        self.vertex_props.blend3_index(
+            a.idx_usize(),
+            b.idx_usize(),
+            c.idx_usize(),
+            dst.idx_usize(),
+        );
+    }
+
+    pub(crate) fn merge_vertex_props(&mut self, removed: VertexHandle, kept: VertexHandle) {
+        self.vertex_props
+            .blend2_index(removed.idx_usize(), kept.idx_usize(), kept.idx_usize());
+    }
+
+    pub(crate) fn copy_edge_props(&mut self, from: EdgeHandle, to: EdgeHandle) {
+        self.edge_props.copy_index(from.idx_usize(), to.idx_usize());
+    }
+
+    pub(crate) fn copy_face_props(&mut self, from: FaceHandle, to: FaceHandle) {
+        self.face_props.copy_index(from.idx_usize(), to.idx_usize());
     }
 
     /// Get face count (includes deleted faces)
@@ -489,6 +690,63 @@ impl SoAKernel {
             return None;
         }
         self.halfedge(heh).and_then(|he| he.face_handle)
+    }
+
+    #[inline]
+    pub fn triangle_face_vertex_indices_and_area_normal(
+        &self,
+        fh: FaceHandle,
+    ) -> Option<([usize; 3], Vec3)> {
+        if self.is_face_deleted(fh) {
+            return None;
+        }
+
+        let he0 = self.face_halfedge_handle(fh)?;
+        let he1 = self.next_halfedge_handle(he0)?;
+        if he1 == he0 {
+            return None;
+        }
+
+        let he2 = self.next_halfedge_handle(he1)?;
+        if he2 == he1 || he2 == he0 {
+            return None;
+        }
+
+        if self.next_halfedge_handle(he2)? != he0 {
+            return None;
+        }
+
+        let v0 = self.to_vertex_handle(he0);
+        let v1 = self.to_vertex_handle(he1);
+        let v2 = self.to_vertex_handle(he2);
+        if !v0.is_valid()
+            || !v1.is_valid()
+            || !v2.is_valid()
+            || self.is_vertex_deleted(v0)
+            || self.is_vertex_deleted(v1)
+            || self.is_vertex_deleted(v2)
+        {
+            return None;
+        }
+
+        let i0 = v0.idx_usize();
+        let i1 = v1.idx_usize();
+        let i2 = v2.idx_usize();
+        if i0 >= self.x.len() || i1 >= self.x.len() || i2 >= self.x.len() {
+            return None;
+        }
+
+        let ux = self.x[i1] - self.x[i0];
+        let uy = self.y[i1] - self.y[i0];
+        let uz = self.z[i1] - self.z[i0];
+        let vx = self.x[i2] - self.x[i0];
+        let vy = self.y[i2] - self.y[i0];
+        let vz = self.z[i2] - self.z[i0];
+
+        Some((
+            [i0, i1, i2],
+            Vec3::new(uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx),
+        ))
     }
 
     /// Set the face handle for a halfedge
@@ -587,6 +845,22 @@ impl SoAKernel {
     }
 
     #[inline]
+    pub(crate) fn remap_edge_lookup(
+        &mut self,
+        old_v0: VertexHandle,
+        old_v1: VertexHandle,
+        new_v0: VertexHandle,
+        new_v1: VertexHandle,
+        lookup_halfedge: HalfedgeHandle,
+    ) {
+        let (old_bucket, old_other) = Self::edge_lookup_key(old_v0.idx(), old_v1.idx());
+        self.remove_edge_lookup(old_bucket, old_other);
+
+        let (new_bucket, new_other) = Self::edge_lookup_key(new_v0.idx(), new_v1.idx());
+        self.insert_edge_lookup(new_bucket, new_other, lookup_halfedge);
+    }
+
+    #[inline]
     pub fn is_vertex_deleted(&self, vh: VertexHandle) -> bool {
         self.vertex_deleted
             .get(vh.idx_usize())
@@ -604,12 +878,18 @@ impl SoAKernel {
 
     #[inline]
     pub fn is_edge_deleted(&self, eh: EdgeHandle) -> bool {
-        self.edge_deleted.get(eh.idx_usize()).copied().unwrap_or(true)
+        self.edge_deleted
+            .get(eh.idx_usize())
+            .copied()
+            .unwrap_or(true)
     }
 
     #[inline]
     pub fn is_face_deleted(&self, fh: FaceHandle) -> bool {
-        self.face_deleted.get(fh.idx_usize()).copied().unwrap_or(true)
+        self.face_deleted
+            .get(fh.idx_usize())
+            .copied()
+            .unwrap_or(true)
     }
 
     #[inline]
@@ -702,8 +982,14 @@ impl SoAKernel {
             // Get the two halfedges before marking as invalid
             let he0 = self.edges[idx].halfedges[0];
             let he1 = self.edges[idx].halfedges[1];
-            let to0 = self.halfedges.get(he0.idx_usize()).map(|he| he.vertex_handle.idx());
-            let to1 = self.halfedges.get(he1.idx_usize()).map(|he| he.vertex_handle.idx());
+            let to0 = self
+                .halfedges
+                .get(he0.idx_usize())
+                .map(|he| he.vertex_handle.idx());
+            let to1 = self
+                .halfedges
+                .get(he1.idx_usize())
+                .map(|he| he.vertex_handle.idx());
 
             if let (Some(v0), Some(v1)) = (to0, to1) {
                 let (bucket_idx, other_vertex) = Self::edge_lookup_key(v0, v1);
@@ -1059,6 +1345,11 @@ impl SoAKernel {
         }
     }
 
+    #[inline]
+    pub fn vertex_normals_mut_ptr(&mut self) -> Option<*mut Vec3> {
+        self.vertex_normals.as_mut().map(Vec::as_mut_ptr)
+    }
+
     /// Request vertex colors
     pub fn request_vertex_colors(&mut self) {
         if self.vertex_colors.is_none() {
@@ -1266,6 +1557,11 @@ impl SoAKernel {
                 *normal = n;
             }
         }
+    }
+
+    #[inline]
+    pub fn face_normals_mut_ptr(&mut self) -> Option<*mut Vec3> {
+        self.face_normals.as_mut().map(Vec::as_mut_ptr)
     }
 
     /// Request face colors

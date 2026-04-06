@@ -98,9 +98,8 @@ fn read_off_impl(path: &Path, mode: OffReadMode) -> io::Result<RustMesh> {
     let reader = BufReader::new(file);
     let mut lines = reader.lines();
 
-    let header = next_data_line(&mut lines)?.ok_or_else(|| {
-        io::Error::new(io::ErrorKind::UnexpectedEof, "missing OFF header")
-    })?;
+    let header = next_data_line(&mut lines)?
+        .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "missing OFF header"))?;
     if header != "OFF" {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -108,9 +107,8 @@ fn read_off_impl(path: &Path, mode: OffReadMode) -> io::Result<RustMesh> {
         ));
     }
 
-    let counts = next_data_line(&mut lines)?.ok_or_else(|| {
-        io::Error::new(io::ErrorKind::UnexpectedEof, "missing OFF counts line")
-    })?;
+    let counts = next_data_line(&mut lines)?
+        .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "missing OFF counts line"))?;
     let count_parts: Vec<_> = counts.split_whitespace().collect();
     if count_parts.len() < 2 {
         return Err(io::Error::new(

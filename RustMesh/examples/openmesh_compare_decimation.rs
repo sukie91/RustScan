@@ -1,10 +1,10 @@
 mod openmesh_compare_common;
 
 use openmesh_compare_common::{
-    cleanup_paths, load_mesh, measure, mesh_digest, off_digest, openmesh_tool, print_duration_compare,
-    print_header, print_mesh_digest, write_temp_off,
+    cleanup_paths, load_mesh, measure, mesh_digest, off_digest, openmesh_tool,
+    print_duration_compare, print_header, print_mesh_digest, write_temp_off,
 };
-use rustmesh::{Decimater, generate_sphere, read_off, write_off};
+use rustmesh::{generate_sphere, read_off, write_off, Decimater};
 use std::collections::HashMap;
 
 fn raw_face_diagnostics(mesh: &rustmesh::RustMesh) -> (usize, usize, usize) {
@@ -73,9 +73,7 @@ fn main() {
         println!("RustMesh collapsed edges: {collapsed}");
         println!(
             "RustMesh collapse mix: boundary={}, interior={}, estimated_faces_removed={}",
-            boundary_collapses,
-            interior_collapses,
-            faces_removed_estimate
+            boundary_collapses, interior_collapses, faces_removed_estimate
         );
         mesh_digest(&mesh)
     });
@@ -117,5 +115,9 @@ fn main() {
     print_mesh_digest("OpenMesh output", openmesh_digest);
 
     print_duration_compare("Decimation pipeline", rust_time, Some(openmesh_time));
-    cleanup_paths(&[input_path.as_path(), rust_output.as_path(), openmesh_output.as_path()]);
+    cleanup_paths(&[
+        input_path.as_path(),
+        rust_output.as_path(),
+        openmesh_output.as_path(),
+    ]);
 }

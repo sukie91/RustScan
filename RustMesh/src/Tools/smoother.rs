@@ -650,7 +650,8 @@ mod tests {
         let mut mesh = generate_cube();
 
         // Store original edge positions
-        let original_positions: Vec<_> = mesh.vertices()
+        let original_positions: Vec<_> = mesh
+            .vertices()
             .map(|vh| mesh.point(vh).unwrap_or(Vec3::ZERO))
             .collect();
 
@@ -666,7 +667,8 @@ mod tests {
         let _ = adaptive_smooth(&mut mesh, config);
 
         // Cube corners (high curvature) should be well preserved
-        let new_positions: Vec<_> = mesh.vertices()
+        let new_positions: Vec<_> = mesh
+            .vertices()
             .map(|vh| mesh.point(vh).unwrap_or(Vec3::ZERO))
             .collect();
 
@@ -674,7 +676,11 @@ mod tests {
         for (orig, new) in original_positions.iter().zip(new_positions.iter()) {
             let displacement = (*new - *orig).length();
             // Adaptive smooth with fixed boundary should preserve corners
-            assert!(displacement < 0.1, "Vertex moved too much: {}", displacement);
+            assert!(
+                displacement < 0.1,
+                "Vertex moved too much: {}",
+                displacement
+            );
         }
     }
 }

@@ -419,7 +419,10 @@ impl<'a> RustMesh {
     /// - The opposite halfedge
     /// - Halfedges sharing the same face (prev/next)
     /// - Other outgoing halfedges from the same vertex
-    pub fn halfedge_halfedges(&'a self, heh: HalfedgeHandle) -> Option<HalfedgeHalfedgeCirculator<'a>> {
+    pub fn halfedge_halfedges(
+        &'a self,
+        heh: HalfedgeHandle,
+    ) -> Option<HalfedgeHalfedgeCirculator<'a>> {
         let mut adjacent = Vec::new();
 
         // Add opposite halfedge
@@ -793,7 +796,9 @@ mod tests {
         let mesh = generate_tetrahedron();
         // Get a valid halfedge from a vertex
         let v0 = VertexHandle::new(0);
-        let heh = mesh.halfedge_handle(v0).expect("Vertex should have halfedge");
+        let heh = mesh
+            .halfedge_handle(v0)
+            .expect("Vertex should have halfedge");
 
         let adjacent: Vec<_> = match mesh.halfedge_halfedges(heh) {
             Some(c) => c.collect(),
@@ -814,7 +819,9 @@ mod tests {
         let mesh = generate_tetrahedron();
         // Get a valid edge from a vertex's halfedge
         let v0 = VertexHandle::new(0);
-        let heh = mesh.halfedge_handle(v0).expect("Vertex should have halfedge");
+        let heh = mesh
+            .halfedge_handle(v0)
+            .expect("Vertex should have halfedge");
         let eh = mesh.edge_handle(heh);
 
         let adjacent: Vec<_> = match mesh.edge_edges(eh) {

@@ -332,7 +332,11 @@ fn find_boundary_loops(mesh: &RustMesh) -> Vec<Vec<HalfedgeHandle>> {
 }
 
 /// Find the next boundary halfedge after the current one, going around the to_vertex
-fn find_next_boundary_halfedge(mesh: &RustMesh, current_heh: HalfedgeHandle, around_vertex: VertexHandle) -> Option<HalfedgeHandle> {
+fn find_next_boundary_halfedge(
+    mesh: &RustMesh,
+    current_heh: HalfedgeHandle,
+    around_vertex: VertexHandle,
+) -> Option<HalfedgeHandle> {
     // The current boundary halfedge ends at around_vertex
     // We need to find the next boundary halfedge that starts from around_vertex
 
@@ -696,7 +700,10 @@ pub fn dual_mesh(mesh: &RustMesh) -> DualResult<RustMesh> {
 /// When using `BoundaryDualStrategy::CloseFirst`:
 /// - The mesh is first "closed" by treating boundary loops as virtual faces
 /// - Then standard dualization is applied
-pub fn dualize_with_boundary(mesh: &mut RustMesh, strategy: BoundaryDualStrategy) -> DualResult<()> {
+pub fn dualize_with_boundary(
+    mesh: &mut RustMesh,
+    strategy: BoundaryDualStrategy,
+) -> DualResult<()> {
     if mesh.n_faces() == 0 || mesh.n_vertices() == 0 {
         return Err(DualError::EmptyMesh);
     }
@@ -709,7 +716,10 @@ pub fn dualize_with_boundary(mesh: &mut RustMesh, strategy: BoundaryDualStrategy
 }
 
 /// Create a dual mesh with boundary handling (returns new mesh)
-pub fn dual_mesh_with_boundary(mesh: &RustMesh, strategy: BoundaryDualStrategy) -> DualResult<RustMesh> {
+pub fn dual_mesh_with_boundary(
+    mesh: &RustMesh,
+    strategy: BoundaryDualStrategy,
+) -> DualResult<RustMesh> {
     if mesh.n_faces() == 0 || mesh.n_vertices() == 0 {
         return Err(DualError::EmptyMesh);
     }
@@ -751,7 +761,8 @@ fn dualize_virtual_vertex(mesh: &mut RustMesh) -> DualResult<()> {
     let mut dual_mesh_new = RustMesh::new();
 
     // Add dual vertices from interior faces
-    let mut dual_vertex_handles: Vec<VertexHandle> = Vec::with_capacity(n_faces + boundary_loops.len());
+    let mut dual_vertex_handles: Vec<VertexHandle> =
+        Vec::with_capacity(n_faces + boundary_loops.len());
     for centroid in &face_centroids {
         let vh = dual_mesh_new.add_vertex(*centroid);
         dual_vertex_handles.push(vh);
@@ -842,7 +853,8 @@ fn dual_mesh_virtual_vertex(mesh: &RustMesh) -> DualResult<RustMesh> {
 
     let mut dual = RustMesh::new();
 
-    let mut dual_vertex_handles: Vec<VertexHandle> = Vec::with_capacity(n_faces + boundary_loops.len());
+    let mut dual_vertex_handles: Vec<VertexHandle> =
+        Vec::with_capacity(n_faces + boundary_loops.len());
     for centroid in &face_centroids {
         dual_vertex_handles.push(dual.add_vertex(*centroid));
     }
@@ -1293,13 +1305,20 @@ mod tests {
     #[test]
     fn test_dualize_with_boundary_virtual_vertex() {
         let mesh = create_open_mesh();
-        println!("Original mesh: V={}, F={}", mesh.n_vertices(), mesh.n_faces());
+        println!(
+            "Original mesh: V={}, F={}",
+            mesh.n_vertices(),
+            mesh.n_faces()
+        );
 
         // Check that standard dualize fails for open mesh
         let mut mesh_copy = mesh.clone();
         let result = dualize(&mut mesh_copy);
         println!("Standard dualize on open mesh: {:?}", result);
-        assert!(result.is_err(), "Standard dualize should fail for open mesh");
+        assert!(
+            result.is_err(),
+            "Standard dualize should fail for open mesh"
+        );
 
         // Apply dualize_with_boundary
         let mut mesh_for_dual = mesh.clone();
@@ -1307,11 +1326,18 @@ mod tests {
         println!("dualize_with_boundary result: {:?}", result);
         assert!(result.is_ok(), "dualize_with_boundary should succeed");
 
-        println!("Dual mesh: V={}, F={}", mesh_for_dual.n_vertices(), mesh_for_dual.n_faces());
+        println!(
+            "Dual mesh: V={}, F={}",
+            mesh_for_dual.n_vertices(),
+            mesh_for_dual.n_faces()
+        );
 
         // The dual should have vertices from faces + boundary loops
         // For a single triangle: 1 face + 1 boundary loop = 2 dual vertices
-        assert!(mesh_for_dual.n_vertices() >= 1, "Dual should have at least 1 vertex");
+        assert!(
+            mesh_for_dual.n_vertices() >= 1,
+            "Dual should have at least 1 vertex"
+        );
 
         // Note: For a single triangle, dual faces may be 0 because
         // each boundary vertex only connects to 1 face and 1 boundary loop = 2 vertices
@@ -1322,30 +1348,49 @@ mod tests {
     fn test_dualize_with_boundary_interior_vertices() {
         // Use a mesh with interior vertices to test proper dual face creation
         let mesh = create_open_mesh_with_interior();
-        println!("Original mesh: V={}, F={}", mesh.n_vertices(), mesh.n_faces());
+        println!(
+            "Original mesh: V={}, F={}",
+            mesh.n_vertices(),
+            mesh.n_faces()
+        );
 
         let mut mesh_for_dual = mesh.clone();
         let result = dualize_with_boundary(&mut mesh_for_dual, BoundaryDualStrategy::VirtualVertex);
         assert!(result.is_ok(), "dualize_with_boundary should succeed");
 
-        println!("Dual mesh: V={}, F={}", mesh_for_dual.n_vertices(), mesh_for_dual.n_faces());
+        println!(
+            "Dual mesh: V={}, F={}",
+            mesh_for_dual.n_vertices(),
+            mesh_for_dual.n_faces()
+        );
 
         // Interior vertices (v1, v2) should create dual faces
         // Each interior vertex is incident to 2 faces
-        assert!(mesh_for_dual.n_faces() > 0, "Mesh with interior vertices should produce dual faces");
+        assert!(
+            mesh_for_dual.n_faces() > 0,
+            "Mesh with interior vertices should produce dual faces"
+        );
     }
 
     #[test]
     fn test_dualize_with_boundary_skip_boundary() {
         let mesh = create_open_mesh();
-        println!("Original mesh: V={}, F={}", mesh.n_vertices(), mesh.n_faces());
+        println!(
+            "Original mesh: V={}, F={}",
+            mesh.n_vertices(),
+            mesh.n_faces()
+        );
 
         let mut mesh_for_dual = mesh.clone();
         let result = dualize_with_boundary(&mut mesh_for_dual, BoundaryDualStrategy::SkipBoundary);
         println!("dualize_skip_boundary result: {:?}", result);
 
         if result.is_ok() {
-            println!("Dual mesh (skip boundary): V={}, F={}", mesh_for_dual.n_vertices(), mesh_for_dual.n_faces());
+            println!(
+                "Dual mesh (skip boundary): V={}, F={}",
+                mesh_for_dual.n_vertices(),
+                mesh_for_dual.n_faces()
+            );
 
             // With skip boundary, we only create dual faces for interior vertices
             // A single triangle has no interior vertices
@@ -1356,13 +1401,21 @@ mod tests {
     #[test]
     fn test_dual_mesh_with_boundary_returns_new_mesh() {
         let mesh = create_open_mesh_with_interior();
-        println!("Original mesh: V={}, F={}", mesh.n_vertices(), mesh.n_faces());
+        println!(
+            "Original mesh: V={}, F={}",
+            mesh.n_vertices(),
+            mesh.n_faces()
+        );
 
         let dual = dual_mesh_with_boundary(&mesh, BoundaryDualStrategy::VirtualVertex);
         assert!(dual.is_ok(), "dual_mesh_with_boundary should succeed");
 
         let dual_mesh = dual.unwrap();
-        println!("Dual mesh created: V={}, F={}", dual_mesh.n_vertices(), dual_mesh.n_faces());
+        println!(
+            "Dual mesh created: V={}, F={}",
+            dual_mesh.n_vertices(),
+            dual_mesh.n_faces()
+        );
 
         // Original mesh should be unchanged (4 vertices, 2 faces)
         assert_eq!(mesh.n_vertices(), 4);
@@ -1372,13 +1425,20 @@ mod tests {
         assert!(dual_mesh.n_vertices() > 0);
 
         // Interior vertices should produce dual faces
-        assert!(dual_mesh.n_faces() > 0, "Mesh with interior vertices should produce dual faces");
+        assert!(
+            dual_mesh.n_faces() > 0,
+            "Mesh with interior vertices should produce dual faces"
+        );
     }
 
     #[test]
     fn test_dualize_multi_boundary_mesh() {
         let mesh = create_multi_boundary_mesh();
-        println!("Multi-boundary mesh: V={}, F={}", mesh.n_vertices(), mesh.n_faces());
+        println!(
+            "Multi-boundary mesh: V={}, F={}",
+            mesh.n_vertices(),
+            mesh.n_faces()
+        );
 
         let loops = find_boundary_loops(&mesh);
         println!("Found {} boundary loops", loops.len());
@@ -1387,11 +1447,20 @@ mod tests {
         let result = dualize_with_boundary(&mut mesh_for_dual, BoundaryDualStrategy::VirtualVertex);
 
         if result.is_ok() {
-            println!("Dual mesh: V={}, F={}", mesh_for_dual.n_vertices(), mesh_for_dual.n_faces());
+            println!(
+                "Dual mesh: V={}, F={}",
+                mesh_for_dual.n_vertices(),
+                mesh_for_dual.n_faces()
+            );
 
             // Should have dual vertices from faces + boundary loops
             let expected_v = mesh.n_faces() + loops.len();
-            println!("Expected dual vertices: {} (faces: {} + loops: {})", expected_v, mesh.n_faces(), loops.len());
+            println!(
+                "Expected dual vertices: {} (faces: {} + loops: {})",
+                expected_v,
+                mesh.n_faces(),
+                loops.len()
+            );
         }
     }
 
@@ -1414,7 +1483,11 @@ mod tests {
     fn test_closed_mesh_dual_with_boundary_strategy() {
         // Test that closed meshes also work with boundary strategies
         let mesh = generate_tetrahedron();
-        println!("Closed mesh (tetrahedron): V={}, F={}", mesh.n_vertices(), mesh.n_faces());
+        println!(
+            "Closed mesh (tetrahedron): V={}, F={}",
+            mesh.n_vertices(),
+            mesh.n_faces()
+        );
 
         let loops = find_boundary_loops(&mesh);
         println!("Closed mesh boundary loops: {}", loops.len()); // Should be 0
@@ -1424,7 +1497,11 @@ mod tests {
 
         assert!(result.is_ok(), "Closed mesh should dualize successfully");
 
-        println!("Dual of closed mesh: V={}, F={}", mesh_for_dual.n_vertices(), mesh_for_dual.n_faces());
+        println!(
+            "Dual of closed mesh: V={}, F={}",
+            mesh_for_dual.n_vertices(),
+            mesh_for_dual.n_faces()
+        );
 
         // For a closed mesh, dual_with_boundary should produce same result as standard dual
         // V* = F, F* = V
@@ -1451,7 +1528,10 @@ mod tests {
             }
         }
 
-        println!("Halfedges: {} boundary, {} interior", boundary_count, interior_count);
+        println!(
+            "Halfedges: {} boundary, {} interior",
+            boundary_count, interior_count
+        );
 
         // An open mesh should have some boundary halfedges
         assert!(boundary_count > 0);

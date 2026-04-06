@@ -5,8 +5,8 @@ use openmesh_compare_common::{
     print_mesh_digest, write_temp_off,
 };
 use rustmesh::{
-    read_off, read_off_openmesh_parity, Decimater, DecimationTraceStep, FaceHandle, VertexHandle,
-    generate_sphere,
+    generate_sphere, read_off, read_off_openmesh_parity, Decimater, DecimationTraceStep,
+    FaceHandle, VertexHandle,
 };
 use std::fs;
 use std::io;
@@ -115,13 +115,20 @@ fn main() {
     }
 
     let rust_boundary_prefix = rust_trace.steps.iter().filter(|step| step.boundary).count();
-    let openmesh_boundary_prefix = openmesh_trace.steps.iter().filter(|step| step.boundary).count();
+    let openmesh_boundary_prefix = openmesh_trace
+        .steps
+        .iter()
+        .filter(|step| step.boundary)
+        .count();
     println!(
         "Boundary collapses in first {} traced steps: RustMesh={}, OpenMesh={}",
         trace_limit, rust_boundary_prefix, openmesh_boundary_prefix
     );
     if let Some(step) = first_boundary_mix_gap(&rust_trace.steps, &openmesh_trace.steps) {
-        println!("First cumulative boundary/interior mix gap within trace: step {}", step);
+        println!(
+            "First cumulative boundary/interior mix gap within trace: step {}",
+            step
+        );
     }
 
     if let Some((lhs, rhs)) = rust_trace
@@ -139,7 +146,10 @@ fn main() {
     }
 
     println!("\nStep-by-step trace:");
-    for idx in 0..trace_limit.min(rust_trace.steps.len()).min(openmesh_trace.steps.len()) {
+    for idx in 0..trace_limit
+        .min(rust_trace.steps.len())
+        .min(openmesh_trace.steps.len())
+    {
         let rust_step = &rust_trace.steps[idx];
         let openmesh_step = &openmesh_trace.steps[idx];
         println!(
@@ -159,10 +169,7 @@ fn main() {
 }
 
 fn parse_rust_import_mode() -> RustImportMode {
-    match std::env::var("RUSTMESH_TRACE_IMPORT_MODE")
-        .ok()
-        .as_deref()
-    {
+    match std::env::var("RUSTMESH_TRACE_IMPORT_MODE").ok().as_deref() {
         Some("standard") => RustImportMode::Standard,
         Some("openmesh_parity") => RustImportMode::OpenMeshParity,
         _ => RustImportMode::OpenMeshParity,
@@ -723,9 +730,7 @@ fn parse_openmesh_trace(stdout: &str) -> io::Result<TraceRun> {
                     "boundary" => step.boundary = value == "1",
                     "faces_removed" => step.faces_removed = value.parse().unwrap_or(0),
                     "priority" => step.priority = value.parse().unwrap_or(0.0),
-                    "active_faces_before" => {
-                        step.active_faces_before = value.parse().unwrap_or(0)
-                    }
+                    "active_faces_before" => step.active_faces_before = value.parse().unwrap_or(0),
                     "active_faces_after" => step.active_faces_after = value.parse().unwrap_or(0),
                     _ => {}
                 }

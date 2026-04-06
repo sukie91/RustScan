@@ -290,12 +290,24 @@ pub fn bounding_sphere(points: &[Point]) -> (Point, f32) {
     let mut max_z = points[0];
 
     for &p in points {
-        if p.x < min_x.x { min_x = p; }
-        if p.x > max_x.x { max_x = p; }
-        if p.y < min_y.y { min_y = p; }
-        if p.y > max_y.y { max_y = p; }
-        if p.z < min_z.z { min_z = p; }
-        if p.z > max_z.z { max_z = p; }
+        if p.x < min_x.x {
+            min_x = p;
+        }
+        if p.x > max_x.x {
+            max_x = p;
+        }
+        if p.y < min_y.y {
+            min_y = p;
+        }
+        if p.y > max_y.y {
+            max_y = p;
+        }
+        if p.z < min_z.z {
+            min_z = p;
+        }
+        if p.z > max_z.z {
+            max_z = p;
+        }
     }
 
     // Step 2: Find the pair with the largest distance
@@ -729,7 +741,10 @@ mod tests {
 
         let k = gaussian_curvature(center, &neighbors);
         println!("Gaussian curvature for flat region: {}", k);
-        assert!(k.abs() < 0.1, "Flat region should have near-zero Gaussian curvature");
+        assert!(
+            k.abs() < 0.1,
+            "Flat region should have near-zero Gaussian curvature"
+        );
     }
 
     #[test]
@@ -745,7 +760,10 @@ mod tests {
 
         let h = mean_curvature(center, &neighbors);
         println!("Mean curvature for flat region: {}", h);
-        assert!(h.abs() < 0.1, "Flat region should have near-zero mean curvature");
+        assert!(
+            h.abs() < 0.1,
+            "Flat region should have near-zero mean curvature"
+        );
     }
 
     #[test]

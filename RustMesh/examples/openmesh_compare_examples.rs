@@ -4,7 +4,9 @@ use openmesh_compare_common::{
     active_faces, active_vertices, bench_ns_per_iter, cleanup_paths, load_mesh, measure,
     mesh_digest, print_header, print_mesh_digest, write_temp_off,
 };
-use rustmesh::{generate_cube, generate_sphere, read_obj, write_off, FaceHandle, RustMesh, VertexHandle};
+use rustmesh::{
+    generate_cube, generate_sphere, read_obj, write_off, FaceHandle, RustMesh, VertexHandle,
+};
 use std::path::Path;
 
 fn build_tutorial08_cube() -> RustMesh {
@@ -158,7 +160,9 @@ fn main() {
         }
         mesh
     });
-    println!("OpenMesh tutorial expectation: keep only face [7, 6, 5, 4], so active V=4 and active F=1.");
+    println!(
+        "OpenMesh tutorial expectation: keep only face [7, 6, 5, 4], so active V=4 and active F=1."
+    );
     println!(
         "RustMesh before GC: active_vertices={}, active_faces={}",
         active_vertices(&delete_mesh),

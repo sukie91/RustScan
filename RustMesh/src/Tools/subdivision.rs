@@ -1813,7 +1813,8 @@ fn compute_butterfly_position(
                     if neighbor != v0 && neighbor != v1 {
                         if let Some(p) = mesh.point(neighbor) {
                             // Check if this vertex is adjacent to v0 or v1
-                            let is_adjacent_to_v0 = mesh.vertex_vertices(v0)
+                            let is_adjacent_to_v0 = mesh
+                                .vertex_vertices(v0)
                                 .map(|mut vv_iter| vv_iter.any(|v| v == neighbor))
                                 .unwrap_or(false);
                             if !is_adjacent_to_v0 {
@@ -1839,7 +1840,8 @@ fn compute_butterfly_position(
                 for neighbor in vv {
                     if neighbor != v0 && neighbor != v1 {
                         if let Some(p) = mesh.point(neighbor) {
-                            let is_adjacent_to_v1 = mesh.vertex_vertices(v1)
+                            let is_adjacent_to_v1 = mesh
+                                .vertex_vertices(v1)
                                 .map(|mut vv_iter| vv_iter.any(|v| v == neighbor))
                                 .unwrap_or(false);
                             if !is_adjacent_to_v1 {
@@ -1879,7 +1881,11 @@ fn compute_butterfly_position(
 }
 
 /// Find the halfedge from v0 to v1
-fn find_halfedge_between(mesh: &RustMesh, v0: VertexHandle, v1: VertexHandle) -> Option<HalfedgeHandle> {
+fn find_halfedge_between(
+    mesh: &RustMesh,
+    v0: VertexHandle,
+    v1: VertexHandle,
+) -> Option<HalfedgeHandle> {
     if let Some(vv) = mesh.vertex_halfedges(v0) {
         for he in vv {
             let to = mesh.to_vertex_handle(he);
@@ -2944,11 +2950,7 @@ mod tests {
         // Midpoint: 1 quad -> 4 quads
         // Vertices: 4 original + 4 edge midpoints + 1 center = 9
         assert_eq!(stats.original_faces, 1);
-        assert_eq!(
-            mesh.n_active_faces(),
-            4,
-            "One quad should become 4 quads"
-        );
+        assert_eq!(mesh.n_active_faces(), 4, "One quad should become 4 quads");
         assert_eq!(mesh.n_vertices(), 9, "Should have 9 vertices (4 + 4 + 1)");
 
         println!("Midpoint quad stats: {}", stats);
@@ -2978,12 +2980,12 @@ mod tests {
         // Vertices: 8 original + 12 edge midpoints + 6 face centers = 26
         // (cube has 12 edges)
         assert_eq!(stats.original_faces, 6);
+        assert_eq!(mesh.n_active_faces(), 24, "6 quads should become 24 quads");
         assert_eq!(
-            mesh.n_active_faces(),
-            24,
-            "6 quads should become 24 quads"
+            mesh.n_vertices(),
+            26,
+            "Should have 26 vertices (8 + 12 + 6)"
         );
-        assert_eq!(mesh.n_vertices(), 26, "Should have 26 vertices (8 + 12 + 6)");
 
         println!("Midpoint cube stats: {}", stats);
     }

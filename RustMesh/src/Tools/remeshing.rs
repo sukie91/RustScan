@@ -358,10 +358,26 @@ fn should_flip_for_valence(
         return false;
     }
 
-    let opt0 = if boundary_vertices[v0.idx_usize()] { 4 } else { 6 };
-    let opt1 = if boundary_vertices[v1.idx_usize()] { 4 } else { 6 };
-    let opt2 = if boundary_vertices[v2.idx_usize()] { 4 } else { 6 };
-    let opt3 = if boundary_vertices[v3.idx_usize()] { 4 } else { 6 };
+    let opt0 = if boundary_vertices[v0.idx_usize()] {
+        4
+    } else {
+        6
+    };
+    let opt1 = if boundary_vertices[v1.idx_usize()] {
+        4
+    } else {
+        6
+    };
+    let opt2 = if boundary_vertices[v2.idx_usize()] {
+        4
+    } else {
+        6
+    };
+    let opt3 = if boundary_vertices[v3.idx_usize()] {
+        4
+    } else {
+        6
+    };
 
     // Current deviation
     let current_deviation = (val0 as i32 - opt0 as i32).abs()
@@ -552,7 +568,10 @@ mod tests {
             valences.push(vertex_valence(&mesh, vh));
         }
 
-        println!("Valence distribution: {:?}", valences.iter().sum::<usize>() / valences.len());
+        println!(
+            "Valence distribution: {:?}",
+            valences.iter().sum::<usize>() / valences.len()
+        );
 
         // Most vertices should have valence around 4-8
         let avg_valence: f32 = valences.iter().sum::<usize>() as f32 / valences.len() as f32;
@@ -562,11 +581,17 @@ mod tests {
     #[test]
     fn test_split_long_edges_splits_shared_interior_edge_into_four_triangles() {
         let mut mesh = make_two_triangle_patch(2.2, 1.0);
+        let original_stats = edge_length_statistics(&mesh);
 
         let split = split_long_edges(&mut mesh, 2.25);
 
         assert_eq!(split, 1);
+        assert!(original_stats.max_length > 2.25);
+        assert!(mesh.validate().is_ok());
+        assert_eq!(mesh.n_faces(), 4);
         assert_eq!(mesh.n_active_faces(), 4);
+        let final_stats = edge_length_statistics(&mesh);
+        assert!(final_stats.max_length <= 2.25 + 1e-5);
 
         for fh in mesh.faces() {
             let verts = mesh.face_vertices_vec(fh);
@@ -578,12 +603,37 @@ mod tests {
     }
 
     #[test]
+    fn test_isotropic_remesh_split_only_keeps_shared_split_path_valid() {
+        let mut mesh = make_two_triangle_patch(3.0, 1.0);
+
+        let config = RemeshingConfig {
+            target_edge_length: 1.5,
+            iterations: 1,
+            enable_split: true,
+            enable_collapse: false,
+            enable_flip: false,
+            enable_smooth: false,
+        };
+
+        let result = isotropic_remesh(&mut mesh, config);
+
+        assert_eq!(result.split_count, 3);
+        assert_eq!(result.collapse_count, 0);
+        assert_eq!(result.flip_count, 0);
+        assert!(mesh.validate().is_ok());
+        assert_eq!(mesh.n_faces(), mesh.n_active_faces());
+        assert!(result.final_stats.max_length <= 2.0 + 1e-5);
+    }
+
+    #[test]
     fn test_isotropic_remesh_sphere() {
         let mut mesh = generate_sphere(1.0, 8, 8);
 
         let original_stats = edge_length_statistics(&mesh);
-        println!("Original edge lengths: min={}, max={}, mean={}",
-            original_stats.min_length, original_stats.max_length, original_stats.mean_length);
+        println!(
+            "Original edge lengths: min={}, max={}, mean={}",
+            original_stats.min_length, original_stats.max_length, original_stats.mean_length
+        );
 
         let config = RemeshingConfig {
             target_edge_length: 0.3,
@@ -596,13 +646,23 @@ mod tests {
 
         let result = isotropic_remesh(&mut mesh, config);
 
-        println!("Remeshing result: split={}, collapse={}, flip={}",
-            result.split_count, result.collapse_count, result.flip_count);
-        println!("Final edge lengths: min={}, max={}, mean={}",
-            result.final_stats.min_length, result.final_stats.max_length, result.final_stats.mean_length);
+        println!(
+            "Remeshing result: split={}, collapse={}, flip={}",
+            result.split_count, result.collapse_count, result.flip_count
+        );
+        println!(
+            "Final edge lengths: min={}, max={}, mean={}",
+            result.final_stats.min_length,
+            result.final_stats.max_length,
+            result.final_stats.mean_length
+        );
 
         // Mesh should still have faces
         assert!(mesh.n_active_faces() > 0);
+        assert!(result.split_count + result.collapse_count + result.flip_count > 0);
+        assert!(mesh.validate().is_ok());
+        assert_eq!(mesh.n_faces(), mesh.n_active_faces());
+        assert!(result.final_stats.n_edges > 0);
     }
 
     #[test]

@@ -1,275 +1,180 @@
 # RustMesh vs OpenMesh Gap Analysis
 
-**Date:** 2026-04-06  
-**Branch:** `worktree-rm-opt`  
-**Goal:** Achieve full OpenMesh feature parity and surpass it in runtime performance.
+**Date:** 2026-04-06
+**Branch:** `worktree-rm-opt`
+**Goal:** Track the real remaining gaps versus OpenMesh without mixing completed work, outdated benchmark conclusions, and future planning.
+
+This document is diagnostic, not a task list. The authoritative execution backlog now lives in [`RustMesh-OpenMesh-Parity-Roadmap.md`](RustMesh-OpenMesh-Parity-Roadmap.md).
 
 ---
 
-## Benchmark Results (release mode, 2026-04-06)
+## Re-Verified Benchmark Results (release mode, 2026-04-06)
 
-Benchmarks run via `cargo run --release --example openmesh_compare_benchmark` and `openmesh_compare_vector_benchmark` after the Sprint 1 kernel update.
+Benchmarks referenced here were re-run from the current worktree during this doc refresh.
 
-| Test | RustMesh | OpenMesh | Ratio |
-|------|----------|----------|-------|
-| Build 1000 tetrahedra | 755 µs | 1.78 ms | **RustMesh 2.35× faster** ✅ |
-| Add 1000 triangles ×1000 | 99.7 ms | 115.9 ms | **RustMesh 1.16× faster** ✅ |
-| Triangle area ×2M | 16.7 ms | 126.0 ms | **RustMesh 7.5× faster** ✅ |
-| Vec3f arithmetic (add/dot/cross/norm) | ~0.7–3.1 ns | ~0.7–2.4 ns | **Near parity / benchmark noise** ✅ |
-| Vec4f_add_compare | ~14–15 ns | ~0.8 ns | **Still anomalous, but benchmark-scoped** ⚠️ |
+| Test | RustMesh | OpenMesh | Interpretation |
+|------|----------|----------|----------------|
+| Build 1000 tetrahedra | `755 us` | `1.78 ms` | RustMesh is ahead on the current harness |
+| Add 1000 triangles x 1000 | `99.7 ms` | `115.9 ms` | `SoAKernel` edge lookup hot path is no longer a live parity gap |
+| Triangle area x 2M | `16.7 ms` | `126.0 ms` | RustMesh is ahead on the current harness |
+| Vec3f arithmetic | `~0.7-3.1 ns` | `~0.7-2.4 ns` | Near parity / benchmark noise |
+| Vec4f_add_compare | `~14-15 ns` | `~0.8 ns` | Still anomalous, but benchmark-scoped rather than a confirmed library gap |
+| update_face_normals | `13.719 ms` | `132.596 ms` | RustMesh release path is ahead on the current sphere workload |
+| update_vertex_normals | `13.647 ms` | `130.897 ms` | RustMesh release path is ahead on the current sphere workload |
+| update_normals | `16.926 ms` | `260.475 ms` | RustMesh release path is ahead on the current sphere workload |
 
----
-
-## Performance Gaps
-
-### P1 — `add_face` hot path lookup cost (DONE 2026-04-06)
-
-**File:** `RustMesh/src/Core/soa_kernel.rs`, method `add_edge`
-
-Baseline: each `add_face(a, b, c)` call triggered 3 global HashMap lookups of `(min_v, max_v) → HalfedgeHandle`. The active `RustMesh` mesh type uses `SoAKernel`, not `AttribSoAKernel`, so the original document target file was wrong.
-
-Implemented fix:
-
-- replaced the global `HashMap<(u32, u32), HalfedgeHandle>` with a per-vertex sorted adjacency index in `SoAKernel`
-- `add_edge`, `find_halfedge`, `edge_exists`, and `delete_edge` now use bucketed binary search instead of hashing
-- `delete_edge` no longer does a whole-map `retain`
-
-Verified result:
-
-- previous benchmark: `RustMesh 156 ms` vs `OpenMesh 111 ms`
-- current benchmark: `RustMesh 99.7 ms` vs `OpenMesh 115.9 ms`
-
-### P2 — Vec4f_add_compare anomaly is not a confirmed RustMesh library gap
-
-**File:** `RustMesh/examples/openmesh_compare_vector_benchmark.rs`
-
-Investigation result:
-
-- the benchmark does not exercise RustMesh library code; it exercises `glam::Vec4`
-- the original document target `geometry.rs` was therefore misleading
-- replacing `glam::Vec4 ==` with an explicit four-component comparison in the benchmark did not materially change the result; both paths stay around `14–15 ns`
-- other Vec4 operations remain close to OpenMesh, so this is isolated to the current compare benchmark shape / compiler codegen interaction
-
-Current disposition:
-
-- treat this as a benchmark-design / codegen investigation, not a RustMesh feature-parity blocker
-- if this benchmark matters, redesign the harness to prevent compiler-specific constant-folding / loop-shape artifacts before drawing library conclusions
+Key correction: earlier normals conclusions based on Rust debug builds versus OpenMesh `-O3` were misleading. For the maintained comparison, release-mode numbers are the relevant data.
 
 ---
 
-## Functional Gaps
+## What Is No Longer a Meaningful Gap
 
-### G1 — Dynamic property system is broken (HIGH)
+### 1. `add_face` hot-path lookup cost
 
-**Files:** `RustMesh/src/Core/attrib_soa_kernel.rs`
+The active `SoAKernel` path no longer depends on the old global edge `HashMap` lookup strategy. The per-vertex sorted adjacency rewrite moved `Add 1000 triangles x 1000` from roughly `156 ms` to `99.7 ms`, which now beats the current OpenMesh comparison result.
 
-**Current state:**
-- Single global `HashMap<u32, DynamicProperty>` — vertex, edge, face, halfedge properties share one store with no entity-type distinction.
-- `get_property<T>()` only works for `f32`; the generic parameter is silently ignored for other types.
-- Properties do not auto-resize when vertices/edges/faces are added.
-- Properties are not propagated during topology changes (`collapse`, `split`, `flip`).
-- Dynamic properties are not serialized to PLY/OBJ.
+### 2. Normals raw performance
 
-**Expected OpenMesh API:**
-```rust
-// Per-entity type-safe property handles
-let vprop: VPropHandle<f32> = mesh.add_vertex_property("quality", 0.0_f32);
-let eprop: EPropHandle<Vec3> = mesh.add_edge_property("flow", Vec3::ZERO);
+The normals API family now exists:
 
-mesh.set_vertex_property(vprop, vh, 0.95);
-let v = mesh.vertex_property(vprop, vh);   // → 0.95_f32
+- `calc_face_normal`
+- `calc_vertex_normal`
+- `update_face_normals`
+- `update_vertex_normals`
+- `update_normals`
 
-// Automatic propagation on collapse: interpolate between v0 and v1
-mesh.collapse(heh);  // surviving vertex gets lerp of quality values
-```
+The current remaining normals gap is not raw release performance. It is behavior definition and integration policy.
 
-**Required changes:**
-1. Split `dynamic_props` into four typed stores: `vertex_props`, `edge_props`, `face_props`, `halfedge_props`.
-2. Add typed handles: `VPropHandle<T>`, `EPropHandle<T>`, `FPropHandle<T>`, `HPropHandle<T>`.
-3. Fix `get_property<T>` to dispatch on `T` for all `PropValue` variants.
-4. Auto-resize all per-entity stores in `add_vertex`, `add_edge`, `add_face`.
-5. Add `copy_property` and interpolated propagation hooks to `collapse` and `split`.
-6. Serialize dynamic `Vec3` / `f32` / `i32` vertex properties to PLY.
+### 3. Public split API surface
+
+RustMesh already exposes public `split_edge(eh, pt)` and `split_face(fh, pt)` entry points, and remeshing now routes through `mesh.split_edge()` rather than maintaining a second split path.
+
+### 4. Missing face triangulation API
+
+RustMesh now exposes `triangulate_face(fh)` as a public baseline API for fan-triangulating n-gons. Like the current public split primitives, it is rebuild-backed for now, but the API surface is no longer missing.
 
 ---
 
-### G2 — Normal update API baseline is now implemented; remaining work is optimization/integration
+## Actual Remaining Gaps
 
-**Files:** `RustMesh/src/Core/connectivity.rs`
+### G1 — Dynamic Property Core Gap Is Closed on the Maintained Path
 
-Current state after 2026-04-06 implementation:
+**Primary files:** `RustMesh/src/Core/attrib_soa_kernel.rs`, `RustMesh/src/Core/soa_kernel.rs`, `RustMesh/src/Core/connectivity.rs`
 
-- `calc_face_normal(fh) -> Vec3`
-- `calc_vertex_normal(vh) -> Vec3`
-- `update_face_normals()`
-- `update_vertex_normals()`
-- `update_normals()`
+Current state:
 
-The API family now exists and is covered by focused correctness tests. The remaining gap versus the original plan is that the implementation is still scalar and topology-changing algorithms do not yet consistently refresh normals automatically.
+- typed per-entity handles and per-domain stores now exist
+- typed get/set now works for the supported numeric/vector property kinds
+- stores now auto-resize on vertex, edge, halfedge, and face growth
+- supported `AttribSoAKernel` PLY round-trips now exist for vertex `f32`, `i32`, and `Vec3` properties
+- unsupported `Vec2` / `Vec4` vertex-property persistence fails explicitly instead of silently degrading
+- deterministic propagation now exists on the maintained `collapse`, `split_edge`, and triangle `split_face` paths
+- the remaining scope question is whether rebuild-backed n-gon topology fallbacks should inherit the same propagation contract or stay explicitly out of parity scope
 
-**Expected API:**
-```rust
-mesh.update_face_normals();       // compute cross-product per face, store in face normal array
-mesh.update_vertex_normals();     // area-weighted average from incident face normals
-mesh.update_normals();            // both of the above
-mesh.calc_face_normal(fh) -> Vec3;
-mesh.calc_vertex_normal(vh) -> Vec3;
-```
+Why this matters:
 
-**Remaining work:**
-1. Batch/SIMD-optimize face normal updates on the SoA storage layout.
-2. Add a broader reference/benchmark example for `update_normals`.
-3. Decide which topology-changing algorithms should call `update_normals()` automatically versus leaving refresh explicit.
+- OpenMesh-grade mesh processing relies heavily on per-entity extensibility
+- RustMesh now has the right storage shape, a bounded IO path, and maintained-path propagation semantics
+- the active remaining work has moved to normals, incremental LOD, parity breadth, and the still-mixed non-triangle topology surface rather than core property propagation
 
----
+### G2 — Normals Gap Is Semantic, Not Performance-Based
 
-### G3 — Public split primitives now exist; remaining gap is implementation depth
+**Primary file:** `RustMesh/src/Core/connectivity.rs`
 
-**Files:** `RustMesh/src/Core/connectivity.rs`, `RustMesh/src/Tools/remeshing.rs`
+Current state:
 
-Current state after 2026-04-06 implementation:
+- RustMesh now explicitly documents area-weighted vertex normals as the default contract
+- OpenMesh default `update_vertex_normals()` uses `calc_vertex_normal_fast()`, which averages adjacent face normals and normalizes
+- RustMesh now exposes `VertexNormalWeighting::FaceAverage` plus `*_with_mode` APIs for an OpenMesh-compatible equal-face-weight path
+- topology-changing operations now explicitly follow an explicit-refresh policy on the maintained path, while rebuild-backed triangulation/split fallbacks drop face-normal storage until refresh
+- current checksum deltas in the normals benchmark are therefore explainable semantic differences rather than automatic proof of a bug
 
-- `RustMesh::split_edge(eh, pt)` now exists
-- `RustMesh::split_face(fh, pt)` now exists
-- the baseline API is covered by regression tests for boundary-edge and triangle-face cases
+Remaining work:
 
-Remaining gap:
+- keep the normals comparison harness and regression coverage aligned with the now-explicit default-vs-compatible contract
 
-- the current implementation uses a controlled rebuild via `rebuild_preserving_vertex_indices()` rather than true local half-edge surgery
-- this is enough to unify call sites and stabilize semantics, but it is not yet the final OpenMesh-grade topology-edit path
+### G3 — Topology Editing Still Needs Deeper Local Surgery
 
-**Expected API on `RustMesh`:**
-```rust
-// Split edge at midpoint, return new vertex handle
-mesh.split_edge(eh, midpoint) -> VertexHandle;
+**Primary files:** `RustMesh/src/Core/connectivity.rs`, `RustMesh/src/Tools/remeshing.rs`
 
-// Split face at centroid (or given point), return new vertex handle
-mesh.split_face(fh, point) -> VertexHandle;
-```
+Current state:
 
-These primitives now exist and unblock higher-level call-site cleanup.
+- public split APIs exist
+- remeshing uses the shared split API
+- `split_edge()` now uses local half-edge surgery on the maintained boundary/interior triangle path
+- triangle `split_face()` now uses local face/halfedge rewiring on the maintained path
+- `triangulate_face()` and non-triangle `split_face()` still fall back to controlled rebuild behavior internally
 
----
+Why this is still a gap:
 
-### G4 — Remeshing split path now uses public primitives; underlying split implementation still rebuilds internally
+- the shared remeshing path is now acceptance-covered, but non-triangle topology depth is still mixed local/rebuild behavior
+- non-triangle face splitting still uses a controlled rebuild fallback, so topology depth is not yet uniformly local
+- rebuild-backed non-triangle topology still does not share the same documented local property-propagation contract as the maintained triangle/local-edit path
 
-**File:** `RustMesh/src/Tools/remeshing.rs`, `split_long_edges()` (line 171)
+### G4 — Progressive-Mesh Upward LOD Still Replays from `original`
 
-Current state after 2026-04-06 implementation:
+**Primary file:** `RustMesh/src/Tools/vdpm.rs`
 
-- `split_long_edges()` now calls `mesh.split_edge()` instead of maintaining its own whole-mesh rebuild path
-- this removes duplicate split logic from remeshing and centralizes behavior in the core mesh API
+Current state:
 
-Remaining gap:
+- `get_lod(level)` now exists and is regression-covered
+- upward movement still re-runs simplification from `original` to the requested face budget
 
-- `mesh.split_edge()` itself still uses controlled rebuild semantics internally, so the performance/property-propagation concerns are reduced but not fully eliminated
+Why this is still a gap:
 
-**Next fix:** replace the internal rebuild-based split primitive with local topology editing once the public API shape is settled.
+- the API shape suggests practical normalized LOD navigation
+- replay-from-original is acceptable as a baseline but not OpenMesh-grade incremental behavior
 
----
+### G5 — Parity Verification Is Uneven Outside Decimation
 
-### G5 — Progressive Mesh normalized LOD API added; upward replay is still not incremental (MEDIUM)
+Current state:
 
-**File:** `RustMesh/src/Tools/vdpm.rs`
+- decimation has the strongest OpenMesh comparison story
+- smoothing, subdivision, dualization, hole filling, analysis, and IO are implemented
+- those areas do not yet have the same parity-protection depth as decimation
 
-Current state after 2026-04-06 implementation:
+Why this matters:
 
-- `ProgressiveMesh::get_lod(&mut self, level: f32) -> &RustMesh` now exists
-- `level` is clamped to `[0.0, 1.0]`
-- `0.0` requests the maximally simplified mesh reachable by current legality checks
-- `0.5` maps to an approximately half-face budget
-- `1.0` restores the original mesh
-- focused tests cover below-range, midpoint, and above-range behavior
+- today RustMesh is closer to "implemented with selective parity evidence" than "broadly behavior-locked to OpenMesh"
 
-**Expected API:**
-```rust
-pm.get_lod(0.0)  // fully simplified (minimum triangles)
-pm.get_lod(0.5)  // half-way
-pm.get_lod(1.0)  // original mesh
-```
+### G6 — `Vec4f_add_compare` Is Still a Benchmark Investigation, Not a Closed Issue
 
-Remaining gap:
-
-- `get_lod()` currently replays from `original` and re-runs simplification to the target face budget
-- this is intentional because `refine()` / `vertex_split()` are still approximate and do not yet provide exact bidirectional LOD navigation
-
-**Next fix:** harden incremental `refine()` / `vertex_split()` so upward LOD changes can avoid a full replay from the original mesh.
+The current anomaly remains useful as a benchmark note, but it should not be treated as a confirmed RustMesh library deficit until the harness is redesigned to rule out benchmark-shape and codegen artifacts.
 
 ---
 
-### G6 — Dynamic properties not persisted in IO (MEDIUM)
+## Priority Order
 
-**Files:** `RustMesh/src/Core/io/ply.rs`, `RustMesh/src/Core/io/obj.rs`
+If the goal is practical OpenMesh parity instead of feature-count inflation, the current priority order is:
 
-Only fixed attributes (positions, built-in normals, colors, texcoords) are written. User-added properties via `add_vertex_property` are silently dropped on save.
-
-**Fix:** In `write_ply`, enumerate `vertex_props` and emit each as a PLY property element. Map `f32` → `float`, `Vec3` → `float[3]`, `i32` → `int`.
-
----
-
-### G7 — `triangulate_face()` missing (LOW)
-
-OpenMesh exposes a fan-triangulation of n-gons as a public method. RustMesh only supports triangle faces at add time. No n-gon → triangle conversion exists.
+1. Durable normals comparison coverage
+2. Incremental progressive-mesh LOD
+3. Selective parity regression outside decimation
+4. Any remaining non-triangle topology depth decisions, including whether rebuild-backed fallbacks need the maintained property contract
+5. Benchmark-only cleanup such as `Vec4f_add_compare`
 
 ---
 
-## Prioritized Task List for Codex
+## Mapping to the Roadmap
 
-Each task is self-contained. Tackle in order; G3 unblocks G4.
+The active execution backlog is maintained in [`RustMesh-OpenMesh-Parity-Roadmap.md`](RustMesh-OpenMesh-Parity-Roadmap.md).
 
-### Sprint 1 — Performance critical path
-
-| ID | Task | File(s) | Acceptance |
-|----|------|---------|------------|
-| T1 | Replace HashMap edge lookup with sorted adjacency | `soa_kernel.rs` | Completed: Case 3 improved from `156 ms` to `99.7 ms` and now beats OpenMesh on the current harness |
-| T2 | Investigate Vec4f_add_compare regression | benchmark only | Completed investigation: not currently attributable to RustMesh library code; benchmark redesign is the next step |
-
-### Sprint 2 — Normal update API
-
-| ID | Task | File(s) | Acceptance |
-|----|------|---------|------------|
-| T3 | Implement `update_face_normals()` batch API | `connectivity.rs` | Completed: API and correctness tests exist; SIMD specialization still pending |
-| T4 | Implement `update_vertex_normals()` area-weighted | `connectivity.rs` | Completed: area-weighted API and regression tests exist; broader reference benchmark still pending |
-| T5 | Add `update_normals()` convenience wrapper | `connectivity.rs` | Completed: wrapper exists; automatic algorithm refresh policy still pending |
-| T6 | Benchmark `update_normals` vs OpenMesh equivalent | new example | Completed baseline: `openmesh_compare_normals.rs` exists; on a deterministic `64x64` sphere, RustMesh is currently slower than OpenMesh on face / vertex / combined normal recomputation |
-
-### Sprint 3 — Split/collapse primitives + fix remeshing
-
-| ID | Task | File(s) | Acceptance |
-|----|------|---------|------------|
-| T7 | Expose `split_edge(eh, pt) -> VertexHandle` as public | `connectivity.rs` | Completed baseline: public API exists and boundary-edge regression test verifies `V+1, E+2, F+1` |
-| T8 | Expose `split_face(fh, pt) -> VertexHandle` as public | `connectivity.rs` | Completed baseline: public API exists and triangle-face regression test verifies `V+1, F+2` |
-| T9 | Rewrite `split_long_edges` using `split_edge` | `remeshing.rs` | Completed baseline: remeshing tests pass through the public split primitive |
-| T10 | Rewrite `collapse_short_edges` using `collapse` | `remeshing.rs` | Already aligned: current implementation already calls `collapse()` directly |
-
-### Sprint 4 — Property system overhaul
-
-| ID | Task | File(s) | Acceptance |
-|----|------|---------|------------|
-| T11 | Split into four typed prop stores (vertex/edge/face/halfedge) | `attrib_soa_kernel.rs` | Existing tests still pass |
-| T12 | Add typed handles `VPropHandle<T>`, etc. | new `Core/properties.rs` | Type-safe get/set for f32, Vec3, i32 |
-| T13 | Fix `get_property<T>` dispatch for all `PropValue` | `attrib_soa_kernel.rs` | Test: get Vec3 property returns correct value |
-| T14 | Auto-resize props on `add_vertex` / `add_edge` / `add_face` | `attrib_soa_kernel.rs` | No out-of-bounds after adding entities |
-| T15 | Propagate properties on `collapse` (linear interp) | `connectivity.rs` | Collapse test: quality prop interpolated correctly |
-| T16 | Propagate properties on `split_edge` | `connectivity.rs` | Split test: new vertex inherits edge midpoint props |
-| T17 | Serialize vertex props to PLY | `io/ply.rs` | Round-trip: write + read preserves custom f32 prop |
-
-### Sprint 5 — Remaining gaps
-
-| ID | Task | File(s) | Acceptance |
-|----|------|---------|------------|
-| T18 | Add `get_lod(level: f32)` to ProgressiveMesh | `vdpm.rs` | Completed baseline: normalized API exists and focused tests verify clamp + midpoint semantics |
-| T19 | Add `triangulate_face(fh)` for n-gon support | `connectivity.rs` | Quad splits into 2 triangles correctly |
+| Gap | Roadmap Epic |
+|-----|--------------|
+| `G1` dynamic properties | Epic 1 core maintained-path work complete |
+| `G2` normals semantics and refresh policy | Epic 4 |
+| `G3` local split internals and remeshing hardening | Epic 2 |
+| `G4` incremental progressive-mesh LOD | Epic 3 |
+| `G5` parity verification breadth | Epic 5 |
+| `G6` benchmark-scoped anomaly cleanup | Epic 5 |
 
 ---
 
-## Notes for Codex
+## Working Notes
 
-- **Build command:** `cd RustMesh && cargo build --release`
-- **Test command:** `cd RustMesh && cargo test`
-- **Benchmark:** `cargo run --release --example openmesh_compare_benchmark`
-- **Vector benchmark:** `cargo run --release --example openmesh_compare_vector_benchmark`
-- **Decimation parity check:** `cargo run --release --example openmesh_compare_decimation_trace -- 10`
-- OpenMesh source mirror is at `Mirror/OpenMesh-11.0.0/` in the repo root — use it as ground truth for API shape and algorithm behavior.
-- All changes must keep `cargo test` green (221 tests currently passing).
-- The SoA layout (`x[]`, `y[]`, `z[]` separate arrays) is intentional for SIMD — do not consolidate into `Vec<Vec3>`.
+- Build command: `cargo build --manifest-path RustMesh/Cargo.toml --release`
+- Test command: `cargo test --manifest-path RustMesh/Cargo.toml --lib --quiet`
+- Decimation parity check: `env RUSTFLAGS=-Awarnings cargo run --manifest-path RustMesh/Cargo.toml --release --example openmesh_compare_decimation_trace --quiet -- 10`
+- Normals comparison: `env RUSTFLAGS=-Awarnings cargo run --manifest-path RustMesh/Cargo.toml --release --example openmesh_compare_normals --quiet`
+- OpenMesh mirror remains the API/behavior reference at `Mirror/OpenMesh-11.0.0/`
+- The SoA layout is intentional; parity work should not collapse it into an AoS shortcut

@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-04-05",
+  "generated_at": "2026-04-06",
   "scope": "workspace_snapshot",
   "note": "Structural snapshot only. Canonical status docs: README.md, docs/index.md, RustMesh/README.md, docs/RustMesh-OpenMesh-Progress-2026-04-05.md, ROADMAP.md.",
   "workspace": {
@@ -33,16 +33,17 @@
     ]
   },
   "verification": {
-    "rustmesh_lib_tests": "214 passed; 0 failed",
+    "rustmesh_lib_tests": "234 passed; 0 failed",
     "rustmesh_decimation_tests": "12 passed; 0 failed",
-    "rustmesh_remeshing_tests": "7 passed; 0 failed",
-    "rustmesh_vdpm_tests": "7 passed; 0 failed",
+    "rustmesh_remeshing_tests": "8 passed; 0 failed",
+    "rustmesh_vdpm_tests": "9 passed; 0 failed",
     "rustmesh_openmesh_decimation_trace": {
       "default_import_mode": "OpenMeshParity",
       "matching_prefix_steps": 10,
       "summary": "collapsed=61, boundary=31, interior=30, final V=60, final F=109"
     },
-    "rustslam_lib_tests": "261 passed; 2 failed"
+    "rustmesh_openmesh_normals": "RustMesh ahead of OpenMesh on the current release-mode normals harness; remaining gap is semantic and policy-driven",
+    "rustslam_lib_tests": "not re-validated in this RustMesh-focused refresh"
   },
   "documentation": {
     "repository_overview": "README.md",

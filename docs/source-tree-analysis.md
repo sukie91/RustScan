@@ -1,6 +1,6 @@
 # RustScan Source Tree Analysis
 
-**Updated:** 2026-04-05
+**Updated:** 2026-04-06
 **Purpose:** Structural snapshot of the current workspace
 
 This document describes the current tree layout. It is not the authoritative status document for feature completeness.
@@ -87,7 +87,7 @@ RustSLAM/
 ### RustSLAM Notes
 
 - The crate spans SLAM, video IO, dense reconstruction support, and mesh extraction.
-- In the current worktree, its library test suite is not fully green, so structural presence should not be confused with feature readiness.
+- This document is structural only; current RustSLAM test status is intentionally deferred to crate-specific verification.
 
 ## Documentation Notes
 

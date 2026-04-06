@@ -1,6 +1,6 @@
 # RustScan Documentation Index
 
-**Updated:** 2026-04-05
+**Updated:** 2026-04-06
 **Scope:** Current workspace and `rm-opt` worktree
 **Status Policy:** Use the documents in the "Canonical Docs" section as the only maintained status sources.
 
@@ -12,7 +12,7 @@
 | [Project Overview](project-overview.md) | Stable project summary and crate roles |
 | [RustMesh README](../RustMesh/README.md) | RustMesh capability matrix and user-facing crate docs |
 | [RustMesh OpenMesh Progress](RustMesh-OpenMesh-Progress-2026-04-05.md) | Current `rm-opt` branch facts and verified test results |
-| [RustMesh OpenMesh Roadmap](RustMesh-OpenMesh-Parity-Roadmap.md) | Remaining RustMesh parity backlog |
+| [RustMesh OpenMesh Roadmap](RustMesh-OpenMesh-Parity-Roadmap.md) | Remaining RustMesh parity backlog organized as epics and stories |
 | [Roadmap](../ROADMAP.md) | Workspace-level forward plan |
 | [Development Guide](DEVELOPMENT.md) | Build, test, and contribution workflow |
 | [Architecture](ARCHITECTURE.md) | System architecture and integration notes |
@@ -30,16 +30,16 @@ They should not carry independent status tables.
 
 ## Verified Snapshot
 
-The following checks were run against the current worktree on 2026-04-05:
+The following checks were re-verified against the current worktree on 2026-04-06:
 
 | Area | Result |
 |------|--------|
-| RustMesh library tests | `214 passed; 0 failed` |
+| RustMesh library tests | `250 passed; 0 failed` |
 | RustMesh decimation tests | `12 passed; 0 failed` |
-| RustMesh remeshing tests | `7 passed; 0 failed` |
-| RustMesh VDPM tests | `7 passed; 0 failed` |
+| RustMesh remeshing tests | `8 passed; 0 failed` |
+| RustMesh VDPM tests | `16 passed; 0 failed` |
 | RustMesh decimation parity example | default `OpenMeshParity` baseline matches OpenMesh for the first 10 traced steps |
-| RustSLAM library tests | `261 passed; 2 failed` |
+| RustMesh normals benchmark | current release-mode harness shows RustMesh ahead of OpenMesh; remaining gap is semantics and refresh policy |
 
 ## Reading Order
 
@@ -53,7 +53,7 @@ The following checks were run against the current worktree on 2026-04-05:
 
 1. Read [RustMesh README](../RustMesh/README.md)
 2. Read [RustMesh OpenMesh Progress](RustMesh-OpenMesh-Progress-2026-04-05.md)
-3. Use [RustMesh OpenMesh Roadmap](RustMesh-OpenMesh-Parity-Roadmap.md) for remaining work
+3. Use [RustMesh OpenMesh Roadmap](RustMesh-OpenMesh-Parity-Roadmap.md) for the authoritative epic/story backlog
 
 ### If you are working on broader workspace issues
 
