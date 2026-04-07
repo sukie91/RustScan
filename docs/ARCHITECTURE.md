@@ -1,262 +1,105 @@
 # RustScan Architecture
 
+**Updated:** 2026-04-07
+
 ## Overview
 
-RustScan is a pure Rust implementation of 3D scanning algorithms, comprising two main libraries that work together to provide a complete 3D reconstruction pipeline.
+RustScan is a Rust workspace for 3D reconstruction tooling. The repository is no longer just `RustMesh + RustSLAM`; the current workspace contains six crates with a shared-documentation surface and a RustGS-centered active development track.
 
-## Project Structure
+## Workspace Crates
 
-```
-RustScan/
-├── RustMesh/          # Mesh processing library
-├── RustSLAM/          # Visual SLAM library
-├── docs/              # Documentation
-├── test_data/         # Test datasets
-└── README.md          # Project overview
-```
+- `rustscan-types`: shared data structures used across crates.
+- `RustSLAM`: visual SLAM, sparse mapping, loop closing, dataset/video ingestion, and SLAM-side outputs.
+- `RustGS`: Gaussian splatting training, evaluation, parity reporting, and chunked training orchestration.
+- `RustMesh`: mesh connectivity, IO, and OpenMesh-aligned processing algorithms.
+- `RustViewer`: interactive inspection UI for RustScan scene data.
+- `RustFF`: feed-forward inference utilities for pose/depth-related reconstruction work.
 
-## Core Components
+## Cross-Crate Flow
 
-### 1. RustMesh - Mesh Processing Library
+1. `RustSLAM` or an external dataset source provides images, poses, and optional sparse geometry.
+2. `RustGS` loads TUM, COLMAP, SLAM JSON, or `TrainingDataset` inputs and trains a Gaussian scene.
+3. `RustGS` exports scene PLY files plus optional evaluation summaries and LiteGS parity sidecars.
+4. `RustMesh` handles mesh-side processing and OpenMesh parity work when surface extraction or mesh cleanup is needed.
+5. `RustViewer` loads scene/checkpoint outputs for inspection.
 
-**Purpose**: A Rust port of OpenMesh providing versatile geometric data structures and mesh processing algorithms.
+## Current RustGS Training Architecture
 
-**Architecture**:
-- **Core Layer**: Half-edge data structure with SoA (Structure of Arrays) memory layout
-- **Tools Layer**: Mesh algorithms (decimation, subdivision, smoothing, hole filling)
-- **Utils Layer**: Helper utilities (circulators, quadric error metrics, performance tools)
+### Public Entry Surface
 
-**Key Modules**:
-- `Core/handles.rs` - Handle types (VertexHandle, EdgeHandle, HalfedgeHandle, FaceHandle)
-- `Core/connectivity.rs` - Half-edge connectivity relations
-- `Core/soa_kernel.rs` - SoA storage layer
-- `Core/geometry.rs` - Geometric operations
-- `Core/io/` - File I/O (OFF, OBJ, PLY, STL formats)
-- `Tools/decimation.rs` - Quadric-based mesh simplification
-- `Tools/subdivision.rs` - Loop, Catmull-Clark, Sqrt3 subdivision
-- `Tools/smoother.rs` - Laplace, Tangential smoothing
-- `Tools/hole_filling.rs` - Hole filling algorithms
-- `Utils/circulators.rs` - Vertex/Edge/Face circulators
-- `Utils/quadric.rs` - Quadric error computation
+- `rustgs::train_from_path`
+- `rustgs::train_from_slam`
+- `rustgs::training::train`
+- `rustgs::evaluate_scene`
+- `rustgs::save_scene_ply`
+- `rustgs::load_scene_ply`
 
-**Dependencies**:
-- `glam` - SIMD-accelerated math library
-- `nalgebra` - Linear algebra
-- `serde` - Serialization
-- `criterion` - Benchmarking
+These are the compatibility boundaries that current refactor work is preserving.
 
-### 2. RustSLAM - Visual SLAM Library
+### Execution Planning
 
-**Purpose**: A pure Rust Visual SLAM library with sparse feature-based VO and dense 3D Gaussian Splatting reconstruction.
+`RustGS/src/training/mod.rs` now owns training entry and route selection directly.
 
-**Architecture**:
-- **Core Layer**: Fundamental data structures (Frame, KeyFrame, MapPoint, Map, Camera, Pose)
-- **Features Layer**: Feature extraction and matching (ORB, Harris, FAST)
-- **Tracker Layer**: Visual Odometry pipeline
-- **Optimizer Layer**: Bundle Adjustment
-- **Loop Closing Layer**: Loop detection and relocalization
-- **Fusion Layer**: 3D Gaussian Splatting and mesh extraction
-- **Pipeline Layer**: Real-time SLAM pipeline
-- **I/O Layer**: Dataset loading and video processing
+- `Standard`
+- `ChunkedSingleChunk`
+- `ChunkedSequential`
 
-**Key Modules**:
+There is no active compiled `train_stream.rs` orchestration layer anymore; execution planning now lives with the public training module.
 
-#### Core (`core/`)
-- `frame.rs` - Frame data structure
-- `keyframe.rs` - KeyFrame management
-- `map_point.rs` - 3D point representation
-- `map.rs` - Map management
-- `camera.rs` - Camera model (pinhole)
-- `pose.rs` - SE3 Pose representation
+### Data and Initialization
 
-#### Features (`features/`)
-- `orb.rs` - ORB feature extractor
-- `pure_rust.rs` - Pure Rust Harris/FAST corner detection
-- `knn_matcher.rs` - KNN-based feature matching
+- `data_loading.rs`: dataset-to-training-data conversion
+- `frame_loader.rs`: bounded frame decode/cache behavior
+- `init_map.rs`: sparse-point or frame-based initialization
+- `chunk_planner.rs`: chunk planning and per-chunk dataset materialization
+- `splats.rs`: internal unified training-state representation used across active training internals
 
-#### Tracker (`tracker/`)
-- `vo.rs` - Visual Odometry pipeline
-- `solver.rs` - PnP solver
+### Step Execution
 
-#### Optimizer (`optimizer/`)
-- `ba.rs` - Bundle Adjustment using apex-solver
+The production Metal path is split into explicit subsystems:
 
-#### Loop Closing (`loop_closing/`)
-- `vocabulary.rs` - BoW vocabulary
-- `detector.rs` - Loop detector
-- `relocalization.rs` - Relocalization module
+- `metal_forward.rs`
+- `metal_loss.rs`
+- `metal_backward.rs`
+- `metal_optimizer.rs`
+- `metal_trainer.rs`
 
-#### Fusion (`fusion/`)
-- `gaussian.rs` - 3D Gaussian data structures
-- `renderer.rs` - Forward renderer
-- `diff_renderer.rs` - Differentiable renderer (CPU)
-- `diff_splat.rs` - GPU differentiable splatting
-- `autodiff.rs` - True autodiff with backward propagation
-- `tiled_renderer.rs` - Tiled rasterization with densify/prune
-- `training_pipeline.rs` - Legacy/reference training helpers; RustGS production ownership now lives in `training::train`, `frame_loader`, `metal_forward` (forward execution boundary), `metal_kernels` + `training/shaders/*.metal` (Metal shader/source ownership), `metal_pipelines` (pipeline cache), `metal_resources` (persistent Metal buffer pool, tensor binding, and buffer IO helpers), `metal_dispatch` (shared low-level compute launch helpers), `metal_projection` (projection kernels and tile-bin construction), `metal_raster` (forward/backward raster staging and dispatch), `metal_loss` (step-loss evaluation + telemetry packing), `metal_backward` (raster backward + parameter-gradient assembly), `metal_optimizer` (optimizer state/update internals), `metal_trainer` (training orchestration and remaining trainer-coupled topology side effects), `topology` (schedule policy, topology execution planning, and snapshot mutation helpers), and `scene_io`
-- `complete_trainer.rs` - Complete trainer with LR scheduler
-- `autodiff_trainer.rs` - GPU trainer
-- `tracker.rs` - Gaussian tracking (ICP)
-- `mapper.rs` - Incremental Gaussian mapping
-- `slam_integrator.rs` - Sparse + Dense SLAM integration
-- `tsdf_volume.rs` - TSDF volume fusion
-- `marching_cubes.rs` - Marching Cubes mesh extraction
-- `mesh_extractor.rs` - High-level mesh extraction API
+`metal_trainer.rs` remains the lifecycle coordinator for the step loop, but it no longer owns the full forward/backward/runtime implementation inline.
 
-#### Pipeline (`pipeline/`)
-- `realtime.rs` - Real-time SLAM pipeline
+### Metal Runtime Layer
 
-#### I/O (`io/`)
-- `dataset.rs` - Dataset loader
-- `video_loader.rs` - Video processing
+The old monolithic runtime has been split into concrete modules:
 
-**Dependencies**:
-- `glam` - SIMD-accelerated math
-- `nalgebra` - Linear algebra
-- `apex-solver` - Bundle adjustment solver
-- `rayon` - Data parallelism
-- `crossbeam-channel` - Thread communication
-- `candle-core`, `candle-metal` - GPU acceleration (Apple MPS)
-- `kiddo` - KD-Tree for KNN matching
-- `opencv` (optional) - Image processing
-- `tch` (optional) - Deep learning
+- `metal_kernels.rs`
+- `metal_pipelines.rs`
+- `metal_resources.rs`
+- `metal_dispatch.rs`
+- `metal_projection.rs`
+- `metal_raster.rs`
+- `metal_runtime.rs` as the shared facade and compatibility layer
 
-## Data Flow
+Shader source now lives in `RustGS/src/training/shaders/*.metal`.
 
-```
-Camera Input → Feature Extraction → Feature Matching → Visual Odometry
-                                                              ↓
-                                                         Tracking
-                                                              ↓
-                                                    Local Mapping
-                                                              ↓
-                                                      Loop Closing
-                                                              ↓
-                                                   3DGS Fusion
-                                                              ↓
-                                                   TSDF Volume
-                                                              ↓
-                                                  Marching Cubes
-                                                              ↓
-                                                   Mesh (RustMesh)
-                                                              ↓
-                                                  Post-processing
-                                                              ↓
-                                                      Export
-```
+### Topology and Parity
 
-## Integration Points
+- `topology.rs` owns schedule calculation, execution planning, and snapshot mutation helpers for densify/prune/reset behavior.
+- `density_controller.rs` remains as reference/parity-sensitive logic and is not being deleted prematurely.
+- `parity_harness.rs` owns LiteGS comparison reports and parity gating utilities.
+- `eval.rs` owns evaluation summaries and post-train metrics.
 
-### RustSLAM → RustMesh
+### Legacy Boundary
 
-The fusion layer in RustSLAM generates mesh data that can be processed by RustMesh:
+`training_pipeline.rs` remains in-tree only as a legacy/reference helper surface. It is not the landing zone for new production behavior.
 
-1. **3DGS → TSDF**: Gaussian splatting results are converted to TSDF volume
-2. **TSDF → Mesh**: Marching Cubes extracts triangle mesh
-3. **Mesh → RustMesh**: Mesh data can be imported into RustMesh for:
-   - Decimation (mesh simplification)
-   - Smoothing
-   - Hole filling
-   - Subdivision
-   - Export to various formats (OFF, OBJ, PLY, STL)
+## Current Architectural Constraints
 
-## Memory Layout
+- Public training, evaluation, scene IO, and chunked-routing behavior must remain stable while internals move.
+- The production backend is still Metal-specific; no new multi-backend abstraction is planned unless the extracted code shape proves a concrete need.
+- Topology-side side effects are partially migrated: scheduling and snapshot mutation moved into `topology.rs`, while some trainer-coupled state updates still live in `metal_trainer.rs`.
 
-### RustMesh SoA (Structure of Arrays)
+## Canonical Companion Docs
 
-RustMesh uses SoA memory layout for cache efficiency:
-
-```rust
-// Instead of Array of Structures (AoS):
-struct Vertex { position: Vec3, normal: Vec3, ... }
-vertices: Vec<Vertex>
-
-// Uses Structure of Arrays (SoA):
-positions: Vec<Vec3>
-normals: Vec<Vec3>
-```
-
-Benefits:
-- Better cache locality for operations on single attributes
-- SIMD-friendly memory access patterns
-- Reduced memory bandwidth
-
-### RustSLAM Frame Management
-
-- Frames are managed in a sliding window
-- KeyFrames are selected based on motion and feature distribution
-- MapPoints maintain references to observing KeyFrames
-
-## Parallelism
-
-### RustMesh
-- Uses `rayon` for parallel mesh operations
-- Parallel feature: Optional `parallel` feature flag
-
-### RustSLAM
-- Multi-threaded pipeline:
-  - Tracking thread
-  - Local mapping thread
-  - Loop closing thread
-  - Gaussian fusion thread
-- Uses `rayon` for parallel feature extraction
-- Uses `crossbeam-channel` for thread communication
-
-## GPU Acceleration
-
-RustSLAM uses Apple Metal Performance Shaders (MPS) via `candle-metal`:
-- Gaussian splatting rasterization
-- Differentiable rendering
-- Backward propagation for training
-- Densification and pruning operations
-
-## Testing Strategy
-
-### RustMesh
-- Unit tests in `#[cfg(test)]` modules
-- Integration tests in `examples/`
-- Benchmarks using `criterion`
-
-### RustSLAM
-- Unit tests in `#[cfg(test)]` modules
-- Integration tests in `examples/`
-- Test utilities in `test_utils.rs`
-- Recent additions: Comprehensive tests for Marching Cubes, VideoLoader, and optimization threads
-
-## Build Configuration
-
-### Release Profile (Aggressive Optimization)
-```toml
-[profile.release]
-lto = true              # Link-time optimization
-codegen-units = 1       # Single codegen unit for better optimization
-opt-level = 3           # Maximum optimization
-strip = true            # Strip symbols
-panic = "abort"         # Abort on panic (smaller binary)
-```
-
-### Development Profile (Fast Compilation)
-```toml
-[profile.dev]
-opt-level = 1           # Basic optimization
-debug = "line-tables-only"  # Minimal debug info
-```
-
-## Future Directions
-
-### Planned Features
-- IMU integration for RustSLAM
-- Multi-map SLAM
-- Enhanced RustMesh-RustSLAM integration
-- Additional mesh processing algorithms
-
-### Performance Optimization
-- Further GPU acceleration
-- SIMD optimization for critical paths
-- Memory pool allocators
-
-## References
-
-- OpenMesh: https://www.graphics.rwth-aachen.de/software/openmesh/
-- ORB-SLAM: https://github.com/raulmur/ORB_SLAM2
-- 3D Gaussian Splatting: https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/
+- `docs/current-project-status.md`
+- `docs/plans/2026-04-06-rustgs-training-execution-plan.md`
+- `docs/plans/2026-04-06-rustgs-brush-refactor-review-and-epics.md`
+- `docs/plans/2026-04-06-rustgs-refactor-guardrails.md`

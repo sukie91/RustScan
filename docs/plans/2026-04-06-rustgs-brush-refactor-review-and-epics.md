@@ -1,8 +1,9 @@
 # RustGS Brush Training Refactor Review and Epic Breakdown
 
-Source plan: `docs/plans/RustGS-Brush-Training-Refactor-Plan.md`
 Review date: 2026-04-06
 Status: Recommended with revisions
+
+This document is the retained, current refactor plan. The earlier draft proposal has been removed from `docs/` because it no longer matched the active codebase closely enough to serve as a reliable execution document.
 
 ## Purpose
 

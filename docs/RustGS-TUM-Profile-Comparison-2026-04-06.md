@@ -4,7 +4,7 @@
 
 本次记录只回答一个当前最直接的问题：
 
-- 在当前 `rustgs-opt` 代码状态下，`LiteGS` 后期 topology churn 是否值得继续保留？
+- 在当前 `main` 训练路径下，`LiteGS` 后期 topology churn 是否值得继续保留？
 - 如果在 late-stage 直接冻结 topology，能否在几乎不伤害质量的前提下减少无效训练开销？
 
 本次对照不讨论 `Brush` 迁移，也不讨论 `gsplat-mlx-main` 对齐。

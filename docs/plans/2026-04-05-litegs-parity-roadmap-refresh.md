@@ -12,7 +12,7 @@
 
 ## Re-baselined Status
 
-The 2026-04-04 roadmap is now partially stale. These items are already implemented or materially advanced in `rustgs-opt` and should not be treated as the critical path:
+The 2026-04-04 roadmap is now partially stale. These items are already implemented or materially advanced in the current `main` line and should not be treated as the critical path:
 
 - COLMAP input loading and CLI source detection
 - LiteGS scale regularization semantics
@@ -40,7 +40,7 @@ What is still missing is not “support exists or not”, but “is RustGS demon
 - Create: `test_data/fixtures/litegs/colmap-small/`
 - Create: `test_data/fixtures/litegs/colmap-small/parity-reference.json`
 - Modify: `RustGS/src/training/parity_harness.rs`
-- Modify: `docs/RustGS-LiteGS-Parity-Progress-2026-04-05.md`
+- Modify: `docs/index.md`
 
 **Work:**
 - Add the real Apple Silicon convergence fixture or the minimum repo-safe subset needed for parity.
@@ -158,8 +158,8 @@ What is still missing is not “support exists or not”, but “is RustGS demon
 
 **Files:**
 - Modify: `RustGS/src/bin/rustgs.rs`
-- Modify: `docs/RustGS-LiteGS-Parity-Progress-2026-04-05.md`
 - Modify: `docs/index.md`
+- Modify: `docs/current-project-status.md`
 
 **Work:**
 - Write down the exact one-command recipe for:
@@ -263,20 +263,19 @@ What is still missing is not “support exists or not”, but “is RustGS demon
 **Priority:** P2
 **Outcome:** docs and surrounding tooling match the implemented training parity story.
 
-### Task 11: Refresh the stale roadmap and progress docs
+### Task 11: Refresh the retained parity documentation set
 
 **Files:**
-- Modify: `docs/RustGS-LiteGS-Parity-Roadmap.md`
-- Modify: `docs/RustGS-LiteGS-Parity-Progress-2026-04-05.md`
 - Modify: `docs/index.md`
+- Modify: `docs/current-project-status.md`
 
 **Work:**
-- Mark already-landed items as done.
-- Move the remaining roadmap to the new phase ordering in this document.
-- Keep one source of truth for “current gap” and one for “historical progress”.
+- Keep `docs/index.md` and `docs/current-project-status.md` aligned with the retained parity plan and guardrail docs.
+- Avoid re-introducing background-only roadmap copies into `docs/`.
+- Make the retained docs point to one current parity gap list and one current acceptance path.
 
 **Exit Criteria:**
-- The docs no longer imply that already-implemented features are still missing.
+- The retained docs no longer imply that removed or superseded parity docs still exist.
 
 ### Task 12: Revisit render-side parity only after training parity stabilizes
 
