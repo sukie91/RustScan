@@ -292,7 +292,13 @@ Implementation note as of 2026-04-07:
 - `metal_trainer.rs` now prepares camera-specific SH colors and then calls the `metal_forward` API instead of embedding the forward execution path inline
 - trainer-only compatibility wrappers for direct forward-path tests remain, but the production training loop no longer owns the forward dispatch implementation details
 - `stage_projected_records_from_tensors()` now reuses the extracted forward row-conversion helper instead of maintaining a second tensor-to-projection-row path
-- `metal_runtime.rs` is still monolithic and MSL is still embedded in Rust source, so Epic 3 remains partially complete overall even though Story 3.3 is now effectively satisfied locally
+- Metal shader source now lives under `training/shaders/*.metal`, with `training::metal_kernels` owning kernel metadata and shader-source selection
+- `training::metal_pipelines` now owns the pipeline-cache responsibility previously inlined inside `metal_runtime.rs`
+- `training::metal_resources` now owns persistent buffer allocation/reuse, tensor binding, and Metal buffer read/write helpers, reducing `metal_runtime.rs` to dispatch/orchestration-heavy code instead of mixed ownership
+- `training::metal_dispatch` now owns the simple compute launch wrappers for fill, gradient-magnitude, projected-gradient-magnitude, and fused-Adam kernels
+- `training::metal_projection` now owns Gaussian projection kernel dispatch, projection-record staging, and CPU/GPU tile-bin construction
+- `training::metal_raster` now owns forward/backward raster buffer preparation, target/SSIM staging, and native Metal raster dispatch
+- `metal_runtime.rs` has been reduced to the shared runtime facade, Metal-specific type definitions, camera staging, and compatibility delegates, so the heavy execution paths are no longer concentrated there even though Story 3.2 is still not fully closed
 
 Exit criteria:
 
@@ -312,6 +318,12 @@ Acceptance criteria:
 - runtime compilation still succeeds without changing functional behavior
 - build or load failures surface clear errors
 
+Status as of 2026-04-07:
+
+- implemented via `training/shaders/*.metal` plus `training::metal_kernels`
+- `metal_runtime.rs` no longer embeds the MSL source strings directly
+- `cargo check -p rustgs --all-features` and targeted GPU regression tests still pass after the move
+
 ### Story 3.2: Split the Metal Runtime into Concrete Subsystems
 
 As a RustGS maintainer,
@@ -323,6 +335,20 @@ Acceptance criteria:
 - runtime code is divided into concrete modules for shader loading, pipeline lookup, resource layout, and dispatch helpers
 - the split preserves the current Metal-only behavior
 - no new multi-backend trait is introduced unless the split demonstrates a real need
+
+Status as of 2026-04-07:
+
+- partially implemented: pipeline-cache ownership now lives in `training::metal_pipelines`
+- shader loading/kernel metadata now lives in `training::metal_kernels`
+- persistent buffer ownership, tensor binding, and Metal read/write helpers now live in `training::metal_resources`
+- simple compute dispatch wrappers now live in `training::metal_dispatch`
+- projection dispatch and tile-bin construction now live in `training::metal_projection`
+- forward/backward raster launch setup now lives in `training::metal_raster`
+- `metal_runtime.rs` still centralizes shared Metal-side data contracts (`MetalProjectionRecord`, `MetalTileBins`, buffer-slot enums, runtime stats) plus compatibility delegates, so Story 3.2 remains active but is no longer the top architecture risk
+- `cargo check -p rustgs --all-features`
+- `cargo test -p rustgs --features gpu render_ -- --nocapture`
+- `cargo test -p rustgs --features gpu training_step_ -- --nocapture`
+- `cargo test -p rustgs --features gpu adam_step_var_ -- --nocapture`
 
 ### Story 3.3: Introduce a Stable Forward Boundary
 

@@ -30,12 +30,12 @@ use super::metal_forward::{
     MetalForwardSettings, MetalRenderProfile, NativeParityProfile, ProjectedGaussians,
     RenderedFrame,
 };
-use super::metal_loss::{evaluate_training_step_loss, scale_regularization_grad, MetalLossConfig};
 #[cfg(test)]
 use super::metal_loss::{
     depth_backward_scale, scale_regularization_grad as test_scale_regularization_grad,
     scale_regularization_term, ssim_gradient,
 };
+use super::metal_loss::{evaluate_training_step_loss, scale_regularization_grad, MetalLossConfig};
 use super::metal_optimizer::{self as metal_optimizer, MetalAdamState, MetalOptimizerConfig};
 use super::metal_runtime::{MetalBufferSlot, MetalRuntime};
 use super::parity_harness::{ParityLossCurveSample, ParityLossTerms, ParityTopologyMetrics};
@@ -1927,24 +1927,23 @@ impl MetalTrainer {
 
         let optimizer_start = Instant::now();
         let effective_lr_pos = self.compute_lr_pos();
-        let scale_reg_grad = if self.is_litegs_mode()
-            && self.litegs.reg_weight > 0.0
-            && projected.visible_count > 0
-        {
-            let visible_log_scales = gaussians
-                .scales
-                .as_tensor()
-                .index_select(&projected.source_indices, 0)?;
-            let visible_reg_grad =
-                scale_regularization_grad(&visible_log_scales, self.litegs.reg_weight)?;
-            Some(Tensor::zeros_like(gaussians.scales.as_tensor())?.index_add(
-                &projected.source_indices,
-                &visible_reg_grad,
-                0,
-            )?)
-        } else {
-            None
-        };
+        let scale_reg_grad =
+            if self.is_litegs_mode() && self.litegs.reg_weight > 0.0 && projected.visible_count > 0
+            {
+                let visible_log_scales = gaussians
+                    .scales
+                    .as_tensor()
+                    .index_select(&projected.source_indices, 0)?;
+                let visible_reg_grad =
+                    scale_regularization_grad(&visible_log_scales, self.litegs.reg_weight)?;
+                Some(Tensor::zeros_like(gaussians.scales.as_tensor())?.index_add(
+                    &projected.source_indices,
+                    &visible_reg_grad,
+                    0,
+                )?)
+            } else {
+                None
+            };
         let parameter_grads = metal_backward::assemble_parameter_grads(
             &self.device,
             MetalParameterGradInputs {

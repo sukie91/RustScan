@@ -43,10 +43,28 @@ mod metal_loss;
 mod metal_backward;
 
 #[cfg(feature = "gpu")]
+mod metal_dispatch;
+
+#[cfg(feature = "gpu")]
 mod metal_forward;
 
 #[cfg(feature = "gpu")]
+mod metal_kernels;
+
+#[cfg(feature = "gpu")]
 mod metal_optimizer;
+
+#[cfg(feature = "gpu")]
+mod metal_pipelines;
+
+#[cfg(feature = "gpu")]
+mod metal_projection;
+
+#[cfg(feature = "gpu")]
+mod metal_raster;
+
+#[cfg(feature = "gpu")]
+mod metal_resources;
 
 #[cfg(feature = "gpu")]
 mod splats;
