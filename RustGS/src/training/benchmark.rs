@@ -304,6 +304,8 @@ fn synthetic_loaded_training_data(
         cameras,
         colors,
         depths,
+        target_width: spec.width,
+        target_height: spec.height,
         initial_map: synthetic_initial_map(spec.gaussian_count),
     })
 }
@@ -456,7 +458,9 @@ mod tests {
             ..MetalTrainingBenchmarkSpec::default()
         })
         .expect_err("zero width should fail validation");
-        assert!(err.to_string().contains("width and height must both be > 0"));
+        assert!(err
+            .to_string()
+            .contains("width and height must both be > 0"));
 
         let err = run_metal_training_benchmark(&MetalTrainingBenchmarkSpec {
             gaussian_count: 0,

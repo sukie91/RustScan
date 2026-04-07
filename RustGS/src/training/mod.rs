@@ -25,6 +25,9 @@ mod data_loading;
 mod frame_loader;
 
 #[cfg(feature = "gpu")]
+mod frame_targets;
+
+#[cfg(feature = "gpu")]
 mod init_map;
 
 #[cfg(feature = "gpu")]
@@ -39,6 +42,18 @@ mod metal_loss;
 #[cfg(feature = "gpu")]
 mod metal_backward;
 
+#[cfg(feature = "gpu")]
+mod metal_forward;
+
+#[cfg(feature = "gpu")]
+mod metal_optimizer;
+
+#[cfg(feature = "gpu")]
+mod splats;
+
+#[cfg(feature = "gpu")]
+mod topology;
+
 // Re-export common types at module level
 pub use training_pipeline::{
     compute_psnr, compute_ssim_loss, compute_training_loss, default_camera_intrinsics,
@@ -46,10 +61,15 @@ pub use training_pipeline::{
     TrainableGaussian, TrainingConfig as PipelineConfig, TrainingState,
 };
 
+#[cfg(feature = "gpu")]
+pub use benchmark::{
+    run_metal_training_benchmark, MetalTrainingBenchmarkReport, MetalTrainingBenchmarkSpec,
+};
 pub use chunk_planner::{
     materialize_chunk_dataset, plan_spatial_chunks, ChunkBounds, ChunkBoundsSource,
     ChunkDisposition, ChunkPlan, MaterializedChunkDataset, PlannedChunk,
 };
+pub use eval::MIN_RENDER_SCALE;
 pub use eval::{
     compute_psnr_f32, scaled_dimensions, select_evaluation_frames, summarize_psnr_samples,
     summarize_training_metrics, worst_frame_metrics, EvaluationDevice, EvaluationFrameMetric,
@@ -58,10 +78,6 @@ pub use eval::{
 };
 #[cfg(feature = "gpu")]
 pub use eval::{evaluate_scene, evaluation_device, render_evaluation_frame, trainable_from_scene};
-#[cfg(feature = "gpu")]
-pub use benchmark::{
-    run_metal_training_benchmark, MetalTrainingBenchmarkReport, MetalTrainingBenchmarkSpec,
-};
 pub use parity_harness::{
     compare_loss_curve_samples, default_litegs_parity_fixtures, default_parity_report_path,
     parity_fixture_id_for_input_path, resolve_litegs_parity_fixture_input_path,
@@ -1124,9 +1140,9 @@ fn adapt_chunk_training_config(
     }
 
     while estimate.requires_subdivision_or_degradation()
-        && effective_config.metal_render_scale > 0.125
+        && effective_config.metal_render_scale > MIN_RENDER_SCALE
     {
-        let next_scale = (effective_config.metal_render_scale * 0.75).max(0.125);
+        let next_scale = (effective_config.metal_render_scale * 0.75).max(MIN_RENDER_SCALE);
         if (next_scale - effective_config.metal_render_scale).abs() < f32::EPSILON {
             break;
         }

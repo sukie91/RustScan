@@ -41,13 +41,13 @@ Today, the active path is not just a single trainer file. It spans:
 
 - `RustGS/src/lib.rs`
 - `RustGS/src/training/mod.rs`
-- `RustGS/src/training/train_stream.rs`
+- `RustGS/src/training/data_loading.rs`
 - `RustGS/src/training/metal_trainer.rs`
 - `RustGS/src/training/topology.rs`
 - `RustGS/src/training/eval.rs`
 - `RustGS/src/training/chunk_planner.rs`
 
-That means the refactor must preserve more than step execution. It must preserve orchestration, evaluation, chunk routing, and external entry behavior.
+That means the refactor must preserve more than step execution. It must preserve orchestration, data loading, evaluation, chunk routing, and external entry behavior.
 
 ### 2. The current data-model split is real
 
@@ -55,7 +55,7 @@ RustGS currently moves between three different representations:
 
 - `Gaussian3D` / `GaussianMap` for scene storage and public scene IO
 - `TrainableGaussians` for GPU training state
-- ad hoc intermediate views such as `SplatParameterView`
+- internal bridges such as `Splats`
 
 This validates the plan's core concern, but it also shows why public `core/` should not be rewritten first. Right now the split is bridged by conversion code in `training/data_loading.rs`, not by a stable shared model.
 
@@ -230,6 +230,16 @@ Acceptance criteria:
 
 Goal: Replace the current representation split with one internal training-state model while preserving `GaussianMap` as the external scene boundary.
 
+Implementation note as of 2026-04-07:
+
+- a new internal `training::splats::Splats` model now exists and captures trainable parameter storage for positions, log-scales, rotations, opacity logits, base color parameters, and SH-rest coefficients
+- `training/data_loading.rs` now routes `GaussianMap <-> TrainableGaussians` conversion through `Splats`, so the canonical conversion logic is no longer duplicated there
+- `metal_trainer.rs` snapshot export/rebuild flow now also uses `Splats`, removing the active trainer path's duplicated parameter snapshot type
+- `training/eval.rs` scene-to-trainable conversion now also routes through `Splats`
+- `topology.rs` now consumes `Splats` directly and is wired into `metal_trainer.rs` for schedule, candidate analysis, and snapshot mutation helpers
+- stale compatibility/orchestration leftovers such as `SplatParameterView` and `train_stream.rs` have been removed from the compiled path
+- Epic 2 exit criteria are now met locally; the remaining architecture work has shifted to Epic 3 and Epic 5 extraction rather than further training-state unification
+
 Exit criteria:
 
 - one internal splat model is used across training internals
@@ -276,6 +286,14 @@ Acceptance criteria:
 
 Goal: Make the Metal forward path modular enough that orchestration code can call it without embedding runtime details.
 
+Implementation note as of 2026-04-07:
+
+- `training::metal_forward` now owns the forward-pass data contracts (`ProjectedGaussians`, `RenderedFrame`, forward profiling structs), projection helpers, and the concrete forward executor helpers for projection, tile binning, rasterization, and native-forward parity checks
+- `metal_trainer.rs` now prepares camera-specific SH colors and then calls the `metal_forward` API instead of embedding the forward execution path inline
+- trainer-only compatibility wrappers for direct forward-path tests remain, but the production training loop no longer owns the forward dispatch implementation details
+- `stage_projected_records_from_tensors()` now reuses the extracted forward row-conversion helper instead of maintaining a second tensor-to-projection-row path
+- `metal_runtime.rs` is still monolithic and MSL is still embedded in Rust source, so Epic 3 remains partially complete overall even though Story 3.3 is now effectively satisfied locally
+
 Exit criteria:
 
 - shader source is externalized
@@ -318,6 +336,12 @@ Acceptance criteria:
 - forward outputs include the auxiliary state needed by later backward work
 - trainer orchestration no longer directly manipulates low-level forward dispatch details
 
+Status as of 2026-04-07:
+
+- implemented via `training::metal_forward::{execute_forward_pass, project_gaussians, rasterize, build_tile_bins, profile_native_forward}`
+- `MetalTrainer::render()` now calls that boundary after camera/color preparation
+- low-level runtime split is still deferred to Story 3.2
+
 ### Story 3.4: Preserve Existing Rendering Namespace Clarity
 
 As a RustGS maintainer,
@@ -333,6 +357,16 @@ Acceptance criteria:
 ## Epic 4: Backward and Optimizer Extraction
 
 Goal: Separate gradient computation and parameter updates from trainer orchestration so they can be reasoned about and tested independently.
+
+Implementation note as of 2026-04-07:
+
+- `training::metal_backward` now owns the explicit `MetalParameterGrads` container, backward loss scales, and parameter-gradient assembly for SH/color and optional rotation terms
+- `training::metal_backward` also now owns a concrete backward request/execution boundary for SSIM staging, target-buffer staging, and raster backward dispatch
+- `training::metal_loss` now owns structured step-loss evaluation, SSIM gradient generation, depth-validity scaling, loss telemetry packing, and backward loss-scale calculation
+- a new internal `training::metal_optimizer` module now owns `MetalAdamState`, `MetalOptimizerConfig`, optimizer-step dispatch, Adam tensor helpers, and Adam-state rebuild logic
+- `metal_trainer.rs` now asks `metal_loss` for a step-loss context, asks the backward layer for a full parameter-gradient container, and then delegates parameter updates to `metal_optimizer::apply_optimizer_step(...)`
+- sparse and dense Adam paths are now isolated from the training loop, and the reorder/rebuild path no longer reconstructs Adam state inline inside the trainer
+- the low-level raster backward still begins with `MetalBackwardGrads`, and a small amount of optimizer-adjacent regularization / pose plumbing still lives in the trainer, so Epic 4 is materially closer but not fully finished overall
 
 Exit criteria:
 
@@ -352,6 +386,12 @@ Acceptance criteria:
 - backward code returns that structure consistently
 - regression tests validate shape and parameter-group alignment
 
+Status as of 2026-04-07:
+
+- largely implemented via `training::metal_backward::{MetalParameterGrads, assemble_parameter_grads}`
+- the production trainer path now consumes a full parameter-gradient container before the optimizer step
+- the remaining gap is mostly cleanup: the raw raster-backward container is still separate from the final parameter-gradient container, but the production step path no longer assembles parameter-group gradients inline
+
 ### Story 4.2: Extract Optimizer Step Logic and State Management
 
 As a RustGS maintainer,
@@ -364,6 +404,12 @@ Acceptance criteria:
 - sparse-gradient and dense-gradient cases are both supported
 - optimizer tests cover reorder, prune, and split/clone state behavior
 
+Status as of 2026-04-07:
+
+- largely implemented via `training::metal_optimizer::{MetalAdamState, rebuild_adam_state, apply_optimizer_step}`
+- sparse and dense update paths are both routed through the extracted optimizer module
+- reorder/rebuild regression coverage still passes through the trainer test suite
+
 ### Story 4.3: Make Trainer Orchestration Explicit
 
 As a RustGS maintainer,
@@ -375,6 +421,14 @@ Acceptance criteria:
 - trainer orchestration calls explicit module boundaries for forward, loss, backward, and optimizer work
 - step-level profiling and telemetry still work
 - external training behavior remains unchanged
+
+Status as of 2026-04-07:
+
+- largely implemented: the production step path now reads as forward -> loss -> backward -> parameter-gradient assembly -> optimize -> topology
+- `metal_loss::evaluate_training_step_loss(...)` now owns loss-term calculation, loss telemetry packing, SSIM gradient generation, and backward loss-scale preparation
+- `metal_backward::execute_backward_pass(...)` now owns target/SSIM staging plus raster backward dispatch
+- `MetalTrainer::training_step()` now reads as forward -> loss -> backward -> parameter-gradient assembly -> optimize -> topology on the production path
+- the remaining cleanup is mostly secondary thinning around pose-gradient handling and the raw-raster-grad to parameter-grad handoff rather than the core step sequence itself
 
 ## Epic 5: Topology Strategy Migration
 

@@ -2,10 +2,12 @@
 //!
 //! This module is no longer the production owner of RustGS training orchestration.
 //! The active runtime path lives in:
-//! - `train_stream.rs` for orchestration and route selection
+//! - `mod.rs` / `training::train()` for orchestration and route selection
 //! - `frame_loader.rs` / `data_loading.rs` for frame ingestion
-//! - `metal_trainer.rs` for step execution
-//! - `topology.rs` / `optimizer_state.rs` / `splat_params.rs` for Gaussian evolution state
+//! - `metal_trainer.rs` for step orchestration and runtime ownership
+//! - `metal_forward.rs` for forward-pass execution, data contracts, and projection/rasterization helpers
+//! - `metal_backward.rs` / `metal_optimizer.rs` for backward kernels, parameter-gradient assembly, and optimizer state/update logic
+//! - `topology.rs` / `splats.rs` for Gaussian evolution state
 //! - `io/scene_io.rs` for scene persistence
 //!
 //! `training_pipeline.rs` remains in-tree for legacy compatibility, shared utility losses,

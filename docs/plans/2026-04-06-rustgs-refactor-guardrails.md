@@ -4,6 +4,28 @@ Related plan: `docs/plans/2026-04-06-rustgs-brush-refactor-review-and-epics.md`
 Implements: Epic 1 Story 1.1, Story 1.2, Story 1.3
 Date: 2026-04-06
 
+## Verified Snapshot
+
+Last verified: 2026-04-07
+
+Status summary from the latest local validation pass:
+
+- public entry points and guardrail documents exist and match the current RustGS package surface
+- execution-plan route tests are present and green
+- adaptive chunk-budget tests are present and green
+- trainer-path regression tests for forward visibility, sparse-grad backward plumbing, Adam row remap, and topology mutation are present and green
+- extracted step-loss coverage is present and green for loss telemetry, depth backward scaling, and LiteGS scale regularization
+- benchmark harness tests are present and green
+- LiteGS parity-report write-path tests are present and green
+- chunk-local loading now consumes full-resolution frames incrementally for initialization and retains training targets at the effective render scale
+- TUM fixture-backed smoke tests are present and green with the workspace fixture at `test_data/tum`
+- benchmark example emits real timing JSON when run with Metal access
+- CLI LiteGS smoke/parity baseline succeeds with the workspace TUM fixture and Metal access
+
+Remaining verification prerequisites:
+
+- real Metal-backed commands still require Metal access; in sandboxed runs on this machine they may report Metal unavailable, while unsandboxed runs succeed
+
 ## Purpose
 
 This document records the current RustGS training compatibility surface and the guardrails that must stay green while the Brush-inspired refactor lands.
@@ -84,6 +106,13 @@ Refactor work may reorganize the internals behind each step, but it must not sil
 
 These commands are the minimum runnable baseline for Epic 1.
 
+Environment prerequisites for the commands below:
+
+- commands that exercise real TUM loading require a workspace fixture at `test_data/tum`
+- commands that exercise real Metal training or benchmark timing require `rustgs::metal_available() == true`
+- in sandboxed execution on this machine, Metal-backed commands may report Metal unavailable even though unsandboxed runs succeed
+- when either prerequisite is missing, the command may compile successfully but skip the runtime path it is meant to guard
+
 ### 1. TUM Dataset Load and Smoke Integration Tests
 
 ```bash
@@ -97,10 +126,17 @@ This covers:
 - direct train-from-path smoke
 - post-train evaluation-summary smoke
 
+Current verification note:
+
+- dataset-load and evaluation-subset checks are green in the current workspace
+- the Metal-backed smoke tests also passed when re-run with Metal access outside the sandbox
+
 ### 2. Execution-Plan and Chunk-Route Regression
 
 ```bash
 cargo test --manifest-path RustGS/Cargo.toml --features gpu execution_plan -- --nocapture
+cargo test --manifest-path RustGS/Cargo.toml --features gpu adaptive_chunk_config_lowers_gaussian_cap_before_render_scale -- --nocapture
+cargo test --manifest-path RustGS/Cargo.toml --features gpu adaptive_chunk_config_reduces_render_scale_when_gaussian_cap_is_not_enough -- --nocapture
 ```
 
 This covers:
@@ -108,6 +144,13 @@ This covers:
 - standard route selection
 - chunked route selection
 - adaptive chunk-budget behavior
+
+Current verification note:
+
+- the `execution_plan` filter only covers the three `*_execution_plan_*` tests
+- the two `adaptive_chunk_config_*` tests must be run explicitly
+- `adaptive_chunk_config_lowers_gaussian_cap_before_render_scale` is green
+- `adaptive_chunk_config_reduces_render_scale_when_gaussian_cap_is_not_enough` is green after aligning chunk-local loading and memory estimation with retained target-frame scale
 
 ### 3. Optimizer and Topology Regression Coverage
 
@@ -135,6 +178,11 @@ This provides a structured timing baseline for:
 - average end-to-end step time
 - smoke training wall-clock timing
 
+Current verification note:
+
+- the benchmark example emitted real timing JSON in the latest Metal-backed validation run
+- in sandboxed environments without Metal access it may still print a skip message instead of emitting timing JSON
+
 ### 5. LiteGS Parity Report Baseline
 
 ```bash
@@ -156,6 +204,12 @@ Expected outputs:
 - scene PLY
 - optional post-train evaluation summary
 - `.parity.json` sidecar for the LiteGS profile
+
+Current verification note:
+
+- unit and integration-style parity report tests are present and green
+- the real CLI smoke command above succeeded in the latest validation run and wrote both the scene PLY and LiteGS parity sidecar
+- in sandboxed environments without Metal access this command may still fail before training starts
 
 ## Regression Coverage Map
 

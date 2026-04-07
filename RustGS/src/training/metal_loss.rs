@@ -1,6 +1,38 @@
 use candle_core::op::BackpropOp;
 use candle_core::{CpuStorage, CustomOp2, Layout, MetalStorage, Shape, Storage, Tensor};
 
+use crate::diff::diff_splat::TrainableGaussians;
+
+use super::metal_backward::{backward_loss_scales, MetalBackwardLossScales};
+use super::metal_forward::{ProjectedGaussians, RenderedFrame};
+use super::parity_harness::ParityLossTerms;
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct MetalLossConfig {
+    pub color_weight: f32,
+    pub ssim_weight: f32,
+    pub depth_weight: f32,
+    pub scale_regularization_weight: f32,
+    pub enable_transmittance_loss: bool,
+    pub render_width: usize,
+    pub render_height: usize,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct MetalLossTelemetry {
+    pub loss_terms: ParityLossTerms,
+    pub depth_valid_pixels: Option<usize>,
+    pub depth_grad_scale: Option<f32>,
+}
+
+pub(crate) struct MetalStepLossContext {
+    pub total_loss: f32,
+    pub rendered_color_cpu: Vec<f32>,
+    pub ssim_grads: Vec<f32>,
+    pub backward_loss_scales: MetalBackwardLossScales,
+    pub telemetry: MetalLossTelemetry,
+}
+
 /// Compute per-pixel SSIM gradient (dSSIM/d_rendered) for RGB images.
 ///
 /// Uses an 11×11 uniform box-filter window.  Returns `(ssim_mean, grad)` where
@@ -141,6 +173,154 @@ pub(crate) fn masked_mean_abs_diff(
     let masked_diff = predicted.sub(target)?.abs()?.broadcast_mul(&mask)?;
     let masked_sum = masked_diff.flatten_all()?.sum(0)?;
     masked_sum.broadcast_div(&valid_count)
+}
+
+pub(crate) fn evaluate_training_step_loss(
+    gaussians: &TrainableGaussians,
+    rendered: &RenderedFrame,
+    projected: &ProjectedGaussians,
+    target_color: &Tensor,
+    target_depth: &Tensor,
+    target_color_cpu: &[f32],
+    target_depth_cpu: &[f32],
+    config: MetalLossConfig,
+) -> candle_core::Result<MetalStepLossContext> {
+    let color_loss = mean_abs_diff(&rendered.color, target_color)?;
+    let depth_loss = masked_mean_abs_diff(&rendered.depth, target_depth, target_depth)?;
+    let rendered_color_cpu = rendered.color.flatten_all()?.to_vec1::<f32>()?;
+    let (ssim_value, ssim_grads) = ssim_gradient(
+        &rendered_color_cpu,
+        target_color_cpu,
+        config.render_width,
+        config.render_height,
+    );
+    let ssim_loss_term = 1.0 - ssim_value;
+    let depth_valid_pixels = if config.depth_weight > 0.0 {
+        Some(valid_depth_sample_count(target_depth_cpu))
+    } else {
+        None
+    };
+    let depth_grad_scale = if config.depth_weight > 0.0 {
+        Some(depth_backward_scale(config.depth_weight, target_depth_cpu))
+    } else {
+        None
+    };
+    let scale_reg_term = if config.scale_regularization_weight > 0.0 && projected.visible_count > 0
+    {
+        let visible_log_scales = gaussians
+            .scales
+            .as_tensor()
+            .index_select(&projected.source_indices, 0)?;
+        scale_regularization_term(&visible_log_scales)?
+    } else {
+        Tensor::new(0.0f32, color_loss.device())?
+    };
+    let transmittance_term = if config.enable_transmittance_loss {
+        rendered.alpha.mean_all()?
+    } else {
+        Tensor::new(0.0f32, color_loss.device())?
+    };
+
+    let mut total = color_loss
+        .affine(config.color_weight as f64, 0.0)?
+        .broadcast_add(&Tensor::new(
+            config.ssim_weight * ssim_loss_term,
+            color_loss.device(),
+        )?)?;
+    if config.depth_weight > 0.0 {
+        total = total.broadcast_add(&depth_loss.affine(config.depth_weight as f64, 0.0)?)?;
+    }
+    if config.scale_regularization_weight > 0.0 {
+        total = total.broadcast_add(
+            &scale_reg_term.affine(config.scale_regularization_weight as f64, 0.0)?,
+        )?;
+    }
+    if config.enable_transmittance_loss {
+        total = total.broadcast_add(&transmittance_term)?;
+    }
+
+    let total_loss = total.to_vec0::<f32>()?;
+    let telemetry = MetalLossTelemetry {
+        loss_terms: ParityLossTerms {
+            l1: Some(color_loss.to_vec0::<f32>()?),
+            ssim: Some(ssim_loss_term),
+            scale_regularization: if config.scale_regularization_weight > 0.0 {
+                Some(scale_reg_term.to_vec0::<f32>()?)
+            } else {
+                None
+            },
+            transmittance: if config.enable_transmittance_loss {
+                Some(transmittance_term.to_vec0::<f32>()?)
+            } else {
+                None
+            },
+            depth: if config.depth_weight > 0.0 {
+                Some(depth_loss.to_vec0::<f32>()?)
+            } else {
+                None
+            },
+            total: Some(total_loss),
+        },
+        depth_valid_pixels,
+        depth_grad_scale,
+    };
+    let backward_loss_scales = backward_loss_scales(
+        config.color_weight,
+        config.ssim_weight,
+        target_color_cpu.len(),
+        depth_grad_scale.unwrap_or(0.0),
+        config.enable_transmittance_loss,
+        config.render_width * config.render_height,
+    );
+
+    Ok(MetalStepLossContext {
+        total_loss,
+        rendered_color_cpu,
+        ssim_grads,
+        backward_loss_scales,
+        telemetry,
+    })
+}
+
+fn is_valid_depth_sample(depth: f32) -> bool {
+    depth.is_finite() && depth > 0.0
+}
+
+pub(crate) fn valid_depth_sample_count(depth: &[f32]) -> usize {
+    depth
+        .iter()
+        .copied()
+        .filter(|depth| is_valid_depth_sample(*depth))
+        .count()
+}
+
+pub(crate) fn depth_backward_scale(depth_weight: f32, target_depth: &[f32]) -> f32 {
+    if depth_weight <= 0.0 {
+        return 0.0;
+    }
+    let valid_count = valid_depth_sample_count(target_depth);
+    if valid_count == 0 {
+        0.0
+    } else {
+        depth_weight / valid_count as f32
+    }
+}
+
+pub(crate) fn scale_regularization_term(
+    visible_log_scales: &Tensor,
+) -> candle_core::Result<Tensor> {
+    visible_log_scales.exp()?.sqr()?.mean_all()
+}
+
+pub(crate) fn scale_regularization_grad(
+    visible_log_scales: &Tensor,
+    weight: f32,
+) -> candle_core::Result<Tensor> {
+    let visible_elem_count = visible_log_scales.elem_count().max(1) as f32;
+    visible_log_scales
+        .exp()?
+        .sqr()?
+        .affine(((2.0 * weight) / visible_elem_count) as f64, 0.0)
 }
 
 impl CustomOp2 for MeanAbsDiff {

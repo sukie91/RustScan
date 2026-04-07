@@ -6,7 +6,11 @@ use std::str::FromStr;
 use std::time::Instant;
 
 #[cfg(feature = "gpu")]
+use super::splats::Splats;
+#[cfg(feature = "gpu")]
 use candle_core::Device;
+
+pub const MIN_RENDER_SCALE: f32 = 0.0625;
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct FinalTrainingMetrics {
@@ -239,7 +243,7 @@ pub fn compute_psnr_f32(rendered: &[f32], target: &[f32]) -> f32 {
 }
 
 pub fn scaled_dimensions(width: usize, height: usize, render_scale: f32) -> (usize, usize) {
-    let scale = render_scale.clamp(0.0625, 1.0);
+    let scale = render_scale.clamp(MIN_RENDER_SCALE, 1.0);
     let scaled_width = ((width as f32) * scale).round().max(1.0) as usize;
     let scaled_height = ((height as f32) * scale).round().max(1.0) as usize;
     (scaled_width, scaled_height)
@@ -261,60 +265,11 @@ pub fn trainable_from_scene(
     metadata: &SceneMetadata,
     device: &Device,
 ) -> Result<TrainableGaussians, SceneEvaluationError> {
-    let mut positions = Vec::with_capacity(scene.len() * 3);
-    let mut scales = Vec::with_capacity(scene.len() * 3);
-    let mut rotations = Vec::with_capacity(scene.len() * 4);
-    let mut opacities = Vec::with_capacity(scene.len());
-    let mut sh_0 = Vec::with_capacity(scene.len() * 3);
-
     let inferred_degree = infer_sh_degree(scene);
     let sh_degree = metadata.sh_degree.max(inferred_degree);
-    let sh_rest_per_gaussian = sh_rest_value_count_for_degree(sh_degree);
-    let uses_sh = sh_degree > 0;
-    let mut sh_rest = if uses_sh {
-        Vec::with_capacity(scene.len() * sh_rest_per_gaussian)
-    } else {
-        Vec::new()
-    };
-
-    for (index, gaussian) in scene.iter().enumerate() {
-        positions.extend_from_slice(&gaussian.position);
-        scales.extend_from_slice(&[
-            gaussian.scale[0].max(1e-6).ln(),
-            gaussian.scale[1].max(1e-6).ln(),
-            gaussian.scale[2].max(1e-6).ln(),
-        ]);
-        rotations.extend_from_slice(&gaussian.rotation);
-        opacities.push(opacity_to_logit(gaussian.opacity));
-        sh_0.extend_from_slice(&gaussian.color);
-
-        if uses_sh {
-            match gaussian.sh_rest.as_ref() {
-                Some(values) => {
-                    if values.len() != sh_rest_per_gaussian {
-                        return Err(SceneEvaluationError::InvalidInput(format!(
-                            "gaussian {index} has {} SH-rest values, expected {} for degree {}",
-                            values.len(),
-                            sh_rest_per_gaussian,
-                            sh_degree
-                        )));
-                    }
-                    sh_rest.extend_from_slice(values);
-                }
-                None => sh_rest.extend(std::iter::repeat(0.0).take(sh_rest_per_gaussian)),
-            }
-        }
-    }
-
-    if uses_sh {
-        Ok(TrainableGaussians::new_with_sh(
-            &positions, &scales, &rotations, &opacities, &sh_0, &sh_rest, sh_degree, device,
-        )?)
-    } else {
-        Ok(TrainableGaussians::new(
-            &positions, &scales, &rotations, &opacities, &sh_0, device,
-        )?)
-    }
+    Ok(Splats::from_scene_gaussians(scene, sh_degree)
+        .map_err(|err| SceneEvaluationError::InvalidInput(err.to_string()))?
+        .to_trainable(device)?)
 }
 
 #[cfg(feature = "gpu")]
@@ -533,15 +488,6 @@ fn resize_rgb_box(
         }
     }
     dst
-}
-
-fn opacity_to_logit(opacity: f32) -> f32 {
-    let clamped = opacity.clamp(1e-6, 1.0 - 1e-6);
-    (clamped / (1.0 - clamped)).ln()
-}
-
-fn sh_rest_value_count_for_degree(sh_degree: usize) -> usize {
-    (((sh_degree + 1) * (sh_degree + 1)).saturating_sub(1)) * 3
 }
 
 fn infer_sh_degree(scene: &[Gaussian]) -> usize {

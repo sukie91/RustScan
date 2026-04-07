@@ -77,8 +77,8 @@ pub use crate::training::{
 pub use crate::training::{
     estimate_chunk_capacity, evaluate_scene, evaluation_device, last_metal_training_telemetry,
     render_evaluation_frame, run_metal_training_benchmark, trainable_from_scene,
-    ChunkCapacityDisposition, ChunkCapacityEstimate, LiteGsOptimizerLrs,
-    LiteGsTrainingTelemetry, MetalTrainingBenchmarkReport, MetalTrainingBenchmarkSpec,
+    ChunkCapacityDisposition, ChunkCapacityEstimate, LiteGsOptimizerLrs, LiteGsTrainingTelemetry,
+    MetalTrainingBenchmarkReport, MetalTrainingBenchmarkSpec,
 };
 pub use crate::training::{TrainingBackend, TrainingConfig, TrainingResult};
 

@@ -93,7 +93,7 @@ RustScan/
 - `diff_splat.rs` - GPU differentiable splatting
 - `autodiff.rs` - True autodiff with backward propagation
 - `tiled_renderer.rs` - Tiled rasterization with densify/prune
-- `training_pipeline.rs` - Legacy/reference training helpers; RustGS production ownership now lives in `train_stream`, `frame_loader`, `metal_trainer`, `topology`, and `scene_io`
+- `training_pipeline.rs` - Legacy/reference training helpers; RustGS production ownership now lives in `training::train`, `frame_loader`, `metal_forward` (forward execution boundary), `metal_loss` (step-loss evaluation + telemetry packing), `metal_backward` (raster backward + parameter-gradient assembly), `metal_optimizer` (optimizer state/update internals), `metal_trainer` (training orchestration), `topology`, and `scene_io`
 - `complete_trainer.rs` - Complete trainer with LR scheduler
 - `autodiff_trainer.rs` - GPU trainer
 - `tracker.rs` - Gaussian tracking (ICP)
