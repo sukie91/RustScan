@@ -327,6 +327,79 @@ impl PoseEmbeddings {
     }
 }
 
+pub(crate) fn cloned_frame_pose_embedding(
+    pose_embeddings: Option<&PoseEmbeddings>,
+    frame_idx: usize,
+) -> Option<PoseEmbedding> {
+    pose_embeddings
+        .and_then(|pose_embeddings| pose_embeddings.get(frame_idx))
+        .cloned()
+}
+
+pub(crate) fn resolve_render_camera(
+    pose_embedding: Option<&PoseEmbedding>,
+    fallback_camera: &DiffCamera,
+    device: &Device,
+) -> candle_core::Result<DiffCamera> {
+    let Some(pose_embedding) = pose_embedding else {
+        return Ok(fallback_camera.clone());
+    };
+
+    pose_embedding.to_diff_camera(
+        fallback_camera.fx,
+        fallback_camera.fy,
+        fallback_camera.cx,
+        fallback_camera.cy,
+        fallback_camera.width,
+        fallback_camera.height,
+        device,
+    )
+}
+
+pub(crate) fn optional_pose_parameter_grads_fd<F>(
+    pose_embedding: Option<&PoseEmbedding>,
+    fallback_camera: &DiffCamera,
+    loss_fn: F,
+    device: &Device,
+) -> candle_core::Result<Option<(Tensor, Tensor)>>
+where
+    F: FnMut(&DiffCamera) -> candle_core::Result<f32>,
+{
+    let Some(pose_embedding) = pose_embedding else {
+        return Ok(None);
+    };
+
+    compute_pose_gradients_fd(
+        pose_embedding,
+        fallback_camera.fx,
+        fallback_camera.fy,
+        fallback_camera.cx,
+        fallback_camera.cy,
+        fallback_camera.width,
+        fallback_camera.height,
+        loss_fn,
+        device,
+    )
+    .map(Some)
+}
+
+pub(crate) fn apply_optional_pose_update(
+    pose_embeddings: Option<&mut PoseEmbeddings>,
+    frame_idx: usize,
+    grads: Option<(Tensor, Tensor)>,
+) -> candle_core::Result<()> {
+    let Some((quaternion_grad, translation_grad)) = grads else {
+        return Ok(());
+    };
+    let Some(pose_embeddings) = pose_embeddings else {
+        return Ok(());
+    };
+
+    let quaternion_grads = [quaternion_grad];
+    let translation_grads = [translation_grad];
+    pose_embeddings.adam_step(&[frame_idx], &quaternion_grads, &translation_grads)
+}
+
 /// Compute pose gradients from loss via finite differences.
 ///
 /// This is a fallback when analytical gradients are not available.

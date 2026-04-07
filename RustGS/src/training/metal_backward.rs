@@ -4,9 +4,9 @@ use crate::diff::diff_splat::{DiffCamera, TrainableGaussians, SH_C0};
 
 use super::metal_forward::{
     finite_difference_sigma_wrt_rotation_component, projected_rows_to_cpu, row_to_quaternion,
-    row_to_vec3, ProjectedGaussians, RenderedFrame,
+    row_to_vec3, ProjectedGaussians, ProjectedTileBins, RenderedFrame,
 };
-use super::metal_runtime::{MetalRuntime, MetalTileBins, METAL_TILE_SIZE};
+use super::metal_runtime::{MetalRuntime, METAL_TILE_SIZE};
 
 const SH_C1: f32 = 0.488_602_52;
 const SH_C2: [f32; 5] = [
@@ -68,7 +68,7 @@ pub(crate) struct MetalBackwardPass {
 }
 
 pub(crate) struct MetalBackwardRequest<'a> {
-    pub tile_bins: &'a MetalTileBins,
+    pub tile_bins: &'a ProjectedTileBins,
     pub n_gaussians: usize,
     pub camera: &'a DiffCamera,
     pub target_color_cpu: &'a [f32],
@@ -123,12 +123,16 @@ pub(crate) fn execute_backward_pass(
 
 pub(crate) fn backward_weighted_l1(
     runtime: &mut MetalRuntime,
-    tile_bins: &MetalTileBins,
+    tile_bins: &ProjectedTileBins,
     n_gaussians: usize,
     camera: &DiffCamera,
 ) -> candle_core::Result<MetalBackwardPass> {
-    let (frame, _profile) =
-        runtime.rasterize_backward(n_gaussians, tile_bins, camera.width, camera.height)?;
+    let (frame, _profile) = runtime.rasterize_backward(
+        n_gaussians,
+        tile_bins.as_runtime(),
+        camera.width,
+        camera.height,
+    )?;
 
     let grad_magnitude_tensor = runtime.compute_grad_magnitudes(n_gaussians)?;
     let grad_magnitudes = runtime.read_tensor_flat::<f32>(&grad_magnitude_tensor)?;

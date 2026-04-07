@@ -311,8 +311,15 @@ impl MetalRuntime {
         }
     }
 
-    pub(crate) fn buffer_capacity(&self, slot: MetalBufferSlot) -> usize {
-        self.resources.buffer_capacity(slot)
+    pub(crate) fn tile_index_capacity_bytes(&self) -> usize {
+        self.resources.buffer_capacity(MetalBufferSlot::TileIndices)
+    }
+
+    pub(crate) fn prime_tile_index_buffer(&mut self) -> candle_core::Result<()> {
+        if self.device.is_metal() {
+            self.dispatch_fill_u32(MetalBufferSlot::TileIndices, 0, 1)?;
+        }
+        Ok(())
     }
 
     pub(crate) fn reserve_core_buffers(

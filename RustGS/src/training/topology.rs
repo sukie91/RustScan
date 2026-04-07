@@ -1,5 +1,6 @@
 use std::cmp::Ordering;
 
+use super::parity_harness::ParityTopologyMetrics;
 use super::splats::Splats;
 use super::{LiteGsConfig, LiteGsPruneMode, TrainingProfile};
 
@@ -779,12 +780,60 @@ pub(super) struct TopologyMutationResult {
     pub(super) added: usize,
     pub(super) pruned: usize,
     pub(super) morton_sorted: bool,
+    pub(super) aftermath: TopologyMutationAftermath,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum TopologyStatsAction {
+    KeepCurrent,
+    UseMutated,
+    ResetAll,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct TopologyMetricsDelta {
+    pub(super) final_gaussians: usize,
+    pub(super) added: usize,
+    pub(super) pruned: usize,
+    pub(super) opacity_reset: bool,
+    pub(super) completed_epoch: Option<usize>,
+    pub(super) late_stage: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct TopologyMutationAftermath {
+    pub(super) requires_trainable_rebuild: bool,
+    pub(super) requires_adam_rebuild: bool,
+    pub(super) requires_cluster_resync: bool,
+    pub(super) requires_runtime_reserve: bool,
+    pub(super) apply_opacity_reset: bool,
+    pub(super) reset_refine_window_stats: bool,
+    pub(super) gaussian_stats_action: TopologyStatsAction,
+    pub(super) metrics_delta: TopologyMetricsDelta,
+}
+
+impl Default for TopologyMutationAftermath {
+    fn default() -> Self {
+        Self {
+            requires_trainable_rebuild: false,
+            requires_adam_rebuild: false,
+            requires_cluster_resync: false,
+            requires_runtime_reserve: false,
+            apply_opacity_reset: false,
+            reset_refine_window_stats: false,
+            gaussian_stats_action: TopologyStatsAction::KeepCurrent,
+            metrics_delta: TopologyMetricsDelta::default(),
+        }
+    }
 }
 
 pub(super) struct TopologyMutationRequest<'a> {
     pub(super) policy: &'a TopologyPolicy,
     pub(super) should_densify: bool,
     pub(super) should_prune: bool,
+    pub(super) should_reset_opacity: bool,
+    pub(super) completed_epoch: Option<usize>,
+    pub(super) late_stage: bool,
     pub(super) max_gaussians: usize,
     pub(super) infos: &'a [TopologyCandidateInfo],
     pub(super) litegs_selection: &'a LiteGsDensifySelection,
@@ -845,7 +894,102 @@ pub(super) fn apply_snapshot_mutations(
         added,
         pruned,
         morton_sorted,
+        aftermath: topology_mutation_aftermath(&request, snapshot.len(), added, pruned),
     }
+}
+
+fn topology_mutation_aftermath(
+    request: &TopologyMutationRequest<'_>,
+    final_gaussians: usize,
+    added: usize,
+    pruned: usize,
+) -> TopologyMutationAftermath {
+    let topology_changed = added > 0 || pruned > 0;
+    let gaussian_stats_action = if topology_changed {
+        TopologyStatsAction::UseMutated
+    } else if request.should_reset_opacity && !request.policy.is_litegs_mode() {
+        TopologyStatsAction::ResetAll
+    } else {
+        TopologyStatsAction::KeepCurrent
+    };
+
+    TopologyMutationAftermath {
+        requires_trainable_rebuild: topology_changed,
+        requires_adam_rebuild: topology_changed,
+        requires_cluster_resync: topology_changed,
+        requires_runtime_reserve: topology_changed,
+        apply_opacity_reset: request.should_reset_opacity,
+        reset_refine_window_stats: request.policy.is_litegs_mode(),
+        gaussian_stats_action,
+        metrics_delta: TopologyMetricsDelta {
+            final_gaussians,
+            added,
+            pruned,
+            opacity_reset: request.should_reset_opacity,
+            completed_epoch: request.completed_epoch,
+            late_stage: request.late_stage,
+        },
+    }
+}
+
+pub(super) fn apply_topology_metrics_delta(
+    metrics: &mut ParityTopologyMetrics,
+    delta: TopologyMetricsDelta,
+) {
+    metrics.final_gaussians = Some(delta.final_gaussians);
+    if delta.added > 0 {
+        metrics.densify_events = metrics.densify_events.saturating_add(1);
+        metrics.densify_added = metrics.densify_added.saturating_add(delta.added);
+        record_topology_epoch(
+            &mut metrics.first_densify_epoch,
+            &mut metrics.last_densify_epoch,
+            delta.completed_epoch,
+        );
+        if delta.late_stage {
+            metrics.late_stage_densify_events = metrics.late_stage_densify_events.saturating_add(1);
+            metrics.late_stage_densify_added =
+                metrics.late_stage_densify_added.saturating_add(delta.added);
+        }
+    }
+    if delta.pruned > 0 {
+        metrics.prune_events = metrics.prune_events.saturating_add(1);
+        metrics.prune_removed = metrics.prune_removed.saturating_add(delta.pruned);
+        record_topology_epoch(
+            &mut metrics.first_prune_epoch,
+            &mut metrics.last_prune_epoch,
+            delta.completed_epoch,
+        );
+        if delta.late_stage {
+            metrics.late_stage_prune_events = metrics.late_stage_prune_events.saturating_add(1);
+            metrics.late_stage_prune_removed = metrics
+                .late_stage_prune_removed
+                .saturating_add(delta.pruned);
+        }
+    }
+    if delta.opacity_reset {
+        metrics.opacity_reset_events = metrics.opacity_reset_events.saturating_add(1);
+        record_topology_epoch(
+            &mut metrics.first_opacity_reset_epoch,
+            &mut metrics.last_opacity_reset_epoch,
+            delta.completed_epoch,
+        );
+        if delta.late_stage {
+            metrics.late_stage_opacity_reset_events =
+                metrics.late_stage_opacity_reset_events.saturating_add(1);
+        }
+    }
+}
+
+fn record_topology_epoch(
+    first: &mut Option<usize>,
+    last: &mut Option<usize>,
+    epoch: Option<usize>,
+) {
+    let Some(epoch) = epoch else {
+        return;
+    };
+    *first = Some(first.map_or(epoch, |current| current.min(epoch)));
+    *last = Some(last.map_or(epoch, |current| current.max(epoch)));
 }
 
 pub(super) fn prune_snapshot_litegs(
@@ -987,12 +1131,14 @@ fn sigmoid_scalar(value: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        analyze_topology_candidates, densify_snapshot_litegs, litegs_requested_additions,
-        litegs_select_densify_candidates, prune_snapshot, schedule_topology,
-        should_collect_visible_indices, MetalGaussianStats, RunningMoments, TopologyAnalysis,
-        TopologyPolicy, TopologySchedule, TopologyStepContext,
+        analyze_topology_candidates, apply_snapshot_mutations, apply_topology_metrics_delta,
+        densify_snapshot_litegs, litegs_requested_additions, litegs_select_densify_candidates,
+        prune_snapshot, schedule_topology, should_collect_visible_indices, LiteGsDensifySelection,
+        MetalGaussianStats, RunningMoments, TopologyAnalysis, TopologyMutationRequest,
+        TopologyPolicy, TopologySchedule, TopologyStatsAction, TopologyStepContext,
     };
     use crate::diff::diff_splat::TrainableColorRepresentation;
+    use crate::training::parity_harness::ParityTopologyMetrics;
     use crate::training::splats::Splats;
     use crate::training::{LiteGsConfig, TrainingConfig, TrainingProfile};
 
@@ -1257,6 +1403,143 @@ mod tests {
                 ..TopologySchedule::default()
             },
         ));
+    }
+
+    #[test]
+    fn mutation_aftermath_requests_structural_rebuild_and_metrics() {
+        let policy = legacy_policy();
+        let mut snapshot = Splats {
+            positions: vec![0.0, 0.0, 1.0, 1.0, 0.0, 1.0],
+            log_scales: vec![
+                0.05f32.ln(),
+                0.05f32.ln(),
+                0.05f32.ln(),
+                0.05f32.ln(),
+                0.05f32.ln(),
+                0.05f32.ln(),
+            ],
+            rotations: vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+            opacity_logits: vec![2.0, -10.0],
+            colors: vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            sh_rest: Vec::new(),
+            color_representation: TrainableColorRepresentation::Rgb,
+        };
+        let mut stats = vec![
+            MetalGaussianStats {
+                mean2d_grad: RunningMoments {
+                    mean: 1.0,
+                    m2: 0.0,
+                    count: 1,
+                },
+                age: 5,
+                ..Default::default()
+            },
+            MetalGaussianStats::default(),
+        ];
+        let mut origins = vec![Some(0), Some(1)];
+        let infos = vec![
+            candidate(false, true, 1, 0.9, 1.0),
+            candidate(true, false, 0, 0.0, 0.0),
+        ];
+
+        let mutation = apply_snapshot_mutations(
+            &mut snapshot,
+            &mut stats,
+            &mut origins,
+            TopologyMutationRequest {
+                policy: &policy,
+                should_densify: true,
+                should_prune: true,
+                should_reset_opacity: false,
+                completed_epoch: Some(2),
+                late_stage: true,
+                max_gaussians: 4,
+                infos: &infos,
+                litegs_selection: &LiteGsDensifySelection::default(),
+                morton_sort_on_densify: false,
+            },
+        );
+
+        assert_eq!(mutation.added, 1);
+        assert_eq!(mutation.pruned, 1);
+        assert_eq!(snapshot.len(), 2);
+        assert_eq!(
+            mutation.aftermath.gaussian_stats_action,
+            TopologyStatsAction::UseMutated
+        );
+        assert!(mutation.aftermath.requires_trainable_rebuild);
+        assert!(mutation.aftermath.requires_adam_rebuild);
+        assert!(mutation.aftermath.requires_cluster_resync);
+        assert!(mutation.aftermath.requires_runtime_reserve);
+        assert!(!mutation.aftermath.apply_opacity_reset);
+
+        let mut metrics = ParityTopologyMetrics::default();
+        apply_topology_metrics_delta(&mut metrics, mutation.aftermath.metrics_delta);
+        assert_eq!(metrics.final_gaussians, Some(2));
+        assert_eq!(metrics.densify_events, 1);
+        assert_eq!(metrics.densify_added, 1);
+        assert_eq!(metrics.prune_events, 1);
+        assert_eq!(metrics.prune_removed, 1);
+        assert_eq!(metrics.first_densify_epoch, Some(2));
+        assert_eq!(metrics.last_prune_epoch, Some(2));
+        assert_eq!(metrics.late_stage_densify_events, 1);
+        assert_eq!(metrics.late_stage_prune_events, 1);
+    }
+
+    #[test]
+    fn mutation_aftermath_marks_litegs_opacity_reset_without_structural_change() {
+        let config = TrainingConfig {
+            training_profile: TrainingProfile::LiteGsMacV1,
+            ..TrainingConfig::default()
+        };
+        let policy = TopologyPolicy::from_training_config(&config, 1.0);
+        let mut snapshot = Splats {
+            positions: vec![0.0, 0.0, 1.0],
+            log_scales: vec![0.05f32.ln(), 0.05f32.ln(), 0.05f32.ln()],
+            rotations: vec![1.0, 0.0, 0.0, 0.0],
+            opacity_logits: vec![2.0],
+            colors: vec![1.0, 0.0, 0.0],
+            sh_rest: Vec::new(),
+            color_representation: TrainableColorRepresentation::Rgb,
+        };
+        let mut stats = vec![MetalGaussianStats::default()];
+        let mut origins = vec![Some(0)];
+        let infos = vec![candidate(false, false, 1, 0.9, 0.0)];
+
+        let mutation = apply_snapshot_mutations(
+            &mut snapshot,
+            &mut stats,
+            &mut origins,
+            TopologyMutationRequest {
+                policy: &policy,
+                should_densify: false,
+                should_prune: false,
+                should_reset_opacity: true,
+                completed_epoch: Some(3),
+                late_stage: true,
+                max_gaussians: 1,
+                infos: &infos,
+                litegs_selection: &LiteGsDensifySelection::default(),
+                morton_sort_on_densify: false,
+            },
+        );
+
+        assert_eq!(mutation.added, 0);
+        assert_eq!(mutation.pruned, 0);
+        assert_eq!(
+            mutation.aftermath.gaussian_stats_action,
+            TopologyStatsAction::KeepCurrent
+        );
+        assert!(!mutation.aftermath.requires_trainable_rebuild);
+        assert!(mutation.aftermath.apply_opacity_reset);
+        assert!(mutation.aftermath.reset_refine_window_stats);
+
+        let mut metrics = ParityTopologyMetrics::default();
+        apply_topology_metrics_delta(&mut metrics, mutation.aftermath.metrics_delta);
+        assert_eq!(metrics.final_gaussians, Some(1));
+        assert_eq!(metrics.opacity_reset_events, 1);
+        assert_eq!(metrics.first_opacity_reset_epoch, Some(3));
+        assert_eq!(metrics.late_stage_opacity_reset_events, 1);
     }
 
     fn candidate(

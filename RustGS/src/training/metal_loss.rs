@@ -323,6 +323,26 @@ pub(crate) fn scale_regularization_grad(
         .affine(((2.0 * weight) / visible_elem_count) as f64, 0.0)
 }
 
+pub(crate) fn optional_full_scale_regularization_grad(
+    gaussians: &TrainableGaussians,
+    projected: &ProjectedGaussians,
+    enabled: bool,
+    weight: f32,
+) -> candle_core::Result<Option<Tensor>> {
+    if !enabled || weight <= 0.0 || projected.visible_count == 0 {
+        return Ok(None);
+    }
+
+    let visible_log_scales = gaussians
+        .scales
+        .as_tensor()
+        .index_select(&projected.source_indices, 0)?;
+    let visible_reg_grad = scale_regularization_grad(&visible_log_scales, weight)?;
+    Tensor::zeros_like(gaussians.scales.as_tensor())?
+        .index_add(&projected.source_indices, &visible_reg_grad, 0)
+        .map(Some)
+}
+
 impl CustomOp2 for MeanAbsDiff {
     fn name(&self) -> &'static str {
         "mean-abs-diff"

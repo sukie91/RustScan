@@ -300,6 +300,7 @@ Implementation note as of 2026-04-07:
 - `training::metal_projection` now owns Gaussian projection kernel dispatch, projection-record staging, and CPU/GPU tile-bin construction
 - `training::metal_raster` now owns forward/backward raster buffer preparation, target/SSIM staging, and native Metal raster dispatch
 - `metal_runtime.rs` has been reduced to the shared runtime facade, Metal-specific type definitions, camera staging, and compatibility delegates, so the heavy execution paths are no longer concentrated there even though Story 3.2 is still not fully closed
+- the remaining architecture gap is contract leakage rather than missing extraction: `metal_forward.rs` still imports `MetalRuntime`, `MetalProjectionRecord`, `MetalTileBins`, and buffer-slot/runtime-facing types from `metal_runtime.rs`, so the trainer boundary is cleaner structurally than semantically
 
 Exit criteria:
 
@@ -365,9 +366,10 @@ Acceptance criteria:
 
 Status as of 2026-04-07:
 
-- implemented via `training::metal_forward::{execute_forward_pass, project_gaussians, rasterize, build_tile_bins, profile_native_forward}`
-- `MetalTrainer::render()` now calls that boundary after camera/color preparation
-- low-level runtime split is still deferred to Story 3.2
+- largely implemented via `training::metal_forward::{execute_forward_pass, execute_forward_pass_on_runtime, project_gaussians, project_gaussians_on_runtime, rasterize, build_tile_bins, profile_native_forward}`
+- `ProjectedGaussians.tile_bins` now exposes the forward-owned `ProjectedTileBins` wrapper, and trainer/backward consumers no longer depend on `MetalTileBins` directly
+- `MetalTrainer` no longer constructs `MetalForwardContext` or reaches into `MetalBufferSlot::TileIndices` on the production forward path; those details now sit behind `metal_forward` and `metal_runtime` helper boundaries
+- the remaining gap is internal rather than caller-facing: `metal_forward` still translates from runtime projection records and staging choices inside the forward/runtime layer, so the implementation boundary is cleaner for callers but not yet fully DTO-only on the inside
 
 ### Story 3.4: Preserve Existing Rendering Namespace Clarity
 
@@ -381,6 +383,25 @@ Acceptance criteria:
 - module ownership between CPU render code and Metal training-forward code is documented
 - the migration does not break existing public render exports
 
+### Story 3.5: Narrow the Forward Contract and Hide Metal Runtime Types
+
+As a RustGS maintainer,
+I want the forward boundary to return forward-owned DTOs instead of runtime-facing Metal types,
+So that trainer orchestration depends on render results rather than buffer-slot and staging internals.
+
+Acceptance criteria:
+
+- `metal_forward` no longer exposes `MetalRuntime`, `MetalProjectionRecord`, `MetalTileBins`, or buffer-slot enums outside the runtime/forward implementation boundary unless a compatibility shim is explicitly documented
+- trainer, backward, and topology follow-up code consume forward-owned result structures with the data they actually need
+- runtime staging choices such as tensor readback versus runtime-buffer reads remain encapsulated inside forward/runtime modules
+
+Status as of 2026-04-07:
+
+- largely implemented via `training::metal_forward::{execute_forward_pass, execute_forward_pass_on_runtime, project_gaussians, project_gaussians_on_runtime, rasterize, build_tile_bins, profile_native_forward}`
+- `ProjectedGaussians.tile_bins` now exposes the forward-owned `ProjectedTileBins` wrapper, and trainer/backward consumers no longer depend on `MetalTileBins` directly
+- `MetalTrainer` no longer constructs `MetalForwardContext` or reaches into `MetalBufferSlot::TileIndices` on the production forward path; those details now sit behind `metal_forward` and `metal_runtime` helper boundaries
+- the remaining gap is internal rather than caller-facing: `metal_forward` still translates from runtime projection records and staging choices inside the forward/runtime layer, so the implementation boundary is cleaner for callers but not yet fully DTO-only on the inside
+
 ## Epic 4: Backward and Optimizer Extraction
 
 Goal: Separate gradient computation and parameter updates from trainer orchestration so they can be reasoned about and tested independently.
@@ -393,7 +414,8 @@ Implementation note as of 2026-04-07:
 - a new internal `training::metal_optimizer` module now owns `MetalAdamState`, `MetalOptimizerConfig`, optimizer-step dispatch, Adam tensor helpers, and Adam-state rebuild logic
 - `metal_trainer.rs` now asks `metal_loss` for a step-loss context, asks the backward layer for a full parameter-gradient container, and then delegates parameter updates to `metal_optimizer::apply_optimizer_step(...)`
 - sparse and dense Adam paths are now isolated from the training loop, and the reorder/rebuild path no longer reconstructs Adam state inline inside the trainer
-- the low-level raster backward still begins with `MetalBackwardGrads`, and a small amount of optimizer-adjacent regularization / pose plumbing still lives in the trainer, so Epic 4 is materially closer but not fully finished overall
+- Story 4.4 is now complete: pose-camera resolution, FD pose gradients, pose updates, and full-tensor LiteGS scale-regularization composition now live behind `pose_embedding` / `metal_loss` boundaries instead of widening `MetalTrainer::training_step()`
+- the remaining Epic 4 gap is mostly structural cleanup below the public step flow, especially the fact that raster backward still first materializes `MetalBackwardGrads` before parameter gradients are assembled into the final `MetalParameterGrads` container
 
 Exit criteria:
 
@@ -455,7 +477,25 @@ Status as of 2026-04-07:
 - `metal_loss::evaluate_training_step_loss(...)` now owns loss-term calculation, loss telemetry packing, SSIM gradient generation, and backward loss-scale preparation
 - `metal_backward::execute_backward_pass(...)` now owns target/SSIM staging plus raster backward dispatch
 - `MetalTrainer::training_step()` now reads as forward -> loss -> backward -> parameter-gradient assembly -> optimize -> topology on the production path
-- the remaining cleanup is mostly secondary thinning around pose-gradient handling and the raw-raster-grad to parameter-grad handoff rather than the core step sequence itself
+- the remaining cleanup is mostly secondary thinning around pose-gradient handling, scale-regularization branching, and the raw-raster-grad to parameter-grad handoff rather than the core step sequence itself
+
+### Story 4.4: Extract Pose-Learning and Secondary Regularization Paths
+
+As a RustGS maintainer,
+I want learnable camera updates and secondary regularization branches isolated from the core step flow,
+So that experimental training options do not keep expanding the main trainer control path.
+
+Acceptance criteria:
+
+- pose-parameter gradient computation and update flow live behind a dedicated module boundary or an explicitly documented experimental adapter
+- scale regularization and similar secondary update paths are composed through backward/optimizer interfaces instead of trainer-local special cases where practical
+- when `learnable_viewproj` is disabled, the production step path does not carry extra trainer-local control flow for pose updates
+
+Status as of 2026-04-07:
+
+- implemented via `training::pose_embedding::{cloned_frame_pose_embedding, resolve_render_camera, optional_pose_parameter_grads_fd, apply_optional_pose_update}`
+- `training::metal_loss::optional_full_scale_regularization_grad(...)` now composes visible LiteGS regularization gradients into the full log-scale optimizer input outside trainer-local scatter code
+- `MetalTrainer::training_step()` now calls dedicated pose/regularization helpers instead of carrying inline camera-selection, FD-pose-gradient, pose-update, and full-tensor scale-regularization branches
 
 ## Epic 5: Topology Strategy Migration
 
@@ -465,8 +505,9 @@ Implementation note as of 2026-04-07:
 
 - `training::topology` now owns the explicit topology schedule contract (`TopologySchedule`, `TopologyStepContext`) plus an extracted execution-planning layer (`TopologyExecutionPlan`, `TopologyExecutionDisposition`)
 - snapshot mutation orchestration for densify/prune and LiteGS Morton reorder now lives in `training::topology::apply_snapshot_mutations(...)` instead of being assembled inline inside `metal_trainer.rs`
-- `metal_trainer.rs` still owns topology-side effects that are tightly coupled to trainer state: opacity reset application, Adam-state rebuild, cluster reassignment, runtime buffer reservation, topology telemetry mutation, and topology logging
-- Epic 5 is now in active implementation rather than just planned, but the trainer still owns enough topology lifecycle state that Story 5.1 and Story 5.2 remain only partially complete
+- `training::topology` now also owns the typed post-mutation aftermath contract (`TopologyMutationAftermath`, `TopologyMetricsDelta`, `TopologyStatsAction`) returned from snapshot mutation
+- `metal_trainer.rs` now applies that aftermath through a single `apply_topology_mutation_aftermath(...)` handoff instead of reconstructing the full rebuild/resync/reset/telemetry sequence inline after every topology change
+- the highest-priority remaining Epic 5 gaps are now reference-strategy ownership for `density_controller.rs` plus broader regression/telemetry coverage, not the post-mutation lifecycle handoff itself
 
 Exit criteria:
 
@@ -483,14 +524,14 @@ So that densify and prune behavior is no longer embedded in trainer internals.
 Acceptance criteria:
 
 - topology schedule inputs and outputs are explicitly modeled
-- topology mutation results include enough information for telemetry and optimizer-state rebuild
+- topology mutation results include enough information for telemetry, optimizer-state rebuild, stats resize/reset, cluster invalidation, runtime-buffer reservation, and opacity-reset handling
 - schedule logic remains compatible with current iteration and epoch semantics
 
 Status as of 2026-04-07:
 
-- partially implemented via `TopologySchedule`, `TopologyExecutionPlan`, `TopologyExecutionDisposition`, and `TopologyMutationResult`
-- the topology module now returns typed schedule/decision/mutation information instead of leaving those branches embedded entirely in `metal_trainer.rs`
-- trainer-owned telemetry mutation and optimizer/cluster side effects still sit outside the topology contract, so the story remains active
+- implemented via `TopologySchedule`, `TopologyExecutionPlan`, `TopologyExecutionDisposition`, `TopologyMutationResult`, `TopologyMutationAftermath`, `TopologyMetricsDelta`, and `TopologyStatsAction`
+- the topology module now returns typed schedule, decision, mutation, and aftermath information instead of leaving those branches embedded in `metal_trainer.rs`
+- the contract now carries the information needed for telemetry deltas, optimizer-state rebuild/remap, gaussian-stat action, cluster resync, runtime-buffer reservation, and opacity-reset handling while preserving current iteration/epoch semantics
 
 ### Story 5.2: Introduce a Baseline-Compatible Topology Strategy
 
@@ -522,6 +563,11 @@ Acceptance criteria:
 - its behavior is either wrapped or adapted behind the new topology contract
 - parity-sensitive logic remains available for comparison and regression work
 
+Status as of 2026-04-07:
+
+- not yet closed: `density_controller.rs` is still retained as reference logic, but the active topology path does not yet expose it as an explicit adapter/strategy behind the current `training::topology` contract
+- parity-sensitive heuristics are therefore preserved in the repository but not yet cleanly owned by the extracted topology boundary
+
 ### Story 5.4: Add Topology Regression and Telemetry Coverage
 
 As a RustGS maintainer,
@@ -534,9 +580,33 @@ Acceptance criteria:
 - telemetry and reporting continue to expose topology metrics
 - primitive-count evolution remains observable during training runs
 
+### Story 5.5: Move Post-Mutation Side Effects Behind the Topology Contract
+
+As a RustGS maintainer,
+I want the aftermath of snapshot mutation represented as one topology-owned handoff,
+So that `metal_trainer.rs` stops reconstructing topology lifecycle state inline after densify and prune decisions are applied.
+
+Acceptance criteria:
+
+- the topology contract returns or applies the information needed to drive Adam remap or rebuild, stats resize/reset, cluster sync invalidation, runtime buffer reservation, opacity reset application, and topology telemetry deltas
+- the production trainer path no longer manually performs the full post-mutation side-effect sequence immediately after `apply_snapshot_mutations(...)`
+- regression coverage verifies densify, prune, and opacity-reset flows with matching optimizer state and gaussian-stat shape
+
+Status as of 2026-04-07:
+
+- implemented via `TopologyMutationAftermath`, `TopologyMetricsDelta`, `TopologyStatsAction`, and `topology::apply_topology_metrics_delta(...)`
+- `MetalTrainer` now funnels post-mutation rebuild/resync/reset/telemetry work through `apply_topology_mutation_aftermath(...)` instead of reconstructing the entire sequence inline after `apply_snapshot_mutations(...)`
+- regression coverage continues to pass for densify/prune optimizer-state alignment and LiteGS late-stage topology telemetry, and the aftermath contract now covers opacity-reset flows as well
+
 ## Epic 6: Orchestration Convergence and Cleanup
 
 Goal: Land the refactor as a stable orchestration model while preserving the current external training surface.
+
+Implementation note as of 2026-04-07:
+
+- `training::train()` still routes through `training/mod.rs`, which owns training entry, profile validation, route selection, chunk-plan selection, sequential chunk execution, and chunk persistence/failure recording
+- `training/mod.rs` still publicly re-exports `training_pipeline` helpers at the module root, so legacy/reference utilities remain part of the visible training surface
+- `Splats` is now the internal bridge for mutation and export flows, but the codebase still moves between `GaussianMap`, `TrainableGaussians`, and `Splats`, so the canonical internal training-state ownership model is not fully settled yet
 
 Exit criteria:
 
@@ -555,6 +625,10 @@ Acceptance criteria:
 - orchestration owns lifecycle flow instead of step-detail implementation
 - chunked and non-chunked flows both remain supported
 - profile-based routing remains intact
+
+Status as of 2026-04-07:
+
+- not yet closed: `training/mod.rs` still combines entrypoint routing, profile validation, execution-plan selection, sequential chunk execution, and persistence concerns in one broad module
 
 ### Story 6.2: Preserve External Entry and Evaluation Behavior
 
@@ -576,9 +650,13 @@ So that cleanup does not outrun validation.
 
 Acceptance criteria:
 
-- `metal_trainer.rs` and `metal_runtime.rs` lose extracted responsibilities incrementally
+- `metal_trainer.rs`, `metal_runtime.rs`, and `training/mod.rs` lose extracted responsibilities incrementally
 - compatibility shims remain only where still required
 - dead code is removed only after regression gates pass
+
+Status as of 2026-04-07:
+
+- partially active: `metal_trainer.rs` and `metal_runtime.rs` are already materially thinner, but `training/mod.rs` and the module-root re-export surface still own more legacy compatibility than the target end state
 
 ### Story 6.4: Reassess Trait Abstractions After Concrete Extraction
 
@@ -591,6 +669,42 @@ Acceptance criteria:
 - `MetalKernel` or similar traits are introduced only if post-extraction duplication justifies them
 - if no strong benefit exists, the runtime remains concrete and well-factored instead
 - the decision is documented as an explicit architectural outcome
+
+### Story 6.5: Choose and Enforce the Canonical Internal Training State
+
+As a RustGS maintainer,
+I want one explicitly documented canonical internal training-state ownership model,
+So that forward, backward, topology, eval, and export code stop drifting between overlapping representations.
+
+Acceptance criteria:
+
+- the plan explicitly states which type is canonical for step-time mutation and module exchange, and which roles remain for `GaussianMap` and `TrainableGaussians`
+- conversion responsibilities are centralized and no new ad hoc conversions are introduced across training internals
+- forward, backward, topology, evaluation, and export paths align with that ownership model
+
+### Story 6.6: Split `training/mod.rs` into Thinner Orchestration Responsibilities
+
+As a RustGS maintainer,
+I want execution planning, chunk routing, and persistence separated from the module root,
+So that `training::train()` remains stable while orchestration code becomes easier to reason about and test.
+
+Acceptance criteria:
+
+- profile validation, execution-plan selection, chunk execution, and chunk persistence/export live behind narrower modules or submodules
+- `training::train()` remains the stable public entry while the module root stops owning the full lifecycle implementation
+- chunked and non-chunked routes retain smoke coverage after the split
+
+### Story 6.7: Reduce `training_pipeline` Public Surface Safely
+
+As a RustGS maintainer,
+I want legacy training helpers re-exported only where compatibility actually requires them,
+So that the module-level training surface reflects the refactored architecture instead of historical convenience exports.
+
+Acceptance criteria:
+
+- public re-exports from `training_pipeline` are audited and reduced to proven compatibility needs
+- legacy/reference helpers such as parity or density-reference code are clearly documented as reference paths instead of silent production defaults
+- dead or duplicate module-level exports are removed only after tests and docs confirm the narrower surface
 
 ## Recommended Execution Order
 
@@ -613,18 +727,21 @@ This order is intentional:
 
 ## Immediate Planning Guidance
 
-If implementation starts now, the first execution slice should be:
+If implementation continues from the current 2026-04-07 state, the next execution slice should be:
 
-1. capture compatibility and regression guardrails
-2. define internal `Splats` without changing public scene types
-3. externalize MSL shader source and split `metal_runtime.rs`
+1. close Epic 5's post-mutation topology contract so optimizer/state side effects stop living in `metal_trainer.rs`
+2. narrow Epic 3's forward contract so trainer-facing code stops depending on runtime-specific Metal types
+3. isolate Epic 4's pose-learning and secondary regularization branches from the core trainer step
+4. land Epic 6's orchestration cleanup by deciding the canonical internal training state and thinning `training/mod.rs`
+5. continue parity and TUM validation work once those ownership boundaries stop moving
 
 Do not begin with:
 
 - rewriting public `core/` scene types
 - renaming the top-level `render/` module around the new training-forward boundary
 - deleting `density_controller.rs`
-- introducing a generic kernel trait before runtime decomposition
+- expanding `learnable_viewproj` further through trainer-local control flow
+- introducing a generic kernel trait before runtime decomposition and orchestration cleanup
 
 ## Final Recommendation
 

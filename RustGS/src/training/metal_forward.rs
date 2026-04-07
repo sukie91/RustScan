@@ -62,7 +62,7 @@ pub(super) struct ProjectedGaussians {
     pub(super) max_y: Tensor,
     pub(super) visible_source_indices: Vec<u32>,
     pub(super) visible_count: usize,
-    pub(super) tile_bins: MetalTileBins,
+    pub(super) tile_bins: ProjectedTileBins,
     pub(super) staging_source: ProjectionStagingSource,
 }
 
@@ -87,7 +87,7 @@ impl ProjectedGaussians {
             max_y: Tensor::zeros((0,), DType::F32, device)?,
             visible_source_indices: Vec::new(),
             visible_count: 0,
-            tile_bins: MetalTileBins::default(),
+            tile_bins: ProjectedTileBins::default(),
             staging_source: ProjectionStagingSource::TensorReadback,
         })
     }
@@ -101,6 +101,71 @@ pub(super) struct RenderedFrame {
     pub(super) color: Tensor,
     pub(super) depth: Tensor,
     pub(super) alpha: Tensor,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ProjectedTileRecord {
+    start: usize,
+    count: usize,
+}
+
+impl ProjectedTileRecord {
+    pub(super) fn start(&self) -> usize {
+        self.start
+    }
+
+    pub(super) fn count(&self) -> usize {
+        self.count
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub(super) struct ProjectedTileBins {
+    runtime: MetalTileBins,
+}
+
+impl ProjectedTileBins {
+    pub(super) fn from_runtime(runtime: MetalTileBins) -> Self {
+        Self { runtime }
+    }
+
+    pub(super) fn active_tiles(&self) -> &[usize] {
+        self.runtime.active_tiles()
+    }
+
+    pub(super) fn active_tile_count(&self) -> usize {
+        self.runtime.active_tile_count()
+    }
+
+    pub(super) fn total_assignments(&self) -> usize {
+        self.runtime.total_assignments()
+    }
+
+    pub(super) fn max_gaussians_per_tile(&self) -> usize {
+        self.runtime.max_gaussians_per_tile()
+    }
+
+    pub(super) fn packed_indices(&self) -> &[u32] {
+        self.runtime.packed_indices()
+    }
+
+    pub(super) fn record(&self, tile_idx: usize) -> Option<ProjectedTileRecord> {
+        self.runtime
+            .record(tile_idx)
+            .map(|record| ProjectedTileRecord {
+                start: record.start(),
+                count: record.count(),
+            })
+    }
+
+    pub(super) fn as_runtime(&self) -> &MetalTileBins {
+        &self.runtime
+    }
+
+    #[cfg(test)]
+    pub(super) fn indices_for_tile(&self, tile_idx: usize) -> &[u32] {
+        self.runtime.indices_for_tile(tile_idx)
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -437,6 +502,20 @@ pub(super) fn execute_forward_pass(
     Ok((rendered, projected, profile))
 }
 
+pub(super) fn execute_forward_pass_on_runtime(
+    runtime: &mut MetalRuntime,
+    device: &Device,
+    settings: MetalForwardSettings,
+    inputs: MetalForwardInputs<'_>,
+) -> candle_core::Result<(RenderedFrame, ProjectedGaussians, MetalRenderProfile)> {
+    let mut ctx = MetalForwardContext {
+        runtime,
+        device,
+        settings,
+    };
+    execute_forward_pass(&mut ctx, inputs)
+}
+
 pub(super) fn project_gaussians(
     ctx: &mut MetalForwardContext<'_>,
     inputs: MetalForwardInputs<'_>,
@@ -721,7 +800,7 @@ pub(super) fn project_gaussians(
         },
         visible_source_indices,
         visible_count: profile.visible_gaussians,
-        tile_bins: MetalTileBins::default(),
+        tile_bins: ProjectedTileBins::default(),
         staging_source,
     };
     synchronize_if_needed(ctx.device, inputs.should_profile)?;
@@ -730,13 +809,29 @@ pub(super) fn project_gaussians(
     Ok((projected, profile))
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
+pub(super) fn project_gaussians_on_runtime(
+    runtime: &mut MetalRuntime,
+    device: &Device,
+    settings: MetalForwardSettings,
+    inputs: MetalForwardInputs<'_>,
+) -> candle_core::Result<(ProjectedGaussians, MetalRenderProfile)> {
+    let mut ctx = MetalForwardContext {
+        runtime,
+        device,
+        settings,
+    };
+    project_gaussians(&mut ctx, inputs)
+}
+
 pub(super) fn rasterize(
     runtime: &mut MetalRuntime,
     device: &Device,
     pixel_count: usize,
     chunk_size: usize,
     projected: &ProjectedGaussians,
-    tile_bins: &MetalTileBins,
+    tile_bins: &ProjectedTileBins,
 ) -> candle_core::Result<(RenderedFrame, TileBinningStats)> {
     let mut color_acc = Tensor::zeros((pixel_count, 3), DType::F32, device)?;
     let mut depth_acc = Tensor::zeros((pixel_count,), DType::F32, device)?;
@@ -812,7 +907,7 @@ pub(super) fn rasterize(
 pub(super) fn rasterize_native(
     runtime: &mut MetalRuntime,
     projected: &ProjectedGaussians,
-    tile_bins: &MetalTileBins,
+    tile_bins: &ProjectedTileBins,
     render_width: usize,
     render_height: usize,
 ) -> candle_core::Result<(RenderedFrame, TileBinningStats, NativeForwardProfile)> {
@@ -824,7 +919,7 @@ pub(super) fn rasterize_native(
     }
     let (native_frame, native_profile) = runtime.rasterize_forward(
         projected.visible_count,
-        tile_bins,
+        tile_bins.as_runtime(),
         render_width,
         render_height,
     )?;
@@ -844,7 +939,7 @@ pub(super) fn build_tile_bins(
     runtime: &mut MetalRuntime,
     device: &Device,
     projected: &ProjectedGaussians,
-) -> candle_core::Result<MetalTileBins> {
+) -> candle_core::Result<ProjectedTileBins> {
     if device.is_metal() {
         if !matches!(
             projected.staging_source,
@@ -852,13 +947,17 @@ pub(super) fn build_tile_bins(
         ) {
             stage_projected_records_from_tensors(runtime, projected)?;
         }
-        return runtime.build_tile_bins_gpu(projected.visible_count);
+        return runtime
+            .build_tile_bins_gpu(projected.visible_count)
+            .map(ProjectedTileBins::from_runtime);
     }
     let min_x_values = projected.min_x.to_vec1::<f32>()?;
     let max_x_values = projected.max_x.to_vec1::<f32>()?;
     let min_y_values = projected.min_y.to_vec1::<f32>()?;
     let max_y_values = projected.max_y.to_vec1::<f32>()?;
-    runtime.build_tile_bins(&min_x_values, &max_x_values, &min_y_values, &max_y_values)
+    runtime
+        .build_tile_bins(&min_x_values, &max_x_values, &min_y_values, &max_y_values)
+        .map(ProjectedTileBins::from_runtime)
 }
 
 pub(super) fn profile_native_forward(
@@ -866,7 +965,7 @@ pub(super) fn profile_native_forward(
     render_width: usize,
     render_height: usize,
     projected: &ProjectedGaussians,
-    tile_bins: &MetalTileBins,
+    tile_bins: &ProjectedTileBins,
     baseline: &RenderedFrame,
 ) -> candle_core::Result<NativeParityProfile> {
     if !matches!(
@@ -877,7 +976,7 @@ pub(super) fn profile_native_forward(
     }
     let (native_frame, native_profile) = runtime.rasterize_forward(
         projected.visible_count,
-        tile_bins,
+        tile_bins.as_runtime(),
         render_width,
         render_height,
     )?;
@@ -961,7 +1060,7 @@ pub(super) fn stage_projected_records_from_tensors(
     runtime.write_projection_records(&records)
 }
 
-pub(super) fn tile_binning_stats(tile_bins: &MetalTileBins) -> TileBinningStats {
+pub(super) fn tile_binning_stats(tile_bins: &ProjectedTileBins) -> TileBinningStats {
     TileBinningStats {
         active_tiles: tile_bins.active_tile_count(),
         tile_gaussian_refs: tile_bins.total_assignments(),
