@@ -147,6 +147,22 @@ impl TopologyPolicy {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum TopologyExecutionDisposition {
+    Apply,
+    SkipDestructiveLiteGs,
+    SkipNoEligibleCandidates,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) struct TopologyExecutionPlan {
+    pub(super) completed_epoch: Option<usize>,
+    pub(super) should_densify: bool,
+    pub(super) should_prune: bool,
+    pub(super) should_reset_opacity: bool,
+    pub(super) disposition: TopologyExecutionDisposition,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(super) struct TopologySchedule {
     pub(super) completed_epoch: Option<usize>,
@@ -218,6 +234,43 @@ pub(super) fn should_collect_visible_indices(
     schedule: TopologySchedule,
 ) -> bool {
     policy.is_litegs_mode() || schedule.densify || schedule.prune
+}
+
+pub(super) fn plan_topology_execution(
+    policy: &TopologyPolicy,
+    schedule: TopologySchedule,
+    analysis: &TopologyAnalysis,
+    litegs_selection: &LiteGsDensifySelection,
+) -> TopologyExecutionPlan {
+    let mut plan = TopologyExecutionPlan {
+        completed_epoch: schedule.completed_epoch,
+        should_densify: schedule.densify,
+        should_prune: schedule.prune,
+        should_reset_opacity: schedule.reset_opacity,
+        disposition: TopologyExecutionDisposition::Apply,
+    };
+
+    if policy.is_litegs_mode()
+        && (plan.should_densify || plan.should_prune || plan.should_reset_opacity)
+        && litegs_selection.selected_indices.is_empty()
+        && analysis.prune_candidates > 0
+    {
+        plan.should_densify = false;
+        plan.should_prune = false;
+        plan.should_reset_opacity = false;
+        plan.disposition = TopologyExecutionDisposition::SkipDestructiveLiteGs;
+        return plan;
+    }
+
+    if analysis.clone_candidates == 0
+        && analysis.split_candidates == 0
+        && analysis.prune_candidates == 0
+        && !plan.should_reset_opacity
+    {
+        plan.disposition = TopologyExecutionDisposition::SkipNoEligibleCandidates;
+    }
+
+    plan
 }
 
 pub(super) fn analyze_topology_candidates(
@@ -721,6 +774,80 @@ pub(super) fn densify_snapshot_litegs(
     added
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub(super) struct TopologyMutationResult {
+    pub(super) added: usize,
+    pub(super) pruned: usize,
+    pub(super) morton_sorted: bool,
+}
+
+pub(super) struct TopologyMutationRequest<'a> {
+    pub(super) policy: &'a TopologyPolicy,
+    pub(super) should_densify: bool,
+    pub(super) should_prune: bool,
+    pub(super) max_gaussians: usize,
+    pub(super) infos: &'a [TopologyCandidateInfo],
+    pub(super) litegs_selection: &'a LiteGsDensifySelection,
+    pub(super) morton_sort_on_densify: bool,
+}
+
+pub(super) fn apply_snapshot_mutations(
+    snapshot: &mut Splats,
+    stats: &mut Vec<MetalGaussianStats>,
+    origins: &mut Vec<Option<usize>>,
+    request: TopologyMutationRequest<'_>,
+) -> TopologyMutationResult {
+    let added = if request.should_densify {
+        if request.policy.is_litegs_mode() {
+            densify_snapshot_litegs(
+                request.policy,
+                snapshot,
+                stats,
+                origins,
+                request.max_gaussians,
+                &request.litegs_selection.selected_indices,
+            )
+        } else {
+            densify_snapshot(
+                request.policy,
+                snapshot,
+                stats,
+                origins,
+                request.infos,
+                request.max_gaussians,
+            )
+        }
+    } else {
+        0
+    };
+
+    let pruned = if request.should_prune {
+        if request.policy.is_litegs_mode() {
+            prune_snapshot_litegs(snapshot, stats, origins, request.infos)
+        } else {
+            prune_snapshot(request.policy, snapshot, stats, origins, request.infos)
+        }
+    } else {
+        0
+    };
+
+    let morton_sorted = if request.policy.is_litegs_mode()
+        && request.morton_sort_on_densify
+        && added > 0
+        && snapshot.len() > 1
+    {
+        apply_morton_sort(snapshot, stats, origins)
+    } else {
+        false
+    };
+
+    TopologyMutationResult {
+        added,
+        pruned,
+        morton_sorted,
+    }
+}
+
 pub(super) fn prune_snapshot_litegs(
     snapshot: &mut Splats,
     stats: &mut Vec<MetalGaussianStats>,
@@ -815,6 +942,42 @@ fn filter_snapshot(
     *stats = kept_stats;
     *origins = kept_origins;
     pruned
+}
+
+fn apply_morton_sort(
+    snapshot: &mut Splats,
+    stats: &mut Vec<MetalGaussianStats>,
+    origins: &mut Vec<Option<usize>>,
+) -> bool {
+    let morton_perm = super::morton::morton_sort_permutation(
+        &snapshot.positions,
+        super::morton::DEFAULT_MORTON_BITS,
+    );
+    if morton_perm.len() != snapshot.len() {
+        return false;
+    }
+
+    snapshot.positions = super::morton::permute_vec3(&snapshot.positions, &morton_perm);
+    snapshot.log_scales = super::morton::permute_vec3(&snapshot.log_scales, &morton_perm);
+    snapshot.rotations = super::morton::permute_vec4(&snapshot.rotations, &morton_perm);
+    snapshot.opacity_logits = super::morton::permute_scalar(&snapshot.opacity_logits, &morton_perm);
+    snapshot.colors = super::morton::permute_vec3(&snapshot.colors, &morton_perm);
+
+    let sh_rest_row_width = snapshot.sh_rest_row_width();
+    if sh_rest_row_width > 0 && !snapshot.sh_rest.is_empty() {
+        snapshot.sh_rest =
+            super::morton::permute_rows(&snapshot.sh_rest, sh_rest_row_width, &morton_perm);
+    }
+
+    let mut new_stats = vec![MetalGaussianStats::default(); morton_perm.len()];
+    let mut new_origins = vec![None; morton_perm.len()];
+    for (new_idx, &old_idx) in morton_perm.iter().enumerate() {
+        new_stats[new_idx] = stats[old_idx];
+        new_origins[new_idx] = origins[old_idx];
+    }
+    *stats = new_stats;
+    *origins = new_origins;
+    true
 }
 
 fn sigmoid_scalar(value: f32) -> f32 {

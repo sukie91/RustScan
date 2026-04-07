@@ -460,6 +460,13 @@ Status as of 2026-04-07:
 
 Goal: Separate topology policies from trainer control flow while preserving current LiteGS and legacy semantics.
 
+Implementation note as of 2026-04-07:
+
+- `training::topology` now owns the explicit topology schedule contract (`TopologySchedule`, `TopologyStepContext`) plus an extracted execution-planning layer (`TopologyExecutionPlan`, `TopologyExecutionDisposition`)
+- snapshot mutation orchestration for densify/prune and LiteGS Morton reorder now lives in `training::topology::apply_snapshot_mutations(...)` instead of being assembled inline inside `metal_trainer.rs`
+- `metal_trainer.rs` still owns topology-side effects that are tightly coupled to trainer state: opacity reset application, Adam-state rebuild, cluster reassignment, runtime buffer reservation, topology telemetry mutation, and topology logging
+- Epic 5 is now in active implementation rather than just planned, but the trainer still owns enough topology lifecycle state that Story 5.1 and Story 5.2 remain only partially complete
+
 Exit criteria:
 
 - topology schedule and statistics contracts are explicit
@@ -478,6 +485,12 @@ Acceptance criteria:
 - topology mutation results include enough information for telemetry and optimizer-state rebuild
 - schedule logic remains compatible with current iteration and epoch semantics
 
+Status as of 2026-04-07:
+
+- partially implemented via `TopologySchedule`, `TopologyExecutionPlan`, `TopologyExecutionDisposition`, and `TopologyMutationResult`
+- the topology module now returns typed schedule/decision/mutation information instead of leaving those branches embedded entirely in `metal_trainer.rs`
+- trainer-owned telemetry mutation and optimizer/cluster side effects still sit outside the topology contract, so the story remains active
+
 ### Story 5.2: Introduce a Baseline-Compatible Topology Strategy
 
 As a RustGS maintainer,
@@ -489,6 +502,12 @@ Acceptance criteria:
 - the first strategy implementation matches current active semantics
 - the strategy can be exercised without introducing a second production training path
 - the strategy boundary is testable in isolation
+
+Status as of 2026-04-07:
+
+- partially implemented: the active production semantics are now routed through `training::topology` execution helpers rather than trainer-local branch assembly
+- topology-focused regression coverage still passes through the existing GPU trainer tests and `training::topology` unit tests
+- the code is still concrete rather than trait-based, which remains intentional until the extraction settles
 
 ### Story 5.3: Adapt `density_controller.rs` as a Reference Strategy or Adapter
 

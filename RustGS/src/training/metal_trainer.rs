@@ -41,8 +41,8 @@ use super::metal_runtime::{MetalBufferSlot, MetalRuntime};
 use super::parity_harness::{ParityLossCurveSample, ParityLossTerms, ParityTopologyMetrics};
 use super::splats::Splats;
 use super::topology::{
-    self, LiteGsDensifySelection, MetalGaussianStats, RunningMoments, TopologyAnalysis,
-    TopologyCandidateInfo, TopologyPolicy, TopologyStepContext,
+    self, MetalGaussianStats, RunningMoments, TopologyExecutionDisposition,
+    TopologyMutationRequest, TopologyPolicy, TopologyStepContext,
 };
 use super::{LiteGsConfig, TrainingConfig, TrainingProfile};
 
@@ -837,32 +837,6 @@ impl MetalTrainer {
         Ok(())
     }
 
-    fn litegs_requested_additions(
-        &self,
-        infos: &[TopologyCandidateInfo],
-        allow_extra_growth: bool,
-    ) -> usize {
-        topology::litegs_requested_additions(
-            infos,
-            self.litegs.growth_select_fraction,
-            allow_extra_growth,
-        )
-    }
-
-    fn litegs_select_densify_candidates(
-        &self,
-        infos: &[TopologyCandidateInfo],
-        max_new: usize,
-        allow_extra_growth: bool,
-    ) -> LiteGsDensifySelection {
-        topology::litegs_select_densify_candidates(
-            infos,
-            max_new,
-            self.litegs.growth_select_fraction,
-            allow_extra_growth,
-        )
-    }
-
     fn max_topology_gaussians(
         &self,
         requested_cap: usize,
@@ -909,74 +883,6 @@ impl MetalTrainer {
             }
         }
         low
-    }
-
-    fn analyze_topology_candidates(
-        &self,
-        gaussians: &TrainableGaussians,
-        stats: &[MetalGaussianStats],
-    ) -> candle_core::Result<TopologyAnalysis> {
-        Ok(topology::analyze_topology_candidates(
-            &self.topology_policy(),
-            &Splats::from_trainable(gaussians)?,
-            stats,
-        ))
-    }
-
-    fn densify_snapshot(
-        &self,
-        snapshot: &mut GaussianParameterSnapshot,
-        stats: &mut Vec<MetalGaussianStats>,
-        origins: &mut Vec<Option<usize>>,
-        infos: &[TopologyCandidateInfo],
-        max_gaussians: usize,
-    ) -> usize {
-        topology::densify_snapshot(
-            &self.topology_policy(),
-            snapshot,
-            stats,
-            origins,
-            infos,
-            max_gaussians,
-        )
-    }
-
-    fn prune_snapshot(
-        &self,
-        snapshot: &mut GaussianParameterSnapshot,
-        stats: &mut Vec<MetalGaussianStats>,
-        origins: &mut Vec<Option<usize>>,
-        infos: &[TopologyCandidateInfo],
-    ) -> usize {
-        topology::prune_snapshot(&self.topology_policy(), snapshot, stats, origins, infos)
-    }
-
-    fn densify_snapshot_litegs(
-        &self,
-        snapshot: &mut GaussianParameterSnapshot,
-        stats: &mut Vec<MetalGaussianStats>,
-        origins: &mut Vec<Option<usize>>,
-        max_gaussians: usize,
-        selected_indices: &[usize],
-    ) -> usize {
-        topology::densify_snapshot_litegs(
-            &self.topology_policy(),
-            snapshot,
-            stats,
-            origins,
-            max_gaussians,
-            selected_indices,
-        )
-    }
-
-    fn prune_snapshot_litegs(
-        &self,
-        snapshot: &mut GaussianParameterSnapshot,
-        stats: &mut Vec<MetalGaussianStats>,
-        origins: &mut Vec<Option<usize>>,
-        infos: &[TopologyCandidateInfo],
-    ) -> usize {
-        topology::prune_snapshot_litegs(snapshot, stats, origins, infos)
     }
 
     fn rebuild_adam_state(
@@ -1217,9 +1123,14 @@ impl MetalTrainer {
             stats.resize(old_len, MetalGaussianStats::default());
         }
 
-        let analysis = self.analyze_topology_candidates(gaussians, &stats)?;
+        let current_splats = Splats::from_trainable(gaussians)?;
+        let analysis = topology::analyze_topology_candidates(&policy, &current_splats, &stats);
         let litegs_requested_additions = if self.is_litegs_mode() && should_densify {
-            self.litegs_requested_additions(&analysis.infos, allow_extra_growth)
+            topology::litegs_requested_additions(
+                &analysis.infos,
+                self.litegs.growth_select_fraction,
+                allow_extra_growth,
+            )
         } else {
             0
         };
@@ -1227,40 +1138,36 @@ impl MetalTrainer {
             topology::requested_gaussian_cap(&policy, old_len, litegs_requested_additions);
         let max_gaussians = self.max_topology_gaussians(requested_cap, old_len, frame_count);
         let litegs_selection = if self.is_litegs_mode() && should_densify {
-            self.litegs_select_densify_candidates(
+            topology::litegs_select_densify_candidates(
                 &analysis.infos,
                 max_gaussians.saturating_sub(old_len),
+                self.litegs.growth_select_fraction,
                 allow_extra_growth,
             )
         } else {
-            LiteGsDensifySelection::default()
+            topology::LiteGsDensifySelection::default()
         };
-        if self.is_litegs_mode()
-            && (should_densify || should_prune || should_reset_opacity)
-            && litegs_selection.selected_indices.is_empty()
-            && analysis.prune_candidates > 0
-        {
+        let execution =
+            topology::plan_topology_execution(&policy, schedule, &analysis, &litegs_selection);
+        should_reset_opacity = execution.should_reset_opacity;
+        should_densify = execution.should_densify;
+        should_prune = execution.should_prune;
+
+        if execution.disposition == TopologyExecutionDisposition::SkipDestructiveLiteGs {
             if should_log_topology {
                 log::info!(
                     "Metal topology check at iter {} skipped destructive LiteGS prune/reset because no replacement or growth sources were available | epoch={:?} | prune_candidates={} | growth_candidates={} | max_grad_accum={:.6} | mean_grad_accum={:.6}",
                     self.iteration,
-                    completed_epoch,
+                    execution.completed_epoch,
                     analysis.prune_candidates,
                     analysis.growth_candidates,
                     analysis.max_grad,
                     analysis.mean_grad,
                 );
             }
-            should_densify = false;
-            should_prune = false;
-            should_reset_opacity = false;
         }
 
-        if analysis.clone_candidates == 0
-            && analysis.split_candidates == 0
-            && analysis.prune_candidates == 0
-            && !should_reset_opacity
-        {
+        if execution.disposition == TopologyExecutionDisposition::SkipNoEligibleCandidates {
             if should_log_topology {
                 log::info!(
                     "Metal topology check at iter {} found no eligible candidates | densify={} | prune={} | reset_opacity={} | gaussians={} | budget_cap={} | max_grad_accum={:.6} | mean_grad_accum={:.6} | active_grad_stats={} | small_scale_stats={} | opacity_ready_stats={} | clone_candidates={} | split_candidates={} | prune_candidates={}",
@@ -1289,85 +1196,23 @@ impl MetalTrainer {
         let mut snapshot = self.export_snapshot(gaussians)?;
         let mut origins: Vec<Option<usize>> = (0..snapshot.len()).map(Some).collect();
 
-        let added = if should_densify {
-            if self.is_litegs_mode() {
-                self.densify_snapshot_litegs(
-                    &mut snapshot,
-                    &mut stats,
-                    &mut origins,
-                    max_gaussians,
-                    &litegs_selection.selected_indices,
-                )
-            } else {
-                self.densify_snapshot(
-                    &mut snapshot,
-                    &mut stats,
-                    &mut origins,
-                    &analysis.infos,
-                    max_gaussians,
-                )
-            }
-        } else {
-            0
-        };
-        let pruned = if should_prune {
-            if self.is_litegs_mode() {
-                self.prune_snapshot_litegs(&mut snapshot, &mut stats, &mut origins, &analysis.infos)
-            } else {
-                self.prune_snapshot(&mut snapshot, &mut stats, &mut origins, &analysis.infos)
-            }
-        } else {
-            0
-        };
-
-        // Apply Morton code spatial sorting after densification for better memory coherence
-        let morton_sorted = if self.is_litegs_mode()
-            && self.litegs.morton_sort_on_densify
-            && added > 0
-            && snapshot.len() > 1
-        {
-            let morton_perm = super::morton::morton_sort_permutation(
-                &snapshot.positions,
-                super::morton::DEFAULT_MORTON_BITS,
-            );
-
-            if morton_perm.len() == snapshot.len() {
-                // Apply permutation to all snapshot arrays
-                snapshot.positions = super::morton::permute_vec3(&snapshot.positions, &morton_perm);
-                snapshot.log_scales =
-                    super::morton::permute_vec3(&snapshot.log_scales, &morton_perm);
-                snapshot.rotations = super::morton::permute_vec4(&snapshot.rotations, &morton_perm);
-                snapshot.opacity_logits =
-                    super::morton::permute_scalar(&snapshot.opacity_logits, &morton_perm);
-                snapshot.colors = super::morton::permute_vec3(&snapshot.colors, &morton_perm);
-
-                // Apply permutation to sh_rest if present
-                let sh_rest_row_width = snapshot.sh_rest_row_width();
-                if sh_rest_row_width > 0 && !snapshot.sh_rest.is_empty() {
-                    snapshot.sh_rest = super::morton::permute_rows(
-                        &snapshot.sh_rest,
-                        sh_rest_row_width,
-                        &morton_perm,
-                    );
-                }
-
-                // Apply permutation to stats and origins
-                let mut new_stats = vec![MetalGaussianStats::default(); morton_perm.len()];
-                let mut new_origins = vec![None; morton_perm.len()];
-                for (new_idx, &old_idx) in morton_perm.iter().enumerate() {
-                    new_stats[new_idx] = stats[old_idx].clone();
-                    new_origins[new_idx] = origins[old_idx];
-                }
-                stats = new_stats;
-                origins = new_origins;
-
-                true
-            } else {
-                false
-            }
-        } else {
-            false
-        };
+        let mutation = topology::apply_snapshot_mutations(
+            &mut snapshot,
+            &mut stats,
+            &mut origins,
+            TopologyMutationRequest {
+                policy: &policy,
+                should_densify,
+                should_prune,
+                max_gaussians,
+                infos: &analysis.infos,
+                litegs_selection: &litegs_selection,
+                morton_sort_on_densify: self.litegs.morton_sort_on_densify,
+            },
+        );
+        let added = mutation.added;
+        let pruned = mutation.pruned;
+        let morton_sorted = mutation.morton_sorted;
 
         let topology_duration = topology_start.elapsed();
         let topology_ms = duration_ms(topology_duration);
