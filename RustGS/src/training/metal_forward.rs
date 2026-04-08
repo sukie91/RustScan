@@ -320,6 +320,53 @@ fn quat_from_wxyz(rotation: [f32; 4]) -> Quat {
     Quat::from_xyzw(rotation[1], rotation[2], rotation[3], rotation[0]).normalize()
 }
 
+pub(super) fn projected_axis_covariance_terms(
+    x: f32,
+    y: f32,
+    z: f32,
+    scale: [f32; 3],
+    rotation: [f32; 4],
+    camera_rotation: &[[f32; 3]; 3],
+    fx: f32,
+    fy: f32,
+) -> (f32, f32, [f32; 3], [f32; 3]) {
+    let inv_z = 1.0 / z.max(1e-4);
+    let object_rotation = Mat3::from_quat(quat_from_wxyz(rotation));
+    let camera_rotation = mat3_from_row_major(camera_rotation);
+    let total_rotation = camera_rotation * object_rotation;
+
+    let projection_row_x = Vec3::new(fx * inv_z, 0.0, -fx * x * inv_z * inv_z);
+    let projection_row_y = Vec3::new(0.0, fy * inv_z, -fy * y * inv_z * inv_z);
+
+    let proj_axis_x = [
+        projection_row_x.dot(total_rotation.col(0)),
+        projection_row_x.dot(total_rotation.col(1)),
+        projection_row_x.dot(total_rotation.col(2)),
+    ];
+    let proj_axis_y = [
+        projection_row_y.dot(total_rotation.col(0)),
+        projection_row_y.dot(total_rotation.col(1)),
+        projection_row_y.dot(total_rotation.col(2)),
+    ];
+
+    let covariance_x = scale[0] * scale[0] * proj_axis_x[0] * proj_axis_x[0]
+        + scale[1] * scale[1] * proj_axis_x[1] * proj_axis_x[1]
+        + scale[2] * scale[2] * proj_axis_x[2] * proj_axis_x[2];
+    let covariance_y = scale[0] * scale[0] * proj_axis_y[0] * proj_axis_y[0]
+        + scale[1] * scale[1] * proj_axis_y[1] * proj_axis_y[1]
+        + scale[2] * scale[2] * proj_axis_y[2] * proj_axis_y[2];
+
+    const LOWPASS_FILTER: f32 = 0.3;
+    const LOWPASS_VAR: f32 = LOWPASS_FILTER * LOWPASS_FILTER;
+
+    (
+        (covariance_x + LOWPASS_VAR).max(1e-6).sqrt(),
+        (covariance_y + LOWPASS_VAR).max(1e-6).sqrt(),
+        proj_axis_x,
+        proj_axis_y,
+    )
+}
+
 pub(super) fn projected_axis_aligned_sigmas(
     x: f32,
     y: f32,
@@ -330,23 +377,9 @@ pub(super) fn projected_axis_aligned_sigmas(
     fx: f32,
     fy: f32,
 ) -> (f32, f32) {
-    let inv_z = 1.0 / z.max(1e-4);
-    let object_rotation = Mat3::from_quat(quat_from_wxyz(rotation));
-    let scale_cov = Mat3::from_diagonal(Vec3::new(
-        scale[0] * scale[0],
-        scale[1] * scale[1],
-        scale[2] * scale[2],
-    ));
-    let covariance_world = object_rotation * scale_cov * object_rotation.transpose();
-    let camera_rotation = mat3_from_row_major(camera_rotation);
-    let covariance_camera = camera_rotation * covariance_world * camera_rotation.transpose();
-
-    let projection_row_x = Vec3::new(fx * inv_z, 0.0, -fx * x * inv_z * inv_z);
-    let projection_row_y = Vec3::new(0.0, fy * inv_z, -fy * y * inv_z * inv_z);
-    let covariance_x = projection_row_x.dot(covariance_camera * projection_row_x);
-    let covariance_y = projection_row_y.dot(covariance_camera * projection_row_y);
-
-    (covariance_x.max(1e-6).sqrt(), covariance_y.max(1e-6).sqrt())
+    let (sigma_x, sigma_y, _, _) =
+        projected_axis_covariance_terms(x, y, z, scale, rotation, camera_rotation, fx, fy);
+    (sigma_x, sigma_y)
 }
 
 pub(super) fn finite_difference_sigma_wrt_rotation_component(

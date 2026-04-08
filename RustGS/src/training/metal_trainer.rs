@@ -2019,7 +2019,7 @@ impl MetalTrainer {
         projected: &ProjectedGaussians,
         render_color_grads: &Tensor,
         camera: &DiffCamera,
-    ) -> candle_core::Result<(Tensor, Tensor)> {
+    ) -> candle_core::Result<(Tensor, Tensor, Tensor)> {
         metal_backward::parameter_grads_from_render_color_grads(
             &self.device,
             self.active_sh_degree,
@@ -2089,7 +2089,7 @@ impl MetalTrainer {
         scale_reg_grad: Option<&Tensor>,
         rotation_parameter_grads: Option<&Tensor>,
     ) -> candle_core::Result<()> {
-        let (color_parameter_grads, sh_rest_parameter_grads) = self
+        let (_, color_parameter_grads, sh_rest_parameter_grads) = self
             .parameter_grads_from_render_color_grads(gaussians, projected, &grads.colors, camera)?;
         let parameter_grads = MetalParameterGrads {
             positions: grads.positions.clone(),
@@ -5791,13 +5791,15 @@ mod tests {
         };
         let render_grads = Tensor::from_slice(&[1.0f32, 2.0, -0.5], (1, 3), &device).unwrap();
 
-        let (sh_0_grads, sh_rest_grads) = trainer
+        let (position_grads, sh_0_grads, sh_rest_grads) = trainer
             .parameter_grads_from_render_color_grads(&gaussians, &projected, &render_grads, &camera)
             .unwrap();
+        let position_grads = position_grads.to_vec2::<f32>().unwrap();
         let sh_0_grads = sh_0_grads.to_vec2::<f32>().unwrap();
         let sh_rest_grads = sh_rest_grads.to_vec3::<f32>().unwrap();
         let expected_basis = -SH_C1;
 
+        assert!(position_grads[0].iter().all(|value| value.abs() < 1e-6));
         assert!((sh_0_grads[0][0] - SH_C0).abs() < 1e-6);
         assert!((sh_0_grads[0][1] - 2.0 * SH_C0).abs() < 1e-6);
         assert!((sh_0_grads[0][2] + 0.5 * SH_C0).abs() < 1e-6);
@@ -5806,5 +5808,108 @@ mod tests {
         assert!((sh_rest_grads[0][0][2] + 0.5 * expected_basis).abs() < 1e-6);
         assert!(sh_rest_grads[0][1].iter().all(|value| value.abs() < 1e-6));
         assert!(sh_rest_grads[0][2].iter().all(|value| value.abs() < 1e-6));
+    }
+
+    #[test]
+    fn sh_parameter_grads_include_position_terms_from_view_direction() {
+        let device = Device::Cpu;
+        let mut trainer = MetalTrainer::new(
+            16,
+            16,
+            &TrainingConfig {
+                training_profile: TrainingProfile::LiteGsMacV1,
+                ..TrainingConfig::default()
+            },
+            device.clone(),
+        )
+        .unwrap();
+        trainer.active_sh_degree = 1;
+        let camera = DiffCamera::new(
+            8.0,
+            8.0,
+            8.0,
+            8.0,
+            16,
+            16,
+            &[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            &[0.0, 0.0, 0.0],
+            &device,
+        )
+        .unwrap();
+        let gaussians = TrainableGaussians::new_with_sh(
+            &[1.2, 0.8, 2.5],
+            &[0.0, 0.0, 0.0],
+            &[1.0, 0.0, 0.0, 0.0],
+            &[0.0],
+            &[
+                crate::diff::diff_splat::rgb_to_sh0_value(0.6),
+                crate::diff::diff_splat::rgb_to_sh0_value(0.55),
+                crate::diff::diff_splat::rgb_to_sh0_value(0.5),
+            ],
+            &[
+                0.05, 0.0, 0.0, //
+                0.10, 0.0, 0.0, //
+                -0.08, 0.0, 0.0,
+            ],
+            1,
+            &device,
+        )
+        .unwrap();
+        let projected = ProjectedGaussians {
+            source_indices: Tensor::from_slice(&[0u32], 1, &device).unwrap(),
+            u: Tensor::zeros((1,), DType::F32, &device).unwrap(),
+            v: Tensor::zeros((1,), DType::F32, &device).unwrap(),
+            sigma_x: Tensor::ones((1,), DType::F32, &device).unwrap(),
+            sigma_y: Tensor::ones((1,), DType::F32, &device).unwrap(),
+            raw_sigma_x: Tensor::ones((1,), DType::F32, &device).unwrap(),
+            raw_sigma_y: Tensor::ones((1,), DType::F32, &device).unwrap(),
+            depth: Tensor::ones((1,), DType::F32, &device).unwrap(),
+            opacity: Tensor::ones((1,), DType::F32, &device).unwrap(),
+            opacity_logits: Tensor::zeros((1,), DType::F32, &device).unwrap(),
+            scale3d: Tensor::ones((1, 3), DType::F32, &device).unwrap(),
+            colors: Tensor::from_slice(&[0.6f32, 0.55, 0.5], (1, 3), &device).unwrap(),
+            min_x: Tensor::zeros((1,), DType::F32, &device).unwrap(),
+            max_x: Tensor::zeros((1,), DType::F32, &device).unwrap(),
+            min_y: Tensor::zeros((1,), DType::F32, &device).unwrap(),
+            max_y: Tensor::zeros((1,), DType::F32, &device).unwrap(),
+            visible_source_indices: vec![0],
+            visible_count: 1,
+            tile_bins: ProjectedTileBins::default(),
+            staging_source: ProjectionStagingSource::TensorReadback,
+        };
+        let render_grads = Tensor::from_slice(&[0.8f32, 0.0, 0.0], (1, 3), &device).unwrap();
+
+        let (position_grads, _, _) = trainer
+            .parameter_grads_from_render_color_grads(&gaussians, &projected, &render_grads, &camera)
+            .unwrap();
+        let analytic = position_grads.to_vec2::<f32>().unwrap()[0].clone();
+        assert!(analytic.iter().any(|value| value.abs() > 1e-5));
+
+        let base_position = gaussians.positions().to_vec2::<f32>().unwrap();
+        let eps = 1e-3f32;
+        for axis in 0..3 {
+            let mut plus = base_position.clone();
+            let mut minus = base_position.clone();
+            plus[0][axis] += eps;
+            minus[0][axis] -= eps;
+            let plus_positions = Tensor::from_slice(&plus.concat(), (1, 3), &device).unwrap();
+            let minus_positions = Tensor::from_slice(&minus.concat(), (1, 3), &device).unwrap();
+            let plus_color = trainer
+                .render_colors_for_camera(&gaussians, &plus_positions, &camera)
+                .unwrap()
+                .to_vec2::<f32>()
+                .unwrap();
+            let minus_color = trainer
+                .render_colors_for_camera(&gaussians, &minus_positions, &camera)
+                .unwrap()
+                .to_vec2::<f32>()
+                .unwrap();
+            let fd = (plus_color[0][0] - minus_color[0][0]) * 0.8 / (2.0 * eps);
+            assert!(
+                (analytic[axis] - fd).abs() < 2e-2,
+                "axis={axis} analytic={} fd={fd}",
+                analytic[axis]
+            );
+        }
     }
 }
