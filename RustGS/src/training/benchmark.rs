@@ -166,7 +166,7 @@ fn run_step_microbenchmark(
     let mut trainer = MetalTrainer::new(spec.width, spec.height, config, device.clone())?;
     let frames = trainer.prepare_frames(&loaded)?;
     let mut gaussians = loaded.initial_splats.to_trainable(&device)?;
-    trainer.initialize_training_session(&mut gaussians, &frames)?;
+    trainer.initialize_training_session(&mut gaussians, frames.len())?;
 
     for step in 0..spec.warmup_steps {
         let frame_idx = step % frames.len();

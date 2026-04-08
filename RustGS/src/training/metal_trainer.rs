@@ -4,6 +4,7 @@
 //! updates on the Metal device, while replacing the generic autograd hot path
 //! with a specialized analytical backward pass.
 
+use std::mem::size_of;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -40,7 +41,10 @@ use super::metal_loss::{
 use super::metal_optimizer::{self as metal_optimizer, MetalAdamState, MetalOptimizerConfig};
 #[cfg(test)]
 use super::metal_runtime::MetalBufferSlot;
-use super::metal_runtime::MetalRuntime;
+use super::metal_runtime::{
+    MetalProjectedGaussian, MetalProjectionRecord, MetalRuntime, MetalTileDispatchRecord,
+    METAL_TILE_SIZE,
+};
 use super::parity_harness::{ParityLossCurveSample, ParityLossTerms, ParityTopologyMetrics};
 use super::pose_embedding;
 use super::splats::Splats;
@@ -69,14 +73,19 @@ const METAL_WARN_BUDGET_DENOMINATOR: u64 = 100;
 const METAL_ESTIMATE_SAFETY_NUMERATOR: u64 = 15;
 const METAL_ESTIMATE_SAFETY_DENOMINATOR: u64 = 100;
 const METAL_ESTIMATE_MIN_SAFETY_BYTES: u64 = 256 * MIB;
-const METAL_SOURCE_FRAME_BYTES_PER_PIXEL: u64 = 16;
-const METAL_RESIZED_CPU_TARGET_BYTES_PER_PIXEL: u64 = 16;
-const METAL_GPU_TARGET_BYTES_PER_PIXEL: u64 = 16;
-const METAL_PIXEL_STATE_BYTES_PER_PIXEL: u64 = 40;
+const METAL_RESIDENT_FRAME_BYTES_PER_PIXEL: u64 = 16;
+const METAL_ACTIVE_FRAME_BYTES_PER_PIXEL: u64 = 32;
+const METAL_RENDER_BUFFER_BYTES_PER_PIXEL: u64 = 20;
+const METAL_LOSS_BUFFER_BYTES_PER_PIXEL: u64 = 28;
+const METAL_LOSS_READBACK_BYTES_PER_PIXEL: u64 = 20;
 const METAL_GAUSSIAN_STATE_BYTES: u64 = 168;
-const METAL_PROJECTED_BYTES_PER_GAUSSIAN: u64 = 64;
-const METAL_CHUNK_WORKSPACE_BYTES_PER_GAUSSIAN_PIXEL: u64 = 64;
-const METAL_RETAINED_GRAPH_BYTES_PER_GAUSSIAN_PIXEL: u64 = 224;
+const METAL_VISIBLE_INDEX_BYTES_PER_GAUSSIAN: u64 = (2 * size_of::<u32>()) as u64;
+const METAL_GRAD_BUFFER_BYTES_PER_GAUSSIAN: u64 = (17 * size_of::<f32>()) as u64;
+const METAL_TILE_INDEX_BYTES_PER_GAUSSIAN: u64 = (4 * size_of::<u32>()) as u64;
+const METAL_TILE_COUNTER_BYTES_PER_TILE: u64 =
+    (2 * size_of::<u32>() + size_of::<MetalTileDispatchRecord>()) as u64;
+const METAL_PROJECTION_RECORD_BYTES: u64 = size_of::<MetalProjectionRecord>() as u64;
+const METAL_PROJECTED_GAUSSIAN_BYTES: u64 = size_of::<MetalProjectedGaussian>() as u64;
 const LITEGS_LAMBDA_DSSIM: f32 = 0.2;
 const LITEGS_DEPTH_LOSS_WEIGHT: f32 = 0.1;
 const LITEGS_SH_ACTIVATION_EPOCH_INTERVAL: usize = 5;
@@ -278,8 +287,7 @@ struct MetalMemoryEstimate {
     frame_bytes: u64,
     pixel_state_bytes: u64,
     projection_bytes: u64,
-    chunk_workspace_bytes: u64,
-    retained_graph_bytes: u64,
+    runtime_bytes: u64,
     safety_margin_bytes: u64,
 }
 
@@ -350,8 +358,7 @@ impl MetalMemoryEstimate {
             .saturating_add(self.frame_bytes)
             .saturating_add(self.pixel_state_bytes)
             .saturating_add(self.projection_bytes)
-            .saturating_add(self.chunk_workspace_bytes)
-            .saturating_add(self.retained_graph_bytes)
+            .saturating_add(self.runtime_bytes)
     }
 
     fn total_bytes(&self) -> u64 {
@@ -367,9 +374,9 @@ impl MetalMemoryEstimate {
 
     fn top_components_summary(&self, count: usize) -> String {
         let mut components = vec![
-            ("graph", self.retained_graph_bytes),
-            ("chunk", self.chunk_workspace_bytes),
+            ("runtime", self.runtime_bytes),
             ("frames", self.frame_bytes),
+            ("pixels", self.pixel_state_bytes),
             ("persistent", self.persistent_bytes()),
             ("safety", self.safety_margin_bytes),
         ];
@@ -386,7 +393,12 @@ impl MetalMemoryEstimate {
     fn recommendations(&self) -> Vec<&'static str> {
         let total = self.total_bytes().max(1);
         let mut recommendations = Vec::new();
-        if self.retained_graph_bytes.saturating_mul(100) >= total.saturating_mul(45) {
+        if self
+            .runtime_bytes
+            .saturating_add(self.projection_bytes)
+            .saturating_mul(100)
+            >= total.saturating_mul(35)
+        {
             recommendations.push("lower --max-initial-gaussians or increase --sampling-step");
         }
         if self
@@ -396,9 +408,6 @@ impl MetalMemoryEstimate {
             >= total.saturating_mul(20)
         {
             recommendations.push("lower --metal-render-scale");
-        }
-        if self.chunk_workspace_bytes.saturating_mul(100) >= total.saturating_mul(10) {
-            recommendations.push("lower --metal-gaussian-chunk-size");
         }
         if recommendations.is_empty() {
             recommendations.push("lower --max-initial-gaussians or --metal-render-scale");
@@ -563,12 +572,17 @@ impl MetalTrainer {
             .litegs_densify_until_epoch(frame_count)
     }
 
+    fn litegs_effective_densify_from_epoch(&self, frame_count: usize) -> usize {
+        self.topology_policy()
+            .litegs_effective_densify_from_epoch(frame_count)
+    }
+
     fn litegs_late_stage_start_epoch(&self, frame_count: usize) -> usize {
         let total_epochs = self.litegs_total_epochs(frame_count);
         let densify_until = self.litegs_densify_until_epoch(frame_count);
         let derived = total_epochs.saturating_mul(2) / 3;
         derived
-            .max(self.litegs.densify_from)
+            .max(self.litegs_effective_densify_from_epoch(frame_count))
             .min(densify_until.saturating_sub(1))
     }
 
@@ -1423,60 +1437,64 @@ impl MetalTrainer {
         })
     }
 
+    pub(crate) fn prepare_frame(
+        &self,
+        loaded: &LoadedTrainingData,
+        idx: usize,
+    ) -> Result<MetalTrainingFrame, TrainingError> {
+        let src_camera = &loaded.cameras[idx];
+        let target_color_cpu = if loaded.target_width == self.render_width
+            && loaded.target_height == self.render_height
+        {
+            loaded.colors[idx].clone()
+        } else {
+            resize_rgb(
+                &loaded.colors[idx],
+                loaded.target_width,
+                loaded.target_height,
+                self.render_width,
+                self.render_height,
+            )
+        };
+        let target_depth_cpu = if loaded.target_width == self.render_width
+            && loaded.target_height == self.render_height
+        {
+            loaded.depths[idx].clone()
+        } else {
+            resize_depth(
+                &loaded.depths[idx],
+                loaded.target_width,
+                loaded.target_height,
+                self.render_width,
+                self.render_height,
+            )
+        };
+        let scaled_camera = scale_camera(
+            src_camera,
+            self.render_width,
+            self.render_height,
+            &self.device,
+        )?;
+        Ok(MetalTrainingFrame {
+            camera: scaled_camera,
+            target_color: Tensor::from_slice(
+                &target_color_cpu,
+                (self.pixel_count, 3),
+                &self.device,
+            )?,
+            target_depth: Tensor::from_slice(&target_depth_cpu, (self.pixel_count,), &self.device)?,
+            target_color_cpu,
+            target_depth_cpu,
+        })
+    }
+
     pub(crate) fn prepare_frames(
         &self,
         loaded: &LoadedTrainingData,
     ) -> Result<Vec<MetalTrainingFrame>, TrainingError> {
         let mut frames = Vec::with_capacity(loaded.cameras.len());
         for idx in 0..loaded.cameras.len() {
-            let src_camera = &loaded.cameras[idx];
-            let target_color_cpu = if loaded.target_width == self.render_width
-                && loaded.target_height == self.render_height
-            {
-                loaded.colors[idx].clone()
-            } else {
-                resize_rgb(
-                    &loaded.colors[idx],
-                    loaded.target_width,
-                    loaded.target_height,
-                    self.render_width,
-                    self.render_height,
-                )
-            };
-            let target_depth_cpu = if loaded.target_width == self.render_width
-                && loaded.target_height == self.render_height
-            {
-                loaded.depths[idx].clone()
-            } else {
-                resize_depth(
-                    &loaded.depths[idx],
-                    loaded.target_width,
-                    loaded.target_height,
-                    self.render_width,
-                    self.render_height,
-                )
-            };
-            let scaled_camera = scale_camera(
-                src_camera,
-                self.render_width,
-                self.render_height,
-                &self.device,
-            )?;
-            frames.push(MetalTrainingFrame {
-                camera: scaled_camera,
-                target_color: Tensor::from_slice(
-                    &target_color_cpu,
-                    (self.pixel_count, 3),
-                    &self.device,
-                )?,
-                target_depth: Tensor::from_slice(
-                    &target_depth_cpu,
-                    (self.pixel_count,),
-                    &self.device,
-                )?,
-                target_color_cpu,
-                target_depth_cpu,
-            });
+            frames.push(self.prepare_frame(loaded, idx)?);
         }
         Ok(frames)
     }
@@ -1484,9 +1502,9 @@ impl MetalTrainer {
     pub(crate) fn initialize_training_session(
         &mut self,
         gaussians: &mut TrainableGaussians,
-        frames: &[MetalTrainingFrame],
+        frame_count: usize,
     ) -> candle_core::Result<()> {
-        if frames.is_empty() {
+        if frame_count == 0 {
             candle_core::bail!("metal backend received zero training frames");
         }
         self.loss_curve_samples.clear();
@@ -1494,7 +1512,7 @@ impl MetalTrainer {
         self.reset_gaussian_stats(gaussians.len());
         self.topology_metrics.initialization_gaussians = Some(gaussians.len());
         self.topology_metrics.final_gaussians = Some(gaussians.len());
-        self.refresh_litegs_topology_window_metrics(frames.len());
+        self.refresh_litegs_topology_window_metrics(frame_count);
         self.runtime.reserve_core_buffers(gaussians.len())?;
         self.runtime.prime_tile_index_buffer()?;
         Ok(())
@@ -1506,7 +1524,7 @@ impl MetalTrainer {
         frames: &[MetalTrainingFrame],
         max_iterations: usize,
     ) -> candle_core::Result<MetalTrainingStats> {
-        self.initialize_training_session(gaussians, frames)?;
+        self.initialize_training_session(gaussians, frames.len())?;
         let runtime_stats = self.runtime.stats();
 
         log::info!(
@@ -1568,6 +1586,74 @@ impl MetalTrainer {
             final_loss: final_metrics.final_loss,
             final_step_loss: final_metrics.final_step_loss,
             telemetry: self.current_telemetry(frames.len()),
+        })
+    }
+
+    pub(crate) fn train_loaded(
+        &mut self,
+        gaussians: &mut TrainableGaussians,
+        loaded: &LoadedTrainingData,
+        max_iterations: usize,
+    ) -> Result<MetalTrainingStats, TrainingError> {
+        let frame_count = loaded.cameras.len();
+        self.initialize_training_session(gaussians, frame_count)?;
+        let runtime_stats = self.runtime.stats();
+
+        log::info!(
+            "MetalTrainer running at {}x{} | chunk_size={} | native_forward={} | topology(densify={} prune={} warmup={} log={}) | frames={} | initial_gaussians={} | tiles={} | runtime_buffers={} | pipeline_warmups={} | tile_index_capacity={}B",
+            self.render_width,
+            self.render_height,
+            self.chunk_size,
+            self.use_native_forward,
+            self.densify_interval,
+            self.prune_interval,
+            self.topology_warmup,
+            self.topology_log_interval,
+            frame_count,
+            gaussians.len(),
+            runtime_stats.tile_windows,
+            runtime_stats.buffer_allocations,
+            runtime_stats.pipeline_compilations,
+            self.runtime.tile_index_capacity_bytes(),
+        );
+
+        let train_start = Instant::now();
+        for iter in 0..max_iterations {
+            let frame_idx = iter % frame_count;
+            let should_log = iter < 5 || iter % 25 == 0;
+            let should_profile =
+                should_profile_iteration(self.profile_steps, self.profile_interval, iter);
+            let frame = self.prepare_frame(loaded, frame_idx)?;
+            let step_start = Instant::now();
+            let outcome =
+                self.training_step(gaussians, &frame, frame_idx, frame_count, should_profile)?;
+            self.record_loss_curve_sample(iter, frame_idx, max_iterations);
+            self.maybe_apply_topology_updates(gaussians, frame_idx, frame_count)?;
+            if should_log {
+                log::info!(
+                    "Metal iter {:5}/{:5} | frame {:3}/{:3} | visible {:5}/{:5} | loss {:.6} | step_time={:.2}s | elapsed={:.2}s",
+                    iter,
+                    max_iterations,
+                    frame_idx + 1,
+                    frame_count,
+                    outcome.visible_gaussians,
+                    outcome.total_gaussians,
+                    outcome.loss,
+                    step_start.elapsed().as_secs_f64(),
+                    train_start.elapsed().as_secs_f64()
+                );
+            }
+            if let Some(profile) = outcome.profile {
+                profile.log(iter, max_iterations);
+            }
+        }
+        self.topology_metrics.final_gaussians = Some(gaussians.len());
+
+        let final_metrics = summarize_training_metrics(&self.loss_history, frame_count);
+        Ok(MetalTrainingStats {
+            final_loss: final_metrics.final_loss,
+            final_step_loss: final_metrics.final_step_loss,
+            telemetry: self.current_telemetry(frame_count),
         })
     }
 
@@ -2415,8 +2501,7 @@ pub fn train(
             "training initialization produced zero Gaussians".to_string(),
         ));
     }
-    let frames = trainer.prepare_frames(&loaded)?;
-    let stats = trainer.train(&mut gaussians, &frames, config.iterations)?;
+    let stats = trainer.train_loaded(&mut gaussians, &loaded, config.iterations)?;
     let trained_map = Splats::from_trainable(&gaussians)?.to_gaussian_map()?;
 
     log::info!(
@@ -2630,40 +2715,40 @@ fn estimate_peak_memory_with_source_pixels(
     pixel_count: usize,
     source_pixel_count: usize,
     frame_count: usize,
-    chunk_size: usize,
+    _chunk_size: usize,
 ) -> MetalMemoryEstimate {
+    let padded_gaussians = num_gaussians.max(1).next_power_of_two() as u64;
     let num_gaussians = num_gaussians as u64;
     let pixel_count = pixel_count as u64;
     let source_pixel_count = source_pixel_count as u64;
     let frame_count = frame_count as u64;
-    let chunk_size = chunk_size.max(1) as u64;
+    let approx_tile_count = pixel_count
+        .saturating_add((METAL_TILE_SIZE * METAL_TILE_SIZE - 1) as u64)
+        / (METAL_TILE_SIZE * METAL_TILE_SIZE) as u64;
     let gaussian_state_bytes = num_gaussians.saturating_mul(METAL_GAUSSIAN_STATE_BYTES);
-    let full_res_frame_bytes = frame_count
+    let resident_frame_bytes = frame_count
         .saturating_mul(source_pixel_count)
-        .saturating_mul(METAL_SOURCE_FRAME_BYTES_PER_PIXEL);
-    let resized_cpu_target_bytes = frame_count
-        .saturating_mul(pixel_count)
-        .saturating_mul(METAL_RESIZED_CPU_TARGET_BYTES_PER_PIXEL);
-    let gpu_target_bytes = frame_count
-        .saturating_mul(pixel_count)
-        .saturating_mul(METAL_GPU_TARGET_BYTES_PER_PIXEL);
-    let frame_bytes = full_res_frame_bytes
-        .saturating_add(resized_cpu_target_bytes)
-        .saturating_add(gpu_target_bytes);
-    let pixel_state_bytes = pixel_count.saturating_mul(METAL_PIXEL_STATE_BYTES_PER_PIXEL);
-    let projection_bytes = num_gaussians.saturating_mul(METAL_PROJECTED_BYTES_PER_GAUSSIAN);
-    let chunk_workspace_bytes = chunk_size
-        .saturating_mul(pixel_count)
-        .saturating_mul(METAL_CHUNK_WORKSPACE_BYTES_PER_GAUSSIAN_PIXEL);
-    let retained_graph_bytes = num_gaussians
-        .saturating_mul(pixel_count)
-        .saturating_mul(METAL_RETAINED_GRAPH_BYTES_PER_GAUSSIAN_PIXEL);
+        .saturating_mul(METAL_RESIDENT_FRAME_BYTES_PER_PIXEL);
+    let active_frame_bytes = pixel_count.saturating_mul(METAL_ACTIVE_FRAME_BYTES_PER_PIXEL);
+    let frame_bytes = resident_frame_bytes.saturating_add(active_frame_bytes);
+    let pixel_state_bytes = pixel_count.saturating_mul(
+        METAL_RENDER_BUFFER_BYTES_PER_PIXEL
+            + METAL_LOSS_BUFFER_BYTES_PER_PIXEL
+            + METAL_LOSS_READBACK_BYTES_PER_PIXEL,
+    );
+    let projection_bytes = padded_gaussians
+        .saturating_mul(METAL_PROJECTION_RECORD_BYTES)
+        .saturating_add(num_gaussians.saturating_mul(
+            METAL_PROJECTED_GAUSSIAN_BYTES + METAL_VISIBLE_INDEX_BYTES_PER_GAUSSIAN,
+        ));
+    let runtime_bytes = num_gaussians
+        .saturating_mul(METAL_GRAD_BUFFER_BYTES_PER_GAUSSIAN + METAL_TILE_INDEX_BYTES_PER_GAUSSIAN)
+        .saturating_add(approx_tile_count.saturating_mul(METAL_TILE_COUNTER_BYTES_PER_TILE));
     let subtotal = gaussian_state_bytes
         .saturating_add(frame_bytes)
         .saturating_add(pixel_state_bytes)
         .saturating_add(projection_bytes)
-        .saturating_add(chunk_workspace_bytes)
-        .saturating_add(retained_graph_bytes);
+        .saturating_add(runtime_bytes);
     let safety_margin_bytes = apply_ratio(
         subtotal,
         METAL_ESTIMATE_SAFETY_NUMERATOR,
@@ -2676,8 +2761,7 @@ fn estimate_peak_memory_with_source_pixels(
         frame_bytes,
         pixel_state_bytes,
         projection_bytes,
-        chunk_workspace_bytes,
-        retained_graph_bytes,
+        runtime_bytes,
         safety_margin_bytes,
     }
 }
@@ -3109,6 +3193,30 @@ mod tests {
         assert_eq!(trainer.litegs_total_epochs(90), 13);
         assert_eq!(trainer.litegs_densify_until_epoch(90), 11);
         assert_eq!(trainer.litegs_late_stage_start_epoch(90), 8);
+    }
+
+    #[test]
+    fn litegs_short_run_topology_window_compresses_to_single_epoch() {
+        let trainer = MetalTrainer::new(
+            32,
+            16,
+            &TrainingConfig {
+                training_profile: TrainingProfile::LiteGsMacV1,
+                iterations: 500,
+                litegs: LiteGsConfig {
+                    densify_from: 3,
+                    ..LiteGsConfig::default()
+                },
+                ..TrainingConfig::default()
+            },
+            Device::Cpu,
+        )
+        .unwrap();
+
+        assert_eq!(trainer.litegs_total_epochs(638), 1);
+        assert_eq!(trainer.litegs_effective_densify_from_epoch(638), 0);
+        assert_eq!(trainer.litegs_densify_until_epoch(638), 1);
+        assert_eq!(trainer.litegs_late_stage_start_epoch(638), 0);
     }
 
     #[test]
@@ -4268,7 +4376,6 @@ mod tests {
         let initial_splats = loaded.initial_splats.clone();
         trainer.scene_extent = initial_splats.scene_extent();
         let mut gaussians = initial_splats.to_trainable(&device).unwrap();
-        let frames = trainer.prepare_frames(&loaded).unwrap();
         let before_positions = gaussians
             .positions()
             .flatten_all()
@@ -4296,7 +4403,7 @@ mod tests {
             .to_vec1::<f32>()
             .unwrap();
 
-        trainer.train(&mut gaussians, &frames, 1).unwrap();
+        trainer.train_loaded(&mut gaussians, &loaded, 1).unwrap();
 
         let position_delta = max_abs_delta(&before_positions, gaussians.positions()).unwrap();
         let scale_delta = max_abs_delta(&before_scales, gaussians.scales.as_tensor()).unwrap();
@@ -4530,16 +4637,17 @@ mod tests {
         let small = estimate_peak_memory(4_096, 4_800, 5, 32);
         let large = estimate_peak_memory(57_474, 4_800, 5, 32);
         assert!(large.total_bytes() > small.total_bytes());
-        assert!(bytes_to_gib(large.total_bytes()) > 10.0);
+        assert!(large.projection_bytes > small.projection_bytes);
+        assert!(large.runtime_bytes > small.runtime_bytes);
     }
 
     #[test]
-    fn peak_estimate_accounts_for_frames_and_chunk_size() {
+    fn peak_estimate_accounts_for_frames_but_not_chunk_size() {
         let baseline = estimate_peak_memory(4_096, 4_800, 5, 32);
         let more_frames = estimate_peak_memory(4_096, 4_800, 25, 32);
         let larger_chunk = estimate_peak_memory(4_096, 4_800, 5, 128);
         assert!(more_frames.total_bytes() > baseline.total_bytes());
-        assert!(larger_chunk.total_bytes() > baseline.total_bytes());
+        assert_eq!(larger_chunk.total_bytes(), baseline.total_bytes());
     }
 
     #[test]
@@ -4569,7 +4677,7 @@ mod tests {
     fn preflight_warns_when_close_to_budget() {
         let estimate = estimate_peak_memory(8_000, 4_800, 5, 32);
         let budget = MetalMemoryBudget {
-            safe_bytes: estimate.total_bytes().saturating_add(512 * MIB),
+            safe_bytes: estimate.total_bytes().saturating_add(1),
             physical_bytes: Some(16 * GIB),
         };
         assert_eq!(
@@ -4582,7 +4690,7 @@ mod tests {
     fn preflight_blocks_when_estimate_exceeds_budget() {
         let estimate = estimate_peak_memory(57_474, 4_800, 1, 32);
         let budget = MetalMemoryBudget {
-            safe_bytes: 16 * GIB,
+            safe_bytes: estimate.total_bytes().saturating_sub(1),
             physical_bytes: Some(24 * GIB),
         };
         assert_eq!(
@@ -4593,13 +4701,19 @@ mod tests {
 
     #[test]
     fn affordable_initial_gaussian_cap_finds_non_blocking_limit() {
+        let requested = 57_474;
+        let minimum_estimate = estimate_peak_memory(1, 4_800, 1, 32);
+        let requested_estimate = estimate_peak_memory(requested, 4_800, 1, 32);
         let budget = MetalMemoryBudget {
-            safe_bytes: 16 * GIB,
+            safe_bytes: minimum_estimate
+                .total_bytes()
+                .saturating_add(requested_estimate.total_bytes())
+                / 2,
             physical_bytes: Some(24 * GIB),
         };
-        let cap = affordable_initial_gaussian_cap(57_474, 4_800, 4_800, 1, 32, &budget);
+        let cap = affordable_initial_gaussian_cap(requested, 4_800, 4_800, 1, 32, &budget);
         assert!(cap > 0);
-        assert!(cap < 57_474);
+        assert!(cap < requested);
         assert_ne!(
             assess_memory_estimate(&estimate_peak_memory(cap, 4_800, 1, 32), &budget),
             MetalMemoryDecision::Block

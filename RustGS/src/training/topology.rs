@@ -134,16 +134,22 @@ impl TopologyPolicy {
         }
     }
 
+    pub(super) fn litegs_effective_densify_from_epoch(&self, frame_count: usize) -> usize {
+        let total_epochs = self.litegs_total_epochs(frame_count);
+        self.litegs.densify_from.min(total_epochs.saturating_sub(1))
+    }
+
     pub(super) fn litegs_densify_until_epoch(&self, frame_count: usize) -> usize {
+        let densify_from = self.litegs_effective_densify_from_epoch(frame_count);
         if let Some(until) = self.litegs.densify_until {
-            return until.max(self.litegs.densify_from.saturating_add(1));
+            return until.max(densify_from.saturating_add(1));
         }
 
         let total_epochs = self.litegs_total_epochs(frame_count);
         let reset_interval = self.litegs.opacity_reset_interval.max(1);
         let scaled = ((total_epochs as f32) * 0.8).floor() as usize;
         let computed = (scaled / reset_interval) * reset_interval + 1;
-        computed.max(self.litegs.densify_from.saturating_add(1))
+        computed.max(densify_from.saturating_add(1))
     }
 
     pub(super) fn litegs_clone_scale_threshold(&self) -> f32 {
@@ -363,7 +369,8 @@ pub(super) fn schedule_topology(
         };
         let passed_warmup = step.iteration > policy.topology_warmup;
         let densify_until = policy.litegs_densify_until_epoch(step.frame_count);
-        let active_window = epoch >= policy.litegs.densify_from && epoch < densify_until;
+        let densify_from = policy.litegs_effective_densify_from_epoch(step.frame_count);
+        let active_window = epoch >= densify_from && epoch < densify_until;
         let frozen = policy
             .litegs
             .topology_freeze_after_epoch
@@ -1432,6 +1439,62 @@ mod tests {
         assert!(!epoch4.densify);
         assert!(!epoch4.prune);
         assert!(!epoch4.reset_opacity);
+    }
+
+    #[test]
+    fn litegs_short_run_schedule_compresses_densify_window() {
+        let config = TrainingConfig {
+            training_profile: TrainingProfile::LiteGsMacV1,
+            iterations: 500,
+            topology_warmup: 100,
+            litegs: LiteGsConfig {
+                densify_from: 3,
+                refine_every: 200,
+                ..LiteGsConfig::default()
+            },
+            ..TrainingConfig::default()
+        };
+        let policy = TopologyPolicy::from_training_config(&config, 1.0);
+
+        assert_eq!(policy.litegs_total_epochs(638), 1);
+        assert_eq!(policy.litegs_effective_densify_from_epoch(638), 0);
+        assert_eq!(policy.litegs_densify_until_epoch(638), 1);
+
+        let early = schedule_topology(
+            &policy,
+            TopologyStepContext {
+                iteration: 100,
+                frame_count: 638,
+            },
+        );
+        let first_refine = schedule_topology(
+            &policy,
+            TopologyStepContext {
+                iteration: 200,
+                frame_count: 638,
+            },
+        );
+        let second_refine = schedule_topology(
+            &policy,
+            TopologyStepContext {
+                iteration: 400,
+                frame_count: 638,
+            },
+        );
+
+        assert_eq!(early.completed_epoch, Some(0));
+        assert!(!early.densify);
+        assert!(!early.prune);
+
+        assert_eq!(first_refine.completed_epoch, Some(0));
+        assert!(first_refine.densify);
+        assert!(first_refine.prune);
+        assert!(first_refine.allow_extra_growth);
+
+        assert_eq!(second_refine.completed_epoch, Some(0));
+        assert!(second_refine.densify);
+        assert!(second_refine.prune);
+        assert!(second_refine.allow_extra_growth);
     }
 
     #[test]

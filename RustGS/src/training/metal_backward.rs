@@ -331,8 +331,9 @@ fn geometry_parameter_grads(
         let inv_z = 1.0 / g.depth.max(1e-6);
         let mut dl_dx_cam = dl_du * camera.fx * inv_z;
         let mut dl_dy_cam = dl_dv * camera.fy * inv_z;
-        let mut dl_dz_cam =
-            dl_dz_direct + dl_du * (-(g.u - camera.cx) * inv_z) + dl_dv * (-(g.v - camera.cy) * inv_z);
+        let mut dl_dz_cam = dl_dz_direct
+            + dl_du * (-(g.u - camera.cx) * inv_z)
+            + dl_dv * (-(g.v - camera.cy) * inv_z);
 
         let raw_rotation = row_to_quaternion(
             raw_rotation_rows
@@ -344,8 +345,14 @@ fn geometry_parameter_grads(
         let y = (g.v - camera.cy) * g.depth / camera.fy.max(1e-6);
 
         if sigma_x_enabled || sigma_y_enabled {
-            let sigma_position_jacobian =
-                finite_difference_sigmas_wrt_camera_position(x, y, g.depth, g.scale3d, raw_rotation, camera);
+            let sigma_position_jacobian = finite_difference_sigmas_wrt_camera_position(
+                x,
+                y,
+                g.depth,
+                g.scale3d,
+                raw_rotation,
+                camera,
+            );
             if sigma_x_enabled {
                 dl_dx_cam += dl_dsigma_x * sigma_position_jacobian[0][0];
                 dl_dy_cam += dl_dsigma_x * sigma_position_jacobian[0][1];
@@ -364,16 +371,17 @@ fn geometry_parameter_grads(
         position_grads[source_idx * 3 + 2] += world_grad[2];
 
         if sigma_x_enabled || sigma_y_enabled {
-            let (raw_sigma_x, raw_sigma_y, proj_axis_x, proj_axis_y) = projected_axis_covariance_terms(
-                x,
-                y,
-                g.depth,
-                g.scale3d,
-                raw_rotation,
-                &camera.rotation,
-                camera.fx,
-                camera.fy,
-            );
+            let (raw_sigma_x, raw_sigma_y, proj_axis_x, proj_axis_y) =
+                projected_axis_covariance_terms(
+                    x,
+                    y,
+                    g.depth,
+                    g.scale3d,
+                    raw_rotation,
+                    &camera.rotation,
+                    camera.fx,
+                    camera.fy,
+                );
             for axis in 0..3 {
                 let scale_sq = g.scale3d[axis] * g.scale3d[axis];
                 if sigma_x_enabled {
@@ -400,8 +408,8 @@ fn geometry_parameter_grads(
                     component,
                     camera,
                 );
-                rotation_grads[source_idx * 4 + component] += dl_dsigma_x * d_sigma_x
-                    + dl_dsigma_y * d_sigma_y;
+                rotation_grads[source_idx * 4 + component] +=
+                    dl_dsigma_x * d_sigma_x + dl_dsigma_y * d_sigma_y;
             }
         }
     }
@@ -649,7 +657,10 @@ fn projected_clamped_sigmas(
         camera.fx,
         camera.fy,
     );
-    (sigma_x.clamp(MIN_SIGMA, MAX_SIGMA), sigma_y.clamp(MIN_SIGMA, MAX_SIGMA))
+    (
+        sigma_x.clamp(MIN_SIGMA, MAX_SIGMA),
+        sigma_y.clamp(MIN_SIGMA, MAX_SIGMA),
+    )
 }
 
 fn finite_difference_sigmas_wrt_camera_position(
@@ -764,7 +775,8 @@ pub(crate) fn parameter_grads_from_render_color_grads(
         );
         let (direction, view_distance) = normalized_view_direction(position, camera_center);
         let basis = sh_basis_values(direction, active_degree);
-        let (basis_dx, basis_dy, basis_dz) = sh_basis_direction_derivatives(direction, active_degree);
+        let (basis_dx, basis_dy, basis_dz) =
+            sh_basis_direction_derivatives(direction, active_degree);
         let sh_0 = row_to_vec3(
             visible_sh_0
                 .get(visible_idx)
@@ -775,11 +787,7 @@ pub(crate) fn parameter_grads_from_render_color_grads(
             .get(visible_idx)
             .map(Vec::as_slice)
             .unwrap_or(&[]);
-        let unclamped_rgb = sh_rgb_from_basis(
-            sh_0,
-            sh_rest_rows,
-            &basis,
-        );
+        let unclamped_rgb = sh_rgb_from_basis(sh_0, sh_rest_rows, &basis);
         let render_grad = visible_grads
             .get(visible_idx)
             .map(Vec::as_slice)
@@ -884,13 +892,7 @@ fn sh_basis_direction_derivatives(
             0.0,
             -2.0 * SH_C2[4] * y,
         ]);
-        dz.extend_from_slice(&[
-            0.0,
-            SH_C2[1] * y,
-            4.0 * SH_C2[2] * z,
-            SH_C2[3] * x,
-            0.0,
-        ]);
+        dz.extend_from_slice(&[0.0, SH_C2[1] * y, 4.0 * SH_C2[2] * z, SH_C2[3] * x, 0.0]);
     }
     if degree > 2 {
         dx.extend_from_slice(&[
