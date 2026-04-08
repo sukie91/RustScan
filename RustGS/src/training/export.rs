@@ -1,6 +1,6 @@
-use super::{
-    ChunkPlan, ChunkTrainingOverridePlan, MaterializedChunkDataset, PlannedChunk, TrainingConfig,
-};
+use super::chunk_training::ChunkTrainingOverridePlan;
+use super::splats::Splats;
+use super::{ChunkPlan, MaterializedChunkDataset, PlannedChunk, TrainingConfig};
 use crate::{GaussianMap, TrainingError};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -200,23 +200,151 @@ pub(super) fn persist_gaussian_map_scene(
     scene: &GaussianMap,
     iterations: usize,
 ) -> Result<(), TrainingError> {
-    let gaussians = scene
-        .gaussians()
-        .iter()
-        .map(crate::Gaussian::from_gaussian3d)
-        .collect::<Vec<_>>();
-    let color_representation = gaussians
-        .first()
-        .map(|gaussian| gaussian.color_representation)
-        .unwrap_or_default();
-    let metadata = crate::SceneMetadata {
-        iterations,
-        final_loss: 0.0,
-        gaussian_count: gaussians.len(),
-        color_representation,
-        ..crate::SceneMetadata::default()
-    };
+    let splats = Splats::from_gaussian_map_inferred(scene)
+        .map_err(|err| TrainingError::TrainingFailed(err.to_string()))?;
+    let gaussians = splats
+        .to_scene_gaussians()
+        .map_err(|err| TrainingError::TrainingFailed(err.to_string()))?;
+    let metadata = splats.to_scene_metadata(iterations, 0.0);
     crate::save_scene_ply(path, &gaussians, &metadata).map_err(|err| {
         TrainingError::TrainingFailed(format!("failed to persist {}: {}", path.display(), err))
     })
+}
+
+#[cfg(all(test, feature = "gpu"))]
+mod tests {
+    use super::{persist_gaussian_map_scene, ChunkPersistenceContext};
+    use crate::core::GaussianColorRepresentation;
+    use crate::diff::diff_splat::rgb_to_sh0_value;
+    use crate::training::chunk_training::ChunkTrainingOverridePlan;
+    use crate::training::{PlannedChunk, TrainingConfig};
+    use crate::{
+        ChunkBounds, ChunkBoundsSource, ChunkDisposition, Gaussian3D, GaussianMap, Intrinsics,
+        MaterializedChunkDataset, ScenePose, TrainingDataset, SE3,
+    };
+    use std::path::PathBuf;
+    use tempfile::tempdir;
+
+    #[test]
+    fn persist_gaussian_map_scene_writes_chunk_ply() {
+        let tempdir = tempdir().unwrap();
+        let path = tempdir.path().join("chunk-000.ply");
+        let scene = GaussianMap::from_gaussians(vec![Gaussian3D::default()]);
+
+        persist_gaussian_map_scene(&path, &scene, 42).unwrap();
+
+        assert!(path.exists());
+        let (gaussians, metadata) = crate::load_scene_ply(&path).unwrap();
+        assert_eq!(gaussians.len(), 1);
+        assert_eq!(metadata.iterations, 42);
+    }
+
+    #[test]
+    fn persist_gaussian_map_scene_preserves_spherical_harmonics_metadata() {
+        let tempdir = tempdir().unwrap();
+        let path = tempdir.path().join("chunk-sh.ply");
+        let scene = GaussianMap::from_gaussians(vec![Gaussian3D::new(
+            glam::Vec3::new(1.0, 2.0, 3.0),
+            glam::Vec3::new(0.1, 0.2, 0.3),
+            glam::Quat::IDENTITY,
+            0.25,
+            [0.2, 0.4, 0.6],
+        )
+        .with_color_state(
+            GaussianColorRepresentation::SphericalHarmonics { degree: 3 },
+            Some([
+                rgb_to_sh0_value(0.2),
+                rgb_to_sh0_value(0.4),
+                rgb_to_sh0_value(0.6),
+            ]),
+            Some(vec![0.5; 15 * 3]),
+        )]);
+
+        persist_gaussian_map_scene(&path, &scene, 42).unwrap();
+
+        let (gaussians, metadata) = crate::load_scene_ply(&path).unwrap();
+        assert_eq!(metadata.iterations, 42);
+        assert_eq!(metadata.sh_degree, 3);
+        assert_eq!(gaussians.len(), 1);
+        assert_eq!(gaussians[0].sh_rest.as_deref().unwrap(), &vec![0.5; 15 * 3]);
+        assert!((gaussians[0].color[0] - 0.2).abs() < 1e-5);
+        assert!((gaussians[0].color[1] - 0.4).abs() < 1e-5);
+        assert!((gaussians[0].color[2] - 0.6).abs() < 1e-5);
+    }
+
+    #[test]
+    fn chunk_persistence_writes_report_entries() {
+        let tempdir = tempdir().unwrap();
+        let chunk = PlannedChunk {
+            chunk_id: 0,
+            core_bounds: ChunkBounds {
+                min: [0.0, 0.0, 0.0],
+                max: [1.0, 1.0, 1.0],
+            },
+            overlap_bounds: ChunkBounds {
+                min: [0.0, 0.0, 0.0],
+                max: [1.0, 1.0, 1.0],
+            },
+            pose_indices: vec![0, 1],
+            point_indices: vec![0],
+            disposition: ChunkDisposition::Trainable,
+        };
+        let chunk_plan = crate::ChunkPlan {
+            bounds_source: ChunkBoundsSource::SparsePoints,
+            scene_bounds: chunk.core_bounds,
+            chunk_axis: 0,
+            requested_chunks: 1,
+            chunks: vec![chunk.clone()],
+        };
+        let config = TrainingConfig {
+            chunked_training: true,
+            chunk_artifact_dir: Some(tempdir.path().join("artifacts")),
+            ..TrainingConfig::default()
+        };
+        let dataset = TrainingDataset::new(Intrinsics::from_focal(500.0, 32, 32));
+        let materialized = MaterializedChunkDataset {
+            chunk_id: 0,
+            dataset,
+            used_frame_based_initialization: true,
+        };
+        let override_plan = ChunkTrainingOverridePlan {
+            effective_config: config.clone(),
+            estimate: crate::estimate_chunk_capacity(
+                &TrainingDataset {
+                    intrinsics: Intrinsics::from_focal(500.0, 32, 32),
+                    depth_scale: 1000.0,
+                    poses: vec![ScenePose::new(
+                        0,
+                        PathBuf::from("frame.png"),
+                        SE3::identity(),
+                        0.0,
+                    )],
+                    initial_points: vec![],
+                },
+                &config,
+            )
+            .unwrap(),
+            lowered_gaussian_cap: false,
+            lowered_render_scale: false,
+        };
+        let scene = GaussianMap::from_gaussians(vec![Gaussian3D::default()]);
+
+        let mut persistence =
+            ChunkPersistenceContext::new(config.chunk_artifact_dir.clone(), &config, &chunk_plan)
+                .unwrap();
+        persistence
+            .record_success(&chunk, &materialized, &override_plan, &scene, 0)
+            .unwrap();
+
+        let report_path = tempdir.path().join("artifacts").join("chunk-report.json");
+        assert!(report_path.exists());
+        let report_json = std::fs::read_to_string(report_path).unwrap();
+        let report: serde_json::Value = serde_json::from_str(&report_json).unwrap();
+        assert_eq!(report["entries"][0]["status"], "success");
+        assert_eq!(report["entries"][0]["output_gaussians"], 1);
+        assert_eq!(
+            report["entries"][0]["used_frame_based_initialization"],
+            true
+        );
+    }
 }

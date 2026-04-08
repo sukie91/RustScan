@@ -1,7 +1,9 @@
 #[cfg(feature = "gpu")]
-use super::data_loading::{trainable_from_map, LoadedTrainingData};
+use super::data_loading::LoadedTrainingData;
 #[cfg(feature = "gpu")]
 use super::metal_trainer::{MetalStepProfile, MetalTrainer};
+#[cfg(feature = "gpu")]
+use super::splats::Splats;
 #[cfg(feature = "gpu")]
 use super::{TrainingConfig, TrainingProfile};
 #[cfg(feature = "gpu")]
@@ -160,10 +162,10 @@ fn run_step_microbenchmark(
     config: &TrainingConfig,
     device: Device,
 ) -> Result<StepMicrobenchmark, TrainingError> {
-    let loaded = synthetic_loaded_training_data(spec, &device)?;
+    let loaded = synthetic_loaded_training_data(spec, config, &device)?;
     let mut trainer = MetalTrainer::new(spec.width, spec.height, config, device.clone())?;
     let frames = trainer.prepare_frames(&loaded)?;
-    let mut gaussians = trainable_from_map(&loaded.initial_map, &device, config)?;
+    let mut gaussians = loaded.initial_splats.to_trainable(&device)?;
     trainer.initialize_training_session(&mut gaussians, &frames)?;
 
     for step in 0..spec.warmup_steps {
@@ -229,10 +231,10 @@ fn run_smoke_training_benchmark(
     config: &TrainingConfig,
     device: Device,
 ) -> Result<SmokeBenchmark, TrainingError> {
-    let loaded = synthetic_loaded_training_data(spec, &device)?;
+    let loaded = synthetic_loaded_training_data(spec, config, &device)?;
     let mut trainer = MetalTrainer::new(spec.width, spec.height, config, device.clone())?;
     let frames = trainer.prepare_frames(&loaded)?;
-    let mut gaussians = trainable_from_map(&loaded.initial_map, &device, config)?;
+    let mut gaussians = loaded.initial_splats.to_trainable(&device)?;
 
     let smoke_start = Instant::now();
     let stats = trainer.train(&mut gaussians, &frames, spec.smoke_iterations)?;
@@ -275,6 +277,7 @@ fn accumulate_profile(
 #[cfg(feature = "gpu")]
 fn synthetic_loaded_training_data(
     spec: &MetalTrainingBenchmarkSpec,
+    config: &TrainingConfig,
     device: &Device,
 ) -> Result<LoadedTrainingData, TrainingError> {
     let mut cameras = Vec::with_capacity(spec.frame_count);
@@ -306,7 +309,10 @@ fn synthetic_loaded_training_data(
         depths,
         target_width: spec.width,
         target_height: spec.height,
-        initial_map: synthetic_initial_map(spec.gaussian_count),
+        initial_splats: Splats::from_gaussian_map_for_config(
+            &synthetic_initial_map(spec.gaussian_count),
+            config,
+        )?,
     })
 }
 
@@ -406,7 +412,7 @@ mod tests {
         benchmark_config, run_metal_training_benchmark, synthetic_loaded_training_data,
         MetalTrainingBenchmarkSpec,
     };
-    use crate::TrainingProfile;
+    use crate::{TrainingConfig, TrainingProfile};
     use candle_core::Device;
 
     #[test]
@@ -441,14 +447,16 @@ mod tests {
             ..MetalTrainingBenchmarkSpec::default()
         };
 
-        let loaded = synthetic_loaded_training_data(&spec, &Device::Cpu).unwrap();
+        let loaded =
+            synthetic_loaded_training_data(&spec, &TrainingConfig::default(), &Device::Cpu)
+                .unwrap();
 
         assert_eq!(loaded.cameras.len(), 4);
         assert_eq!(loaded.colors.len(), 4);
         assert_eq!(loaded.depths.len(), 4);
         assert_eq!(loaded.colors[0].len(), 20 * 12 * 3);
         assert_eq!(loaded.depths[0].len(), 20 * 12);
-        assert_eq!(loaded.initial_map.len(), 25);
+        assert_eq!(loaded.initial_splats.len(), 25);
     }
 
     #[test]

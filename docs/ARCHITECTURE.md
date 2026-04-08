@@ -1,6 +1,6 @@
 # RustScan Architecture
 
-**Updated:** 2026-04-07
+**Updated:** 2026-04-08
 
 ## Overview
 
@@ -38,13 +38,15 @@ These are the compatibility boundaries that current refactor work is preserving.
 
 ### Execution Planning
 
-`RustGS/src/training/mod.rs` now owns training entry and route selection directly.
+`RustGS/src/training/mod.rs` now acts as a thin public training assembly layer, while active orchestration and configuration have been split into narrower modules:
 
-- `Standard`
-- `ChunkedSingleChunk`
-- `ChunkedSequential`
+- `config.rs`: training enums, nested LiteGS config, public `TrainingConfig`, and `TrainingResult`
+- `orchestrator.rs`: profile-aware `training::train()` entry and top-level route handoff
+- `execution_plan.rs`: `Standard` / `ChunkedSingleChunk` / `ChunkedSequential` selection
+- `chunk_training.rs`: sequential chunk execution, adaptive per-chunk config, scene merge
+- `export.rs`: chunk artifact/report persistence
 
-There is no active compiled `train_stream.rs` orchestration layer anymore; execution planning now lives with the public training module.
+There is no active compiled `train_stream.rs` orchestration layer anymore.
 
 ### Data and Initialization
 
@@ -52,7 +54,14 @@ There is no active compiled `train_stream.rs` orchestration layer anymore; execu
 - `frame_loader.rs`: bounded frame decode/cache behavior
 - `init_map.rs`: sparse-point or frame-based initialization
 - `chunk_planner.rs`: chunk planning and per-chunk dataset materialization
-- `splats.rs`: internal unified training-state representation used across active training internals
+- `splats.rs`: internal unified training-state representation plus conversion bridge for `GaussianMap <-> TrainableGaussians` and export-scene conversion
+- `LoadedTrainingData` now carries `initial_splats` into the production and benchmark training paths instead of exposing a loader-owned `initial_map`
+
+### Canonical State Roles
+
+- `GaussianMap` remains the public scene IO and final return boundary.
+- `Splats` is the canonical internal snapshot and exchange type for initialization, scene/export conversion, and explicit `GaussianMap <-> TrainableGaussians` boundary crossings.
+- `TrainableGaussians` remains the canonical mutable step-loop state consumed by forward, backward, optimizer, and Metal runtime code.
 
 ### Step Execution
 
@@ -83,19 +92,20 @@ Shader source now lives in `RustGS/src/training/shaders/*.metal`.
 ### Topology and Parity
 
 - `topology.rs` owns schedule calculation, execution planning, and snapshot mutation helpers for densify/prune/reset behavior.
-- `density_controller.rs` remains as reference/parity-sensitive logic and is not being deleted prematurely.
+- `density_controller.rs` remains as reference/parity-sensitive logic and is now adapted back into `topology.rs` through an explicit reference adapter for LiteGS telemetry and regression work.
 - `parity_harness.rs` owns LiteGS comparison reports and parity gating utilities.
 - `eval.rs` owns evaluation summaries and post-train metrics.
 
 ### Legacy Boundary
 
-`training_pipeline.rs` remains in-tree only as a legacy/reference helper surface. It is not the landing zone for new production behavior.
+`training_pipeline.rs` remains in-tree only as a legacy/reference helper surface. It is not the landing zone for new production behavior, and its helpers are no longer re-exported from `training/mod.rs`; callers must import it explicitly when they really need the legacy surface.
 
 ## Current Architectural Constraints
 
 - Public training, evaluation, scene IO, and chunked-routing behavior must remain stable while internals move.
 - The production backend is still Metal-specific; no new multi-backend abstraction is planned unless the extracted code shape proves a concrete need.
 - Topology-side side effects are partially migrated: scheduling and snapshot mutation moved into `topology.rs`, while some trainer-coupled state updates still live in `metal_trainer.rs`.
+- The remaining Epic 6.5 debt is not raw conversion duplication anymore; it is reducing how often the trainer rebuilds `Splats` snapshots around topology/export checkpoints.
 
 ## Canonical Companion Docs
 

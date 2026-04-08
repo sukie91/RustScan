@@ -15,9 +15,7 @@ use crate::diff::diff_splat::{DiffCamera, TrainableGaussians, SH_C0};
 use crate::training::clustering::ClusterAssignment;
 use crate::{GaussianMap, TrainingDataset, TrainingError};
 
-use super::data_loading::{
-    load_training_data, map_from_trainable, trainable_from_map, LoadedTrainingData,
-};
+use super::data_loading::{load_training_data, LoadedTrainingData};
 use super::eval::{scaled_dimensions, summarize_training_metrics};
 use super::frame_targets::{resize_depth, resize_rgb};
 use super::metal_backward::{
@@ -1120,6 +1118,32 @@ impl MetalTrainer {
 
         let current_splats = Splats::from_trainable(gaussians)?;
         let analysis = topology::analyze_topology_candidates(&policy, &current_splats, &stats);
+        let density_reference = if self.is_litegs_mode() {
+            Some(topology::density_controller_reference_summary(
+                &policy,
+                &current_splats,
+                &stats,
+                completed_epoch,
+            ))
+        } else {
+            None
+        };
+        let reference_clone_candidates = density_reference
+            .as_ref()
+            .map(|summary| summary.clone_candidates())
+            .unwrap_or(0);
+        let reference_split_candidates = density_reference
+            .as_ref()
+            .map(|summary| summary.split_candidates())
+            .unwrap_or(0);
+        let reference_prune_candidates = density_reference
+            .as_ref()
+            .map(|summary| summary.prune_candidates())
+            .unwrap_or(0);
+        let reference_densify_budget = density_reference
+            .as_ref()
+            .and_then(|summary| summary.densify_budget)
+            .unwrap_or(0);
         let litegs_requested_additions = if self.is_litegs_mode() && should_densify {
             topology::litegs_requested_additions(
                 &analysis.infos,
@@ -1151,11 +1175,15 @@ impl MetalTrainer {
         if execution.disposition == TopologyExecutionDisposition::SkipDestructiveLiteGs {
             if should_log_topology {
                 log::info!(
-                    "Metal topology check at iter {} skipped destructive LiteGS prune/reset because no replacement or growth sources were available | epoch={:?} | prune_candidates={} | growth_candidates={} | max_grad_accum={:.6} | mean_grad_accum={:.6}",
+                    "Metal topology check at iter {} skipped destructive LiteGS prune/reset because no replacement or growth sources were available | epoch={:?} | prune_candidates={} | growth_candidates={} | reference_clone_candidates={} | reference_split_candidates={} | reference_prune_candidates={} | reference_budget={} | max_grad_accum={:.6} | mean_grad_accum={:.6}",
                     self.iteration,
                     execution.completed_epoch,
                     analysis.prune_candidates,
                     analysis.growth_candidates,
+                    reference_clone_candidates,
+                    reference_split_candidates,
+                    reference_prune_candidates,
+                    reference_densify_budget,
                     analysis.max_grad,
                     analysis.mean_grad,
                 );
@@ -1165,7 +1193,7 @@ impl MetalTrainer {
         if execution.disposition == TopologyExecutionDisposition::SkipNoEligibleCandidates {
             if should_log_topology {
                 log::info!(
-                    "Metal topology check at iter {} found no eligible candidates | densify={} | prune={} | reset_opacity={} | gaussians={} | budget_cap={} | max_grad_accum={:.6} | mean_grad_accum={:.6} | active_grad_stats={} | small_scale_stats={} | opacity_ready_stats={} | clone_candidates={} | split_candidates={} | prune_candidates={}",
+                    "Metal topology check at iter {} found no eligible candidates | densify={} | prune={} | reset_opacity={} | gaussians={} | budget_cap={} | max_grad_accum={:.6} | mean_grad_accum={:.6} | active_grad_stats={} | small_scale_stats={} | opacity_ready_stats={} | clone_candidates={} | split_candidates={} | prune_candidates={} | reference_clone_candidates={} | reference_split_candidates={} | reference_prune_candidates={} | reference_budget={}",
                     self.iteration,
                     should_densify,
                     should_prune,
@@ -1180,6 +1208,10 @@ impl MetalTrainer {
                     analysis.clone_candidates,
                     analysis.split_candidates,
                     analysis.prune_candidates,
+                    reference_clone_candidates,
+                    reference_split_candidates,
+                    reference_prune_candidates,
+                    reference_densify_budget,
                 );
             }
             if self.is_litegs_mode() {
@@ -1237,7 +1269,7 @@ impl MetalTrainer {
             )?;
             if should_log_topology || guardrail_triggered {
                 log::info!(
-                    "Metal topology check at iter {} | epoch={:?} | late_stage={} | made no changes | densify={} | prune={} | reset_opacity={} | gaussians={} | budget_cap={} | topology={:.2}ms | step_share={:.0}% | max_grad_accum={:.6} | mean_grad_accum={:.6} | active_grad_stats={} | small_scale_stats={} | opacity_ready_stats={} | clone_candidates={} | split_candidates={} | prune_candidates={}",
+                    "Metal topology check at iter {} | epoch={:?} | late_stage={} | made no changes | densify={} | prune={} | reset_opacity={} | gaussians={} | budget_cap={} | topology={:.2}ms | step_share={:.0}% | max_grad_accum={:.6} | mean_grad_accum={:.6} | active_grad_stats={} | small_scale_stats={} | opacity_ready_stats={} | clone_candidates={} | split_candidates={} | prune_candidates={} | reference_clone_candidates={} | reference_split_candidates={} | reference_prune_candidates={} | reference_budget={}",
                     self.iteration,
                     completed_epoch,
                     late_stage,
@@ -1256,6 +1288,10 @@ impl MetalTrainer {
                     analysis.clone_candidates,
                     analysis.split_candidates,
                     analysis.prune_candidates,
+                    reference_clone_candidates,
+                    reference_split_candidates,
+                    reference_prune_candidates,
+                    reference_densify_budget,
                 );
             }
             if guardrail_triggered {
@@ -1276,7 +1312,7 @@ impl MetalTrainer {
         self.apply_topology_mutation_aftermath(gaussians, &snapshot, stats, &origins, aftermath)?;
 
         log::info!(
-            "Metal topology update at iter {} | epoch={:?} | late_stage={} | densify={} | prune={} | reset_opacity={} | added {} | pruned {} | morton={} | gaussians {} -> {} | budget_cap={} | topology={:.2}ms | step_share={:.0}% | active_grad_stats={} | small_scale_stats={} | opacity_ready_stats={} | clone_candidates={} | split_candidates={} | prune_candidates={} | max_grad_accum={:.6} | mean_grad_accum={:.6}",
+            "Metal topology update at iter {} | epoch={:?} | late_stage={} | densify={} | prune={} | reset_opacity={} | added {} | pruned {} | morton={} | gaussians {} -> {} | budget_cap={} | topology={:.2}ms | step_share={:.0}% | active_grad_stats={} | small_scale_stats={} | opacity_ready_stats={} | clone_candidates={} | split_candidates={} | prune_candidates={} | reference_clone_candidates={} | reference_split_candidates={} | reference_prune_candidates={} | reference_budget={} | max_grad_accum={:.6} | mean_grad_accum={:.6}",
             self.iteration,
             completed_epoch,
             late_stage,
@@ -1297,6 +1333,10 @@ impl MetalTrainer {
             analysis.clone_candidates,
             analysis.split_candidates,
             analysis.prune_candidates,
+            reference_clone_candidates,
+            reference_split_candidates,
+            reference_prune_candidates,
+            reference_densify_budget,
             analysis.max_grad,
             analysis.mean_grad,
         );
@@ -2208,7 +2248,7 @@ pub fn train(
     let mut effective_config = effective_metal_config(config);
     let mut loaded = load_training_data(dataset, &effective_config, &device)?;
 
-    if loaded.initial_map.is_empty() {
+    if loaded.initial_splats.is_empty() {
         return Err(TrainingError::InvalidInput(
             "training initialization produced zero Gaussians".to_string(),
         ));
@@ -2224,13 +2264,13 @@ pub fn train(
     let frame_count = loaded.cameras.len();
     log::info!(
         "MetalTrainer preflight | gaussians={} | frames={} | pixels={} | chunk_size={} | estimated_peak≈{:.1} GiB | budget={} | dominant={}",
-        loaded.initial_map.len(),
+        loaded.initial_splats.len(),
         frame_count,
         trainer.pixel_count,
         trainer.chunk_size,
         bytes_to_gib(
             estimate_peak_memory_with_source_pixels(
-                loaded.initial_map.len(),
+                loaded.initial_splats.len(),
                 trainer.pixel_count,
                 trainer.source_pixel_count,
                 frame_count,
@@ -2240,7 +2280,7 @@ pub fn train(
         ),
         memory_budget.describe(),
         estimate_peak_memory_with_source_pixels(
-            loaded.initial_map.len(),
+            loaded.initial_splats.len(),
             trainer.pixel_count,
             trainer.source_pixel_count,
             frame_count,
@@ -2257,23 +2297,23 @@ pub fn train(
     let affordable_cap = affordable_initial_gaussian_cap(
         effective_config
             .max_initial_gaussians
-            .max(loaded.initial_map.len()),
+            .max(loaded.initial_splats.len()),
         trainer.pixel_count,
         trainer.source_pixel_count,
         frame_count,
         trainer.chunk_size,
         &memory_budget,
     );
-    if !skip_memory_guard && affordable_cap > 0 && loaded.initial_map.len() > affordable_cap {
+    if !skip_memory_guard && affordable_cap > 0 && loaded.initial_splats.len() > affordable_cap {
         let initial_cap =
             preflight_initial_gaussian_cap(effective_config.training_profile, affordable_cap);
         log::warn!(
             "MetalTrainer preflight lowered initial_gaussians from {} to {} for this run to fit the safe memory budget using even coverage downsampling. Growth budget remains capped at {}. Set RUSTGS_SKIP_METAL_MEMORY_GUARD=1 to keep the larger initialization.",
-            loaded.initial_map.len(),
+            loaded.initial_splats.len(),
             initial_cap,
             affordable_cap,
         );
-        downsample_gaussian_map_evenly(&mut loaded.initial_map, initial_cap);
+        loaded.initial_splats.downsample_evenly(initial_cap);
         effective_config.max_initial_gaussians = initial_cap;
     }
     trainer.max_gaussian_budget = if skip_memory_guard {
@@ -2281,25 +2321,25 @@ pub fn train(
             effective_config
                 .litegs
                 .target_primitives
-                .max(loaded.initial_map.len())
+                .max(loaded.initial_splats.len())
         } else {
             effective_config
                 .max_initial_gaussians
-                .max(loaded.initial_map.len())
+                .max(loaded.initial_splats.len())
         }
     } else {
         let profile_cap = if effective_config.training_profile == TrainingProfile::LiteGsMacV1 {
             effective_config
                 .litegs
                 .target_primitives
-                .max(loaded.initial_map.len())
+                .max(loaded.initial_splats.len())
         } else {
-            affordable_cap.max(loaded.initial_map.len())
+            affordable_cap.max(loaded.initial_splats.len())
         };
-        profile_cap.min(affordable_cap.max(loaded.initial_map.len()))
+        profile_cap.min(affordable_cap.max(loaded.initial_splats.len()))
     };
     let estimated_peak = estimate_peak_memory_with_source_pixels(
-        loaded.initial_map.len(),
+        loaded.initial_splats.len(),
         trainer.pixel_count,
         trainer.source_pixel_count,
         frame_count,
@@ -2337,8 +2377,8 @@ pub fn train(
             )));
         }
     }
-    let mut gaussians = trainable_from_map(&loaded.initial_map, &trainer.device, config)?;
-    trainer.scene_extent = estimate_scene_extent(&loaded.initial_map);
+    let mut gaussians = loaded.initial_splats.to_trainable(&trainer.device)?;
+    trainer.scene_extent = loaded.initial_splats.scene_extent();
 
     // Initialize pose embeddings if learnable_viewproj is enabled
     if config.litegs.learnable_viewproj && config.litegs.lr_pose > 0.0 {
@@ -2356,12 +2396,7 @@ pub fn train(
     // Initialize cluster assignment if cluster_size > 0
     if config.litegs.cluster_size > 0 {
         use crate::training::clustering::ClusterAssignment;
-        let positions: Vec<[f32; 3]> = loaded
-            .initial_map
-            .gaussians()
-            .iter()
-            .map(|g| g.position.into())
-            .collect();
+        let positions = loaded.initial_splats.positions_vec3();
         let assignment = ClusterAssignment::assign_spatial_hash(
             &positions,
             config.litegs.cluster_size,
@@ -2382,7 +2417,7 @@ pub fn train(
     }
     let frames = trainer.prepare_frames(&loaded)?;
     let stats = trainer.train(&mut gaussians, &frames, config.iterations)?;
-    let trained_map = map_from_trainable(&gaussians)?;
+    let trained_map = Splats::from_trainable(&gaussians)?.to_gaussian_map()?;
 
     log::info!(
         "Metal backend complete in {:.2}s | frames={} | render={}x{} | initial_gaussians={} | final_gaussians={} | final_loss_mean={:.6} | last_step_loss={:.6}",
@@ -2390,7 +2425,7 @@ pub fn train(
         dataset.poses.len(),
         trainer.render_width,
         trainer.render_height,
-        loaded.initial_map.len(),
+        loaded.initial_splats.len(),
         trained_map.len(),
         stats.final_loss,
         stats.final_step_loss,
@@ -2749,23 +2784,6 @@ fn should_profile_iteration(profile_steps: bool, profile_interval: usize, iter: 
     profile_steps && (iter < 5 || iter % profile_interval.max(1) == 0)
 }
 
-fn downsample_gaussian_map_evenly(map: &mut GaussianMap, target_count: usize) {
-    let gaussians = map.gaussians();
-    if target_count == 0 || gaussians.len() <= target_count {
-        return;
-    }
-
-    let len = gaussians.len();
-    let mut sampled = Vec::with_capacity(target_count);
-    for out_idx in 0..target_count {
-        let src_idx = out_idx.saturating_mul(len) / target_count;
-        sampled.push(gaussians[src_idx.min(len.saturating_sub(1))].clone());
-    }
-
-    *map = GaussianMap::from_gaussians(sampled);
-    map.update_states();
-}
-
 #[cfg(test)]
 fn adam_step_var_fused(
     var: &Var,
@@ -2853,32 +2871,6 @@ fn view_directions_for_camera(
         .clamp(1e-6, f32::MAX)?
         .reshape((positions.dim(0)?, 1))?;
     dirs.broadcast_div(&norms)
-}
-
-fn estimate_scene_extent(map: &GaussianMap) -> f32 {
-    if map.is_empty() {
-        return 1.0;
-    }
-
-    let mut center = [0.0f32; 3];
-    for gaussian in map.gaussians() {
-        center[0] += gaussian.position.x;
-        center[1] += gaussian.position.y;
-        center[2] += gaussian.position.z;
-    }
-    let inv = 1.0 / map.len().max(1) as f32;
-    center[0] *= inv;
-    center[1] *= inv;
-    center[2] *= inv;
-
-    let mut max_dist = 0.0f32;
-    for gaussian in map.gaussians() {
-        let dx = gaussian.position.x - center[0];
-        let dy = gaussian.position.y - center[1];
-        let dz = gaussian.position.z - center[2];
-        max_dist = max_dist.max((dx * dx + dy * dy + dz * dz).sqrt());
-    }
-    max_dist.max(1e-3)
 }
 
 #[cfg(test)]
@@ -4049,21 +4041,21 @@ mod tests {
         let affordable_cap = affordable_initial_gaussian_cap(
             effective_config
                 .max_initial_gaussians
-                .max(loaded.initial_map.len()),
+                .max(loaded.initial_splats.len()),
             trainer.pixel_count,
             trainer.source_pixel_count,
             loaded.cameras.len(),
             trainer.chunk_size,
             &memory_budget,
         );
-        if affordable_cap > 0 && loaded.initial_map.len() > affordable_cap {
+        if affordable_cap > 0 && loaded.initial_splats.len() > affordable_cap {
             let initial_cap =
                 preflight_initial_gaussian_cap(effective_config.training_profile, affordable_cap);
-            downsample_gaussian_map_evenly(&mut loaded.initial_map, initial_cap);
+            loaded.initial_splats.downsample_evenly(initial_cap);
         }
-        trainer.scene_extent = estimate_scene_extent(&loaded.initial_map);
-        let mut gaussians =
-            trainable_from_map(&loaded.initial_map, &device, &effective_config).unwrap();
+        let initial_splats = loaded.initial_splats.clone();
+        trainer.scene_extent = initial_splats.scene_extent();
+        let mut gaussians = initial_splats.to_trainable(&device).unwrap();
         trainer.adam = Some(MetalAdamState::new(&gaussians).unwrap());
         trainer.iteration = 1;
         let frames = trainer.prepare_frames(&loaded).unwrap();
@@ -4153,13 +4145,16 @@ mod tests {
         let opacity_delta =
             max_abs_delta(&before_opacities, gaussians.opacities.as_tensor()).unwrap();
         let color_delta = max_abs_delta(&before_colors, &gaussians.colors()).unwrap();
-        let trained_map = map_from_trainable(&gaussians).unwrap();
+        let trained_map = Splats::from_trainable(&gaussians)
+            .unwrap()
+            .to_gaussian_map()
+            .unwrap();
         let mut map_position_delta = 0.0f32;
         let mut map_scale_delta = 0.0f32;
         let mut map_opacity_delta = 0.0f32;
         let mut map_color_delta = 0.0f32;
-        for (before, after) in loaded
-            .initial_map
+        let initial_map = loaded.initial_splats.to_gaussian_map().unwrap();
+        for (before, after) in initial_map
             .gaussians()
             .iter()
             .zip(trained_map.gaussians().iter())
@@ -4258,21 +4253,21 @@ mod tests {
         let affordable_cap = affordable_initial_gaussian_cap(
             effective_config
                 .max_initial_gaussians
-                .max(loaded.initial_map.len()),
+                .max(loaded.initial_splats.len()),
             trainer.pixel_count,
             trainer.source_pixel_count,
             loaded.cameras.len(),
             trainer.chunk_size,
             &memory_budget,
         );
-        if affordable_cap > 0 && loaded.initial_map.len() > affordable_cap {
+        if affordable_cap > 0 && loaded.initial_splats.len() > affordable_cap {
             let initial_cap =
                 preflight_initial_gaussian_cap(effective_config.training_profile, affordable_cap);
-            downsample_gaussian_map_evenly(&mut loaded.initial_map, initial_cap);
+            loaded.initial_splats.downsample_evenly(initial_cap);
         }
-        trainer.scene_extent = estimate_scene_extent(&loaded.initial_map);
-        let mut gaussians =
-            trainable_from_map(&loaded.initial_map, &device, &effective_config).unwrap();
+        let initial_splats = loaded.initial_splats.clone();
+        trainer.scene_extent = initial_splats.scene_extent();
+        let mut gaussians = initial_splats.to_trainable(&device).unwrap();
         let frames = trainer.prepare_frames(&loaded).unwrap();
         let before_positions = gaussians
             .positions()
@@ -4628,8 +4623,8 @@ mod tests {
     }
 
     #[test]
-    fn downsample_gaussian_map_evenly_spreads_samples_across_map() {
-        let mut map = GaussianMap::from_gaussians(
+    fn splats_downsample_evenly_spreads_samples_across_map() {
+        let map = GaussianMap::from_gaussians(
             (0..10)
                 .map(|idx| {
                     let mut gaussian = crate::Gaussian3D::default();
@@ -4638,9 +4633,9 @@ mod tests {
                 })
                 .collect(),
         );
-
-        downsample_gaussian_map_evenly(&mut map, 4);
-
+        let mut splats = Splats::from_gaussian_map_inferred(&map).unwrap();
+        splats.downsample_evenly(4);
+        let map = splats.to_gaussian_map().unwrap();
         let sampled_positions: Vec<f32> = map
             .gaussians()
             .iter()

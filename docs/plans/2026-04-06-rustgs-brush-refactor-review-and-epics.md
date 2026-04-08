@@ -501,13 +501,14 @@ Status as of 2026-04-07:
 
 Goal: Separate topology policies from trainer control flow while preserving current LiteGS and legacy semantics.
 
-Implementation note as of 2026-04-07:
+Implementation note as of 2026-04-08:
 
 - `training::topology` now owns the explicit topology schedule contract (`TopologySchedule`, `TopologyStepContext`) plus an extracted execution-planning layer (`TopologyExecutionPlan`, `TopologyExecutionDisposition`)
 - snapshot mutation orchestration for densify/prune and LiteGS Morton reorder now lives in `training::topology::apply_snapshot_mutations(...)` instead of being assembled inline inside `metal_trainer.rs`
 - `training::topology` now also owns the typed post-mutation aftermath contract (`TopologyMutationAftermath`, `TopologyMetricsDelta`, `TopologyStatsAction`) returned from snapshot mutation
 - `metal_trainer.rs` now applies that aftermath through a single `apply_topology_mutation_aftermath(...)` handoff instead of reconstructing the full rebuild/resync/reset/telemetry sequence inline after every topology change
-- the highest-priority remaining Epic 5 gaps are now reference-strategy ownership for `density_controller.rs` plus broader regression/telemetry coverage, not the post-mutation lifecycle handoff itself
+- `training::topology::{DensityControllerReferenceAdapter, density_controller_reference_summary}` now adapts `density_controller.rs` against live `Splats` + `MetalGaussianStats`, and the production LiteGS topology logs now emit reference clone/split/prune/budget counts alongside the active path metrics
+- the highest-priority remaining Epic 5 gaps are now deciding whether that adapter becomes the production selection/prune owner or remains reference-only, plus broader regression/telemetry coverage
 
 Exit criteria:
 
@@ -563,10 +564,11 @@ Acceptance criteria:
 - its behavior is either wrapped or adapted behind the new topology contract
 - parity-sensitive logic remains available for comparison and regression work
 
-Status as of 2026-04-07:
+Status as of 2026-04-08:
 
-- not yet closed: `density_controller.rs` is still retained as reference logic, but the active topology path does not yet expose it as an explicit adapter/strategy behind the current `training::topology` contract
-- parity-sensitive heuristics are therefore preserved in the repository but not yet cleanly owned by the extracted topology boundary
+- partially implemented: `training::topology::{DensityControllerReferenceAdapter, density_controller_reference_summary}` now adapts `density_controller.rs` behind the extracted topology boundary using the live `Splats` snapshot plus `MetalGaussianStats`
+- production LiteGS topology logs now expose reference clone/split/prune/budget telemetry beside the active concrete path, so parity-sensitive heuristics are no longer orphaned in a standalone module
+- Story 5.3 remains open because the production mutation path is still concrete rather than directly owned by the new adapter/strategy boundary
 
 ### Story 5.4: Add Topology Regression and Telemetry Coverage
 
@@ -579,6 +581,12 @@ Acceptance criteria:
 - tests cover clone, split, prune, and reset cases
 - telemetry and reporting continue to expose topology metrics
 - primitive-count evolution remains observable during training runs
+
+Status as of 2026-04-08:
+
+- partially implemented: `density_controller_reference_summary_tracks_threshold_masks` and `density_controller_reference_summary_tracks_weight_budget` now pin the reference adapter against both threshold-mode and weight-mode LiteGS semantics
+- production LiteGS topology logs now include reference clone/split/prune/budget counts in addition to the active-path candidate metrics
+- remaining work is broader clone/split/prune/reset regression plus surfacing any longer-lived reference-vs-production divergence in parity reporting
 
 ### Story 5.5: Move Post-Mutation Side Effects Behind the Topology Contract
 
@@ -602,11 +610,17 @@ Status as of 2026-04-07:
 
 Goal: Land the refactor as a stable orchestration model while preserving the current external training surface.
 
-Implementation note as of 2026-04-07:
+Implementation note as of 2026-04-08:
 
-- `training::train()` still routes through `training/mod.rs`, which owns training entry, profile validation, route selection, chunk-plan selection, sequential chunk execution, and chunk persistence/failure recording
-- `training/mod.rs` still publicly re-exports `training_pipeline` helpers at the module root, so legacy/reference utilities remain part of the visible training surface
-- `Splats` is now the internal bridge for mutation and export flows, but the codebase still moves between `GaussianMap`, `TrainableGaussians`, and `Splats`, so the canonical internal training-state ownership model is not fully settled yet
+- `training::orchestrator` now owns profile-specific train routing and the stable `training::train()` public entry implementation
+- `training::execution_plan` now owns chunked/non-chunked route selection and chunk-plan choice
+- `training::chunk_training` now owns sequential chunk execution, per-chunk config adaptation, and merge behavior
+- `training::export` now owns chunk artifact/report persistence helpers
+- `training::config` now owns training enums/config/result types, and `training/mod.rs` has been reduced to a thin module assembly layer
+- `training/mod.rs` no longer publicly re-exports `training_pipeline` helpers at the module root; legacy/reference utilities remain available only via explicit `training::training_pipeline::*` imports
+- `LoadedTrainingData` now emits `initial_splats`, and both the production trainer path and benchmark path enter the live step loop from `Splats`
+- ad hoc `map_from_trainable(...)` compatibility helpers have been removed; explicit trainable-to-scene conversion now goes through `Splats::from_trainable(...).to_gaussian_map()`
+- the current ownership split is now explicit: `GaussianMap` remains the public scene boundary, `Splats` is the internal exchange/snapshot bridge, and `TrainableGaussians` remains the live mutable step-loop state
 
 Exit criteria:
 
@@ -626,9 +640,10 @@ Acceptance criteria:
 - chunked and non-chunked flows both remain supported
 - profile-based routing remains intact
 
-Status as of 2026-04-07:
+Status as of 2026-04-08:
 
-- not yet closed: `training/mod.rs` still combines entrypoint routing, profile validation, execution-plan selection, sequential chunk execution, and persistence concerns in one broad module
+- partially implemented: `training::orchestrator`, `training::execution_plan`, `training::chunk_training`, and `training::export` now own the active route/plan/chunk/persistence flow, so `training/mod.rs` no longer embeds that orchestration inline
+- Story 6.1 remains open because the module root still carries a broad compatibility/config surface and the longer-lived lifecycle split is not fully settled yet
 
 ### Story 6.2: Preserve External Entry and Evaluation Behavior
 
@@ -642,6 +657,11 @@ Acceptance criteria:
 - chunked training still routes and merges as before unless explicitly changed in a later plan
 - any intentional behavior changes are documented and gated
 
+Status as of 2026-04-08:
+
+- `training::train()` remains stable while chunked/non-chunked routing smoke coverage continues to pass
+- chunk artifact scene export now preserves SH metadata and `sh_rest` payloads instead of collapsing persisted scenes to RGB-only metadata
+
 ### Story 6.3: Reduce Legacy File Ownership Safely
 
 As a RustGS maintainer,
@@ -654,9 +674,10 @@ Acceptance criteria:
 - compatibility shims remain only where still required
 - dead code is removed only after regression gates pass
 
-Status as of 2026-04-07:
+Status as of 2026-04-08:
 
-- partially active: `metal_trainer.rs` and `metal_runtime.rs` are already materially thinner, but `training/mod.rs` and the module-root re-export surface still own more legacy compatibility than the target end state
+- partially active: `metal_trainer.rs` and `metal_runtime.rs` are already materially thinner, and `training/mod.rs` has now shed the inline execution-plan/chunk-persistence implementation into narrower submodules
+- the remaining work is mostly compatibility-surface cleanup rather than another large extraction wave
 
 ### Story 6.4: Reassess Trait Abstractions After Concrete Extraction
 
@@ -682,6 +703,12 @@ Acceptance criteria:
 - conversion responsibilities are centralized and no new ad hoc conversions are introduced across training internals
 - forward, backward, topology, evaluation, and export paths align with that ownership model
 
+Status as of 2026-04-08:
+
+- substantially implemented: the ownership model is now explicit and documented as `GaussianMap` for public scene IO, `Splats` for internal snapshot/exchange boundaries, and `TrainableGaussians` for live step-loop mutation
+- implemented for current boundary crossings: `Splats` now owns `GaussianMap <-> TrainableGaussians` conversion helpers and `GaussianMap -> scene Gaussian/metadata` export conversion, `LoadedTrainingData` emits `initial_splats`, and production/benchmark entry paths now cross into the step loop from `Splats`
+- remaining tail: trainer/topology/export still rebuild `Splats` snapshots at a few checkpoints, so the last follow-up is reducing that snapshot churn rather than redefining the ownership model again
+
 ### Story 6.6: Split `training/mod.rs` into Thinner Orchestration Responsibilities
 
 As a RustGS maintainer,
@@ -694,6 +721,12 @@ Acceptance criteria:
 - `training::train()` remains the stable public entry while the module root stops owning the full lifecycle implementation
 - chunked and non-chunked routes retain smoke coverage after the split
 
+Status as of 2026-04-08:
+
+- implemented via `training::orchestrator`, `training::execution_plan`, `training::chunk_training`, `training::export`, and `training::config`
+- `training::train()` remains the stable public entry and route smoke coverage passes for `execution_plan`, chunk persistence, chunk scene export, chunk sequencing, adaptive chunk budgets, LiteGS bootstrap config validation, and config defaults
+- `training/mod.rs` has been reduced to thin module assembly and re-export wiring instead of owning orchestration/config implementation directly
+
 ### Story 6.7: Reduce `training_pipeline` Public Surface Safely
 
 As a RustGS maintainer,
@@ -705,6 +738,12 @@ Acceptance criteria:
 - public re-exports from `training_pipeline` are audited and reduced to proven compatibility needs
 - legacy/reference helpers such as parity or density-reference code are clearly documented as reference paths instead of silent production defaults
 - dead or duplicate module-level exports are removed only after tests and docs confirm the narrower surface
+
+Status as of 2026-04-08:
+
+- implemented for the module root: `training/mod.rs` no longer re-exports legacy `training_pipeline` helpers such as `compute_psnr`, `densify_gaussians`, `SceneMetadata`, or `TrainingState`
+- compatibility now requires explicit `training::training_pipeline::*` imports, which makes the legacy/reference surface visible instead of implicit
+- docs and regression coverage were updated after the surface reduction so the narrower boundary is intentional and verified
 
 ## Recommended Execution Order
 

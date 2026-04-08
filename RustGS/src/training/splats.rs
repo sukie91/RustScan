@@ -1,13 +1,15 @@
 use candle_core::Device;
 
 use crate::core::{Gaussian3D, GaussianColorRepresentation, GaussianMap, GaussianState};
-use crate::diff::diff_splat::{rgb_to_sh0_value, TrainableColorRepresentation, TrainableGaussians};
+use crate::diff::diff_splat::{
+    rgb_to_sh0_value, sh0_to_rgb_value, TrainableColorRepresentation, TrainableGaussians,
+};
 use crate::Gaussian;
 
 use super::{TrainingConfig, TrainingProfile};
 
 #[derive(Debug, Clone)]
-pub(super) struct Splats {
+pub(crate) struct Splats {
     pub(super) positions: Vec<f32>,
     pub(super) log_scales: Vec<f32>,
     pub(super) rotations: Vec<f32>,
@@ -111,6 +113,18 @@ impl Splats {
 
         splats.validate()?;
         Ok(splats)
+    }
+
+    pub(super) fn from_gaussian_map_for_config(
+        map: &GaussianMap,
+        config: &TrainingConfig,
+    ) -> candle_core::Result<Self> {
+        Self::from_gaussian_map(map, trainable_color_representation_for_config(config))
+    }
+
+    pub(super) fn from_gaussian_map_inferred(map: &GaussianMap) -> candle_core::Result<Self> {
+        let color_representation = infer_color_representation_from_gaussian_map(map)?;
+        Self::from_gaussian_map(map, color_representation)
     }
 
     pub(super) fn from_scene_gaussians(
@@ -241,6 +255,45 @@ impl Splats {
         Ok(map)
     }
 
+    pub(super) fn to_scene_gaussians(&self) -> candle_core::Result<Vec<Gaussian>> {
+        self.validate()?;
+        let mut gaussians = Vec::with_capacity(self.len());
+        for idx in 0..self.len() {
+            let gaussian = match self.color_representation {
+                TrainableColorRepresentation::Rgb => Gaussian::new(
+                    self.position(idx),
+                    self.scale(idx),
+                    self.rotation(idx),
+                    sigmoid_scalar(self.opacity_logits[idx]).clamp(0.0, 1.0),
+                    self.color(idx),
+                ),
+                TrainableColorRepresentation::SphericalHarmonics { .. } => Gaussian::with_sh(
+                    self.position(idx),
+                    self.scale(idx),
+                    self.rotation(idx),
+                    sigmoid_scalar(self.opacity_logits[idx]).clamp(0.0, 1.0),
+                    self.color(idx).map(sh0_to_rgb_value),
+                    self.sh_rest(idx).to_vec(),
+                ),
+            };
+            gaussians.push(gaussian);
+        }
+        Ok(gaussians)
+    }
+
+    pub(super) fn to_scene_metadata(
+        &self,
+        iterations: usize,
+        final_loss: f32,
+    ) -> crate::SceneMetadata {
+        crate::SceneMetadata {
+            iterations,
+            final_loss,
+            gaussian_count: self.len(),
+            sh_degree: self.color_representation.sh_degree(),
+        }
+    }
+
     pub(super) fn validate(&self) -> candle_core::Result<()> {
         let row_count = self.opacity_logits.len();
         validate_component_len("positions", self.positions.len(), row_count, 3)?;
@@ -258,6 +311,10 @@ impl Splats {
 
     pub(super) fn len(&self) -> usize {
         self.opacity_logits.len()
+    }
+
+    pub(super) fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
     #[allow(dead_code)]
@@ -349,6 +406,60 @@ impl Splats {
             color_representation: self.color_representation,
         }
     }
+
+    pub(super) fn downsample_evenly(&mut self, target_count: usize) {
+        if target_count == 0 || self.len() <= target_count {
+            return;
+        }
+
+        let len = self.len();
+        let mut sampled = self.retained_view(target_count);
+        for out_idx in 0..target_count {
+            let src_idx = out_idx.saturating_mul(len) / target_count;
+            let src_idx = src_idx.min(len.saturating_sub(1));
+            sampled.push(
+                self.position(src_idx),
+                self.log_scale(src_idx),
+                self.rotation(src_idx),
+                self.opacity_logits[src_idx],
+                self.color(src_idx),
+                self.sh_rest(src_idx),
+            );
+        }
+        *self = sampled;
+    }
+
+    pub(super) fn positions_vec3(&self) -> Vec<[f32; 3]> {
+        (0..self.len()).map(|idx| self.position(idx)).collect()
+    }
+
+    pub(super) fn scene_extent(&self) -> f32 {
+        if self.is_empty() {
+            return 1.0;
+        }
+
+        let mut center = [0.0f32; 3];
+        for idx in 0..self.len() {
+            let position = self.position(idx);
+            center[0] += position[0];
+            center[1] += position[1];
+            center[2] += position[2];
+        }
+        let inv = 1.0 / self.len().max(1) as f32;
+        center[0] *= inv;
+        center[1] *= inv;
+        center[2] *= inv;
+
+        let mut max_dist = 0.0f32;
+        for idx in 0..self.len() {
+            let position = self.position(idx);
+            let dx = position[0] - center[0];
+            let dy = position[1] - center[1];
+            let dz = position[2] - center[2];
+            max_dist = max_dist.max((dx * dx + dy * dy + dz * dz).sqrt());
+        }
+        max_dist.max(1e-3)
+    }
 }
 
 pub(super) fn trainable_color_representation_for_config(
@@ -361,6 +472,36 @@ pub(super) fn trainable_color_representation_for_config(
     } else {
         TrainableColorRepresentation::Rgb
     }
+}
+
+pub(super) fn infer_color_representation_from_gaussian_map(
+    map: &GaussianMap,
+) -> candle_core::Result<TrainableColorRepresentation> {
+    let mut inferred = TrainableColorRepresentation::Rgb;
+    for gaussian in map.gaussians() {
+        match gaussian.color_representation {
+            GaussianColorRepresentation::Rgb => {
+                if inferred != TrainableColorRepresentation::Rgb {
+                    candle_core::bail!(
+                        "gaussian map mixes RGB and spherical harmonics color representations"
+                    );
+                }
+            }
+            GaussianColorRepresentation::SphericalHarmonics { degree } => {
+                let next = TrainableColorRepresentation::SphericalHarmonics { degree };
+                if inferred == TrainableColorRepresentation::Rgb {
+                    inferred = next;
+                } else if inferred != next {
+                    candle_core::bail!(
+                        "gaussian map mixes spherical harmonics degrees {} and {}",
+                        inferred.sh_degree(),
+                        degree
+                    );
+                }
+            }
+        }
+    }
+    Ok(inferred)
 }
 
 pub(super) fn row_slice(values: &[f32], width: usize, idx: usize) -> &[f32] {
@@ -403,7 +544,10 @@ fn sigmoid_scalar(value: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{trainable_color_representation_for_config, Splats};
+    use super::{
+        infer_color_representation_from_gaussian_map, trainable_color_representation_for_config,
+        Splats,
+    };
     use crate::core::{Gaussian3D, GaussianColorRepresentation, GaussianMap};
     use crate::diff::diff_splat::{
         rgb_to_sh0_value, TrainableColorRepresentation, TrainableGaussians,
@@ -576,6 +720,139 @@ mod tests {
         assert_eq!(
             litegs,
             TrainableColorRepresentation::SphericalHarmonics { degree: 3 }
+        );
+    }
+
+    #[test]
+    fn inferred_color_representation_tracks_sh_degree_from_map() {
+        let gaussian = Gaussian3D::new(
+            Vec3::new(1.0, 2.0, 3.0),
+            Vec3::new(0.1, 0.2, 0.3),
+            Quat::IDENTITY,
+            0.25,
+            [0.2, 0.4, 0.6],
+        )
+        .with_color_state(
+            GaussianColorRepresentation::SphericalHarmonics { degree: 3 },
+            Some([
+                rgb_to_sh0_value(0.2),
+                rgb_to_sh0_value(0.4),
+                rgb_to_sh0_value(0.6),
+            ]),
+            Some(vec![0.5; 15 * 3]),
+        );
+        let map = GaussianMap::from_gaussians(vec![gaussian]);
+
+        let representation = infer_color_representation_from_gaussian_map(&map).unwrap();
+
+        assert_eq!(
+            representation,
+            TrainableColorRepresentation::SphericalHarmonics { degree: 3 }
+        );
+    }
+
+    #[test]
+    fn inferred_color_representation_rejects_mixed_sh_degrees() {
+        let sh_degree_2 = Gaussian3D::new(
+            Vec3::new(0.0, 0.0, 1.0),
+            Vec3::new(0.1, 0.2, 0.3),
+            Quat::IDENTITY,
+            0.25,
+            [0.2, 0.4, 0.6],
+        )
+        .with_color_state(
+            GaussianColorRepresentation::SphericalHarmonics { degree: 2 },
+            Some([
+                rgb_to_sh0_value(0.2),
+                rgb_to_sh0_value(0.4),
+                rgb_to_sh0_value(0.6),
+            ]),
+            Some(vec![0.5; 8 * 3]),
+        );
+        let sh_degree_3 = Gaussian3D::new(
+            Vec3::new(1.0, 2.0, 3.0),
+            Vec3::new(0.1, 0.2, 0.3),
+            Quat::IDENTITY,
+            0.25,
+            [0.2, 0.4, 0.6],
+        )
+        .with_color_state(
+            GaussianColorRepresentation::SphericalHarmonics { degree: 3 },
+            Some([
+                rgb_to_sh0_value(0.2),
+                rgb_to_sh0_value(0.4),
+                rgb_to_sh0_value(0.6),
+            ]),
+            Some(vec![0.5; 15 * 3]),
+        );
+        let map = GaussianMap::from_gaussians(vec![sh_degree_2, sh_degree_3]);
+
+        let err = infer_color_representation_from_gaussian_map(&map)
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("mixes spherical harmonics degrees"));
+    }
+
+    #[test]
+    fn inferred_splats_round_trip_to_scene_gaussians_with_sh() {
+        let gaussian = Gaussian3D::new(
+            Vec3::new(1.0, 2.0, 3.0),
+            Vec3::new(0.1, 0.2, 0.3),
+            Quat::IDENTITY,
+            0.25,
+            [0.2, 0.4, 0.6],
+        )
+        .with_color_state(
+            GaussianColorRepresentation::SphericalHarmonics { degree: 3 },
+            Some([
+                rgb_to_sh0_value(0.2),
+                rgb_to_sh0_value(0.4),
+                rgb_to_sh0_value(0.6),
+            ]),
+            Some(vec![0.5; 15 * 3]),
+        );
+        let map = GaussianMap::from_gaussians(vec![gaussian]);
+
+        let splats = Splats::from_gaussian_map_inferred(&map).unwrap();
+        let scene = splats.to_scene_gaussians().unwrap();
+        let metadata = splats.to_scene_metadata(7, 0.5);
+
+        assert_eq!(metadata.iterations, 7);
+        assert_eq!(metadata.final_loss, 0.5);
+        assert_eq!(metadata.sh_degree, 3);
+        assert_eq!(scene.len(), 1);
+        assert_eq!(scene[0].sh_rest.as_deref().unwrap(), &vec![0.5; 15 * 3]);
+        assert!((scene[0].color[0] - 0.2).abs() < 1e-5);
+        assert!((scene[0].color[1] - 0.4).abs() < 1e-5);
+        assert!((scene[0].color[2] - 0.6).abs() < 1e-5);
+    }
+
+    #[test]
+    fn scene_extent_tracks_radius_from_splats_positions() {
+        let map = GaussianMap::from_gaussians(vec![
+            Gaussian3D::new(
+                Vec3::new(-2.0, 0.0, 0.0),
+                Vec3::new(0.1, 0.2, 0.3),
+                Quat::IDENTITY,
+                0.25,
+                [0.2, 0.4, 0.6],
+            ),
+            Gaussian3D::new(
+                Vec3::new(2.0, 0.0, 0.0),
+                Vec3::new(0.1, 0.2, 0.3),
+                Quat::IDENTITY,
+                0.25,
+                [0.2, 0.4, 0.6],
+            ),
+        ]);
+
+        let splats = Splats::from_gaussian_map_inferred(&map).unwrap();
+
+        assert!((splats.scene_extent() - 2.0).abs() < 1e-6);
+        assert_eq!(
+            splats.positions_vec3(),
+            vec![[-2.0, 0.0, 0.0], [2.0, 0.0, 0.0]]
         );
     }
 }

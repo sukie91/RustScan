@@ -8,11 +8,11 @@ use super::init_map::{
     initial_frame_sampling_step,
 };
 #[cfg(feature = "gpu")]
-use super::splats::{trainable_color_representation_for_config, Splats};
+use super::splats::Splats;
 #[cfg(feature = "gpu")]
 use crate::core::GaussianMap;
 #[cfg(feature = "gpu")]
-use crate::diff::diff_splat::{DiffCamera, TrainableGaussians};
+use crate::diff::diff_splat::DiffCamera;
 #[cfg(feature = "gpu")]
 use crate::{TrainingDataset, TrainingError, SE3};
 #[cfg(feature = "gpu")]
@@ -33,7 +33,7 @@ pub(crate) struct LoadedTrainingData {
     pub depths: Vec<Vec<f32>>,
     pub target_width: usize,
     pub target_height: usize,
-    pub initial_map: GaussianMap,
+    pub initial_splats: Splats,
 }
 
 #[cfg(feature = "gpu")]
@@ -148,13 +148,15 @@ pub(crate) fn load_training_data(
         );
     }
 
+    let initial_splats = Splats::from_gaussian_map_for_config(&initial_map, config)?;
+
     Ok(LoadedTrainingData {
         cameras,
         colors,
         depths,
         target_width,
         target_height,
-        initial_map,
+        initial_splats,
     })
 }
 
@@ -189,27 +191,11 @@ fn diff_camera_from_scene_pose(
     )
 }
 
-#[cfg(feature = "gpu")]
-pub(crate) fn trainable_from_map(
-    map: &GaussianMap,
-    device: &Device,
-    config: &super::TrainingConfig,
-) -> candle_core::Result<TrainableGaussians> {
-    Splats::from_gaussian_map(map, trainable_color_representation_for_config(config))?
-        .to_trainable(device)
-}
-
-#[cfg(feature = "gpu")]
-pub(crate) fn map_from_trainable(
-    gaussians: &TrainableGaussians,
-) -> candle_core::Result<GaussianMap> {
-    Splats::from_trainable(gaussians)?.to_gaussian_map()
-}
-
 #[cfg(all(test, feature = "gpu"))]
 mod tests {
     use super::*;
-    use crate::diff::diff_splat::rgb_to_sh0_value;
+    use crate::diff::diff_splat::{rgb_to_sh0_value, TrainableGaussians};
+    use crate::training::splats::Splats;
     use crate::Gaussian3D;
 
     fn test_opacity_to_logit(opacity: f32) -> f32 {
@@ -247,7 +233,10 @@ mod tests {
             training_profile: super::super::TrainingProfile::LiteGsMacV1,
             ..super::super::TrainingConfig::default()
         };
-        let trainable = trainable_from_map(&map, &device, &config).unwrap();
+        let trainable = Splats::from_gaussian_map_for_config(&map, &config)
+            .unwrap()
+            .to_trainable(&device)
+            .unwrap();
 
         assert!(trainable.uses_spherical_harmonics());
         assert_eq!(trainable.sh_degree(), 3);
@@ -278,7 +267,10 @@ mod tests {
         )
         .unwrap();
 
-        let map = map_from_trainable(&trainable).unwrap();
+        let map = Splats::from_trainable(&trainable)
+            .unwrap()
+            .to_gaussian_map()
+            .unwrap();
         let gaussian = &map.gaussians()[0];
         assert!((gaussian.color[0] - 0.2).abs() < 1e-5);
         assert!((gaussian.color[1] - 0.4).abs() < 1e-5);

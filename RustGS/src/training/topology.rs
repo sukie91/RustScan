@@ -1,8 +1,11 @@
 use std::cmp::Ordering;
 
+use super::density_controller::{
+    DensityController, DensityControllerConfig, OpacityResetMode, PruneMode,
+};
 use super::parity_harness::ParityTopologyMetrics;
 use super::splats::Splats;
-use super::{LiteGsConfig, LiteGsPruneMode, TrainingProfile};
+use super::{LiteGsConfig, LiteGsOpacityResetMode, LiteGsPruneMode, TrainingProfile};
 
 #[cfg(test)]
 use super::TrainingConfig;
@@ -146,6 +149,177 @@ impl TopologyPolicy {
     pub(super) fn litegs_clone_scale_threshold(&self) -> f32 {
         (self.scene_extent * LITEGS_PERCENT_DENSE).max(1e-4)
     }
+
+    pub(super) fn density_controller_reference_config(
+        &self,
+        current_gaussians: usize,
+    ) -> DensityControllerConfig {
+        DensityControllerConfig {
+            densify_grad_threshold: if self.is_litegs_mode() {
+                self.litegs.growth_grad_threshold
+            } else {
+                self.legacy_densify_grad_threshold
+            },
+            opacity_threshold: if self.is_litegs_mode() {
+                LITEGS_OPACITY_THRESHOLD
+            } else {
+                self.prune_threshold
+            },
+            percent_dense: LITEGS_PERCENT_DENSE,
+            screen_extent: self.scene_extent.max(1e-6),
+            screen_size_threshold: if self.is_litegs_mode() {
+                self.litegs.prune_scale_threshold
+            } else {
+                self.legacy_prune_scale_threshold
+            },
+            init_points_num: current_gaussians.max(1),
+            target_primitives: if self.is_litegs_mode() {
+                self.litegs.target_primitives.max(current_gaussians.max(1))
+            } else {
+                self.max_gaussian_budget.max(current_gaussians.max(1))
+            },
+            densify_from: if self.is_litegs_mode() {
+                self.litegs.densify_from
+            } else {
+                self.topology_warmup
+            },
+            densify_until: if self.is_litegs_mode() {
+                self.litegs.densify_until.unwrap_or(self.max_iterations)
+            } else {
+                self.max_iterations
+            },
+            densification_interval: if self.is_litegs_mode() {
+                self.litegs.densification_interval.max(1)
+            } else {
+                self.densify_interval.max(1)
+            },
+            opacity_reset_interval: if self.is_litegs_mode() {
+                self.litegs.opacity_reset_interval.max(1)
+            } else {
+                self.prune_interval.max(1)
+            },
+            opacity_reset_mode: density_controller_opacity_reset_mode(
+                self.litegs.opacity_reset_mode,
+            ),
+            prune_mode: density_controller_prune_mode(self.litegs.prune_mode),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct DensityControllerReferenceSummary {
+    pub(super) prune_mask: Vec<bool>,
+    pub(super) clone_mask: Vec<bool>,
+    pub(super) split_mask: Vec<bool>,
+    pub(super) densify_budget: Option<usize>,
+}
+
+impl DensityControllerReferenceSummary {
+    pub(super) fn prune_candidates(&self) -> usize {
+        self.prune_mask
+            .iter()
+            .filter(|candidate| **candidate)
+            .count()
+    }
+
+    pub(super) fn clone_candidates(&self) -> usize {
+        self.clone_mask
+            .iter()
+            .filter(|candidate| **candidate)
+            .count()
+    }
+
+    pub(super) fn split_candidates(&self) -> usize {
+        self.split_mask
+            .iter()
+            .filter(|candidate| **candidate)
+            .count()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct DensityControllerReferenceAdapter {
+    controller: DensityController,
+}
+
+impl DensityControllerReferenceAdapter {
+    pub(super) fn from_topology_state(
+        policy: &TopologyPolicy,
+        splats: &Splats,
+        stats: &[MetalGaussianStats],
+    ) -> Self {
+        let mut controller = DensityController::new(
+            policy.density_controller_reference_config(splats.len()),
+            density_controller_taming_mode(policy),
+        );
+        controller.stats.resize(splats.len());
+
+        for idx in 0..splats.len() {
+            let gaussian_stats = stats.get(idx).copied().unwrap_or_default();
+            let mean2d_grad_count = gaussian_stats.mean2d_grad.count as f32;
+            let fragment_weight_count = gaussian_stats.fragment_weight.count as f32;
+            let fragment_err_count = gaussian_stats.fragment_err.count as f32;
+
+            controller.stats.visible_count[idx] =
+                gaussian_stats.visible_count.min(u32::MAX as usize) as u32;
+            controller.stats.mean2d_grad[idx] = (
+                gaussian_stats.mean2d_grad.mean * mean2d_grad_count,
+                mean2d_grad_count,
+            );
+            controller.stats.fragment_weight[idx] = (
+                gaussian_stats.fragment_weight.mean * fragment_weight_count,
+                fragment_weight_count,
+            );
+            controller.stats.fragment_err[idx] = (
+                gaussian_stats.fragment_err.mean * fragment_err_count,
+                gaussian_stats.fragment_err.m2
+                    + fragment_err_count
+                        * gaussian_stats.fragment_err.mean
+                        * gaussian_stats.fragment_err.mean,
+                fragment_err_count,
+            );
+            controller.stats.opacity[idx] = sigmoid_scalar(splats.opacity_logits[idx]);
+            controller.stats.max_scale[idx] = splats.scale(idx).into_iter().fold(0.0f32, f32::max);
+        }
+
+        Self { controller }
+    }
+
+    pub(super) fn summary(
+        &self,
+        completed_epoch: Option<usize>,
+    ) -> DensityControllerReferenceSummary {
+        let prune_mask = self.controller.get_prune_mask();
+        let clone_mask = self.controller.get_clone_mask();
+        let split_mask = self.controller.get_split_mask();
+        let prune_candidates = prune_mask.iter().filter(|candidate| **candidate).count();
+        let densify_budget = completed_epoch
+            .filter(|epoch| self.controller.is_densify_active(*epoch))
+            .map(|epoch| {
+                self.controller.compute_densify_budget(
+                    self.controller.stats.len(),
+                    prune_candidates,
+                    epoch,
+                )
+            });
+
+        DensityControllerReferenceSummary {
+            prune_mask,
+            clone_mask,
+            split_mask,
+            densify_budget,
+        }
+    }
+}
+
+pub(super) fn density_controller_reference_summary(
+    policy: &TopologyPolicy,
+    splats: &Splats,
+    stats: &[MetalGaussianStats],
+    completed_epoch: Option<usize>,
+) -> DensityControllerReferenceSummary {
+    DensityControllerReferenceAdapter::from_topology_state(policy, splats, stats)
+        .summary(completed_epoch)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -980,6 +1154,24 @@ pub(super) fn apply_topology_metrics_delta(
     }
 }
 
+fn density_controller_opacity_reset_mode(mode: LiteGsOpacityResetMode) -> OpacityResetMode {
+    match mode {
+        LiteGsOpacityResetMode::Decay => OpacityResetMode::Decay,
+        LiteGsOpacityResetMode::Reset => OpacityResetMode::Reset,
+    }
+}
+
+fn density_controller_prune_mode(mode: LiteGsPruneMode) -> PruneMode {
+    match mode {
+        LiteGsPruneMode::Threshold => PruneMode::Threshold,
+        LiteGsPruneMode::Weight => PruneMode::Weight,
+    }
+}
+
+fn density_controller_taming_mode(policy: &TopologyPolicy) -> bool {
+    policy.is_litegs_mode() && matches!(policy.litegs.prune_mode, LiteGsPruneMode::Weight)
+}
+
 fn record_topology_epoch(
     first: &mut Option<usize>,
     last: &mut Option<usize>,
@@ -1132,10 +1324,11 @@ fn sigmoid_scalar(value: f32) -> f32 {
 mod tests {
     use super::{
         analyze_topology_candidates, apply_snapshot_mutations, apply_topology_metrics_delta,
-        densify_snapshot_litegs, litegs_requested_additions, litegs_select_densify_candidates,
-        prune_snapshot, schedule_topology, should_collect_visible_indices, LiteGsDensifySelection,
-        MetalGaussianStats, RunningMoments, TopologyAnalysis, TopologyMutationRequest,
-        TopologyPolicy, TopologySchedule, TopologyStatsAction, TopologyStepContext,
+        densify_snapshot_litegs, density_controller_reference_summary, litegs_requested_additions,
+        litegs_select_densify_candidates, prune_snapshot, schedule_topology,
+        should_collect_visible_indices, LiteGsDensifySelection, MetalGaussianStats, RunningMoments,
+        TopologyAnalysis, TopologyMutationRequest, TopologyPolicy, TopologySchedule,
+        TopologyStatsAction, TopologyStepContext,
     };
     use crate::diff::diff_splat::TrainableColorRepresentation;
     use crate::training::parity_harness::ParityTopologyMetrics;
@@ -1379,6 +1572,155 @@ mod tests {
         assert_eq!(analysis.growth_candidates, 1);
         assert!(analysis.infos[0].growth_candidate);
         assert!(analysis.infos[1].prune_candidate);
+    }
+
+    #[test]
+    fn density_controller_reference_summary_tracks_threshold_masks() {
+        let config = TrainingConfig {
+            training_profile: TrainingProfile::LiteGsMacV1,
+            iterations: 12,
+            litegs: LiteGsConfig {
+                densify_from: 1,
+                densify_until: Some(8),
+                densification_interval: 1,
+                growth_grad_threshold: 0.001,
+                prune_mode: crate::training::LiteGsPruneMode::Threshold,
+                ..LiteGsConfig::default()
+            },
+            ..TrainingConfig::default()
+        };
+        let policy = TopologyPolicy::from_training_config(&config, 2.0);
+        let snapshot = Splats {
+            positions: vec![0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 2.0, 0.0, 1.0],
+            log_scales: vec![
+                0.005f32.ln(),
+                0.005f32.ln(),
+                0.005f32.ln(),
+                0.05f32.ln(),
+                0.05f32.ln(),
+                0.05f32.ln(),
+                0.01f32.ln(),
+                0.01f32.ln(),
+                0.01f32.ln(),
+            ],
+            rotations: vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+            opacity_logits: vec![2.0, 2.0, -10.0],
+            colors: vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            sh_rest: vec![0.0; 3 * 15 * 3],
+            color_representation: TrainableColorRepresentation::SphericalHarmonics { degree: 3 },
+        };
+        let stats = vec![
+            MetalGaussianStats {
+                mean2d_grad: RunningMoments {
+                    mean: 0.01,
+                    m2: 0.0,
+                    count: 1,
+                },
+                visible_count: 1,
+                ..Default::default()
+            },
+            MetalGaussianStats {
+                mean2d_grad: RunningMoments {
+                    mean: 0.02,
+                    m2: 0.0,
+                    count: 1,
+                },
+                visible_count: 1,
+                ..Default::default()
+            },
+            MetalGaussianStats::default(),
+        ];
+
+        let summary = density_controller_reference_summary(&policy, &snapshot, &stats, Some(2));
+
+        assert_eq!(summary.clone_candidates(), 1);
+        assert_eq!(summary.split_candidates(), 1);
+        assert_eq!(summary.prune_candidates(), 1);
+        assert_eq!(summary.densify_budget, Some(3));
+    }
+
+    #[test]
+    fn density_controller_reference_summary_tracks_weight_budget() {
+        let config = TrainingConfig {
+            training_profile: TrainingProfile::LiteGsMacV1,
+            iterations: 12,
+            litegs: LiteGsConfig {
+                densify_from: 1,
+                densify_until: Some(5),
+                densification_interval: 1,
+                growth_grad_threshold: 0.001,
+                prune_mode: crate::training::LiteGsPruneMode::Weight,
+                target_primitives: 6,
+                ..LiteGsConfig::default()
+            },
+            ..TrainingConfig::default()
+        };
+        let policy = TopologyPolicy::from_training_config(&config, 1.0);
+        let snapshot = Splats {
+            positions: vec![0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 2.0, 0.0, 1.0],
+            log_scales: vec![0.01f32.ln(); 9],
+            rotations: vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+            opacity_logits: vec![2.0, 2.0, 2.0],
+            colors: vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            sh_rest: vec![0.0; 3 * 15 * 3],
+            color_representation: TrainableColorRepresentation::SphericalHarmonics { degree: 3 },
+        };
+        let stats = vec![
+            MetalGaussianStats {
+                mean2d_grad: RunningMoments {
+                    mean: 0.01,
+                    m2: 0.0,
+                    count: 1,
+                },
+                fragment_weight: RunningMoments {
+                    mean: 0.5,
+                    m2: 0.0,
+                    count: 1,
+                },
+                fragment_err: RunningMoments {
+                    mean: 0.6,
+                    m2: 0.1,
+                    count: 2,
+                },
+                visible_count: 2,
+                ..Default::default()
+            },
+            MetalGaussianStats {
+                mean2d_grad: RunningMoments {
+                    mean: 0.01,
+                    m2: 0.0,
+                    count: 1,
+                },
+                fragment_weight: RunningMoments {
+                    mean: 0.4,
+                    m2: 0.0,
+                    count: 1,
+                },
+                fragment_err: RunningMoments {
+                    mean: 0.5,
+                    m2: 0.05,
+                    count: 2,
+                },
+                visible_count: 2,
+                ..Default::default()
+            },
+            MetalGaussianStats {
+                mean2d_grad: RunningMoments {
+                    mean: 0.01,
+                    m2: 0.0,
+                    count: 1,
+                },
+                visible_count: 3,
+                ..Default::default()
+            },
+        ];
+
+        let summary = density_controller_reference_summary(&policy, &snapshot, &stats, Some(3));
+
+        assert_eq!(summary.prune_candidates(), 1);
+        assert_eq!(summary.clone_candidates(), 3);
+        assert_eq!(summary.split_candidates(), 0);
+        assert_eq!(summary.densify_budget, Some(3));
     }
 
     #[test]
