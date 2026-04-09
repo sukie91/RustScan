@@ -1,6 +1,7 @@
 use super::tum_dataset::TumRgbdConfig;
 use super::{colmap_dataset, nerfstudio_dataset, tum_dataset};
-use crate::{SlamOutput, TrainingConfig, TrainingDataset, TrainingError};
+use crate::{TrainingConfig, TrainingDataset, TrainingError};
+use rustscan_types::SlamOutput;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 

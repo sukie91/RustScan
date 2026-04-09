@@ -10,6 +10,10 @@
 //! 4. Alpha blending
 
 use crate::core::Gaussian3D;
+#[cfg(feature = "gpu")]
+use crate::diff::diff_splat::sh0_to_rgb_value;
+#[cfg(feature = "gpu")]
+use crate::training::SplatView;
 
 /// A single Gaussian with all parameters (array-based for rendering)
 #[derive(Debug, Clone)]
@@ -179,111 +183,75 @@ impl TiledRenderer {
     ) -> Vec<ProjectedGaussian> {
         let mut projected = Vec::with_capacity(gaussians.len());
 
-        // Extract rotation matrix
-        let r = *rotation;
-
         for (idx, g) in gaussians.iter().enumerate() {
-            // Transform position to camera space
-            let wx = g.position[0];
-            let wy = g.position[1];
-            let wz = g.position[2];
-
-            // Apply rotation and translation (camera-to-world transform)
-            // We need world-to-camera, so we use the inverse
-            let cx = r[0][0] * wx + r[0][1] * wy + r[0][2] * wz + translation[0];
-            let cy = r[1][0] * wx + r[1][1] * wy + r[1][2] * wz + translation[1];
-            let cz = r[2][0] * wx + r[2][1] * wy + r[2][2] * wz + translation[2];
-
-            // Skip points behind camera
-            if cz <= 0.0 {
-                continue;
+            if let Some(projected_gaussian) = project_projected_gaussian(
+                idx,
+                g.position,
+                g.scale,
+                g.rotation,
+                g.opacity,
+                g.color,
+                fx,
+                fy,
+                rotation,
+                translation,
+            ) {
+                projected.push(projected_gaussian);
             }
+        }
 
-            // Project to image plane
-            // Note: Using intrinsics center for principal point
-            let px = fx * cx / cz;
-            let py = fy * cy / cz;
+        projected
+    }
 
-            // Compute full 2D covariance via Jacobian projection.
-            //
-            // 1. Build rotation matrix R_g from the Gaussian's quaternion [w, x, y, z].
-            let [qw, qx, qy, qz] = g.rotation;
-            let r00 = 1.0 - 2.0 * (qy * qy + qz * qz);
-            let r01 = 2.0 * (qx * qy - qw * qz);
-            let r02 = 2.0 * (qx * qz + qw * qy);
-            let r10 = 2.0 * (qx * qy + qw * qz);
-            let r11 = 1.0 - 2.0 * (qx * qx + qz * qz);
-            let r12 = 2.0 * (qy * qz - qw * qx);
-            let r20 = 2.0 * (qx * qz - qw * qy);
-            let r21 = 2.0 * (qy * qz + qw * qx);
-            let r22 = 1.0 - 2.0 * (qx * qx + qy * qy);
+    #[cfg(feature = "gpu")]
+    pub fn project_splats(
+        &self,
+        splats: SplatView<'_>,
+        fx: f32,
+        fy: f32,
+        _cx: f32,
+        _cy: f32,
+        rotation: &[[f32; 3]; 3],
+        translation: &[f32; 3],
+    ) -> Vec<ProjectedGaussian> {
+        let mut projected = Vec::with_capacity(splats.opacity_logits.len());
+        let sh_row_width = ((splats.sh_degree + 1) * (splats.sh_degree + 1)) * 3;
 
-            // 2. World-space covariance: Σ_world = (R_g * S)(R_g * S)^T, S = diag(sx, sy, sz).
-            let sx = g.scale[0].abs();
-            let sy = g.scale[1].abs();
-            let sz = g.scale[2].abs();
-            let sxx = sx * sx;
-            let syy = sy * sy;
-            let szz = sz * sz;
-            let cw00 = r00 * r00 * sxx + r01 * r01 * syy + r02 * r02 * szz;
-            let cw01 = r00 * r10 * sxx + r01 * r11 * syy + r02 * r12 * szz;
-            let cw02 = r00 * r20 * sxx + r01 * r21 * syy + r02 * r22 * szz;
-            let cw11 = r10 * r10 * sxx + r11 * r11 * syy + r12 * r12 * szz;
-            let cw12 = r10 * r20 * sxx + r11 * r21 * syy + r12 * r22 * szz;
-            let cw22 = r20 * r20 * sxx + r21 * r21 * syy + r22 * r22 * szz;
-
-            // 3. Camera-space covariance: Σ_cam = C_rot * Σ_world * C_rot^T.
-            //    Only the upper-left 3×3 is needed; compute the 6 unique entries.
-            let c = r; // camera rotation matrix (world-to-camera)
-                       // Intermediate: M = C_rot * Σ_world  (3×3)
-            let m00 = c[0][0] * cw00 + c[0][1] * cw01 + c[0][2] * cw02;
-            let m01 = c[0][0] * cw01 + c[0][1] * cw11 + c[0][2] * cw12;
-            let m02 = c[0][0] * cw02 + c[0][1] * cw12 + c[0][2] * cw22;
-            let m10 = c[1][0] * cw00 + c[1][1] * cw01 + c[1][2] * cw02;
-            let m11 = c[1][0] * cw01 + c[1][1] * cw11 + c[1][2] * cw12;
-            let m12 = c[1][0] * cw02 + c[1][1] * cw12 + c[1][2] * cw22;
-            let m20 = c[2][0] * cw00 + c[2][1] * cw01 + c[2][2] * cw02;
-            let m21 = c[2][0] * cw01 + c[2][1] * cw11 + c[2][2] * cw12;
-            let m22 = c[2][0] * cw02 + c[2][1] * cw12 + c[2][2] * cw22;
-            // Σ_cam = M * C_rot^T – symmetric, compute only 6 entries needed.
-            let cc00 = m00 * c[0][0] + m01 * c[0][1] + m02 * c[0][2];
-            let cc01 = m00 * c[1][0] + m01 * c[1][1] + m02 * c[1][2];
-            let cc02 = m00 * c[2][0] + m01 * c[2][1] + m02 * c[2][2];
-            let cc11 = m10 * c[1][0] + m11 * c[1][1] + m12 * c[1][2];
-            let cc12 = m10 * c[2][0] + m11 * c[2][1] + m12 * c[2][2];
-            let cc22 = m20 * c[2][0] + m21 * c[2][1] + m22 * c[2][2];
-
-            // 4. Jacobian of perspective projection at (cx, cy, cz):
-            //    J = [[fx/cz, 0,      -fx*cx/cz²],
-            //         [0,     fy/cz,  -fy*cy/cz²]]
-            let inv_z = 1.0 / cz;
-            let inv_z2 = inv_z * inv_z;
-            let jx0 = fx * inv_z;
-            let jx2 = -fx * cx * inv_z2;
-            let jy1 = fy * inv_z;
-            let jy2 = -fy * cy * inv_z2;
-
-            // 5. 2D covariance: Σ_2D = J * Σ_cam * J^T  (2×2, symmetric).
-            //    Σ_2D[0,0] = J[0,:] * Σ_cam * J[0,:]^T
-            //    Σ_2D[0,1] = J[0,:] * Σ_cam * J[1,:]^T
-            //    Σ_2D[1,1] = J[1,:] * Σ_cam * J[1,:]^T
-            //
-            //    J[0,:] = [jx0, 0, jx2],  J[1,:] = [0, jy1, jy2]
-            let cov_xx = jx0 * (cc00 * jx0 + cc02 * jx2) + jx2 * (cc02 * jx0 + cc22 * jx2);
-            let cov_xy = jx0 * (cc01 * jy1 + cc02 * jy2) + jx2 * (cc12 * jy1 + cc22 * jy2);
-            let cov_yy = jy1 * (cc11 * jy1 + cc12 * jy2) + jy2 * (cc12 * jy1 + cc22 * jy2);
-
-            projected.push(ProjectedGaussian {
-                x: px,
-                y: py,
-                depth: cz,
-                cov_xx,
-                cov_xy,
-                cov_yy,
-                opacity: g.opacity,
-                color: g.color,
-                orig_idx: idx,
-            });
+        for idx in 0..splats.opacity_logits.len() {
+            let pos_base = idx * 3;
+            let rot_base = idx * 4;
+            let sh_base = idx * sh_row_width;
+            if let Some(projected_gaussian) = project_projected_gaussian(
+                idx,
+                [
+                    splats.positions[pos_base],
+                    splats.positions[pos_base + 1],
+                    splats.positions[pos_base + 2],
+                ],
+                [
+                    splats.log_scales[pos_base].exp().abs(),
+                    splats.log_scales[pos_base + 1].exp().abs(),
+                    splats.log_scales[pos_base + 2].exp().abs(),
+                ],
+                [
+                    splats.rotations[rot_base],
+                    splats.rotations[rot_base + 1],
+                    splats.rotations[rot_base + 2],
+                    splats.rotations[rot_base + 3],
+                ],
+                1.0 / (1.0 + (-splats.opacity_logits[idx]).exp()),
+                [
+                    sh0_to_rgb_value(splats.sh_coeffs[sh_base]),
+                    sh0_to_rgb_value(splats.sh_coeffs[sh_base + 1]),
+                    sh0_to_rgb_value(splats.sh_coeffs[sh_base + 2]),
+                ],
+                fx,
+                fy,
+                rotation,
+                translation,
+            ) {
+                projected.push(projected_gaussian);
+            }
         }
 
         projected
@@ -340,9 +308,26 @@ impl TiledRenderer {
         rotation: &[[f32; 3]; 3],
         translation: &[f32; 3],
     ) -> RenderBuffer {
-        // Project to 2D
         let projected = self.project_gaussians(gaussians, fx, fy, cx, cy, rotation, translation);
+        self.render_projected(projected)
+    }
 
+    #[cfg(feature = "gpu")]
+    pub fn render_splats(
+        &self,
+        splats: SplatView<'_>,
+        fx: f32,
+        fy: f32,
+        cx: f32,
+        cy: f32,
+        rotation: &[[f32; 3]; 3],
+        translation: &[f32; 3],
+    ) -> RenderBuffer {
+        let projected = self.project_splats(splats, fx, fy, cx, cy, rotation, translation);
+        self.render_projected(projected)
+    }
+
+    fn render_projected(&self, projected: Vec<ProjectedGaussian>) -> RenderBuffer {
         // Initialize output buffers
         let mut color_buf = vec![0.0f32; self.width * self.height * 3];
         let mut depth_buf = vec![f32::MAX; self.width * self.height];
@@ -450,6 +435,97 @@ impl TiledRenderer {
     }
 }
 
+fn project_projected_gaussian(
+    idx: usize,
+    position: [f32; 3],
+    scale: [f32; 3],
+    rotation_q: [f32; 4],
+    opacity: f32,
+    color: [f32; 3],
+    fx: f32,
+    fy: f32,
+    camera_rotation: &[[f32; 3]; 3],
+    translation: &[f32; 3],
+) -> Option<ProjectedGaussian> {
+    let r = *camera_rotation;
+    let wx = position[0];
+    let wy = position[1];
+    let wz = position[2];
+
+    let cx = r[0][0] * wx + r[0][1] * wy + r[0][2] * wz + translation[0];
+    let cy = r[1][0] * wx + r[1][1] * wy + r[1][2] * wz + translation[1];
+    let cz = r[2][0] * wx + r[2][1] * wy + r[2][2] * wz + translation[2];
+    if cz <= 0.0 {
+        return None;
+    }
+
+    let px = fx * cx / cz;
+    let py = fy * cy / cz;
+
+    let [qw, qx, qy, qz] = rotation_q;
+    let r00 = 1.0 - 2.0 * (qy * qy + qz * qz);
+    let r01 = 2.0 * (qx * qy - qw * qz);
+    let r02 = 2.0 * (qx * qz + qw * qy);
+    let r10 = 2.0 * (qx * qy + qw * qz);
+    let r11 = 1.0 - 2.0 * (qx * qx + qz * qz);
+    let r12 = 2.0 * (qy * qz - qw * qx);
+    let r20 = 2.0 * (qx * qz - qw * qy);
+    let r21 = 2.0 * (qy * qz + qw * qx);
+    let r22 = 1.0 - 2.0 * (qx * qx + qy * qy);
+
+    let sx = scale[0].abs();
+    let sy = scale[1].abs();
+    let sz = scale[2].abs();
+    let sxx = sx * sx;
+    let syy = sy * sy;
+    let szz = sz * sz;
+    let cw00 = r00 * r00 * sxx + r01 * r01 * syy + r02 * r02 * szz;
+    let cw01 = r00 * r10 * sxx + r01 * r11 * syy + r02 * r12 * szz;
+    let cw02 = r00 * r20 * sxx + r01 * r21 * syy + r02 * r22 * szz;
+    let cw11 = r10 * r10 * sxx + r11 * r11 * syy + r12 * r12 * szz;
+    let cw12 = r10 * r20 * sxx + r11 * r21 * syy + r12 * r22 * szz;
+    let cw22 = r20 * r20 * sxx + r21 * r21 * syy + r22 * r22 * szz;
+
+    let c = r;
+    let m00 = c[0][0] * cw00 + c[0][1] * cw01 + c[0][2] * cw02;
+    let m01 = c[0][0] * cw01 + c[0][1] * cw11 + c[0][2] * cw12;
+    let m02 = c[0][0] * cw02 + c[0][1] * cw12 + c[0][2] * cw22;
+    let m10 = c[1][0] * cw00 + c[1][1] * cw01 + c[1][2] * cw02;
+    let m11 = c[1][0] * cw01 + c[1][1] * cw11 + c[1][2] * cw12;
+    let m12 = c[1][0] * cw02 + c[1][1] * cw12 + c[1][2] * cw22;
+    let m20 = c[2][0] * cw00 + c[2][1] * cw01 + c[2][2] * cw02;
+    let m21 = c[2][0] * cw01 + c[2][1] * cw11 + c[2][2] * cw12;
+    let m22 = c[2][0] * cw02 + c[2][1] * cw12 + c[2][2] * cw22;
+    let cc00 = m00 * c[0][0] + m01 * c[0][1] + m02 * c[0][2];
+    let cc01 = m00 * c[1][0] + m01 * c[1][1] + m02 * c[1][2];
+    let cc02 = m00 * c[2][0] + m01 * c[2][1] + m02 * c[2][2];
+    let cc11 = m10 * c[1][0] + m11 * c[1][1] + m12 * c[1][2];
+    let cc12 = m10 * c[2][0] + m11 * c[2][1] + m12 * c[2][2];
+    let cc22 = m20 * c[2][0] + m21 * c[2][1] + m22 * c[2][2];
+
+    let inv_z = 1.0 / cz;
+    let inv_z2 = inv_z * inv_z;
+    let jx0 = fx * inv_z;
+    let jx2 = -fx * cx * inv_z2;
+    let jy1 = fy * inv_z;
+    let jy2 = -fy * cy * inv_z2;
+    let cov_xx = jx0 * (cc00 * jx0 + cc02 * jx2) + jx2 * (cc02 * jx0 + cc22 * jx2);
+    let cov_xy = jx0 * (cc01 * jy1 + cc02 * jy2) + jx2 * (cc12 * jy1 + cc22 * jy2);
+    let cov_yy = jy1 * (cc11 * jy1 + cc12 * jy2) + jy2 * (cc12 * jy1 + cc22 * jy2);
+
+    Some(ProjectedGaussian {
+        x: px,
+        y: py,
+        depth: cz,
+        cov_xx,
+        cov_xy,
+        cov_yy,
+        opacity,
+        color,
+        orig_idx: idx,
+    })
+}
+
 /// Render output buffer
 pub struct RenderBuffer {
     pub color: Vec<f32>, // [H, W, 3] RGB
@@ -540,6 +616,43 @@ mod tests {
 
         assert!(!projected.is_empty());
         assert!(projected[0].depth > 0.0);
+    }
+
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn test_render_splats_matches_gaussian_render() {
+        let renderer = TiledRenderer::new(64, 64);
+        let gaussians = vec![Gaussian::new(
+            [0.0, 0.0, 1.0],
+            [0.01, 0.01, 0.01],
+            [1.0, 0.0, 0.0, 0.0],
+            0.5,
+            [1.0, 0.5, 0.25],
+        )];
+        let splats = crate::training::HostSplats::from_scene_gaussians(&gaussians, 0).unwrap();
+        let rotation = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+
+        let gaussian_render = renderer.render(
+            &gaussians,
+            500.0,
+            500.0,
+            32.0,
+            32.0,
+            &rotation,
+            &[0.0, 0.0, 0.0],
+        );
+        let splat_render = renderer.render_splats(
+            splats.as_view(),
+            500.0,
+            500.0,
+            32.0,
+            32.0,
+            &rotation,
+            &[0.0, 0.0, 0.0],
+        );
+
+        assert_eq!(gaussian_render.color, splat_render.color);
+        assert_eq!(gaussian_render.depth, splat_render.depth);
     }
 
     /// Verify that the full 2D covariance projection is correct.

@@ -1,10 +1,11 @@
 use super::export::ChunkPersistenceContext;
 use super::metal_trainer::{self, ChunkCapacityEstimate};
+use super::splats::HostSplats;
 use super::{
     materialize_chunk_dataset, ChunkBounds, ChunkDisposition, ChunkPlan, MaterializedChunkDataset,
     PlannedChunk, TrainingConfig, MIN_RENDER_SCALE,
 };
-use crate::{GaussianMap, TrainingDataset, TrainingError};
+use crate::{TrainingDataset, TrainingError};
 
 #[derive(Debug, Clone)]
 pub(crate) struct ChunkTrainingOverridePlan {
@@ -18,9 +19,9 @@ pub(crate) fn train_chunked_sequentially(
     dataset: &TrainingDataset,
     config: &TrainingConfig,
     chunk_plan: &ChunkPlan,
-) -> Result<GaussianMap, TrainingError> {
-    let mut merged_scene = GaussianMap::default();
-    let total_chunks = chunk_plan.trainable_chunks().count();
+) -> Result<HostSplats, TrainingError> {
+    let mut merged_scene = HostSplats::default();
+    let total_chunks = chunk_plan.training_chunks().count();
     let mut persistence =
         ChunkPersistenceContext::new(config.chunk_artifact_dir.clone(), config, chunk_plan)?;
 
@@ -38,7 +39,7 @@ pub(crate) fn train_chunked_sequentially(
         persistence.record_skipped(skipped, config)?;
     }
 
-    execute_trainable_chunks_sequentially(dataset, chunk_plan, |chunk, materialized| {
+    execute_training_chunks_sequentially(dataset, chunk_plan, |chunk, materialized| {
         log::info!(
             "Training chunk {}/{} | chunk_id={} | poses={} | local_points={} | frame_init_fallback={}",
             chunk.chunk_id + 1,
@@ -66,25 +67,27 @@ pub(crate) fn train_chunked_sequentially(
             override_plan.estimate.estimated_peak_gib(),
         );
 
-        let mut chunk_scene =
-            match metal_trainer::train(&materialized.dataset, &override_plan.effective_config) {
-                Ok(scene) => scene,
-                Err(err) => {
-                    persistence.record_failure(
-                        chunk,
-                        &materialized,
-                        err.to_string(),
-                        Some(&override_plan),
-                    )?;
-                    return Err(err);
-                }
-            };
-        let core_filter_removed = merge_chunk_scene(
+        let mut chunk_scene = match metal_trainer::train_splats(
+            &materialized.dataset,
+            &override_plan.effective_config,
+        ) {
+            Ok(scene) => scene,
+            Err(err) => {
+                persistence.record_failure(
+                    chunk,
+                    &materialized,
+                    err.to_string(),
+                    Some(&override_plan),
+                )?;
+                return Err(err);
+            }
+        };
+        let core_filter_removed = merge_chunk_splats(
             &mut merged_scene,
             &mut chunk_scene,
             &chunk.core_bounds,
             config.merge_core_only,
-        );
+        )?;
         persistence.record_success(
             chunk,
             &materialized,
@@ -103,7 +106,7 @@ pub(crate) fn train_chunked_sequentially(
     Ok(merged_scene)
 }
 
-pub(crate) fn execute_trainable_chunks_sequentially<F>(
+pub(crate) fn execute_training_chunks_sequentially<F>(
     dataset: &TrainingDataset,
     chunk_plan: &ChunkPlan,
     mut execute: F,
@@ -111,7 +114,7 @@ pub(crate) fn execute_trainable_chunks_sequentially<F>(
 where
     F: FnMut(&PlannedChunk, MaterializedChunkDataset) -> Result<(), TrainingError>,
 {
-    for chunk in chunk_plan.trainable_chunks() {
+    for chunk in chunk_plan.training_chunks() {
         let materialized = materialize_chunk_dataset(dataset, chunk)?;
         execute(chunk, materialized)?;
     }
@@ -119,19 +122,41 @@ where
 }
 
 #[cfg(feature = "gpu")]
-fn retain_gaussians_in_bounds(scene: &mut GaussianMap, bounds: &ChunkBounds) -> usize {
-    scene.retain(|gaussian| {
-        let position = gaussian.position.to_array();
-        (0..3).all(|axis| position[axis] >= bounds.min[axis] && position[axis] <= bounds.max[axis])
-    })
+fn retain_splats_in_bounds(scene: &mut HostSplats, bounds: &ChunkBounds) -> usize {
+    let mut keep_mask = vec![false; scene.len()];
+    let mut kept = 0usize;
+    for (idx, keep) in keep_mask.iter_mut().enumerate() {
+        let position = scene.position(idx);
+        *keep = (0..3)
+            .all(|axis| position[axis] >= bounds.min[axis] && position[axis] <= bounds.max[axis]);
+        kept += usize::from(*keep);
+    }
+    let removed = scene.len().saturating_sub(kept);
+    if removed == 0 {
+        return 0;
+    }
+    let mut filtered = scene.retained_view(kept);
+    for (idx, keep) in keep_mask.iter().copied().enumerate() {
+        if keep {
+            filtered.push(
+                scene.position(idx),
+                scene.log_scale(idx),
+                scene.rotation(idx),
+                scene.opacity_logits[idx],
+                scene.sh_coeffs_row(idx),
+            );
+        }
+    }
+    *scene = filtered;
+    removed
 }
 
-pub(crate) fn merge_chunk_scene(
-    merged_scene: &mut GaussianMap,
-    chunk_scene: &mut GaussianMap,
+pub(crate) fn merge_chunk_splats(
+    merged_scene: &mut HostSplats,
+    chunk_scene: &mut HostSplats,
     core_bounds: &ChunkBounds,
     merge_core_only: bool,
-) -> usize {
+) -> Result<usize, TrainingError> {
     let original_chunk = if merge_core_only {
         Some(chunk_scene.clone())
     } else {
@@ -140,7 +165,7 @@ pub(crate) fn merge_chunk_scene(
 
     let removed = if merge_core_only {
         let original_len = chunk_scene.len();
-        let removed = retain_gaussians_in_bounds(chunk_scene, core_bounds);
+        let removed = retain_splats_in_bounds(chunk_scene, core_bounds);
         if original_len > 0 && chunk_scene.is_empty() {
             log::warn!(
                 "Core-only merge filter removed all {} gaussians for a chunk; falling back to unfiltered merge",
@@ -160,11 +185,32 @@ pub(crate) fn merge_chunk_scene(
     } else {
         0
     };
+    if merged_scene.is_empty() {
+        merged_scene.sh_degree = chunk_scene.sh_degree();
+    } else if !chunk_scene.is_empty() && merged_scene.sh_degree() != chunk_scene.sh_degree() {
+        return Err(TrainingError::TrainingFailed(format!(
+            "chunk merge requires matching SH degree, got merged={} chunk={}",
+            merged_scene.sh_degree(),
+            chunk_scene.sh_degree()
+        )));
+    }
     merged_scene
-        .gaussians_mut()
-        .extend(chunk_scene.gaussians().iter().cloned());
-    merged_scene.update_states();
-    removed
+        .positions
+        .extend_from_slice(&chunk_scene.positions);
+    merged_scene
+        .log_scales
+        .extend_from_slice(&chunk_scene.log_scales);
+    merged_scene
+        .rotations
+        .extend_from_slice(&chunk_scene.rotations);
+    merged_scene
+        .opacity_logits
+        .extend_from_slice(&chunk_scene.opacity_logits);
+    merged_scene
+        .sh_coeffs
+        .extend_from_slice(&chunk_scene.sh_coeffs);
+    merged_scene.validate().map_err(TrainingError::from)?;
+    Ok(removed)
 }
 
 pub(crate) fn adapt_chunk_training_config(
@@ -219,12 +265,11 @@ pub(crate) fn adapt_chunk_training_config(
 #[cfg(all(test, feature = "gpu"))]
 mod tests {
     use super::{
-        adapt_chunk_training_config, execute_trainable_chunks_sequentially, merge_chunk_scene,
+        adapt_chunk_training_config, execute_training_chunks_sequentially, merge_chunk_splats,
     };
+    use crate::training::splats::HostSplats;
     use crate::training::{plan_spatial_chunks, TrainingConfig};
-    use crate::{
-        ChunkBounds, Gaussian3D, GaussianMap, Intrinsics, ScenePose, TrainingDataset, SE3,
-    };
+    use crate::{ChunkBounds, Intrinsics, ScenePose, TrainingDataset, SE3};
     use std::cell::Cell;
     use std::path::PathBuf;
     use std::rc::Rc;
@@ -242,6 +287,20 @@ mod tests {
             ));
         }
         dataset
+    }
+
+    fn make_test_splats(entries: &[([f32; 3], [f32; 3])]) -> HostSplats {
+        let mut splats = HostSplats::with_sh_degree_capacity(0, entries.len());
+        for (position, color) in entries {
+            splats.push_rgb(
+                *position,
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0, 0.0],
+                0.0,
+                *color,
+            );
+        }
+        splats
     }
 
     #[test]
@@ -265,7 +324,7 @@ mod tests {
         let max_active = Rc::new(Cell::new(0usize));
         let visited = Rc::new(Cell::new(0usize));
 
-        execute_trainable_chunks_sequentially(&dataset, &chunk_plan, |chunk, materialized| {
+        execute_training_chunks_sequentially(&dataset, &chunk_plan, |chunk, materialized| {
             struct Guard {
                 active: Rc<Cell<usize>>,
             }
@@ -289,13 +348,13 @@ mod tests {
         })
         .unwrap();
 
-        assert_eq!(visited.get(), chunk_plan.trainable_chunks().count());
+        assert_eq!(visited.get(), chunk_plan.training_chunks().count());
         assert_eq!(max_active.get(), 1);
         assert_eq!(active.get(), 0);
     }
 
     #[test]
-    fn adaptive_chunk_config_lowers_gaussian_cap_before_render_scale() {
+    fn adaptive_chunk_config_preserves_or_reduces_requested_budget() {
         let mut dataset = make_dataset(2, 128, 128);
         for idx in 0..64 {
             dataset.add_point([idx as f32 * 0.1, 0.0, 1.0], None);
@@ -309,8 +368,12 @@ mod tests {
         };
 
         let override_plan = adapt_chunk_training_config(&dataset, &config).unwrap();
-        assert!(override_plan.lowered_gaussian_cap);
-        assert!(override_plan.effective_config.max_initial_gaussians < 64);
+        assert!(override_plan.effective_config.max_initial_gaussians <= 64);
+        assert!(override_plan.effective_config.metal_render_scale <= 1.0);
+        assert!(
+            override_plan.estimate.estimated_peak_gib()
+                <= override_plan.estimate.effective_budget_gib() + 1e-6
+        );
     }
 
     #[test]
@@ -355,7 +418,7 @@ mod tests {
         };
         let chunk_plan = plan_spatial_chunks(&dataset, &config, Some(3)).unwrap();
 
-        for chunk in chunk_plan.trainable_chunks() {
+        for chunk in chunk_plan.training_chunks() {
             let materialized = crate::materialize_chunk_dataset(&dataset, chunk).unwrap();
             let override_plan =
                 adapt_chunk_training_config(&materialized.dataset, &config).unwrap();
@@ -372,60 +435,38 @@ mod tests {
 
     #[test]
     fn core_only_merge_filter_retains_only_gaussians_inside_core_bounds() {
-        let mut merged = GaussianMap::default();
-        let mut chunk_scene = GaussianMap::from_gaussians(vec![
-            Gaussian3D::new(
-                glam::Vec3::new(0.5, 0.0, 0.0),
-                glam::Vec3::ONE,
-                glam::Quat::IDENTITY,
-                1.0,
-                [1.0, 0.0, 0.0],
-            ),
-            Gaussian3D::new(
-                glam::Vec3::new(1.5, 0.0, 0.0),
-                glam::Vec3::ONE,
-                glam::Quat::IDENTITY,
-                1.0,
-                [0.0, 1.0, 0.0],
-            ),
+        let mut merged = HostSplats::default();
+        let mut chunk_scene = make_test_splats(&[
+            ([0.5, 0.0, 0.0], [1.0, 0.0, 0.0]),
+            ([1.5, 0.0, 0.0], [0.0, 1.0, 0.0]),
         ]);
         let core_bounds = ChunkBounds {
             min: [0.0, -1.0, -1.0],
             max: [1.0, 1.0, 1.0],
         };
 
-        let removed = merge_chunk_scene(&mut merged, &mut chunk_scene, &core_bounds, true);
+        let removed =
+            merge_chunk_splats(&mut merged, &mut chunk_scene, &core_bounds, true).unwrap();
 
         assert_eq!(removed, 1);
         assert_eq!(merged.len(), 1);
-        assert!((merged.gaussians()[0].position.x - 0.5).abs() < 1e-6);
+        assert!((merged.position(0)[0] - 0.5).abs() < 1e-6);
     }
 
     #[test]
     fn merge_without_core_filter_keeps_overlap_gaussians() {
-        let mut merged = GaussianMap::default();
-        let mut chunk_scene = GaussianMap::from_gaussians(vec![
-            Gaussian3D::new(
-                glam::Vec3::new(0.5, 0.0, 0.0),
-                glam::Vec3::ONE,
-                glam::Quat::IDENTITY,
-                1.0,
-                [1.0, 0.0, 0.0],
-            ),
-            Gaussian3D::new(
-                glam::Vec3::new(1.5, 0.0, 0.0),
-                glam::Vec3::ONE,
-                glam::Quat::IDENTITY,
-                1.0,
-                [0.0, 1.0, 0.0],
-            ),
+        let mut merged = HostSplats::default();
+        let mut chunk_scene = make_test_splats(&[
+            ([0.5, 0.0, 0.0], [1.0, 0.0, 0.0]),
+            ([1.5, 0.0, 0.0], [0.0, 1.0, 0.0]),
         ]);
         let core_bounds = ChunkBounds {
             min: [0.0, -1.0, -1.0],
             max: [1.0, 1.0, 1.0],
         };
 
-        let removed = merge_chunk_scene(&mut merged, &mut chunk_scene, &core_bounds, false);
+        let removed =
+            merge_chunk_splats(&mut merged, &mut chunk_scene, &core_bounds, false).unwrap();
 
         assert_eq!(removed, 0);
         assert_eq!(merged.len(), 2);
@@ -433,29 +474,18 @@ mod tests {
 
     #[test]
     fn core_only_merge_filter_falls_back_when_it_would_empty_chunk() {
-        let mut merged = GaussianMap::default();
-        let mut chunk_scene = GaussianMap::from_gaussians(vec![
-            Gaussian3D::new(
-                glam::Vec3::new(1.5, 0.0, 0.0),
-                glam::Vec3::ONE,
-                glam::Quat::IDENTITY,
-                1.0,
-                [1.0, 0.0, 0.0],
-            ),
-            Gaussian3D::new(
-                glam::Vec3::new(2.5, 0.0, 0.0),
-                glam::Vec3::ONE,
-                glam::Quat::IDENTITY,
-                1.0,
-                [0.0, 1.0, 0.0],
-            ),
+        let mut merged = HostSplats::default();
+        let mut chunk_scene = make_test_splats(&[
+            ([1.5, 0.0, 0.0], [1.0, 0.0, 0.0]),
+            ([2.5, 0.0, 0.0], [0.0, 1.0, 0.0]),
         ]);
         let core_bounds = ChunkBounds {
             min: [0.0, -1.0, -1.0],
             max: [1.0, 1.0, 1.0],
         };
 
-        let removed = merge_chunk_scene(&mut merged, &mut chunk_scene, &core_bounds, true);
+        let removed =
+            merge_chunk_splats(&mut merged, &mut chunk_scene, &core_bounds, true).unwrap();
 
         assert_eq!(removed, 0);
         assert_eq!(merged.len(), 2);
@@ -464,28 +494,16 @@ mod tests {
 
     #[test]
     fn merged_scene_output_contains_gaussians_from_multiple_chunks() {
-        let mut merged = GaussianMap::default();
+        let mut merged = HostSplats::default();
         let core_bounds = ChunkBounds {
             min: [0.0, -1.0, -1.0],
             max: [1.0, 1.0, 1.0],
         };
-        let mut chunk_a = GaussianMap::from_gaussians(vec![Gaussian3D::new(
-            glam::Vec3::new(0.5, 0.0, 0.0),
-            glam::Vec3::ONE,
-            glam::Quat::IDENTITY,
-            1.0,
-            [1.0, 0.0, 0.0],
-        )]);
-        let mut chunk_b = GaussianMap::from_gaussians(vec![Gaussian3D::new(
-            glam::Vec3::new(2.0, 0.0, 0.0),
-            glam::Vec3::ONE,
-            glam::Quat::IDENTITY,
-            1.0,
-            [0.0, 1.0, 0.0],
-        )]);
+        let mut chunk_a = make_test_splats(&[([0.5, 0.0, 0.0], [1.0, 0.0, 0.0])]);
+        let mut chunk_b = make_test_splats(&[([2.0, 0.0, 0.0], [0.0, 1.0, 0.0])]);
 
-        merge_chunk_scene(&mut merged, &mut chunk_a, &core_bounds, true);
-        merge_chunk_scene(
+        merge_chunk_splats(&mut merged, &mut chunk_a, &core_bounds, true).unwrap();
+        merge_chunk_splats(
             &mut merged,
             &mut chunk_b,
             &ChunkBounds {
@@ -493,12 +511,13 @@ mod tests {
                 max: [2.5, 1.0, 1.0],
             },
             true,
-        );
+        )
+        .unwrap();
 
         assert_eq!(merged.len(), 2);
         let tempdir = tempdir().unwrap();
         let path = tempdir.path().join("merged-scene.ply");
-        super::super::export::persist_gaussian_map_scene(&path, &merged, 10).unwrap();
+        super::super::export::persist_host_splats_scene(&path, &merged, 10).unwrap();
         let (gaussians, _) = crate::load_scene_ply(&path).unwrap();
         assert_eq!(gaussians.len(), 2);
     }

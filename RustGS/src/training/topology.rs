@@ -740,8 +740,7 @@ pub(super) fn densify_snapshot(
         let scale = snapshot.scale(idx);
         let log_scale = snapshot.log_scale(idx);
         let rotation = snapshot.rotation(idx);
-        let color = snapshot.color(idx);
-        let sh_rest = snapshot.sh_rest(idx).to_vec();
+        let sh_coeffs = snapshot.sh_coeffs_row(idx).to_vec();
         let opacity_logit = snapshot.opacity_logits[idx];
         let axis = rank % 3;
         let mut cloned_position = position;
@@ -751,8 +750,7 @@ pub(super) fn densify_snapshot(
             log_scale,
             rotation,
             opacity_logit,
-            color,
-            &sh_rest,
+            &sh_coeffs,
         );
         stats.push(MetalGaussianStats::default());
         origins.push(None);
@@ -776,8 +774,7 @@ pub(super) fn densify_snapshot(
         let mut split_scale = snapshot.log_scale(idx);
         split_scale[0] = (max_scale * 0.5).max(1e-6).ln();
         let rotation = snapshot.rotation(idx);
-        let color = snapshot.color(idx);
-        let sh_rest = snapshot.sh_rest(idx).to_vec();
+        let sh_coeffs = snapshot.sh_coeffs_row(idx).to_vec();
         let opacity_logit = snapshot.opacity_logits[idx];
         for direction in [1.0f32, -1.0] {
             if available == 0 {
@@ -790,8 +787,7 @@ pub(super) fn densify_snapshot(
                 split_scale,
                 rotation,
                 opacity_logit,
-                color,
-                &sh_rest,
+                &sh_coeffs,
             );
             stats.push(MetalGaussianStats::default());
             origins.push(None);
@@ -821,7 +817,7 @@ pub(super) fn prune_snapshot(
     for idx in 0..snapshot.len() {
         let position = snapshot.position(idx);
         let rotation = snapshot.rotation(idx);
-        let color = snapshot.color(idx);
+        let sh_coeffs = snapshot.sh_coeffs_row(idx);
         let info = infos.get(idx).copied().unwrap_or_else(|| {
             let scale = snapshot.scale(idx);
             TopologyCandidateInfo {
@@ -843,7 +839,7 @@ pub(super) fn prune_snapshot(
             && max_scale <= policy.legacy_prune_scale_threshold
             && position.iter().all(|value| value.is_finite())
             && rotation.iter().all(|value| value.is_finite())
-            && color.iter().all(|value| value.is_finite());
+            && sh_coeffs.iter().all(|value| value.is_finite());
         if valid {
             keep_mask[idx] = true;
         }
@@ -904,8 +900,7 @@ pub(super) fn densify_snapshot_litegs(
         let mut log_scale = snapshot.log_scale(*idx);
         let rotation = snapshot.rotation(*idx);
         let opacity_logit = snapshot.opacity_logits[*idx];
-        let color = snapshot.color(*idx);
-        let sh_rest = snapshot.sh_rest(*idx).to_vec();
+        let sh_coeffs = snapshot.sh_coeffs_row(*idx).to_vec();
         let scale = snapshot.scale(*idx);
 
         let (max_axis, max_axis_scale) = scale
@@ -916,14 +911,7 @@ pub(super) fn densify_snapshot_litegs(
         position[max_axis] += max_axis_scale * 0.5;
         log_scale[max_axis] = (max_axis_scale / 1.6).max(1e-6).ln();
 
-        snapshot.push(
-            position,
-            log_scale,
-            rotation,
-            opacity_logit,
-            color,
-            &sh_rest,
-        );
+        snapshot.push(position, log_scale, rotation, opacity_logit, &sh_coeffs);
         stats.push(MetalGaussianStats::default());
         origins.push(None);
         added = added.saturating_add(1);
@@ -938,16 +926,8 @@ pub(super) fn densify_snapshot_litegs(
         let log_scale = snapshot.log_scale(*idx);
         let rotation = snapshot.rotation(*idx);
         let opacity_logit = snapshot.opacity_logits[*idx];
-        let color = snapshot.color(*idx);
-        let sh_rest = snapshot.sh_rest(*idx).to_vec();
-        snapshot.push(
-            position,
-            log_scale,
-            rotation,
-            opacity_logit,
-            color,
-            &sh_rest,
-        );
+        let sh_coeffs = snapshot.sh_coeffs_row(*idx).to_vec();
+        snapshot.push(position, log_scale, rotation, opacity_logit, &sh_coeffs);
         stats.push(MetalGaussianStats::default());
         origins.push(None);
         added = added.saturating_add(1);
@@ -983,7 +963,7 @@ pub(super) struct TopologyMetricsDelta {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct TopologyMutationAftermath {
-    pub(super) requires_trainable_rebuild: bool,
+    pub(super) requires_runtime_rebuild: bool,
     pub(super) requires_adam_rebuild: bool,
     pub(super) requires_cluster_resync: bool,
     pub(super) requires_runtime_reserve: bool,
@@ -996,7 +976,7 @@ pub(super) struct TopologyMutationAftermath {
 impl Default for TopologyMutationAftermath {
     fn default() -> Self {
         Self {
-            requires_trainable_rebuild: false,
+            requires_runtime_rebuild: false,
             requires_adam_rebuild: false,
             requires_cluster_resync: false,
             requires_runtime_reserve: false,
@@ -1095,7 +1075,7 @@ fn topology_mutation_aftermath(
     };
 
     TopologyMutationAftermath {
-        requires_trainable_rebuild: topology_changed,
+        requires_runtime_rebuild: topology_changed,
         requires_adam_rebuild: topology_changed,
         requires_cluster_resync: topology_changed,
         requires_runtime_reserve: topology_changed,
@@ -1273,8 +1253,7 @@ fn filter_snapshot(
                 snapshot.log_scale(idx),
                 snapshot.rotation(idx),
                 snapshot.opacity_logits[idx],
-                snapshot.color(idx),
-                snapshot.sh_rest(idx),
+                snapshot.sh_coeffs_row(idx),
             );
             kept_stats.push(stats[idx]);
             kept_origins.push(origins[idx]);
@@ -1304,12 +1283,18 @@ fn apply_morton_sort(
     snapshot.log_scales = super::morton::permute_vec3(&snapshot.log_scales, &morton_perm);
     snapshot.rotations = super::morton::permute_vec4(&snapshot.rotations, &morton_perm);
     snapshot.opacity_logits = super::morton::permute_scalar(&snapshot.opacity_logits, &morton_perm);
-    snapshot.colors = super::morton::permute_vec3(&snapshot.colors, &morton_perm);
+    snapshot.sh_coeffs = super::morton::permute_rows(
+        &snapshot.sh_coeffs,
+        snapshot.sh_coeffs_row_width(),
+        &morton_perm,
+    );
 
-    let sh_rest_row_width = snapshot.sh_rest_row_width();
-    if sh_rest_row_width > 0 && !snapshot.sh_rest.is_empty() {
-        snapshot.sh_rest =
-            super::morton::permute_rows(&snapshot.sh_rest, sh_rest_row_width, &morton_perm);
+    if snapshot.sh_degree() > 0 {
+        let sh_rest_row_width = snapshot.sh_rest_row_width();
+        debug_assert_eq!(
+            snapshot.sh_coeffs_row_width(),
+            sh_rest_row_width.saturating_add(3)
+        );
     }
 
     let mut new_stats = vec![MetalGaussianStats::default(); morton_perm.len()];
@@ -1337,7 +1322,9 @@ mod tests {
         TopologyAnalysis, TopologyMutationRequest, TopologyPolicy, TopologySchedule,
         TopologyStatsAction, TopologyStepContext,
     };
-    use crate::diff::diff_splat::TrainableColorRepresentation;
+    use crate::diff::diff_splat::{
+        rgb_to_sh0_value, sh_coeff_count_for_degree, TrainableColorRepresentation,
+    };
     use crate::training::parity_harness::ParityTopologyMetrics;
     use crate::training::splats::Splats;
     use crate::training::{LiteGsConfig, TrainingConfig, TrainingProfile};
@@ -1353,6 +1340,48 @@ mod tests {
             ..TrainingConfig::default()
         };
         TopologyPolicy::from_training_config(&config, 1.0)
+    }
+
+    fn test_snapshot(
+        positions: Vec<f32>,
+        log_scales: Vec<f32>,
+        rotations: Vec<f32>,
+        opacity_logits: Vec<f32>,
+        colors: Vec<f32>,
+        sh_rest: Vec<f32>,
+        color_representation: TrainableColorRepresentation,
+    ) -> Splats {
+        let sh_degree = color_representation.sh_degree();
+        let row_count = opacity_logits.len();
+        let sh_rest_row_width = sh_coeff_count_for_degree(sh_degree).saturating_sub(1) * 3;
+        let mut sh_coeffs =
+            Vec::with_capacity(row_count * sh_coeff_count_for_degree(sh_degree) * 3);
+        for idx in 0..row_count {
+            let color_base = idx * 3;
+            match color_representation {
+                TrainableColorRepresentation::Rgb => {
+                    sh_coeffs.extend(
+                        colors[color_base..color_base + 3]
+                            .iter()
+                            .copied()
+                            .map(rgb_to_sh0_value),
+                    );
+                }
+                TrainableColorRepresentation::SphericalHarmonics { .. } => {
+                    sh_coeffs.extend_from_slice(&colors[color_base..color_base + 3]);
+                    let rest = super::super::splats::row_slice(&sh_rest, sh_rest_row_width, idx);
+                    sh_coeffs.extend_from_slice(rest);
+                }
+            }
+        }
+        Splats {
+            positions,
+            log_scales,
+            rotations,
+            opacity_logits,
+            sh_coeffs,
+            sh_degree,
+        }
     }
 
     #[test]
@@ -1531,15 +1560,15 @@ mod tests {
     #[test]
     fn prune_snapshot_keeps_best_gaussian_when_all_candidates_fail() {
         let policy = legacy_policy();
-        let mut snapshot = Splats {
-            positions: vec![0.0, 0.0, 1.0, 1.0, 0.0, 2.0],
-            log_scales: vec![10.0; 6],
-            rotations: vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
-            opacity_logits: vec![-10.0, -1.0],
-            colors: vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
-            sh_rest: Vec::new(),
-            color_representation: TrainableColorRepresentation::Rgb,
-        };
+        let mut snapshot = test_snapshot(
+            vec![0.0, 0.0, 1.0, 1.0, 0.0, 2.0],
+            vec![10.0; 6],
+            vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+            vec![-10.0, -1.0],
+            vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            Vec::new(),
+            TrainableColorRepresentation::Rgb,
+        );
         let mut stats = vec![MetalGaussianStats::default(), MetalGaussianStats::default()];
         let mut origins = vec![Some(0), Some(1)];
         let infos = TopologyAnalysis::default().infos;
@@ -1562,15 +1591,15 @@ mod tests {
             ..TrainingConfig::default()
         };
         let policy = TopologyPolicy::from_training_config(&config, 1.0);
-        let mut snapshot = Splats {
-            positions: vec![0.0, 0.0, 1.0],
-            log_scales: vec![0.05f32.ln(), 0.05f32.ln(), 0.05f32.ln()],
-            rotations: vec![1.0, 0.0, 0.0, 0.0],
-            opacity_logits: vec![0.5],
-            colors: vec![0.2, 0.4, 0.6],
-            sh_rest: vec![0.1; 15 * 3],
-            color_representation: TrainableColorRepresentation::SphericalHarmonics { degree: 3 },
-        };
+        let mut snapshot = test_snapshot(
+            vec![0.0, 0.0, 1.0],
+            vec![0.05f32.ln(), 0.05f32.ln(), 0.05f32.ln()],
+            vec![1.0, 0.0, 0.0, 0.0],
+            vec![0.5],
+            vec![0.2, 0.4, 0.6],
+            vec![0.1; 15 * 3],
+            TrainableColorRepresentation::SphericalHarmonics { degree: 3 },
+        );
         let mut stats = vec![MetalGaussianStats::default()];
         let mut origins = vec![Some(0)];
 
@@ -1579,7 +1608,7 @@ mod tests {
 
         assert_eq!(added, 1);
         assert_eq!(snapshot.len(), 2);
-        assert_eq!(snapshot.sh_rest.len(), 2 * 15 * 3);
+        assert_eq!(snapshot.sh_coeffs.len(), 2 * 16 * 3);
     }
 
     #[test]
@@ -1594,9 +1623,9 @@ mod tests {
             ..TrainingConfig::default()
         };
         let policy = TopologyPolicy::from_training_config(&config, 1.0);
-        let snapshot = Splats {
-            positions: vec![0.0, 0.0, 1.0, 1.0, 0.0, 1.0],
-            log_scales: vec![
+        let snapshot = test_snapshot(
+            vec![0.0, 0.0, 1.0, 1.0, 0.0, 1.0],
+            vec![
                 0.005f32.ln(),
                 0.005f32.ln(),
                 0.005f32.ln(),
@@ -1604,12 +1633,12 @@ mod tests {
                 0.5f32.ln(),
                 0.5f32.ln(),
             ],
-            rotations: vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
-            opacity_logits: vec![2.0, -10.0],
-            colors: vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
-            sh_rest: vec![0.0; 2 * 15 * 3],
-            color_representation: TrainableColorRepresentation::SphericalHarmonics { degree: 3 },
-        };
+            vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+            vec![2.0, -10.0],
+            vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            vec![0.0; 2 * 15 * 3],
+            TrainableColorRepresentation::SphericalHarmonics { degree: 3 },
+        );
         let stats = vec![
             MetalGaussianStats {
                 mean2d_grad: RunningMoments {
@@ -1653,9 +1682,9 @@ mod tests {
             ..TrainingConfig::default()
         };
         let policy = TopologyPolicy::from_training_config(&config, 2.0);
-        let snapshot = Splats {
-            positions: vec![0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 2.0, 0.0, 1.0],
-            log_scales: vec![
+        let snapshot = test_snapshot(
+            vec![0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 2.0, 0.0, 1.0],
+            vec![
                 0.005f32.ln(),
                 0.005f32.ln(),
                 0.005f32.ln(),
@@ -1666,12 +1695,12 @@ mod tests {
                 0.01f32.ln(),
                 0.01f32.ln(),
             ],
-            rotations: vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
-            opacity_logits: vec![2.0, 2.0, -10.0],
-            colors: vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
-            sh_rest: vec![0.0; 3 * 15 * 3],
-            color_representation: TrainableColorRepresentation::SphericalHarmonics { degree: 3 },
-        };
+            vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+            vec![2.0, 2.0, -10.0],
+            vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            vec![0.0; 3 * 15 * 3],
+            TrainableColorRepresentation::SphericalHarmonics { degree: 3 },
+        );
         let stats = vec![
             MetalGaussianStats {
                 mean2d_grad: RunningMoments {
@@ -1719,15 +1748,15 @@ mod tests {
             ..TrainingConfig::default()
         };
         let policy = TopologyPolicy::from_training_config(&config, 1.0);
-        let snapshot = Splats {
-            positions: vec![0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 2.0, 0.0, 1.0],
-            log_scales: vec![0.01f32.ln(); 9],
-            rotations: vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
-            opacity_logits: vec![2.0, 2.0, 2.0],
-            colors: vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
-            sh_rest: vec![0.0; 3 * 15 * 3],
-            color_representation: TrainableColorRepresentation::SphericalHarmonics { degree: 3 },
-        };
+        let snapshot = test_snapshot(
+            vec![0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 2.0, 0.0, 1.0],
+            vec![0.01f32.ln(); 9],
+            vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+            vec![2.0, 2.0, 2.0],
+            vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            vec![0.0; 3 * 15 * 3],
+            TrainableColorRepresentation::SphericalHarmonics { degree: 3 },
+        );
         let stats = vec![
             MetalGaussianStats {
                 mean2d_grad: RunningMoments {
@@ -1813,9 +1842,9 @@ mod tests {
     #[test]
     fn mutation_aftermath_requests_structural_rebuild_and_metrics() {
         let policy = legacy_policy();
-        let mut snapshot = Splats {
-            positions: vec![0.0, 0.0, 1.0, 1.0, 0.0, 1.0],
-            log_scales: vec![
+        let mut snapshot = test_snapshot(
+            vec![0.0, 0.0, 1.0, 1.0, 0.0, 1.0],
+            vec![
                 0.05f32.ln(),
                 0.05f32.ln(),
                 0.05f32.ln(),
@@ -1823,12 +1852,12 @@ mod tests {
                 0.05f32.ln(),
                 0.05f32.ln(),
             ],
-            rotations: vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
-            opacity_logits: vec![2.0, -10.0],
-            colors: vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
-            sh_rest: Vec::new(),
-            color_representation: TrainableColorRepresentation::Rgb,
-        };
+            vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+            vec![2.0, -10.0],
+            vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            Vec::new(),
+            TrainableColorRepresentation::Rgb,
+        );
         let mut stats = vec![
             MetalGaussianStats {
                 mean2d_grad: RunningMoments {
@@ -1872,7 +1901,7 @@ mod tests {
             mutation.aftermath.gaussian_stats_action,
             TopologyStatsAction::UseMutated
         );
-        assert!(mutation.aftermath.requires_trainable_rebuild);
+        assert!(mutation.aftermath.requires_runtime_rebuild);
         assert!(mutation.aftermath.requires_adam_rebuild);
         assert!(mutation.aftermath.requires_cluster_resync);
         assert!(mutation.aftermath.requires_runtime_reserve);
@@ -1898,15 +1927,15 @@ mod tests {
             ..TrainingConfig::default()
         };
         let policy = TopologyPolicy::from_training_config(&config, 1.0);
-        let mut snapshot = Splats {
-            positions: vec![0.0, 0.0, 1.0],
-            log_scales: vec![0.05f32.ln(), 0.05f32.ln(), 0.05f32.ln()],
-            rotations: vec![1.0, 0.0, 0.0, 0.0],
-            opacity_logits: vec![2.0],
-            colors: vec![1.0, 0.0, 0.0],
-            sh_rest: Vec::new(),
-            color_representation: TrainableColorRepresentation::Rgb,
-        };
+        let mut snapshot = test_snapshot(
+            vec![0.0, 0.0, 1.0],
+            vec![0.05f32.ln(), 0.05f32.ln(), 0.05f32.ln()],
+            vec![1.0, 0.0, 0.0, 0.0],
+            vec![2.0],
+            vec![1.0, 0.0, 0.0],
+            Vec::new(),
+            TrainableColorRepresentation::Rgb,
+        );
         let mut stats = vec![MetalGaussianStats::default()];
         let mut origins = vec![Some(0)];
         let infos = vec![candidate(false, false, 1, 0.9, 0.0)];
@@ -1935,7 +1964,7 @@ mod tests {
             mutation.aftermath.gaussian_stats_action,
             TopologyStatsAction::KeepCurrent
         );
-        assert!(!mutation.aftermath.requires_trainable_rebuild);
+        assert!(!mutation.aftermath.requires_runtime_rebuild);
         assert!(mutation.aftermath.apply_opacity_reset);
         assert!(mutation.aftermath.reset_refine_window_stats);
 

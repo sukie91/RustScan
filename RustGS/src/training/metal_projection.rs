@@ -3,7 +3,7 @@ use std::mem::size_of;
 use candle_core::Tensor;
 use objc2_metal::MTLSize;
 
-use crate::diff::diff_splat::TrainableGaussians;
+use crate::diff::diff_splat::Splats;
 
 use super::metal_kernels::MetalKernel;
 use super::metal_runtime::{
@@ -13,7 +13,7 @@ use super::metal_runtime::{
 
 pub(crate) fn project_gaussians(
     runtime: &mut MetalRuntime,
-    gaussians: &TrainableGaussians,
+    gaussians: &Splats,
     render_colors: &Tensor,
     extract_visible_source_indices: bool,
 ) -> candle_core::Result<ProjectedGpuBatch> {

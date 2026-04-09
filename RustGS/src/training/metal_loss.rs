@@ -1,7 +1,7 @@
 use candle_core::op::BackpropOp;
 use candle_core::{CpuStorage, CustomOp2, Layout, MetalStorage, Shape, Storage, Tensor};
 
-use crate::diff::diff_splat::TrainableGaussians;
+use crate::diff::diff_splat::Splats;
 
 use super::metal_backward::{backward_loss_scales, MetalBackwardLossScales};
 use super::metal_forward::{ProjectedGaussians, RenderedFrame};
@@ -176,7 +176,7 @@ pub(crate) fn masked_mean_abs_diff(
 }
 
 pub(crate) fn evaluate_training_step_loss(
-    gaussians: &TrainableGaussians,
+    gaussians: &Splats,
     rendered: &RenderedFrame,
     projected: &ProjectedGaussians,
     target_color: &Tensor,
@@ -324,7 +324,7 @@ pub(crate) fn scale_regularization_grad(
 }
 
 pub(crate) fn optional_full_scale_regularization_grad(
-    gaussians: &TrainableGaussians,
+    gaussians: &Splats,
     projected: &ProjectedGaussians,
     enabled: bool,
     weight: f32,

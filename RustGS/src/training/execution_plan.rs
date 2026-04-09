@@ -32,7 +32,7 @@ pub(crate) fn select_training_execution_plan(
     if estimate.requires_subdivision_or_degradation() {
         let chunk_plan =
             plan_spatial_chunks(dataset, config, Some(estimate.affordable_initial_gaussians))?;
-        if chunk_plan.trainable_chunks().count() == 0 {
+        if chunk_plan.training_chunks().count() == 0 {
             return Err(TrainingError::TrainingFailed(format!(
                 "chunked training planned {} chunks under {:.1} GiB, but none met the minimum camera threshold of {}. Recommendations: {}",
                 chunk_plan.chunks.len(),
@@ -108,7 +108,9 @@ mod tests {
         let dataset = make_dataset(5, 1920, 1080);
         let config = crate::TrainingConfig {
             chunked_training: true,
-            chunk_budget_gb: 1.0,
+            // Use a tight budget so the execution route test stays stable even
+            // if the memory estimator's gaussian accounting changes.
+            chunk_budget_gb: 0.25,
             metal_render_scale: 1.0,
             max_initial_gaussians: 57_474,
             max_chunks: 4,

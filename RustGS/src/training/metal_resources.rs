@@ -7,7 +7,7 @@ use candle_core::{DType, Device, MetalStorage, Shape, Storage, Tensor};
 use candle_metal_kernels::metal::Buffer;
 use objc2_foundation::NSRange;
 
-use crate::diff::diff_splat::TrainableGaussians;
+use crate::diff::diff_splat::Splats;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum MetalBufferSlot {
@@ -226,7 +226,7 @@ impl MetalResources {
 
     pub(crate) fn bind_gaussians<'a>(
         &self,
-        gaussians: &'a TrainableGaussians,
+        gaussians: &'a Splats,
         render_colors: &'a Tensor,
     ) -> candle_core::Result<MetalGaussianBindings<'a>> {
         Ok(MetalGaussianBindings {

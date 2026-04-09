@@ -14,7 +14,7 @@ use crate::render::tiled_renderer::Gaussian;
 use candle_core::Device;
 
 #[cfg(feature = "gpu")]
-use crate::diff::diff_splat::TrainableGaussians;
+use crate::diff::diff_splat::Splats;
 
 /// Configuration for Gaussian initialization from point clouds.
 #[derive(Debug, Clone)]
@@ -120,7 +120,7 @@ pub fn initialize_trainable_gaussians_from_points(
     points: &[([f32; 3], Option<[f32; 3]>)],
     config: &GaussianInitConfig,
     device: &Device,
-) -> candle_core::Result<TrainableGaussians> {
+) -> candle_core::Result<Splats> {
     let gaussians = initialize_gaussians_from_points(points, config);
     let n = gaussians.len();
 
@@ -138,7 +138,7 @@ pub fn initialize_trainable_gaussians_from_points(
         colors.extend_from_slice(&g.color);
     }
 
-    TrainableGaussians::new(&positions, &scales, &rotations, &opacities, &colors, device)
+    Splats::new(&positions, &scales, &rotations, &opacities, &colors, device)
 }
 
 fn compute_scales(points: &[Vec3], config: &GaussianInitConfig) -> Vec<f32> {

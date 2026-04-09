@@ -2,7 +2,8 @@
 //!
 //! This module is no longer the production owner of RustGS training orchestration.
 //! The active runtime path lives in:
-//! - `mod.rs` / `training::train()` for orchestration and route selection
+//! - `mod.rs` / `training::train_splats()` for the canonical training entrypoint
+//! - `mod.rs` / `training::train_scene()` for the legacy `GaussianMap` compatibility wrapper
 //! - `frame_loader.rs` / `data_loading.rs` for frame ingestion
 //! - `metal_trainer.rs` for step orchestration and runtime ownership
 //! - `metal_forward.rs` for forward-pass execution, data contracts, and projection/rasterization helpers

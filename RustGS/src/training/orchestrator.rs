@@ -1,4 +1,5 @@
 use super::{LiteGsConfig, TrainingConfig, TrainingProfile};
+use crate::core::GaussianMap;
 use crate::TrainingError;
 
 #[cfg(feature = "gpu")]
@@ -10,13 +11,15 @@ use super::execution_plan::{
 #[cfg(feature = "gpu")]
 use super::metal_trainer;
 #[cfg(feature = "gpu")]
-use crate::{GaussianMap, TrainingDataset};
+use super::splats::HostSplats;
+#[cfg(feature = "gpu")]
+use crate::TrainingDataset;
 
 #[cfg(feature = "gpu")]
-pub fn train(
+pub fn train_splats(
     dataset: &TrainingDataset,
     config: &TrainingConfig,
-) -> Result<GaussianMap, TrainingError> {
+) -> Result<HostSplats, TrainingError> {
     match config.training_profile {
         TrainingProfile::LegacyMetal => train_legacy_metal(dataset, config),
         TrainingProfile::LiteGsMacV1 => train_litegs_mac_v1(dataset, config),
@@ -24,19 +27,48 @@ pub fn train(
 }
 
 #[cfg(feature = "gpu")]
-fn train_legacy_metal(
+#[deprecated(note = "Use train_splats(...) instead to avoid materializing a legacy GaussianMap.")]
+pub fn train_scene(
     dataset: &TrainingDataset,
     config: &TrainingConfig,
 ) -> Result<GaussianMap, TrainingError> {
-    let plan = select_training_execution_plan(dataset, config)?;
-    execute_training_plan(dataset, config, plan)
+    let splats = train_splats(dataset, config)?;
+    let mut map = GaussianMap::from_gaussians(splats.to_legacy_gaussians()?);
+    map.update_states();
+    Ok(map)
+}
+
+#[cfg(feature = "gpu")]
+#[deprecated(note = "Use train_splats(...) instead.")]
+pub fn train(
+    dataset: &TrainingDataset,
+    config: &TrainingConfig,
+) -> Result<GaussianMap, TrainingError> {
+    let splats = train_splats(dataset, config)?;
+    let mut map = GaussianMap::from_gaussians(splats.to_legacy_gaussians()?);
+    map.update_states();
+    Ok(map)
+}
+
+#[cfg(feature = "gpu")]
+fn train_legacy_metal(
+    dataset: &TrainingDataset,
+    config: &TrainingConfig,
+) -> Result<HostSplats, TrainingError> {
+    match config.training_profile {
+        TrainingProfile::LegacyMetal => {
+            let plan = select_training_execution_plan(dataset, config)?;
+            execute_training_plan(dataset, config, plan)
+        }
+        TrainingProfile::LiteGsMacV1 => unreachable!("validated by caller"),
+    }
 }
 
 #[cfg(feature = "gpu")]
 fn train_litegs_mac_v1(
     dataset: &TrainingDataset,
     config: &TrainingConfig,
-) -> Result<GaussianMap, TrainingError> {
+) -> Result<HostSplats, TrainingError> {
     validate_litegs_mac_v1_config(config)?;
     log::info!(
         "Training with LiteGS Mac V1 profile | sh_degree={} | cluster_size={} | tile_size={} | sparse_grad={} | reg_weight={:.4} | enable_transmittance={} | enable_depth={} | learnable_viewproj={} | lr_pose={:.6}",
@@ -60,9 +92,9 @@ fn execute_training_plan(
     dataset: &TrainingDataset,
     config: &TrainingConfig,
     plan: TrainingExecutionPlan,
-) -> Result<GaussianMap, TrainingError> {
+) -> Result<HostSplats, TrainingError> {
     match plan.route {
-        TrainingExecutionRoute::Standard => metal_trainer::train(dataset, config),
+        TrainingExecutionRoute::Standard => metal_trainer::train_splats(dataset, config),
         TrainingExecutionRoute::ChunkedSingleChunk => {
             if let Some(estimate) = plan.chunk_estimate.as_ref() {
                 log::info!(
@@ -73,7 +105,7 @@ fn execute_training_plan(
                     estimate.effective_budget_gib(),
                 );
             }
-            metal_trainer::train(dataset, config)
+            metal_trainer::train_splats(dataset, config)
         }
         TrainingExecutionRoute::ChunkedSequential => {
             let chunk_plan = plan
@@ -82,11 +114,11 @@ fn execute_training_plan(
                 .expect("sequential route requires chunk plan");
             if let Some(estimate) = plan.chunk_estimate.as_ref() {
                 log::info!(
-                    "Chunked planner selected sequential chunk execution | requested_gaussians={} | affordable_gaussians={} | chunks={} | trainable_chunks={}",
+                    "Chunked planner selected sequential chunk execution | requested_gaussians={} | affordable_gaussians={} | chunks={} | training_chunks={}",
                     estimate.requested_initial_gaussians,
                     estimate.affordable_initial_gaussians,
                     chunk_plan.chunks.len(),
-                    chunk_plan.trainable_chunks().count(),
+                    chunk_plan.training_chunks().count(),
                 );
             }
             train_chunked_sequentially(dataset, config, chunk_plan)

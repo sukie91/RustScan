@@ -6,7 +6,11 @@
 use candle_core::{Device, Tensor};
 
 #[cfg(feature = "gpu")]
-use crate::render::{Gaussian, RenderBuffer, TiledRenderer};
+use crate::diff::diff_splat::rgb_to_sh0_value;
+#[cfg(feature = "gpu")]
+use crate::render::{RenderBuffer, TiledRenderer};
+#[cfg(feature = "gpu")]
+use crate::training::HostSplats;
 
 /// Gaussian parameters as tensors (for GPU computation)
 pub struct GaussianTensors {
@@ -248,12 +252,12 @@ impl DiffGaussianRenderer {
             return Ok(RenderBuffer::new(self.width, self.height));
         }
 
-        let gaussians = tensors_to_gaussians(gaussians)?;
+        let splats = tensors_to_splats(gaussians)?;
         let rotation = tensor_to_rotation(&camera.rotation)?;
         let translation = tensor_to_vec3(&camera.translation)?;
 
-        Ok(self.tiled_renderer.render(
-            &gaussians,
+        Ok(self.tiled_renderer.render_splats(
+            splats.as_view(),
             camera.intrinsics[0],
             camera.intrinsics[1],
             camera.intrinsics[2],
@@ -265,38 +269,38 @@ impl DiffGaussianRenderer {
 }
 
 #[cfg(feature = "gpu")]
-fn tensors_to_gaussians(gaussians: &GaussianTensors) -> candle_core::Result<Vec<Gaussian>> {
-    let positions = gaussians.positions.to_vec2::<f32>()?;
-    let scales = gaussians.scales.to_vec2::<f32>()?;
-    let rotations = gaussians.rotations.to_vec2::<f32>()?;
-    let opacities = gaussians.opacities.to_vec1::<f32>()?;
-    let colors = gaussians.colors.to_vec2::<f32>()?;
+fn tensors_to_splats(gaussians: &GaussianTensors) -> candle_core::Result<HostSplats> {
+    let positions = gaussians.positions.flatten_all()?.to_vec1::<f32>()?;
+    let log_scales = gaussians
+        .scales
+        .flatten_all()?
+        .to_vec1::<f32>()?
+        .into_iter()
+        .map(|scale| scale.max(1e-6).ln())
+        .collect();
+    let rotations = gaussians.rotations.flatten_all()?.to_vec1::<f32>()?;
+    let opacity_logits = gaussians
+        .opacities
+        .to_vec1::<f32>()?
+        .into_iter()
+        .map(opacity_to_logit)
+        .collect();
+    let sh_coeffs = gaussians
+        .colors
+        .flatten_all()?
+        .to_vec1::<f32>()?
+        .into_iter()
+        .map(rgb_to_sh0_value)
+        .collect();
 
-    let positions: Vec<f32> = positions.into_iter().flatten().collect();
-    let scales: Vec<f32> = scales.into_iter().flatten().collect();
-    let rotations: Vec<f32> = rotations.into_iter().flatten().collect();
-    let colors: Vec<f32> = colors.into_iter().flatten().collect();
-
-    let mut output = Vec::with_capacity(gaussians.n);
-    for i in 0..gaussians.n {
-        let p = i * 3;
-        let r = i * 4;
-        let c = i * 3;
-        output.push(Gaussian::new(
-            [positions[p], positions[p + 1], positions[p + 2]],
-            [scales[p], scales[p + 1], scales[p + 2]],
-            [
-                rotations[r],
-                rotations[r + 1],
-                rotations[r + 2],
-                rotations[r + 3],
-            ],
-            opacities[i],
-            [colors[c], colors[c + 1], colors[c + 2]],
-        ));
-    }
-
-    Ok(output)
+    HostSplats::from_raw_parts(
+        positions,
+        log_scales,
+        rotations,
+        opacity_logits,
+        sh_coeffs,
+        0,
+    )
 }
 
 #[cfg(feature = "gpu")]
@@ -313,6 +317,12 @@ fn tensor_to_rotation(tensor: &Tensor) -> candle_core::Result<[[f32; 3]; 3]> {
 fn tensor_to_vec3(tensor: &Tensor) -> candle_core::Result<[f32; 3]> {
     let data = tensor.to_vec1::<f32>()?;
     Ok([data[0], data[1], data[2]])
+}
+
+#[cfg(feature = "gpu")]
+fn opacity_to_logit(opacity: f32) -> f32 {
+    let clamped = opacity.clamp(1e-6, 1.0 - 1e-6);
+    (clamped / (1.0 - clamped)).ln()
 }
 
 #[cfg(all(test, feature = "gpu"))]
@@ -391,5 +401,31 @@ mod tests {
         if let Ok(t) = tensors {
             assert_eq!(t.len(), 3);
         }
+    }
+
+    #[test]
+    fn test_tensor_conversion_preserves_render_ready_semantics() {
+        let device = Device::Cpu;
+        let tensors = GaussianTensors::new(
+            &[1.0, 2.0, 3.0],
+            &[0.25, 0.5, 1.0],
+            &[1.0, 0.0, 0.0, 0.0],
+            &[0.8],
+            &[0.2, 0.4, 0.6],
+            &device,
+        )
+        .unwrap();
+
+        let splats = tensors_to_splats(&tensors).unwrap();
+        let view = splats.as_view();
+
+        assert_eq!(view.positions, &[1.0, 2.0, 3.0]);
+        assert!((view.log_scales[0] - 0.25f32.ln()).abs() < 1e-6);
+        assert!((view.log_scales[1] - 0.5f32.ln()).abs() < 1e-6);
+        assert!((view.log_scales[2] - 1.0f32.ln()).abs() < 1e-6);
+        assert!((view.opacity_logits[0] - opacity_to_logit(0.8)).abs() < 1e-6);
+        assert!((view.sh_coeffs[0] - rgb_to_sh0_value(0.2)).abs() < 1e-6);
+        assert!((view.sh_coeffs[1] - rgb_to_sh0_value(0.4)).abs() < 1e-6);
+        assert!((view.sh_coeffs[2] - rgb_to_sh0_value(0.6)).abs() < 1e-6);
     }
 }

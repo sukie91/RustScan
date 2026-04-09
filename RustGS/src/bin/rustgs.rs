@@ -309,17 +309,18 @@ fn main() -> anyhow::Result<()> {
                 .parse_filters(&args.log_level)
                 .init();
 
-            log::info!("Training 3DGS scene from {:?}", args.input);
+            log::info!("Training 3DGS splats from {:?}", args.input);
             log::info!("Output: {:?}", args.output);
             log::info!("Iterations: {}", args.iterations);
             log::info!("Backend: metal");
             log::info!("Training profile: {}", args.training_profile);
 
-            let slam_output = load_training_input(&args.input, args.max_frames, args.frame_stride)?;
+            let dataset =
+                load_training_dataset_for_training(&args.input, args.max_frames, args.frame_stride)?;
             log::info!(
-                "Loaded {} poses, {} map points",
-                slam_output.num_poses(),
-                slam_output.num_points()
+                "Loaded {} poses, {} initialization points",
+                dataset.poses.len(),
+                dataset.initial_points.len()
             );
 
             let config = build_training_config(&args)?;
@@ -331,40 +332,26 @@ fn main() -> anyhow::Result<()> {
             #[cfg(feature = "gpu")]
             {
                 let train_start = std::time::Instant::now();
-                let scene = rustgs::train_from_slam(&slam_output, &config)?;
+                let splats = rustgs::train_splats(&dataset, &config)?;
                 let training_elapsed = train_start.elapsed();
                 let training_telemetry = rustgs::last_metal_training_telemetry();
-                log::info!("Trained {} Gaussians", scene.len());
+                log::info!("Trained {} Gaussians", splats.len());
 
-                // Save scene - convert Gaussian3D to array-based Gaussian for PLY export
-                let gaussians: Vec<rustgs::Gaussian> = scene
-                    .gaussians()
-                    .iter()
-                    .map(|g| {
-                        rustgs::Gaussian::new(
-                            g.position.into(),
-                            g.scale.into(),
-                            [g.rotation.w, g.rotation.x, g.rotation.y, g.rotation.z],
-                            g.opacity,
-                            g.color,
-                        )
-                    })
-                    .collect();
                 let metadata = rustgs::SceneMetadata {
                     iterations: config.iterations,
                     final_loss: training_telemetry
                         .as_ref()
                         .and_then(|telemetry| telemetry.loss_terms.total)
                         .unwrap_or(0.0),
-                    gaussian_count: gaussians.len(),
-                    sh_degree: config.litegs.sh_degree,
+                    gaussian_count: splats.len(),
+                    sh_degree: splats.sh_degree(),
                 };
-                rustgs::save_scene_ply(&args.output, &gaussians, &metadata)?;
+                rustgs::save_splats_ply(&args.output, &splats, &metadata)?;
                 log::info!("Saved scene to {:?}", args.output);
 
-                let evaluation_summary = maybe_evaluate_trained_scene(
+                let evaluation_summary = maybe_evaluate_trained_splats(
                     &args,
-                    &gaussians,
+                    &splats,
                     &metadata,
                     training_telemetry.as_ref(),
                 )?;
@@ -372,8 +359,8 @@ fn main() -> anyhow::Result<()> {
                 if let Err(err) = maybe_write_litegs_parity_report(
                     &args.input,
                     &args.output,
-                    &slam_output,
-                    &scene,
+                    &dataset,
+                    &splats,
                     &config,
                     training_telemetry.as_ref(),
                     training_elapsed,
@@ -395,8 +382,8 @@ fn main() -> anyhow::Result<()> {
             log::info!("Output: {:?}", args.output);
 
             // Load scene
-            let (gaussians, metadata) = rustgs::load_scene_ply(&args.input)?;
-            log::info!("Loaded {} Gaussians", gaussians.len());
+            let (splats, metadata) = rustgs::load_splats_ply(&args.input)?;
+            log::info!("Loaded {} Gaussians", splats.len());
             let _ = metadata;
 
             // TODO: Load camera and render
@@ -408,11 +395,11 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn load_training_input(
+fn load_training_dataset_for_training(
     input: &std::path::Path,
     max_frames: usize,
     frame_stride: usize,
-) -> anyhow::Result<rustscan_types::SlamOutput> {
+) -> anyhow::Result<rustscan_types::TrainingDataset> {
     if !input.is_dir() && (max_frames > 0 || frame_stride > 1) {
         log::warn!(
             "--max-frames and --frame-stride only apply to dataset directories; ignoring them for {:?}",
@@ -441,7 +428,7 @@ fn load_training_input(
         dataset.poses.len(),
     );
 
-    Ok(rustscan_types::SlamOutput::from_dataset(dataset))
+    Ok(dataset)
 }
 
 #[cfg(feature = "gpu")]
@@ -477,7 +464,7 @@ fn load_evaluation_dataset(
 #[cfg(feature = "gpu")]
 fn evaluation_dataset_load_params(args: &TrainArgs) -> (usize, usize) {
     // Keep the evaluation prefix trimming, but do not apply frame_stride here.
-    // The actual evaluation subset selection should happen once inside evaluate_scene().
+    // The actual evaluation subset selection should happen once inside evaluate_splats().
     (args.eval_max_frames, 1)
 }
 
@@ -493,12 +480,12 @@ fn final_training_metrics_from_telemetry(
 }
 
 #[cfg(feature = "gpu")]
-fn maybe_evaluate_trained_scene(
+fn maybe_evaluate_trained_splats(
     args: &TrainArgs,
-    scene: &[rustgs::Gaussian],
+    splats: &rustgs::HostSplats,
     metadata: &rustgs::SceneMetadata,
     training_telemetry: Option<&rustgs::LiteGsTrainingTelemetry>,
-) -> anyhow::Result<Option<rustgs::SceneEvaluationSummary>> {
+) -> anyhow::Result<Option<rustgs::SplatEvaluationSummary>> {
     if !args.eval_after_train {
         return Ok(None);
     }
@@ -516,9 +503,9 @@ fn maybe_evaluate_trained_scene(
     let device = rustgs::evaluation_device(eval_device).map_err(anyhow::Error::from)?;
     let (dataset_max_frames, dataset_frame_stride) = evaluation_dataset_load_params(args);
     let dataset = load_evaluation_dataset(&args.input, dataset_max_frames, dataset_frame_stride)?;
-    let evaluation = rustgs::evaluate_scene(
+    let evaluation = rustgs::evaluate_splats(
         &dataset,
-        scene,
+        splats,
         metadata,
         &rustgs::SceneEvaluationConfig {
             render_scale: args.eval_render_scale,
@@ -531,17 +518,17 @@ fn maybe_evaluate_trained_scene(
     )
     .map_err(anyhow::Error::from)?;
 
-    log_scene_evaluation_summary(&evaluation.summary, args.eval_json)?;
+    log_splat_evaluation_summary(&evaluation.summary, args.eval_json)?;
     Ok(Some(evaluation.summary))
 }
 
 #[cfg(feature = "gpu")]
-fn log_scene_evaluation_summary(
-    summary: &rustgs::SceneEvaluationSummary,
+fn log_splat_evaluation_summary(
+    summary: &rustgs::SplatEvaluationSummary,
     emit_json: bool,
 ) -> anyhow::Result<()> {
     log::info!(
-        "Scene evaluation summary | device={} | render_scale={:.3} | resolution={}x{} | frames={} | final_loss={:.6} | final_step_loss={:?} | psnr_mean_db={:.4} | psnr_min_db={:.4} | psnr_max_db={:.4} | elapsed={:.2}s",
+        "Splat evaluation summary | device={} | render_scale={:.3} | resolution={}x{} | frames={} | final_loss={:.6} | final_step_loss={:?} | psnr_mean_db={:.4} | psnr_min_db={:.4} | psnr_max_db={:.4} | elapsed={:.2}s",
         summary.device,
         summary.render_scale,
         summary.render_width,
@@ -731,18 +718,18 @@ fn log_litegs_training_config(config: &rustgs::TrainingConfig) {
 fn maybe_write_litegs_parity_report(
     input: &std::path::Path,
     output: &std::path::Path,
-    slam_output: &rustscan_types::SlamOutput,
-    scene: &rustgs::GaussianMap,
+    dataset: &rustscan_types::TrainingDataset,
+    splats: &rustgs::HostSplats,
     config: &rustgs::TrainingConfig,
     training_telemetry: Option<&rustgs::LiteGsTrainingTelemetry>,
     training_elapsed: Duration,
-    evaluation_summary: Option<&rustgs::SceneEvaluationSummary>,
+    evaluation_summary: Option<&rustgs::SplatEvaluationSummary>,
 ) -> anyhow::Result<()> {
     maybe_write_litegs_parity_report_with_manifest_dir(
         input,
         output,
-        slam_output,
-        scene,
+        dataset,
+        splats,
         config,
         training_telemetry,
         training_elapsed,
@@ -754,12 +741,12 @@ fn maybe_write_litegs_parity_report(
 fn maybe_write_litegs_parity_report_with_manifest_dir(
     input: &std::path::Path,
     output: &std::path::Path,
-    slam_output: &rustscan_types::SlamOutput,
-    scene: &rustgs::GaussianMap,
+    dataset: &rustscan_types::TrainingDataset,
+    splats: &rustgs::HostSplats,
     config: &rustgs::TrainingConfig,
     training_telemetry: Option<&rustgs::LiteGsTrainingTelemetry>,
     training_elapsed: Duration,
-    evaluation_summary: Option<&rustgs::SceneEvaluationSummary>,
+    evaluation_summary: Option<&rustgs::SplatEvaluationSummary>,
     manifest_dir: &std::path::Path,
 ) -> anyhow::Result<()> {
     if config.training_profile != rustgs::TrainingProfile::LiteGsMacV1 {
@@ -772,8 +759,8 @@ fn maybe_write_litegs_parity_report_with_manifest_dir(
         rustgs::ParityHarnessReport::new(fixture_id, config.training_profile, &config.litegs);
 
     report.topology.initialization_gaussians =
-        inferred_initialization_gaussian_count(slam_output, config);
-    report.topology.final_gaussians = Some(scene.len());
+        inferred_initialization_gaussian_count(dataset, config);
+    report.topology.final_gaussians = Some(splats.len());
     report.topology.export_outputs = 1;
 
     if let Some(telemetry) = training_telemetry {
@@ -783,8 +770,8 @@ fn maybe_write_litegs_parity_report_with_manifest_dir(
         report.topology.initialization_gaussians = report
             .topology
             .initialization_gaussians
-            .or_else(|| inferred_initialization_gaussian_count(slam_output, config));
-        report.topology.final_gaussians = report.topology.final_gaussians.or(Some(scene.len()));
+            .or_else(|| inferred_initialization_gaussian_count(dataset, config));
+        report.topology.final_gaussians = report.topology.final_gaussians.or(Some(splats.len()));
         report.topology.export_outputs = 1;
         report.metrics.active_sh_degree = telemetry.active_sh_degree;
         report.metrics.depth_valid_pixels = telemetry.depth_valid_pixels;
@@ -805,13 +792,13 @@ fn maybe_write_litegs_parity_report_with_manifest_dir(
             summary.psnr_mean_db,
         ));
     }
-    report.metrics.had_nan = scene_contains_non_finite(scene);
+    report.metrics.had_nan = splats_have_non_finite(splats);
     report.metrics.had_oom = false;
 
     report.timing.training_ms = Some(training_elapsed.as_millis() as u64);
     report.timing.total_wall_clock_ms = Some(training_elapsed.as_millis() as u64);
 
-    if slam_output.num_points() == 0 {
+    if dataset.initial_points.is_empty() {
         report.notes.push(
             "Sparse COLMAP-style points were unavailable, so initialization-count parity is approximate and frame-based fallback was used.".to_string(),
         );
@@ -827,10 +814,10 @@ fn maybe_write_litegs_parity_report_with_manifest_dir(
         );
     }
 
-    let (roundtrip_gaussians, roundtrip_metadata) = rustgs::load_scene_ply(output)?;
-    report.metrics.export_roundtrip_ok = roundtrip_gaussians.len() == scene.len()
-        && roundtrip_metadata.gaussian_count == scene.len()
-        && !gaussians_have_non_finite(&roundtrip_gaussians);
+    let (roundtrip_splats, roundtrip_metadata) = rustgs::load_splats_ply(output)?;
+    report.metrics.export_roundtrip_ok = roundtrip_splats.len() == splats.len()
+        && roundtrip_metadata.gaussian_count == splats.len()
+        && !splats_have_non_finite(&roundtrip_splats);
 
     if let Some(reference_report_path) =
         resolve_parity_reference_report_path_from_manifest_dir(&report.fixture_id, manifest_dir)
@@ -890,10 +877,10 @@ fn resolve_parity_reference_report_path_from_manifest_dir(
 }
 
 fn inferred_initialization_gaussian_count(
-    slam_output: &rustscan_types::SlamOutput,
+    dataset: &rustscan_types::TrainingDataset,
     config: &rustgs::TrainingConfig,
 ) -> Option<usize> {
-    let sparse_points = slam_output.num_points();
+    let sparse_points = dataset.initial_points.len();
     if sparse_points == 0 {
         None
     } else {
@@ -910,37 +897,14 @@ fn gaussian_count_delta_ratio(current: Option<usize>, reference: Option<usize>) 
     }
 }
 
-fn scene_contains_non_finite(scene: &rustgs::GaussianMap) -> bool {
-    gaussians_have_non_finite(
-        &scene
-            .gaussians()
-            .iter()
-            .map(|gaussian| {
-                rustgs::Gaussian::new(
-                    gaussian.position.into(),
-                    gaussian.scale.into(),
-                    [
-                        gaussian.rotation.w,
-                        gaussian.rotation.x,
-                        gaussian.rotation.y,
-                        gaussian.rotation.z,
-                    ],
-                    gaussian.opacity,
-                    gaussian.color,
-                )
-            })
-            .collect::<Vec<_>>(),
-    )
-}
-
-fn gaussians_have_non_finite(gaussians: &[rustgs::Gaussian]) -> bool {
-    gaussians.iter().any(|gaussian| {
-        gaussian.position.iter().any(|value| !value.is_finite())
-            || gaussian.scale.iter().any(|value| !value.is_finite())
-            || gaussian.rotation.iter().any(|value| !value.is_finite())
-            || !gaussian.opacity.is_finite()
-            || gaussian.color.iter().any(|value| !value.is_finite())
-    })
+#[cfg(feature = "gpu")]
+fn splats_have_non_finite(splats: &rustgs::HostSplats) -> bool {
+    let view = splats.as_view();
+    view.positions.iter().any(|value| !value.is_finite())
+        || view.log_scales.iter().any(|value| !value.is_finite())
+        || view.rotations.iter().any(|value| !value.is_finite())
+        || view.opacity_logits.iter().any(|value| !value.is_finite())
+        || view.sh_coeffs.iter().any(|value| !value.is_finite())
 }
 
 fn default_chunk_artifact_dir(output: &std::path::Path) -> PathBuf {
@@ -960,7 +924,7 @@ fn default_chunk_artifact_dir(output: &std::path::Path) -> PathBuf {
 mod tests {
     use super::{
         build_training_config, default_chunk_artifact_dir, evaluation_dataset_load_params,
-        load_training_input, maybe_write_litegs_parity_report,
+        load_training_dataset_for_training, maybe_write_litegs_parity_report,
         maybe_write_litegs_parity_report_with_manifest_dir, validate_chunked_training_args, Cli,
         Commands, TrainArgs,
     };
@@ -982,6 +946,45 @@ mod tests {
     }
 
     #[cfg(feature = "gpu")]
+    fn rgb_to_sh0_value(rgb: f32) -> f32 {
+        (rgb - 0.5) / 0.282_094_8
+    }
+
+    #[cfg(feature = "gpu")]
+    fn test_splats() -> rustgs::HostSplats {
+        rustgs::HostSplats::from_raw_parts(
+            vec![0.0, 0.0, 0.0],
+            vec![0.01f32.ln(), 0.01f32.ln(), 0.01f32.ln()],
+            vec![1.0, 0.0, 0.0, 0.0],
+            vec![0.0],
+            vec![
+                rgb_to_sh0_value(0.2),
+                rgb_to_sh0_value(0.3),
+                rgb_to_sh0_value(0.4),
+            ],
+            0,
+        )
+        .unwrap()
+    }
+
+    #[cfg(feature = "gpu")]
+    fn test_splats_metadata(splats: &rustgs::HostSplats) -> rustgs::SceneMetadata {
+        rustgs::SceneMetadata {
+            iterations: 1,
+            final_loss: 0.0,
+            gaussian_count: splats.len(),
+            sh_degree: splats.sh_degree(),
+        }
+    }
+
+    #[cfg(feature = "gpu")]
+    fn write_test_output_splats(path: &std::path::Path) -> rustgs::HostSplats {
+        let splats = test_splats();
+        rustgs::save_splats_ply(path, &splats, &test_splats_metadata(&splats)).unwrap();
+        splats
+    }
+
+    #[cfg(feature = "gpu")]
     fn convergence_fixture_input_path() -> Option<PathBuf> {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .ancestors()
@@ -1000,28 +1003,6 @@ mod tests {
         let result = std::panic::catch_unwind(|| candle_core::Device::new_metal(0));
         std::panic::set_hook(previous_hook);
         matches!(result, Ok(Ok(_)))
-    }
-
-    #[cfg(feature = "gpu")]
-    fn scene_to_ply_gaussians(scene: &rustgs::GaussianMap) -> Vec<rustgs::Gaussian> {
-        scene
-            .gaussians()
-            .iter()
-            .map(|gaussian| {
-                rustgs::Gaussian::new(
-                    gaussian.position.into(),
-                    gaussian.scale.into(),
-                    [
-                        gaussian.rotation.w,
-                        gaussian.rotation.x,
-                        gaussian.rotation.y,
-                        gaussian.rotation.z,
-                    ],
-                    gaussian.opacity,
-                    gaussian.color,
-                )
-            })
-            .collect()
     }
 
     #[test]
@@ -1311,31 +1292,12 @@ mod tests {
         let output = dir.path().join("scene.ply");
         let input = std::path::Path::new("test_data/tum/rgbd_dataset_freiburg1_xyz");
 
-        let scene = rustgs::GaussianMap::from_gaussians(vec![rustgs::Gaussian3D::default()]);
-        let gaussians = vec![rustgs::Gaussian::new(
-            [0.0, 0.0, 0.0],
-            [0.01, 0.01, 0.01],
-            [1.0, 0.0, 0.0, 0.0],
-            0.5,
-            [0.2, 0.3, 0.4],
-        )];
-        rustgs::save_scene_ply(
-            &output,
-            &gaussians,
-            &rustgs::SceneMetadata {
-                iterations: 1,
-                final_loss: 0.0,
-                gaussian_count: gaussians.len(),
-                sh_degree: 0,
-            },
-        )
-        .unwrap();
+        let splats = write_test_output_splats(&output);
 
         let mut dataset =
             rustgs::TrainingDataset::new(rustgs::Intrinsics::from_focal(500.0, 32, 32));
         dataset.add_point([0.0, 0.0, 0.0], None);
         dataset.add_point([1.0, 0.0, 0.0], None);
-        let slam_output = rustscan_types::SlamOutput::from_dataset(dataset);
         let config = rustgs::TrainingConfig {
             training_profile: rustgs::TrainingProfile::LiteGsMacV1,
             ..rustgs::TrainingConfig::default()
@@ -1344,8 +1306,8 @@ mod tests {
         maybe_write_litegs_parity_report(
             input,
             &output,
-            &slam_output,
-            &scene,
+            &dataset,
+            &splats,
             &config,
             None,
             Duration::from_millis(42),
@@ -1380,30 +1342,11 @@ mod tests {
         let output = dir.path().join("scene.ply");
         let input = std::path::Path::new("test_data/tum/rgbd_dataset_freiburg1_xyz");
 
-        let scene = rustgs::GaussianMap::from_gaussians(vec![rustgs::Gaussian3D::default()]);
-        let gaussians = vec![rustgs::Gaussian::new(
-            [0.0, 0.0, 0.0],
-            [0.01, 0.01, 0.01],
-            [1.0, 0.0, 0.0, 0.0],
-            0.5,
-            [0.2, 0.3, 0.4],
-        )];
-        rustgs::save_scene_ply(
-            &output,
-            &gaussians,
-            &rustgs::SceneMetadata {
-                iterations: 1,
-                final_loss: 0.0,
-                gaussian_count: gaussians.len(),
-                sh_degree: 0,
-            },
-        )
-        .unwrap();
+        let splats = write_test_output_splats(&output);
 
         let mut dataset =
             rustgs::TrainingDataset::new(rustgs::Intrinsics::from_focal(500.0, 32, 32));
         dataset.add_point([0.0, 0.0, 0.0], None);
-        let slam_output = rustscan_types::SlamOutput::from_dataset(dataset);
         let config = rustgs::TrainingConfig {
             training_profile: rustgs::TrainingProfile::LiteGsMacV1,
             ..rustgs::TrainingConfig::default()
@@ -1447,8 +1390,8 @@ mod tests {
         maybe_write_litegs_parity_report(
             input,
             &output,
-            &slam_output,
-            &scene,
+            &dataset,
+            &splats,
             &config,
             Some(&telemetry),
             Duration::from_millis(42),
@@ -1481,35 +1424,16 @@ mod tests {
         let output = dir.path().join("scene.ply");
         let input = std::path::Path::new("test_data/tum/rgbd_dataset_freiburg1_xyz");
 
-        let scene = rustgs::GaussianMap::from_gaussians(vec![rustgs::Gaussian3D::default()]);
-        let gaussians = vec![rustgs::Gaussian::new(
-            [0.0, 0.0, 0.0],
-            [0.01, 0.01, 0.01],
-            [1.0, 0.0, 0.0, 0.0],
-            0.5,
-            [0.2, 0.3, 0.4],
-        )];
-        rustgs::save_scene_ply(
-            &output,
-            &gaussians,
-            &rustgs::SceneMetadata {
-                iterations: 1,
-                final_loss: 0.0,
-                gaussian_count: gaussians.len(),
-                sh_degree: 0,
-            },
-        )
-        .unwrap();
+        let splats = write_test_output_splats(&output);
 
         let mut dataset =
             rustgs::TrainingDataset::new(rustgs::Intrinsics::from_focal(500.0, 32, 32));
         dataset.add_point([0.0, 0.0, 0.0], None);
-        let slam_output = rustscan_types::SlamOutput::from_dataset(dataset);
         let config = rustgs::TrainingConfig {
             training_profile: rustgs::TrainingProfile::LiteGsMacV1,
             ..rustgs::TrainingConfig::default()
         };
-        let evaluation_summary = rustgs::SceneEvaluationSummary {
+        let evaluation_summary = rustgs::SplatEvaluationSummary {
             device: rustgs::EvaluationDevice::Metal,
             render_scale: 0.25,
             render_width: 16,
@@ -1517,8 +1441,8 @@ mod tests {
             frame_stride: 30,
             max_frames: 180,
             frame_count: 6,
-            scene_iterations: 1,
-            scene_gaussian_count: 1,
+            splat_iterations: 1,
+            splat_count: 1,
             final_loss: 0.4,
             final_step_loss: Some(0.35),
             elapsed_seconds: 1.2,
@@ -1533,8 +1457,8 @@ mod tests {
         maybe_write_litegs_parity_report(
             input,
             &output,
-            &slam_output,
-            &scene,
+            &dataset,
+            &splats,
             &config,
             None,
             Duration::from_millis(42),
@@ -1558,30 +1482,11 @@ mod tests {
         let output = dir.path().join("scene.ply");
         let input = std::path::Path::new("test_data/tum/rgbd_dataset_freiburg1_xyz");
 
-        let scene = rustgs::GaussianMap::from_gaussians(vec![rustgs::Gaussian3D::default()]);
-        let gaussians = vec![rustgs::Gaussian::new(
-            [0.0, 0.0, 0.0],
-            [0.01, 0.01, 0.01],
-            [1.0, 0.0, 0.0, 0.0],
-            0.5,
-            [0.2, 0.3, 0.4],
-        )];
-        rustgs::save_scene_ply(
-            &output,
-            &gaussians,
-            &rustgs::SceneMetadata {
-                iterations: 1,
-                final_loss: 0.0,
-                gaussian_count: gaussians.len(),
-                sh_degree: 0,
-            },
-        )
-        .unwrap();
+        let splats = write_test_output_splats(&output);
 
         let mut dataset =
             rustgs::TrainingDataset::new(rustgs::Intrinsics::from_focal(500.0, 32, 32));
         dataset.add_point([0.0, 0.0, 0.0], None);
-        let slam_output = rustscan_types::SlamOutput::from_dataset(dataset);
         let config = rustgs::TrainingConfig {
             training_profile: rustgs::TrainingProfile::LiteGsMacV1,
             litegs: rustgs::LiteGsConfig {
@@ -1626,8 +1531,8 @@ mod tests {
         maybe_write_litegs_parity_report(
             input,
             &output,
-            &slam_output,
-            &scene,
+            &dataset,
+            &splats,
             &config,
             Some(&telemetry),
             Duration::from_millis(42),
@@ -1691,30 +1596,11 @@ mod tests {
 
         let output = dir.path().join("scene.ply");
         let input = std::path::Path::new("test_data/tum/rgbd_dataset_freiburg1_xyz");
-        let scene = rustgs::GaussianMap::from_gaussians(vec![rustgs::Gaussian3D::default()]);
-        let gaussians = vec![rustgs::Gaussian::new(
-            [0.0, 0.0, 0.0],
-            [0.01, 0.01, 0.01],
-            [1.0, 0.0, 0.0, 0.0],
-            0.5,
-            [0.2, 0.3, 0.4],
-        )];
-        rustgs::save_scene_ply(
-            &output,
-            &gaussians,
-            &rustgs::SceneMetadata {
-                iterations: 1,
-                final_loss: 0.0,
-                gaussian_count: gaussians.len(),
-                sh_degree: 0,
-            },
-        )
-        .unwrap();
+        let splats = write_test_output_splats(&output);
 
         let mut dataset =
             rustgs::TrainingDataset::new(rustgs::Intrinsics::from_focal(500.0, 32, 32));
         dataset.add_point([0.0, 0.0, 0.0], None);
-        let slam_output = rustscan_types::SlamOutput::from_dataset(dataset);
         let config = rustgs::TrainingConfig {
             training_profile: rustgs::TrainingProfile::LiteGsMacV1,
             ..rustgs::TrainingConfig::default()
@@ -1759,8 +1645,8 @@ mod tests {
         maybe_write_litegs_parity_report_with_manifest_dir(
             input,
             &output,
-            &slam_output,
-            &scene,
+            &dataset,
+            &splats,
             &config,
             Some(&telemetry),
             Duration::from_millis(42),
@@ -1823,11 +1709,15 @@ mod tests {
         };
         let output_dir = tempdir().unwrap();
         let output = output_dir.path().join("fixture-scene.ply");
-        let slam_output =
-            load_training_input(&input, tum_config.max_frames, tum_config.frame_stride).unwrap();
+        let dataset = load_training_dataset_for_training(
+            &input,
+            tum_config.max_frames,
+            tum_config.frame_stride,
+        )
+        .unwrap();
 
         let training_start = Instant::now();
-        let scene = rustgs::train_from_path(&input, &tum_config, &config).unwrap();
+        let splats = rustgs::train_splats_from_path(&input, &tum_config, &config).unwrap();
         let training_elapsed = training_start.elapsed();
         let training_telemetry = rustgs::last_metal_training_telemetry();
         let final_loss = training_telemetry
@@ -1835,14 +1725,14 @@ mod tests {
             .and_then(|telemetry| telemetry.loss_terms.total)
             .unwrap_or(0.0);
 
-        rustgs::save_scene_ply(
+        rustgs::save_splats_ply(
             &output,
-            &scene_to_ply_gaussians(&scene),
+            &splats,
             &rustgs::SceneMetadata {
                 iterations: config.iterations,
                 final_loss,
-                gaussian_count: scene.len(),
-                sh_degree: config.litegs.sh_degree,
+                gaussian_count: splats.len(),
+                sh_degree: splats.sh_degree(),
             },
         )
         .unwrap();
@@ -1850,8 +1740,8 @@ mod tests {
         maybe_write_litegs_parity_report(
             &input,
             &output,
-            &slam_output,
-            &scene,
+            &dataset,
+            &splats,
             &config,
             training_telemetry.as_ref(),
             training_elapsed,
@@ -1868,7 +1758,7 @@ mod tests {
         assert!(report.litegs.sparse_grad);
         assert!(report.litegs.enable_depth);
         assert_eq!(report.topology.export_outputs, 1);
-        assert_eq!(report.topology.final_gaussians, Some(scene.len()));
+        assert_eq!(report.topology.final_gaussians, Some(splats.len()));
         assert!(report.loss_terms.total.unwrap_or(0.0) > 0.0);
         assert!(report.loss_terms.depth.is_some());
         assert!(!report.loss_curve_samples.is_empty());

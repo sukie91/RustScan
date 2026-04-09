@@ -12,9 +12,10 @@ use std::time::{Duration, Instant};
 use candle_core::Var;
 use candle_core::{DType, Device, Tensor};
 
-use crate::diff::diff_splat::{DiffCamera, TrainableGaussians, SH_C0};
+use crate::core::GaussianMap;
+use crate::diff::diff_splat::{DiffCamera, Splats, SH_C0};
 use crate::training::clustering::ClusterAssignment;
-use crate::{GaussianMap, TrainingDataset, TrainingError};
+use crate::{TrainingDataset, TrainingError};
 
 use super::data_loading::{load_training_data, LoadedTrainingData};
 use super::eval::{scaled_dimensions, summarize_training_metrics};
@@ -47,7 +48,7 @@ use super::metal_runtime::{
 };
 use super::parity_harness::{ParityLossCurveSample, ParityLossTerms, ParityTopologyMetrics};
 use super::pose_embedding;
-use super::splats::Splats;
+use super::splats::HostSplats;
 use super::topology::{
     self, MetalGaussianStats, RunningMoments, TopologyExecutionDisposition,
     TopologyMutationRequest, TopologyPolicy, TopologyStatsAction, TopologyStepContext,
@@ -169,7 +170,7 @@ pub(crate) struct MetalTrainingFrame {
     target_depth_cpu: Vec<f32>,
 }
 
-type GaussianParameterSnapshot = Splats;
+type GaussianParameterSnapshot = HostSplats;
 
 pub struct MetalTrainer {
     training_profile: TrainingProfile,
@@ -678,9 +679,9 @@ impl MetalTrainer {
 
     fn export_snapshot(
         &self,
-        gaussians: &TrainableGaussians,
+        gaussians: &Splats,
     ) -> candle_core::Result<GaussianParameterSnapshot> {
-        GaussianParameterSnapshot::from_trainable(gaussians)
+        GaussianParameterSnapshot::from_runtime(gaussians)
     }
 
     fn update_gaussian_stats(
@@ -803,10 +804,7 @@ impl MetalTrainer {
         adam.reset_moments(only_opacity)
     }
 
-    fn apply_litegs_opacity_reset(
-        &mut self,
-        gaussians: &mut TrainableGaussians,
-    ) -> candle_core::Result<()> {
+    fn apply_litegs_opacity_reset(&mut self, gaussians: &mut Splats) -> candle_core::Result<()> {
         let opacities = gaussians.opacities()?;
         let new_opacity_values = match self.litegs.opacity_reset_mode {
             super::LiteGsOpacityResetMode::Decay => inverse_sigmoid_tensor(
@@ -884,14 +882,14 @@ impl MetalTrainer {
 
     fn apply_topology_mutation_aftermath(
         &mut self,
-        gaussians: &mut TrainableGaussians,
-        snapshot: &Splats,
+        gaussians: &mut Splats,
+        snapshot: &HostSplats,
         stats: Vec<MetalGaussianStats>,
         origins: &[Option<usize>],
         aftermath: topology::TopologyMutationAftermath,
     ) -> candle_core::Result<()> {
-        if aftermath.requires_trainable_rebuild {
-            let rebuilt = snapshot.to_trainable(&self.device)?;
+        if aftermath.requires_runtime_rebuild {
+            let rebuilt = snapshot.upload(&self.device)?;
             let new_adam = match self.adam.take() {
                 Some(old_state) if aftermath.requires_adam_rebuild => {
                     self.rebuild_adam_state(&old_state, origins)?
@@ -930,10 +928,7 @@ impl MetalTrainer {
         Ok(())
     }
 
-    fn clustering_positions(
-        &self,
-        gaussians: &TrainableGaussians,
-    ) -> candle_core::Result<Vec<[f32; 3]>> {
+    fn clustering_positions(&self, gaussians: &Splats) -> candle_core::Result<Vec<[f32; 3]>> {
         gaussians
             .positions()
             .to_vec2::<f32>()?
@@ -949,7 +944,7 @@ impl MetalTrainer {
 
     fn sync_cluster_assignment(
         &mut self,
-        gaussians: &TrainableGaussians,
+        gaussians: &Splats,
         topology_changed: bool,
     ) -> candle_core::Result<()> {
         if self.litegs.cluster_size == 0 {
@@ -1058,7 +1053,7 @@ impl MetalTrainer {
 
     fn total_loss_for_render_result(
         &self,
-        gaussians: &TrainableGaussians,
+        gaussians: &Splats,
         rendered: &RenderedFrame,
         projected: &ProjectedGaussians,
         frame: &MetalTrainingFrame,
@@ -1078,7 +1073,7 @@ impl MetalTrainer {
 
     fn loss_for_camera(
         &mut self,
-        gaussians: &TrainableGaussians,
+        gaussians: &Splats,
         frame: &MetalTrainingFrame,
         camera: &DiffCamera,
     ) -> candle_core::Result<f32> {
@@ -1096,7 +1091,7 @@ impl MetalTrainer {
 
     fn maybe_apply_topology_updates(
         &mut self,
-        gaussians: &mut TrainableGaussians,
+        gaussians: &mut Splats,
         _frame_idx: usize,
         frame_count: usize,
     ) -> candle_core::Result<()> {
@@ -1130,7 +1125,7 @@ impl MetalTrainer {
             stats.resize(old_len, MetalGaussianStats::default());
         }
 
-        let current_splats = Splats::from_trainable(gaussians)?;
+        let current_splats = HostSplats::from_runtime(gaussians)?;
         let analysis = topology::analyze_topology_candidates(&policy, &current_splats, &stats);
         let density_reference = if self.is_litegs_mode() {
             Some(topology::density_controller_reference_summary(
@@ -1501,7 +1496,7 @@ impl MetalTrainer {
 
     pub(crate) fn initialize_training_session(
         &mut self,
-        gaussians: &mut TrainableGaussians,
+        gaussians: &mut Splats,
         frame_count: usize,
     ) -> candle_core::Result<()> {
         if frame_count == 0 {
@@ -1520,7 +1515,7 @@ impl MetalTrainer {
 
     pub(crate) fn train(
         &mut self,
-        gaussians: &mut TrainableGaussians,
+        gaussians: &mut Splats,
         frames: &[MetalTrainingFrame],
         max_iterations: usize,
     ) -> candle_core::Result<MetalTrainingStats> {
@@ -1591,7 +1586,7 @@ impl MetalTrainer {
 
     pub(crate) fn train_loaded(
         &mut self,
-        gaussians: &mut TrainableGaussians,
+        gaussians: &mut Splats,
         loaded: &LoadedTrainingData,
         max_iterations: usize,
     ) -> Result<MetalTrainingStats, TrainingError> {
@@ -1659,7 +1654,7 @@ impl MetalTrainer {
 
     pub(crate) fn training_step(
         &mut self,
-        gaussians: &mut TrainableGaussians,
+        gaussians: &mut Splats,
         frame: &MetalTrainingFrame,
         frame_idx: usize,
         frame_count: usize,
@@ -1910,7 +1905,7 @@ impl MetalTrainer {
 
     fn render_colors_for_camera(
         &self,
-        gaussians: &TrainableGaussians,
+        gaussians: &Splats,
         positions: &Tensor,
         camera: &DiffCamera,
     ) -> candle_core::Result<Tensor> {
@@ -2072,7 +2067,7 @@ impl MetalTrainer {
     #[cfg(test)]
     fn rotation_parameter_grads(
         &self,
-        gaussians: &TrainableGaussians,
+        gaussians: &Splats,
         projected: &ProjectedGaussians,
         rendered: &RenderedFrame,
         rendered_color_cpu: &[f32],
@@ -2101,7 +2096,7 @@ impl MetalTrainer {
     #[cfg(test)]
     fn parameter_grads_from_render_color_grads(
         &self,
-        gaussians: &TrainableGaussians,
+        gaussians: &Splats,
         projected: &ProjectedGaussians,
         render_color_grads: &Tensor,
         camera: &DiffCamera,
@@ -2118,7 +2113,7 @@ impl MetalTrainer {
 
     fn apply_parameter_grads(
         &mut self,
-        gaussians: &mut TrainableGaussians,
+        gaussians: &mut Splats,
         parameter_grads: &MetalParameterGrads,
         projected: &ProjectedGaussians,
         effective_lr_pos: f32,
@@ -2167,7 +2162,7 @@ impl MetalTrainer {
     #[cfg(test)]
     fn apply_backward_grads(
         &mut self,
-        gaussians: &mut TrainableGaussians,
+        gaussians: &mut Splats,
         grads: &MetalBackwardGrads,
         projected: &ProjectedGaussians,
         camera: &DiffCamera,
@@ -2207,7 +2202,7 @@ impl MetalTrainer {
 
     fn render(
         &mut self,
-        gaussians: &TrainableGaussians,
+        gaussians: &Splats,
         camera: &DiffCamera,
         should_profile: bool,
         collect_visible_indices: bool,
@@ -2250,7 +2245,7 @@ impl MetalTrainer {
     #[cfg(test)]
     fn project_gaussians(
         &mut self,
-        gaussians: &TrainableGaussians,
+        gaussians: &Splats,
         camera: &DiffCamera,
         should_profile: bool,
         collect_visible_indices: bool,
@@ -2324,10 +2319,10 @@ impl MetalTrainer {
     }
 }
 
-pub fn train(
+pub fn train_splats(
     dataset: &TrainingDataset,
     config: &TrainingConfig,
-) -> Result<GaussianMap, TrainingError> {
+) -> Result<HostSplats, TrainingError> {
     let start = Instant::now();
     store_last_metal_training_telemetry(None);
     let device = crate::require_metal_device()?;
@@ -2463,7 +2458,7 @@ pub fn train(
             )));
         }
     }
-    let mut gaussians = loaded.initial_splats.to_trainable(&trainer.device)?;
+    let mut gaussians = loaded.initial_splats.upload(&trainer.device)?;
     trainer.scene_extent = loaded.initial_splats.scene_extent();
 
     // Initialize pose embeddings if learnable_viewproj is enabled
@@ -2502,7 +2497,7 @@ pub fn train(
         ));
     }
     let stats = trainer.train_loaded(&mut gaussians, &loaded, config.iterations)?;
-    let trained_map = Splats::from_trainable(&gaussians)?.to_gaussian_map()?;
+    let trained_splats = HostSplats::from_runtime(&gaussians)?;
 
     log::info!(
         "Metal backend complete in {:.2}s | frames={} | render={}x{} | initial_gaussians={} | final_gaussians={} | final_loss_mean={:.6} | last_step_loss={:.6}",
@@ -2511,13 +2506,35 @@ pub fn train(
         trainer.render_width,
         trainer.render_height,
         loaded.initial_splats.len(),
-        trained_map.len(),
+        trained_splats.len(),
         stats.final_loss,
         stats.final_step_loss,
     );
     store_last_metal_training_telemetry(Some(stats.telemetry.clone()));
 
-    Ok(trained_map)
+    Ok(trained_splats)
+}
+
+#[deprecated(note = "Use train_splats(...) instead to keep HostSplats as the primary artifact.")]
+pub fn train_scene(
+    dataset: &TrainingDataset,
+    config: &TrainingConfig,
+) -> Result<GaussianMap, TrainingError> {
+    let splats = train_splats(dataset, config)?;
+    let mut map = GaussianMap::from_gaussians(splats.to_legacy_gaussians()?);
+    map.update_states();
+    Ok(map)
+}
+
+#[deprecated(note = "Use train_splats(...) instead.")]
+pub fn train(
+    dataset: &TrainingDataset,
+    config: &TrainingConfig,
+) -> Result<GaussianMap, TrainingError> {
+    let splats = train_splats(dataset, config)?;
+    let mut map = GaussianMap::from_gaussians(splats.to_legacy_gaussians()?);
+    map.update_states();
+    Ok(map)
 }
 
 fn effective_metal_config(config: &TrainingConfig) -> TrainingConfig {
@@ -3243,7 +3260,7 @@ mod tests {
         trainer.topology_memory_budget = None;
         trainer.iteration = 3;
 
-        let mut gaussians = TrainableGaussians::new(
+        let mut gaussians = Splats::new(
             &[0.0, 0.0, 1.0, 1.0, 0.0, 1.0],
             &[
                 0.05f32.ln(),
@@ -3322,7 +3339,7 @@ mod tests {
         trainer.topology_memory_budget = None;
         trainer.iteration = 3;
 
-        let mut gaussians = TrainableGaussians::new(
+        let mut gaussians = Splats::new(
             &[0.0, 0.0, 1.0],
             &[0.05f32.ln(), 0.05f32.ln(), 0.05f32.ln()],
             &[1.0, 0.0, 0.0, 0.0],
@@ -3377,7 +3394,7 @@ mod tests {
         trainer.topology_memory_budget = None;
         trainer.iteration = 6;
 
-        let mut gaussians = TrainableGaussians::new(
+        let mut gaussians = Splats::new(
             &[0.0, 0.0, 1.0],
             &[0.05f32.ln(), 0.05f32.ln(), 0.05f32.ln()],
             &[1.0, 0.0, 0.0, 0.0],
@@ -3431,7 +3448,7 @@ mod tests {
         trainer.topology_memory_budget = None;
         trainer.iteration = 6;
 
-        let mut gaussians = TrainableGaussians::new(
+        let mut gaussians = Splats::new(
             &[0.0, 0.0, 1.0],
             &[0.05f32.ln(), 0.05f32.ln(), 0.05f32.ln()],
             &[1.0, 0.0, 0.0, 0.0],
@@ -3514,7 +3531,7 @@ mod tests {
         )
         .unwrap();
 
-        let identity = TrainableGaussians::new(
+        let identity = Splats::new(
             &[0.0, 0.0, 2.0],
             &[0.4f32.ln(), 0.05f32.ln(), 0.05f32.ln()],
             &[1.0, 0.0, 0.0, 0.0],
@@ -3523,7 +3540,7 @@ mod tests {
             &device,
         )
         .unwrap();
-        let rotated = TrainableGaussians::new(
+        let rotated = Splats::new(
             &[0.0, 0.0, 2.0],
             &[0.4f32.ln(), 0.05f32.ln(), 0.05f32.ln()],
             &[
@@ -3578,7 +3595,7 @@ mod tests {
             &device,
         )
         .unwrap();
-        let gaussians = TrainableGaussians::new(
+        let gaussians = Splats::new(
             &[0.25, 0.0, 2.0],
             &[0.4f32.ln(), 0.05f32.ln(), 0.05f32.ln()],
             &[1.0, 0.0, 0.0, base_z],
@@ -3655,7 +3672,7 @@ mod tests {
             &device,
         )
         .unwrap();
-        let mut gaussians = TrainableGaussians::new(
+        let mut gaussians = Splats::new(
             &[0.0, 0.0, 2.0],
             &[0.4f32.ln(), 0.05f32.ln(), 0.05f32.ln()],
             &[1.0, 0.0, 0.0, 0.0],
@@ -3711,7 +3728,7 @@ mod tests {
         let mut trainer = MetalTrainer::new(64, 64, &config, device.clone()).unwrap();
         trainer.iteration = 3;
         let camera = make_test_camera(&device);
-        let mut gaussians = TrainableGaussians::new(
+        let mut gaussians = Splats::new(
             &[0.0, 0.0, 2.0, 3.0, 0.0, 2.0],
             &[0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
             &[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
@@ -3778,7 +3795,7 @@ mod tests {
         let mut trainer = MetalTrainer::new(64, 64, &config, device.clone()).unwrap();
         trainer.iteration = 4;
         let camera = make_test_camera(&device);
-        let mut gaussians = TrainableGaussians::new(
+        let mut gaussians = Splats::new(
             &[0.0, 0.0, 2.0, 3.0, 0.0, 2.0],
             &[0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
             &[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
@@ -3896,7 +3913,7 @@ mod tests {
         let mut trainer = MetalTrainer::new(64, 64, &config, device.clone()).unwrap();
         trainer.scene_extent = 16.0;
         let camera = make_test_camera(&device);
-        let mut gaussians = TrainableGaussians::new(
+        let mut gaussians = Splats::new(
             &[
                 0.0, 0.0, 2.0, //
                 0.0, 0.0, -2.0,
@@ -3992,7 +4009,7 @@ mod tests {
         let mut trainer = MetalTrainer::new(64, 64, &config, device.clone()).unwrap();
         trainer.scene_extent = 16.0;
         let camera = make_test_camera(&device);
-        let mut gaussians = TrainableGaussians::new(
+        let mut gaussians = Splats::new(
             &[
                 0.0, 0.0, 2.0, //
                 0.0, 0.0, -2.0,
@@ -4163,7 +4180,7 @@ mod tests {
         }
         let initial_splats = loaded.initial_splats.clone();
         trainer.scene_extent = initial_splats.scene_extent();
-        let mut gaussians = initial_splats.to_trainable(&device).unwrap();
+        let mut gaussians = initial_splats.upload(&device).unwrap();
         trainer.adam = Some(MetalAdamState::new(&gaussians).unwrap());
         trainer.iteration = 1;
         let frames = trainer.prepare_frames(&loaded).unwrap();
@@ -4253,20 +4270,16 @@ mod tests {
         let opacity_delta =
             max_abs_delta(&before_opacities, gaussians.opacities.as_tensor()).unwrap();
         let color_delta = max_abs_delta(&before_colors, &gaussians.colors()).unwrap();
-        let trained_map = Splats::from_trainable(&gaussians)
+        let trained_gaussians = HostSplats::from_runtime(&gaussians)
             .unwrap()
-            .to_gaussian_map()
+            .to_legacy_gaussians()
             .unwrap();
         let mut map_position_delta = 0.0f32;
         let mut map_scale_delta = 0.0f32;
         let mut map_opacity_delta = 0.0f32;
         let mut map_color_delta = 0.0f32;
-        let initial_map = loaded.initial_splats.to_gaussian_map().unwrap();
-        for (before, after) in initial_map
-            .gaussians()
-            .iter()
-            .zip(trained_map.gaussians().iter())
-        {
+        let initial_gaussians = loaded.initial_splats.to_legacy_gaussians().unwrap();
+        for (before, after) in initial_gaussians.iter().zip(trained_gaussians.iter()) {
             map_position_delta =
                 map_position_delta.max((before.position - after.position).abs().max_element());
             map_scale_delta = map_scale_delta.max((before.scale - after.scale).abs().max_element());
@@ -4375,7 +4388,7 @@ mod tests {
         }
         let initial_splats = loaded.initial_splats.clone();
         trainer.scene_extent = initial_splats.scene_extent();
-        let mut gaussians = initial_splats.to_trainable(&device).unwrap();
+        let mut gaussians = initial_splats.upload(&device).unwrap();
         let before_positions = gaussians
             .positions()
             .flatten_all()
@@ -4581,7 +4594,7 @@ mod tests {
         let mut trainer = MetalTrainer::new(64, 64, &config, device.clone()).unwrap();
         trainer.iteration = 3;
         let camera = make_test_camera(&device);
-        let mut gaussians = TrainableGaussians::new(
+        let mut gaussians = Splats::new(
             &[0.0, 0.0, 2.0, 3.0, 0.0, 2.0],
             &[0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
             &[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
@@ -4738,22 +4751,21 @@ mod tests {
 
     #[test]
     fn splats_downsample_evenly_spreads_samples_across_map() {
-        let map = GaussianMap::from_gaussians(
-            (0..10)
-                .map(|idx| {
-                    let mut gaussian = crate::Gaussian3D::default();
-                    gaussian.position.x = idx as f32;
-                    gaussian
-                })
-                .collect(),
-        );
-        let mut splats = Splats::from_gaussian_map_inferred(&map).unwrap();
+        let mut splats = HostSplats::with_sh_degree_capacity(0, 10);
+        for idx in 0..10 {
+            splats.push_rgb(
+                [idx as f32, 0.0, 0.0],
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0, 0.0],
+                0.0,
+                [0.5, 0.5, 0.5],
+            );
+        }
         splats.downsample_evenly(4);
-        let map = splats.to_gaussian_map().unwrap();
-        let sampled_positions: Vec<f32> = map
-            .gaussians()
-            .iter()
-            .map(|gaussian| gaussian.position.x)
+        let sampled_positions: Vec<f32> = splats
+            .positions_vec3()
+            .into_iter()
+            .map(|position| position[0])
             .collect();
         assert_eq!(sampled_positions, vec![0.0, 2.0, 5.0, 7.0]);
     }
@@ -4779,7 +4791,9 @@ mod tests {
     fn chunk_capacity_marks_over_budget_requests_for_subdivision() {
         let config = TrainingConfig {
             chunked_training: true,
-            chunk_budget_gb: 1.0,
+            // Keep this deliberately tight so the estimator reliably requests
+            // subdivision even as per-gaussian accounting evolves.
+            chunk_budget_gb: 0.25,
             metal_render_scale: 1.0,
             max_initial_gaussians: 57_474,
             ..TrainingConfig::default()
@@ -4986,7 +5000,7 @@ mod tests {
             &device,
         )
         .unwrap();
-        let gaussians = TrainableGaussians::new(
+        let gaussians = Splats::new(
             &[0.0, 0.0, 2.0, 1.0, 0.0, 3.0],
             &[
                 0.1f32.ln(),
@@ -5089,7 +5103,7 @@ mod tests {
             &device,
         )
         .unwrap();
-        let gaussians = TrainableGaussians::new(
+        let gaussians = Splats::new(
             &[0.0, 0.0, -1.0],
             &[0.0, 0.0, 0.0],
             &[1.0, 0.0, 0.0, 0.0],
@@ -5134,7 +5148,7 @@ mod tests {
             &device,
         )
         .unwrap();
-        let gaussians = TrainableGaussians::new(
+        let gaussians = Splats::new(
             &[
                 0.0, 0.0, 1.0, //
                 0.1, 0.0, 0.5, //
@@ -5198,7 +5212,7 @@ mod tests {
             &device,
         )
         .unwrap();
-        let gaussians = TrainableGaussians::new(
+        let gaussians = Splats::new(
             &[
                 0.0, 0.0, 1.0, //
                 0.1, 0.0, 0.5, //
@@ -5255,7 +5269,7 @@ mod tests {
         };
         let mut trainer = MetalTrainer::new(32, 16, &trainer_config, device.clone()).unwrap();
         trainer.topology_memory_budget = None;
-        let mut gaussians = TrainableGaussians::new(
+        let mut gaussians = Splats::new(
             &[0.0, 0.0, 1.0, 1.0, 0.0, 1.0],
             &[
                 0.05f32.ln(),
@@ -5315,7 +5329,7 @@ mod tests {
         };
         let mut trainer = MetalTrainer::new(32, 16, &trainer_config, device.clone()).unwrap();
         trainer.topology_memory_budget = None;
-        let mut gaussians = TrainableGaussians::new_with_sh(
+        let mut gaussians = Splats::new_with_sh(
             &[0.0, 0.0, 1.0],
             &[0.05f32.ln(), 0.05f32.ln(), 0.05f32.ln()],
             &[1.0, 0.0, 0.0, 0.0],
@@ -5365,7 +5379,7 @@ mod tests {
             ..TrainingConfig::default()
         };
         let mut trainer = MetalTrainer::new(32, 16, &trainer_config, device.clone()).unwrap();
-        let mut gaussians = TrainableGaussians::new(
+        let mut gaussians = Splats::new(
             &[0.0, 0.0, 1.0, 1.0, 0.0, 1.0],
             &[
                 0.05f32.ln(),
@@ -5426,7 +5440,7 @@ mod tests {
         let device = Device::Cpu;
         let trainer =
             MetalTrainer::new(32, 16, &TrainingConfig::default(), device.clone()).unwrap();
-        let gaussians = TrainableGaussians::new(
+        let gaussians = Splats::new(
             &[0.0, 0.0, 1.0, 1.0, 0.0, 2.0],
             &[
                 0.05f32.ln(),
@@ -5479,7 +5493,7 @@ mod tests {
         )
         .unwrap();
         trainer.scene_extent = 16.0;
-        let gaussians = TrainableGaussians::new(
+        let gaussians = Splats::new(
             &[0.0, 0.0, 0.0, 1.0, 0.0, 0.0],
             &[0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
             &[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
@@ -5524,7 +5538,7 @@ mod tests {
         )
         .unwrap();
         trainer.scene_extent = 16.0;
-        let gaussians_one = TrainableGaussians::new(
+        let gaussians_one = Splats::new(
             &[0.0, 0.0, 0.0],
             &[0.0, 0.0, 0.0],
             &[1.0, 0.0, 0.0, 0.0],
@@ -5546,7 +5560,7 @@ mod tests {
             1
         );
 
-        let gaussians_two = TrainableGaussians::new(
+        let gaussians_two = Splats::new(
             &[0.0, 0.0, 0.0, 5.0, 0.0, 0.0],
             &[0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
             &[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
@@ -5640,7 +5654,7 @@ mod tests {
         .unwrap();
         let mut sh_rest = vec![0.0f32; 3 * 3];
         sh_rest[0] = -0.5;
-        let gaussians = TrainableGaussians::new_with_sh(
+        let gaussians = Splats::new_with_sh(
             &[0.0, 1.0, 0.0],
             &[0.0, 0.0, 0.0],
             &[1.0, 0.0, 0.0, 0.0],
@@ -5730,7 +5744,7 @@ mod tests {
             &device,
         )
         .unwrap();
-        let gaussians = TrainableGaussians::new(
+        let gaussians = Splats::new(
             &[0.0, 0.0, 3.0],
             &[0.0, 0.0, 0.0],
             &[1.0, 0.0, 0.0, 0.0],
@@ -5811,7 +5825,7 @@ mod tests {
             device.clone(),
         )
         .unwrap();
-        let gaussians = TrainableGaussians::new(
+        let gaussians = Splats::new(
             &[0.0, 0.0, 3.0, 1.0, 0.0, 3.0],
             &[2.0f32.ln(), 1.0f32.ln(), 0.5f32.ln(), 0.0, 0.0, 0.0],
             &[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
@@ -5866,7 +5880,7 @@ mod tests {
             &device,
         )
         .unwrap();
-        let gaussians = TrainableGaussians::new_with_sh(
+        let gaussians = Splats::new_with_sh(
             &[0.0, 1.0, 0.0],
             &[0.0, 0.0, 0.0],
             &[1.0, 0.0, 0.0, 0.0],
@@ -5950,7 +5964,7 @@ mod tests {
             &device,
         )
         .unwrap();
-        let gaussians = TrainableGaussians::new_with_sh(
+        let gaussians = Splats::new_with_sh(
             &[1.2, 0.8, 2.5],
             &[0.0, 0.0, 0.0],
             &[1.0, 0.0, 0.0, 0.0],

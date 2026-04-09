@@ -3,17 +3,17 @@ use super::data_loading::LoadedTrainingData;
 #[cfg(feature = "gpu")]
 use super::metal_trainer::{MetalStepProfile, MetalTrainer};
 #[cfg(feature = "gpu")]
-use super::splats::Splats;
+use super::splats::splat_color_representation_for_config;
+#[cfg(feature = "gpu")]
+use super::splats::HostSplats;
 #[cfg(feature = "gpu")]
 use super::{TrainingConfig, TrainingProfile};
 #[cfg(feature = "gpu")]
 use crate::diff::diff_splat::DiffCamera;
 #[cfg(feature = "gpu")]
-use crate::{Gaussian3D, GaussianMap, TrainingError};
+use crate::TrainingError;
 #[cfg(feature = "gpu")]
 use candle_core::Device;
-#[cfg(feature = "gpu")]
-use glam::{Quat, Vec3};
 #[cfg(feature = "gpu")]
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "gpu")]
@@ -165,7 +165,7 @@ fn run_step_microbenchmark(
     let loaded = synthetic_loaded_training_data(spec, config, &device)?;
     let mut trainer = MetalTrainer::new(spec.width, spec.height, config, device.clone())?;
     let frames = trainer.prepare_frames(&loaded)?;
-    let mut gaussians = loaded.initial_splats.to_trainable(&device)?;
+    let mut gaussians = loaded.initial_splats.upload(&device)?;
     trainer.initialize_training_session(&mut gaussians, frames.len())?;
 
     for step in 0..spec.warmup_steps {
@@ -234,7 +234,7 @@ fn run_smoke_training_benchmark(
     let loaded = synthetic_loaded_training_data(spec, config, &device)?;
     let mut trainer = MetalTrainer::new(spec.width, spec.height, config, device.clone())?;
     let frames = trainer.prepare_frames(&loaded)?;
-    let mut gaussians = loaded.initial_splats.to_trainable(&device)?;
+    let mut gaussians = loaded.initial_splats.upload(&device)?;
 
     let smoke_start = Instant::now();
     let stats = trainer.train(&mut gaussians, &frames, spec.smoke_iterations)?;
@@ -309,17 +309,15 @@ fn synthetic_loaded_training_data(
         depths,
         target_width: spec.width,
         target_height: spec.height,
-        initial_splats: Splats::from_gaussian_map_for_config(
-            &synthetic_initial_map(spec.gaussian_count),
-            config,
-        )?,
+        initial_splats: synthetic_initial_splats(spec.gaussian_count, config),
     })
 }
 
 #[cfg(feature = "gpu")]
-fn synthetic_initial_map(gaussian_count: usize) -> GaussianMap {
+fn synthetic_initial_splats(gaussian_count: usize, config: &TrainingConfig) -> HostSplats {
     let cols = (gaussian_count as f32).sqrt().ceil().max(1.0) as usize;
-    let mut gaussians = Vec::with_capacity(gaussian_count);
+    let sh_degree = splat_color_representation_for_config(config).sh_degree();
+    let mut splats = HostSplats::with_sh_degree_capacity(sh_degree, gaussian_count);
     for idx in 0..gaussian_count {
         let x_idx = idx % cols;
         let y_idx = idx / cols;
@@ -333,26 +331,26 @@ fn synthetic_initial_map(gaussian_count: usize) -> GaussianMap {
         } else {
             0.5
         };
-        let position = Vec3::new(
+        let position = [
             (norm_x - 0.5) * 1.2,
             (norm_y - 0.5) * 0.8,
             1.5 + (idx % 7) as f32 * 0.05,
-        );
-        let scale = Vec3::new(0.06, 0.06, 0.08);
+        ];
+        let log_scale = [0.06f32.ln(), 0.06f32.ln(), 0.08f32.ln()];
         let color = [
             0.2 + 0.6 * norm_x,
             0.15 + 0.7 * norm_y,
             0.3 + 0.5 * ((idx % 11) as f32 / 10.0),
         ];
-        gaussians.push(Gaussian3D::new(
+        splats.push_rgb(
             position,
-            scale,
-            Quat::IDENTITY,
+            log_scale,
+            [1.0, 0.0, 0.0, 0.0],
             0.55,
             color.map(|value| value.clamp(0.0, 1.0)),
-        ));
+        );
     }
-    GaussianMap::from_gaussians(gaussians)
+    splats
 }
 
 #[cfg(feature = "gpu")]

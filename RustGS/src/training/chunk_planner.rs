@@ -117,10 +117,15 @@ impl ChunkBounds {
 }
 
 impl ChunkPlan {
-    pub fn trainable_chunks(&self) -> impl Iterator<Item = &PlannedChunk> {
+    pub fn training_chunks(&self) -> impl Iterator<Item = &PlannedChunk> {
         self.chunks
             .iter()
             .filter(|chunk| chunk.disposition == ChunkDisposition::Trainable)
+    }
+
+    #[deprecated(note = "Use training_chunks() instead.")]
+    pub fn trainable_chunks(&self) -> impl Iterator<Item = &PlannedChunk> {
+        self.training_chunks()
     }
 }
 

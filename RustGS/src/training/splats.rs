@@ -1,54 +1,133 @@
 use candle_core::Device;
+use serde::{Deserialize, Serialize};
 
 use crate::core::{Gaussian3D, GaussianColorRepresentation, GaussianMap, GaussianState};
 use crate::diff::diff_splat::{
-    rgb_to_sh0_value, sh0_to_rgb_value, TrainableColorRepresentation, TrainableGaussians,
+    rgb_to_sh0_value, sh0_to_rgb_value, sh_coeff_count_for_degree, Splats as RuntimeSplats,
+    TrainableColorRepresentation, TrainableGaussians,
 };
 use crate::Gaussian;
 
 use super::{TrainingConfig, TrainingProfile};
 
-#[derive(Debug, Clone)]
-pub(crate) struct Splats {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HostSplats {
     pub(super) positions: Vec<f32>,
     pub(super) log_scales: Vec<f32>,
     pub(super) rotations: Vec<f32>,
     pub(super) opacity_logits: Vec<f32>,
-    pub(super) colors: Vec<f32>,
-    pub(super) sh_rest: Vec<f32>,
-    pub(super) color_representation: TrainableColorRepresentation,
+    pub(super) sh_coeffs: Vec<f32>,
+    pub(super) sh_degree: usize,
 }
 
-impl Splats {
-    pub(super) fn from_trainable(gaussians: &TrainableGaussians) -> candle_core::Result<Self> {
+impl Default for HostSplats {
+    fn default() -> Self {
+        Self {
+            positions: Vec::new(),
+            log_scales: Vec::new(),
+            rotations: Vec::new(),
+            opacity_logits: Vec::new(),
+            sh_coeffs: Vec::new(),
+            sh_degree: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct SplatView<'a> {
+    pub positions: &'a [f32],
+    pub log_scales: &'a [f32],
+    pub rotations: &'a [f32],
+    pub opacity_logits: &'a [f32],
+    pub sh_coeffs: &'a [f32],
+    pub sh_degree: usize,
+}
+
+pub(crate) type Splats = HostSplats;
+
+impl HostSplats {
+    pub(super) fn with_sh_degree_capacity(sh_degree: usize, row_count: usize) -> Self {
+        Self {
+            positions: Vec::with_capacity(row_count * 3),
+            log_scales: Vec::with_capacity(row_count * 3),
+            rotations: Vec::with_capacity(row_count * 4),
+            opacity_logits: Vec::with_capacity(row_count),
+            sh_coeffs: Vec::with_capacity(row_count * sh_coeff_count_for_degree(sh_degree) * 3),
+            sh_degree,
+        }
+    }
+
+    pub fn from_raw_parts(
+        positions: Vec<f32>,
+        log_scales: Vec<f32>,
+        rotations: Vec<f32>,
+        opacity_logits: Vec<f32>,
+        sh_coeffs: Vec<f32>,
+        sh_degree: usize,
+    ) -> candle_core::Result<Self> {
         let splats = Self {
-            positions: flatten_rows(gaussians.positions().to_vec2::<f32>()?),
-            log_scales: flatten_rows(gaussians.scales.as_tensor().to_vec2::<f32>()?),
-            rotations: flatten_rows(gaussians.rotations.as_tensor().to_vec2::<f32>()?),
-            opacity_logits: gaussians.opacities.as_tensor().to_vec1::<f32>()?,
-            colors: flatten_rows(gaussians.colors().to_vec2::<f32>()?),
-            sh_rest: flatten_3d(gaussians.sh_rest().to_vec3::<f32>()?),
-            color_representation: gaussians.color_representation(),
+            positions,
+            log_scales,
+            rotations,
+            opacity_logits,
+            sh_coeffs,
+            sh_degree,
         };
         splats.validate()?;
         Ok(splats)
     }
 
-    pub(super) fn from_gaussian_map(
-        map: &GaussianMap,
+    pub fn from_runtime(gaussians: &RuntimeSplats) -> candle_core::Result<Self> {
+        let sh_degree = gaussians.sh_degree();
+        let mut sh_coeffs =
+            Vec::with_capacity(gaussians.len() * sh_coeff_count_for_degree(sh_degree) * 3);
+        let sh_0 = flatten_rows(gaussians.colors().to_vec2::<f32>()?);
+        let sh_rest = flatten_3d(gaussians.sh_rest().to_vec3::<f32>()?);
+        if sh_degree == 0 && !gaussians.uses_spherical_harmonics() {
+            sh_coeffs.extend(sh_0.into_iter().map(rgb_to_sh0_value));
+        } else {
+            let sh_rest_row_width = sh_coeff_count_for_degree(sh_degree).saturating_sub(1) * 3;
+            for idx in 0..gaussians.len() {
+                let base = idx * 3;
+                sh_coeffs.extend_from_slice(&sh_0[base..base + 3]);
+                let rest = row_slice(&sh_rest, sh_rest_row_width, idx);
+                sh_coeffs.extend_from_slice(rest);
+            }
+        }
+        let splats = Self {
+            positions: flatten_rows(gaussians.positions().to_vec2::<f32>()?),
+            log_scales: flatten_rows(gaussians.scales.as_tensor().to_vec2::<f32>()?),
+            rotations: flatten_rows(gaussians.rotations.as_tensor().to_vec2::<f32>()?),
+            opacity_logits: gaussians.opacities.as_tensor().to_vec1::<f32>()?,
+            sh_coeffs,
+            sh_degree,
+        };
+        splats.validate()?;
+        Ok(splats)
+    }
+
+    #[deprecated(note = "Use HostSplats::from_runtime(...) instead.")]
+    pub fn from_trainable(gaussians: &TrainableGaussians) -> candle_core::Result<Self> {
+        Self::from_runtime(gaussians)
+    }
+
+    pub fn from_legacy_gaussians(
+        gaussians: &[Gaussian3D],
         color_representation: TrainableColorRepresentation,
     ) -> candle_core::Result<Self> {
+        let sh_degree = color_representation.sh_degree();
         let mut splats = Self {
-            positions: Vec::with_capacity(map.len() * 3),
-            log_scales: Vec::with_capacity(map.len() * 3),
-            rotations: Vec::with_capacity(map.len() * 4),
-            opacity_logits: Vec::with_capacity(map.len()),
-            colors: Vec::with_capacity(map.len() * 3),
-            sh_rest: Vec::with_capacity(map.len() * color_representation.sh_rest_coeff_count() * 3),
-            color_representation,
+            positions: Vec::with_capacity(gaussians.len() * 3),
+            log_scales: Vec::with_capacity(gaussians.len() * 3),
+            rotations: Vec::with_capacity(gaussians.len() * 4),
+            opacity_logits: Vec::with_capacity(gaussians.len()),
+            sh_coeffs: Vec::with_capacity(
+                gaussians.len() * sh_coeff_count_for_degree(sh_degree) * 3,
+            ),
+            sh_degree,
         };
 
-        for gaussian in map.gaussians() {
+        for gaussian in gaussians {
             splats.positions.extend_from_slice(&[
                 gaussian.position.x,
                 gaussian.position.y,
@@ -71,17 +150,12 @@ impl Splats {
 
             match color_representation {
                 TrainableColorRepresentation::Rgb => {
-                    splats.colors.extend_from_slice(&gaussian.color);
+                    splats.push_sh_coeffs(gaussian.color.map(rgb_to_sh0_value), &[]);
                 }
                 TrainableColorRepresentation::SphericalHarmonics { degree } => {
                     match gaussian.color_representation {
                         GaussianColorRepresentation::Rgb => {
-                            splats
-                                .colors
-                                .extend(gaussian.color.iter().copied().map(rgb_to_sh0_value));
-                            splats
-                                .sh_rest
-                                .resize(splats.sh_rest.len() + splats.sh_rest_row_width(), 0.0);
+                            splats.push_sh_coeffs(gaussian.color.map(rgb_to_sh0_value), &[]);
                         }
                         GaussianColorRepresentation::SphericalHarmonics {
                             degree: stored_degree,
@@ -91,20 +165,12 @@ impl Splats {
                                     "gaussian map mixes SH degree {stored_degree} with requested degree {degree}"
                                 );
                             }
-                            splats.colors.extend_from_slice(
-                                &gaussian
+                            splats.push_sh_coeffs(
+                                gaussian
                                     .sh_dc
                                     .unwrap_or_else(|| gaussian.color.map(rgb_to_sh0_value)),
+                                gaussian.sh_rest.as_deref().unwrap_or(&[]),
                             );
-                            let source_rest = gaussian.sh_rest.as_deref().unwrap_or(&[]);
-                            let expected = splats.sh_rest_row_width();
-                            let copied = source_rest.len().min(expected);
-                            splats.sh_rest.extend_from_slice(&source_rest[..copied]);
-                            if copied < expected {
-                                splats
-                                    .sh_rest
-                                    .resize(splats.sh_rest.len() + (expected - copied), 0.0);
-                            }
                         }
                     }
                 }
@@ -115,37 +181,49 @@ impl Splats {
         Ok(splats)
     }
 
-    pub(super) fn from_gaussian_map_for_config(
+    pub fn from_legacy_gaussians_for_config(
+        gaussians: &[Gaussian3D],
+        config: &TrainingConfig,
+    ) -> candle_core::Result<Self> {
+        Self::from_legacy_gaussians(gaussians, splat_color_representation_for_config(config))
+    }
+
+    pub fn from_legacy_gaussians_inferred(gaussians: &[Gaussian3D]) -> candle_core::Result<Self> {
+        let color_representation = infer_color_representation_from_legacy_gaussians(gaussians)?;
+        Self::from_legacy_gaussians(gaussians, color_representation)
+    }
+
+    #[deprecated(note = "Use HostSplats::from_legacy_gaussians(...) instead.")]
+    pub fn from_gaussian_map(
+        map: &GaussianMap,
+        color_representation: TrainableColorRepresentation,
+    ) -> candle_core::Result<Self> {
+        Self::from_legacy_gaussians(map.gaussians(), color_representation)
+    }
+
+    #[deprecated(note = "Use HostSplats::from_legacy_gaussians_for_config(...) instead.")]
+    pub fn from_gaussian_map_for_config(
         map: &GaussianMap,
         config: &TrainingConfig,
     ) -> candle_core::Result<Self> {
-        Self::from_gaussian_map(map, trainable_color_representation_for_config(config))
+        Self::from_legacy_gaussians_for_config(map.gaussians(), config)
     }
 
-    pub(super) fn from_gaussian_map_inferred(map: &GaussianMap) -> candle_core::Result<Self> {
-        let color_representation = infer_color_representation_from_gaussian_map(map)?;
-        Self::from_gaussian_map(map, color_representation)
+    #[deprecated(note = "Use HostSplats::from_legacy_gaussians_inferred(...) instead.")]
+    pub fn from_gaussian_map_inferred(map: &GaussianMap) -> candle_core::Result<Self> {
+        Self::from_legacy_gaussians_inferred(map.gaussians())
     }
 
-    pub(super) fn from_scene_gaussians(
-        scene: &[Gaussian],
-        sh_degree: usize,
-    ) -> candle_core::Result<Self> {
-        let color_representation = if sh_degree > 0 {
-            TrainableColorRepresentation::SphericalHarmonics { degree: sh_degree }
-        } else {
-            TrainableColorRepresentation::Rgb
-        };
-        let sh_rest_row_width = color_representation.sh_rest_coeff_count() * 3;
+    pub fn from_scene_gaussians(scene: &[Gaussian], sh_degree: usize) -> candle_core::Result<Self> {
         let mut splats = Self {
             positions: Vec::with_capacity(scene.len() * 3),
             log_scales: Vec::with_capacity(scene.len() * 3),
             rotations: Vec::with_capacity(scene.len() * 4),
             opacity_logits: Vec::with_capacity(scene.len()),
-            colors: Vec::with_capacity(scene.len() * 3),
-            sh_rest: Vec::with_capacity(scene.len() * sh_rest_row_width),
-            color_representation,
+            sh_coeffs: Vec::with_capacity(scene.len() * sh_coeff_count_for_degree(sh_degree) * 3),
+            sh_degree,
         };
+        let sh_rest_row_width = splats.sh_rest_row_width();
 
         for (index, gaussian) in scene.iter().enumerate() {
             splats.positions.extend_from_slice(&gaussian.position);
@@ -158,9 +236,8 @@ impl Splats {
             splats
                 .opacity_logits
                 .push(opacity_to_logit(gaussian.opacity));
-            splats.colors.extend_from_slice(&gaussian.color);
 
-            if sh_rest_row_width > 0 {
+            let sh_rest = if sh_rest_row_width > 0 {
                 match gaussian.sh_rest.as_ref() {
                     Some(values) => {
                         if values.len() != sh_rest_row_width {
@@ -171,12 +248,16 @@ impl Splats {
                                 sh_degree
                             );
                         }
-                        splats.sh_rest.extend_from_slice(values);
+                        values.as_slice()
                     }
-                    None => splats
-                        .sh_rest
-                        .extend(std::iter::repeat_n(0.0, sh_rest_row_width)),
+                    None => &[],
                 }
+            } else {
+                &[]
+            };
+            splats.push_sh_coeffs(gaussian.color.map(rgb_to_sh0_value), sh_rest);
+            if sh_rest_row_width > 0 && gaussian.sh_rest.is_none() {
+                // `push_sh_coeffs` already zero-fills missing SH rows.
             }
         }
 
@@ -184,25 +265,26 @@ impl Splats {
         Ok(splats)
     }
 
-    pub(super) fn to_trainable(&self, device: &Device) -> candle_core::Result<TrainableGaussians> {
+    pub fn upload(&self, device: &Device) -> candle_core::Result<RuntimeSplats> {
         self.validate()?;
-        match self.color_representation {
-            TrainableColorRepresentation::Rgb => TrainableGaussians::new(
+        match self.sh_degree {
+            0 => RuntimeSplats::new(
                 &self.positions,
                 &self.log_scales,
                 &self.rotations,
                 &self.opacity_logits,
-                &self.colors,
+                &self.rgb_colors(),
                 device,
             ),
-            TrainableColorRepresentation::SphericalHarmonics { degree } => {
-                TrainableGaussians::new_with_sh(
+            degree => {
+                let (sh_0, sh_rest) = self.split_sh_coeffs();
+                RuntimeSplats::new_with_sh(
                     &self.positions,
                     &self.log_scales,
                     &self.rotations,
                     &self.opacity_logits,
-                    &self.colors,
-                    &self.sh_rest,
+                    &sh_0,
+                    &sh_rest,
                     degree,
                     device,
                 )
@@ -210,12 +292,33 @@ impl Splats {
         }
     }
 
-    pub(super) fn to_gaussian_map(&self) -> candle_core::Result<GaussianMap> {
+    pub fn to_runtime(&self, device: &Device) -> candle_core::Result<RuntimeSplats> {
+        self.upload(device)
+    }
+
+    #[deprecated(note = "Use HostSplats::to_runtime(...) or HostSplats::upload(...) instead.")]
+    pub fn to_trainable(&self, device: &Device) -> candle_core::Result<TrainableGaussians> {
+        self.to_runtime(device)
+    }
+
+    pub fn as_view(&self) -> SplatView<'_> {
+        SplatView {
+            positions: &self.positions,
+            log_scales: &self.log_scales,
+            rotations: &self.rotations,
+            opacity_logits: &self.opacity_logits,
+            sh_coeffs: &self.sh_coeffs,
+            sh_degree: self.sh_degree,
+        }
+    }
+
+    pub fn to_legacy_gaussians(&self) -> candle_core::Result<Vec<Gaussian3D>> {
         self.validate()?;
-        let color_representation = match self.color_representation {
-            TrainableColorRepresentation::Rgb => GaussianColorRepresentation::Rgb,
-            TrainableColorRepresentation::SphericalHarmonics { degree } => {
-                GaussianColorRepresentation::SphericalHarmonics { degree }
+        let color_representation = if self.sh_degree == 0 {
+            GaussianColorRepresentation::Rgb
+        } else {
+            GaussianColorRepresentation::SphericalHarmonics {
+                degree: self.sh_degree,
             }
         };
 
@@ -223,7 +326,8 @@ impl Splats {
         for idx in 0..self.len() {
             let scale = self.scale(idx);
             let rotation = self.rotation(idx);
-            let color = self.color(idx);
+            let sh_0 = self.sh_0(idx);
+            let color = self.rgb_color(idx);
             output.push(Gaussian3D {
                 position: glam::Vec3::new(
                     self.positions[idx * 3],
@@ -239,7 +343,7 @@ impl Splats {
                     color_representation,
                     GaussianColorRepresentation::SphericalHarmonics { .. }
                 )
-                .then_some(color),
+                .then_some(sh_0),
                 sh_rest: matches!(
                     color_representation,
                     GaussianColorRepresentation::SphericalHarmonics { .. }
@@ -250,29 +354,34 @@ impl Splats {
             });
         }
 
-        let mut map = GaussianMap::from_gaussians(output);
+        Ok(output)
+    }
+
+    #[deprecated(note = "Use HostSplats::to_legacy_gaussians(...) instead.")]
+    pub fn to_gaussian_map(&self) -> candle_core::Result<GaussianMap> {
+        let mut map = GaussianMap::from_gaussians(self.to_legacy_gaussians()?);
         map.update_states();
         Ok(map)
     }
 
-    pub(super) fn to_scene_gaussians(&self) -> candle_core::Result<Vec<Gaussian>> {
+    pub fn to_scene_gaussians(&self) -> candle_core::Result<Vec<Gaussian>> {
         self.validate()?;
         let mut gaussians = Vec::with_capacity(self.len());
         for idx in 0..self.len() {
-            let gaussian = match self.color_representation {
-                TrainableColorRepresentation::Rgb => Gaussian::new(
+            let gaussian = match self.sh_degree {
+                0 => Gaussian::new(
                     self.position(idx),
                     self.scale(idx),
                     self.rotation(idx),
                     sigmoid_scalar(self.opacity_logits[idx]).clamp(0.0, 1.0),
-                    self.color(idx),
+                    self.rgb_color(idx),
                 ),
-                TrainableColorRepresentation::SphericalHarmonics { .. } => Gaussian::with_sh(
+                _ => Gaussian::with_sh(
                     self.position(idx),
                     self.scale(idx),
                     self.rotation(idx),
                     sigmoid_scalar(self.opacity_logits[idx]).clamp(0.0, 1.0),
-                    self.color(idx).map(sh0_to_rgb_value),
+                    self.rgb_color(idx),
                     self.sh_rest(idx).to_vec(),
                 ),
             };
@@ -281,39 +390,34 @@ impl Splats {
         Ok(gaussians)
     }
 
-    pub(super) fn to_scene_metadata(
-        &self,
-        iterations: usize,
-        final_loss: f32,
-    ) -> crate::SceneMetadata {
+    pub fn to_scene_metadata(&self, iterations: usize, final_loss: f32) -> crate::SceneMetadata {
         crate::SceneMetadata {
             iterations,
             final_loss,
             gaussian_count: self.len(),
-            sh_degree: self.color_representation.sh_degree(),
+            sh_degree: self.sh_degree,
         }
     }
 
-    pub(super) fn validate(&self) -> candle_core::Result<()> {
+    pub fn validate(&self) -> candle_core::Result<()> {
         let row_count = self.opacity_logits.len();
         validate_component_len("positions", self.positions.len(), row_count, 3)?;
         validate_component_len("log_scales", self.log_scales.len(), row_count, 3)?;
         validate_component_len("rotations", self.rotations.len(), row_count, 4)?;
-        validate_component_len("colors", self.colors.len(), row_count, 3)?;
         validate_component_len(
-            "sh_rest",
-            self.sh_rest.len(),
+            "sh_coeffs",
+            self.sh_coeffs.len(),
             row_count,
-            self.sh_rest_row_width(),
+            self.sh_coeffs_row_width(),
         )?;
         Ok(())
     }
 
-    pub(super) fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         self.opacity_logits.len()
     }
 
-    pub(super) fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
@@ -346,21 +450,37 @@ impl Splats {
         ]
     }
 
-    pub(super) fn color(&self, idx: usize) -> [f32; 3] {
+    pub(super) fn sh_0(&self, idx: usize) -> [f32; 3] {
         let base = idx * 3;
         [
-            self.colors[base],
-            self.colors[base + 1],
-            self.colors[base + 2],
+            self.sh_coeffs[base],
+            self.sh_coeffs[base + 1],
+            self.sh_coeffs[base + 2],
         ]
     }
 
+    pub(super) fn rgb_color(&self, idx: usize) -> [f32; 3] {
+        self.sh_0(idx).map(sh0_to_rgb_value)
+    }
+
+    pub fn sh_degree(&self) -> usize {
+        self.sh_degree
+    }
+
+    pub(super) fn sh_coeffs_row_width(&self) -> usize {
+        sh_coeff_count_for_degree(self.sh_degree) * 3
+    }
+
     pub(super) fn sh_rest_row_width(&self) -> usize {
-        self.color_representation.sh_rest_coeff_count() * 3
+        self.sh_coeffs_row_width().saturating_sub(3)
+    }
+
+    pub(super) fn sh_coeffs_row(&self, idx: usize) -> &[f32] {
+        row_slice(&self.sh_coeffs, self.sh_coeffs_row_width(), idx)
     }
 
     pub(super) fn sh_rest(&self, idx: usize) -> &[f32] {
-        row_slice(&self.sh_rest, self.sh_rest_row_width(), idx)
+        self.sh_coeffs_row(idx).get(3..).unwrap_or(&[])
     }
 
     pub(super) fn scale(&self, idx: usize) -> [f32; 3] {
@@ -375,22 +495,32 @@ impl Splats {
         log_scale: [f32; 3],
         rotation: [f32; 4],
         opacity_logit: f32,
-        color: [f32; 3],
-        sh_rest: &[f32],
+        sh_coeffs: &[f32],
     ) {
         self.positions.extend_from_slice(&position);
         self.log_scales.extend_from_slice(&log_scale);
         self.rotations.extend_from_slice(&rotation);
         self.opacity_logits.push(opacity_logit);
-        self.colors.extend_from_slice(&color);
-        let sh_rest_row_width = self.sh_rest_row_width();
-        if sh_rest_row_width > 0 {
-            let copied = sh_rest.len().min(sh_rest_row_width);
-            self.sh_rest.extend_from_slice(&sh_rest[..copied]);
-            if copied < sh_rest_row_width {
-                self.sh_rest
-                    .resize(self.sh_rest.len() + (sh_rest_row_width - copied), 0.0);
-            }
+        self.push_sh_coeffs_row(sh_coeffs);
+    }
+
+    pub(super) fn push_rgb(
+        &mut self,
+        position: [f32; 3],
+        log_scale: [f32; 3],
+        rotation: [f32; 4],
+        opacity_logit: f32,
+        rgb: [f32; 3],
+    ) {
+        self.positions.extend_from_slice(&position);
+        self.log_scales.extend_from_slice(&log_scale);
+        self.rotations.extend_from_slice(&rotation);
+        self.opacity_logits.push(opacity_logit);
+        self.sh_coeffs.extend(rgb.map(rgb_to_sh0_value));
+        let sh_rest_width = self.sh_rest_row_width();
+        if sh_rest_width > 0 {
+            self.sh_coeffs
+                .resize(self.sh_coeffs.len() + sh_rest_width, 0.0);
         }
     }
 
@@ -401,9 +531,8 @@ impl Splats {
             log_scales: Vec::with_capacity(row_count * 3),
             rotations: Vec::with_capacity(row_count * 4),
             opacity_logits: Vec::with_capacity(row_count),
-            colors: Vec::with_capacity(row_count * 3),
-            sh_rest: Vec::with_capacity(row_count * self.sh_rest_row_width()),
-            color_representation: self.color_representation,
+            sh_coeffs: Vec::with_capacity(row_count * self.sh_coeffs_row_width()),
+            sh_degree: self.sh_degree,
         }
     }
 
@@ -422,8 +551,7 @@ impl Splats {
                 self.log_scale(src_idx),
                 self.rotation(src_idx),
                 self.opacity_logits[src_idx],
-                self.color(src_idx),
-                self.sh_rest(src_idx),
+                self.sh_coeffs_row(src_idx),
             );
         }
         *self = sampled;
@@ -460,9 +588,54 @@ impl Splats {
         }
         max_dist.max(1e-3)
     }
+
+    fn push_sh_coeffs(&mut self, sh_0: [f32; 3], sh_rest: &[f32]) {
+        self.sh_coeffs.extend_from_slice(&sh_0);
+        let sh_rest_row_width = self.sh_rest_row_width();
+        if sh_rest_row_width == 0 {
+            return;
+        }
+        let copied = sh_rest.len().min(sh_rest_row_width);
+        self.sh_coeffs.extend_from_slice(&sh_rest[..copied]);
+        if copied < sh_rest_row_width {
+            self.sh_coeffs
+                .resize(self.sh_coeffs.len() + (sh_rest_row_width - copied), 0.0);
+        }
+    }
+
+    fn push_sh_coeffs_row(&mut self, sh_coeffs: &[f32]) {
+        let row_width = self.sh_coeffs_row_width();
+        if row_width == 0 {
+            return;
+        }
+        let copied = sh_coeffs.len().min(row_width);
+        self.sh_coeffs.extend_from_slice(&sh_coeffs[..copied]);
+        if copied < row_width {
+            self.sh_coeffs
+                .resize(self.sh_coeffs.len() + (row_width - copied), 0.0);
+        }
+    }
+
+    fn split_sh_coeffs(&self) -> (Vec<f32>, Vec<f32>) {
+        let mut sh_0 = Vec::with_capacity(self.len() * 3);
+        let mut sh_rest = Vec::with_capacity(self.len() * self.sh_rest_row_width());
+        for idx in 0..self.len() {
+            sh_0.extend_from_slice(&self.sh_0(idx));
+            sh_rest.extend_from_slice(self.sh_rest(idx));
+        }
+        (sh_0, sh_rest)
+    }
+
+    fn rgb_colors(&self) -> Vec<f32> {
+        let mut rgb = Vec::with_capacity(self.len() * 3);
+        for idx in 0..self.len() {
+            rgb.extend(self.rgb_color(idx));
+        }
+        rgb
+    }
 }
 
-pub(super) fn trainable_color_representation_for_config(
+pub(super) fn splat_color_representation_for_config(
     config: &TrainingConfig,
 ) -> TrainableColorRepresentation {
     if config.training_profile == TrainingProfile::LiteGsMacV1 {
@@ -474,11 +647,11 @@ pub(super) fn trainable_color_representation_for_config(
     }
 }
 
-pub(super) fn infer_color_representation_from_gaussian_map(
-    map: &GaussianMap,
+pub(super) fn infer_color_representation_from_legacy_gaussians(
+    gaussians: &[Gaussian3D],
 ) -> candle_core::Result<TrainableColorRepresentation> {
     let mut inferred = TrainableColorRepresentation::Rgb;
-    for gaussian in map.gaussians() {
+    for gaussian in gaussians {
         match gaussian.color_representation {
             GaussianColorRepresentation::Rgb => {
                 if inferred != TrainableColorRepresentation::Rgb {
@@ -545,10 +718,10 @@ fn sigmoid_scalar(value: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        infer_color_representation_from_gaussian_map, trainable_color_representation_for_config,
+        infer_color_representation_from_legacy_gaussians, splat_color_representation_for_config,
         Splats,
     };
-    use crate::core::{Gaussian3D, GaussianColorRepresentation, GaussianMap};
+    use crate::core::{Gaussian3D, GaussianColorRepresentation};
     use crate::diff::diff_splat::{
         rgb_to_sh0_value, TrainableColorRepresentation, TrainableGaussians,
     };
@@ -563,9 +736,8 @@ mod tests {
             log_scales: vec![0.0; 6],
             rotations: vec![0.0; 8],
             opacity_logits: vec![0.0; 2],
-            colors: vec![0.0; 6],
-            sh_rest: Vec::new(),
-            color_representation: TrainableColorRepresentation::Rgb,
+            sh_coeffs: vec![0.0; 6],
+            sh_degree: 0,
         };
 
         let err = invalid.validate().unwrap_err().to_string();
@@ -585,17 +757,20 @@ mod tests {
         )
         .unwrap();
 
-        let splats = Splats::from_trainable(&gaussians).unwrap();
-        let rebuilt = splats.to_trainable(&device).unwrap();
+        let splats = Splats::from_runtime(&gaussians).unwrap();
+        let rebuilt = splats.to_runtime(&device).unwrap();
 
         assert_eq!(
             rebuilt.positions().to_vec2::<f32>().unwrap(),
             gaussians.positions().to_vec2::<f32>().unwrap()
         );
-        assert_eq!(
-            rebuilt.colors().to_vec2::<f32>().unwrap(),
-            gaussians.colors().to_vec2::<f32>().unwrap()
-        );
+        let rebuilt_colors = rebuilt.colors().to_vec2::<f32>().unwrap();
+        let source_colors = gaussians.colors().to_vec2::<f32>().unwrap();
+        for (rebuilt_row, source_row) in rebuilt_colors.iter().zip(source_colors.iter()) {
+            for (rebuilt, source) in rebuilt_row.iter().zip(source_row.iter()) {
+                assert!((rebuilt - source).abs() < 1e-6);
+            }
+        }
     }
 
     #[test]
@@ -617,8 +792,8 @@ mod tests {
         )
         .unwrap();
 
-        let splats = Splats::from_trainable(&gaussians).unwrap();
-        let rebuilt = splats.to_trainable(&device).unwrap();
+        let splats = Splats::from_runtime(&gaussians).unwrap();
+        let rebuilt = splats.to_runtime(&device).unwrap();
 
         assert!(rebuilt.uses_spherical_harmonics());
         assert_eq!(rebuilt.sh_degree(), 3);
@@ -629,23 +804,24 @@ mod tests {
     }
 
     #[test]
-    fn gaussian_map_round_trips_via_rgb_splats() {
+    fn legacy_gaussians_round_trip_via_rgb_splats() {
         let device = Device::Cpu;
-        let map = GaussianMap::from_gaussians(vec![Gaussian3D::new(
+        let gaussians = vec![Gaussian3D::new(
             Vec3::new(1.0, 2.0, 3.0),
             Vec3::new(0.1, 0.2, 0.3),
             Quat::IDENTITY,
             0.25,
             [0.2, 0.4, 0.6],
-        )]);
+        )];
 
-        let splats = Splats::from_gaussian_map(&map, TrainableColorRepresentation::Rgb).unwrap();
-        let trainable = splats.to_trainable(&device).unwrap();
-        let rebuilt = Splats::from_trainable(&trainable)
+        let splats =
+            Splats::from_legacy_gaussians(&gaussians, TrainableColorRepresentation::Rgb).unwrap();
+        let runtime = splats.to_runtime(&device).unwrap();
+        let rebuilt = Splats::from_runtime(&runtime)
             .unwrap()
-            .to_gaussian_map()
+            .to_legacy_gaussians()
             .unwrap();
-        let gaussian = &rebuilt.gaussians()[0];
+        let gaussian = &rebuilt[0];
 
         assert_eq!(
             gaussian.color_representation,
@@ -657,7 +833,7 @@ mod tests {
     }
 
     #[test]
-    fn gaussian_map_round_trips_via_sh_splats() {
+    fn legacy_gaussians_round_trips_via_sh_splats() {
         let device = Device::Cpu;
         let gaussian = Gaussian3D::new(
             Vec3::new(1.0, 2.0, 3.0),
@@ -675,19 +851,19 @@ mod tests {
             ]),
             Some(vec![0.5; 15 * 3]),
         );
-        let map = GaussianMap::from_gaussians(vec![gaussian]);
+        let gaussians = vec![gaussian];
 
-        let splats = Splats::from_gaussian_map(
-            &map,
+        let splats = Splats::from_legacy_gaussians(
+            &gaussians,
             TrainableColorRepresentation::SphericalHarmonics { degree: 3 },
         )
         .unwrap();
-        let trainable = splats.to_trainable(&device).unwrap();
-        let rebuilt = Splats::from_trainable(&trainable)
+        let runtime = splats.to_runtime(&device).unwrap();
+        let rebuilt = Splats::from_runtime(&runtime)
             .unwrap()
-            .to_gaussian_map()
+            .to_legacy_gaussians()
             .unwrap();
-        let gaussian = &rebuilt.gaussians()[0];
+        let gaussian = &rebuilt[0];
 
         assert_eq!(
             gaussian.color_representation,
@@ -705,11 +881,11 @@ mod tests {
     }
 
     #[test]
-    fn config_selects_internal_trainable_color_representation() {
-        let legacy = trainable_color_representation_for_config(&TrainingConfig::default());
+    fn config_selects_internal_splat_color_representation() {
+        let legacy = splat_color_representation_for_config(&TrainingConfig::default());
         assert_eq!(legacy, TrainableColorRepresentation::Rgb);
 
-        let litegs = trainable_color_representation_for_config(&TrainingConfig {
+        let litegs = splat_color_representation_for_config(&TrainingConfig {
             training_profile: TrainingProfile::LiteGsMacV1,
             litegs: LiteGsConfig {
                 sh_degree: 3,
@@ -724,7 +900,7 @@ mod tests {
     }
 
     #[test]
-    fn inferred_color_representation_tracks_sh_degree_from_map() {
+    fn inferred_color_representation_tracks_sh_degree_from_legacy_gaussians() {
         let gaussian = Gaussian3D::new(
             Vec3::new(1.0, 2.0, 3.0),
             Vec3::new(0.1, 0.2, 0.3),
@@ -741,9 +917,9 @@ mod tests {
             ]),
             Some(vec![0.5; 15 * 3]),
         );
-        let map = GaussianMap::from_gaussians(vec![gaussian]);
+        let gaussians = vec![gaussian];
 
-        let representation = infer_color_representation_from_gaussian_map(&map).unwrap();
+        let representation = infer_color_representation_from_legacy_gaussians(&gaussians).unwrap();
 
         assert_eq!(
             representation,
@@ -785,9 +961,9 @@ mod tests {
             ]),
             Some(vec![0.5; 15 * 3]),
         );
-        let map = GaussianMap::from_gaussians(vec![sh_degree_2, sh_degree_3]);
+        let gaussians = vec![sh_degree_2, sh_degree_3];
 
-        let err = infer_color_representation_from_gaussian_map(&map)
+        let err = infer_color_representation_from_legacy_gaussians(&gaussians)
             .unwrap_err()
             .to_string();
 
@@ -812,9 +988,9 @@ mod tests {
             ]),
             Some(vec![0.5; 15 * 3]),
         );
-        let map = GaussianMap::from_gaussians(vec![gaussian]);
+        let gaussians = vec![gaussian];
 
-        let splats = Splats::from_gaussian_map_inferred(&map).unwrap();
+        let splats = Splats::from_legacy_gaussians_inferred(&gaussians).unwrap();
         let scene = splats.to_scene_gaussians().unwrap();
         let metadata = splats.to_scene_metadata(7, 0.5);
 
@@ -830,7 +1006,7 @@ mod tests {
 
     #[test]
     fn scene_extent_tracks_radius_from_splats_positions() {
-        let map = GaussianMap::from_gaussians(vec![
+        let gaussians = vec![
             Gaussian3D::new(
                 Vec3::new(-2.0, 0.0, 0.0),
                 Vec3::new(0.1, 0.2, 0.3),
@@ -845,9 +1021,9 @@ mod tests {
                 0.25,
                 [0.2, 0.4, 0.6],
             ),
-        ]);
+        ];
 
-        let splats = Splats::from_gaussian_map_inferred(&map).unwrap();
+        let splats = Splats::from_legacy_gaussians_inferred(&gaussians).unwrap();
 
         assert!((splats.scene_extent() - 2.0).abs() < 1e-6);
         assert_eq!(

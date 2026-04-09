@@ -1,6 +1,6 @@
 use candle_core::{Device, Tensor};
 
-use crate::diff::diff_splat::TrainableGaussians;
+use crate::diff::diff_splat::Splats;
 
 #[derive(Debug)]
 pub(super) struct MetalAdamState {
@@ -19,7 +19,7 @@ pub(super) struct MetalAdamState {
 }
 
 impl MetalAdamState {
-    pub(super) fn new(gaussians: &TrainableGaussians) -> candle_core::Result<Self> {
+    pub(super) fn new(gaussians: &Splats) -> candle_core::Result<Self> {
         Ok(Self {
             m_pos: gaussians.positions().zeros_like()?,
             v_pos: gaussians.positions().zeros_like()?,
@@ -160,13 +160,13 @@ fn gather_rows(source: &[f32], row_width: usize, origins: &[Option<usize>]) -> V
 #[cfg(test)]
 mod tests {
     use super::MetalAdamState;
-    use crate::diff::diff_splat::TrainableGaussians;
+    use crate::diff::diff_splat::Splats;
     use candle_core::{Device, Tensor};
 
     #[test]
     fn rebuild_preserves_pruned_and_reordered_rows() {
         let device = Device::Cpu;
-        let gaussians = TrainableGaussians::new(
+        let gaussians = Splats::new(
             &[0.0, 0.0, 1.0, 1.0, 0.0, 2.0, 2.0, 0.0, 3.0],
             &[0.0; 9],
             &[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
@@ -204,7 +204,7 @@ mod tests {
     #[test]
     fn rebuild_zero_initializes_split_rows() {
         let device = Device::Cpu;
-        let gaussians = TrainableGaussians::new(
+        let gaussians = Splats::new(
             &[0.0, 0.0, 1.0],
             &[0.0, 0.0, 0.0],
             &[1.0, 0.0, 0.0, 0.0],

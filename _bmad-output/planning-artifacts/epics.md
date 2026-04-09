@@ -1,640 +1,487 @@
 ---
-stepsCompleted: [1, 2, 3, 4]
+stepsCompleted:
+  - step-01-validate-prerequisites
+  - step-02-design-epics
+  - step-03-create-stories
+  - step-04-final-validation
 inputDocuments:
-  - /Users/tfjiang/Projects/brush/crates/brush-process/src/train_stream.rs
-  - /Users/tfjiang/Projects/brush/crates/brush-dataset/src/scene_loader.rs
-  - /Users/tfjiang/Projects/brush/crates/brush-train/src/train.rs
-  - /Users/tfjiang/Projects/brush/crates/brush-serde/src/import.rs
-  - /Users/tfjiang/Projects/brush/crates/brush-serde/src/export.rs
-  - /Users/tfjiang/Projects/RustScan/RustGS/src/training/mod.rs
-  - /Users/tfjiang/Projects/RustScan/RustGS/src/training/metal_trainer.rs
-  - /Users/tfjiang/Projects/RustScan/RustGS/src/training/data_loading.rs
-  - /Users/tfjiang/Projects/RustScan/RustGS/src/training/training_pipeline.rs
-  - /Users/tfjiang/Projects/RustScan/RustGS/src/io/scene_io.rs
+  - /Users/tfjiang/Projects/RustScan/RustGS/docs/plans/2026-04-09-rustgs-soa-splat-architecture-proposal.md
 ---
 
 # RustScan - Epic Breakdown
 
 ## Overview
 
-This document provides the complete epic and story breakdown for RustScan, decomposing the Brush-inspired RustGS migration plan into implementable stories. The purpose of this plan is not to port Brush into RustGS, but to migrate the parts of Brush that improve RustGS engineering quality: training orchestration, data loading, dataset onboarding, topology state management, persistence hardening, and validation infrastructure.
+This document provides the complete epic and story breakdown for RustScan, decomposing the requirements from the selected splat architecture proposal into implementable stories.
+
+## Implementation Status
+
+Status snapshot as of 2026-04-09:
+
+- `Epic 1` is partially complete.
+  - Runtime `Splats` rename landed.
+  - Host `HostSplats` rename landed.
+  - Explicit upload/snapshot APIs landed.
+  - Host-side SH payload unification landed.
+  - Most internal GPU training code now uses the canonical `Splats` name directly.
+  - Runtime-side SH/color split is still pending cleanup.
+- `Epic 2` is partially complete.
+  - Runtime `Splats` is now the explicit training owner in the main non-chunked Metal path.
+  - Existing optimizer/topology sidecars remain external.
+  - Training data loading and initialization now build `HostSplats` directly.
+  - Some compatibility paths still bounce through `GaussianMap`.
+- `Epic 3` is partially complete.
+  - `SplatView` landed.
+  - `save_splats_ply` / `load_splats_ply` landed.
+  - `save_splats_ply` / `load_splats_ply` now run directly on `HostSplats` SoA storage.
+  - `evaluate_splats` / `trainable_from_splats` landed.
+  - `evaluate_gaussians` / `trainable_from_gaussians` now provide splat-first canonical naming for Gaussian-array compatibility inputs.
+  - Import and some compatibility reporting paths still use scene-oriented helpers.
+- `Epic 4` is not complete.
+  - AoS and scene/map owners still exist in compatibility paths.
+  - SLAM/path adapters still exist at crate root.
+  - Legacy CLI/evaluation/reporting terminology still exposes `scene` names in public compatibility surfaces.
 
 ## Requirements Inventory
 
 ### Functional Requirements
 
-FR1: RustGS routes training execution through a dedicated orchestration module that owns initialization, loop scheduling, evaluation, export, and telemetry.
-FR2: RustGS separates step-level Metal execution from lifecycle management so `metal_trainer` focuses on forward, backward, and parameter update work.
-FR3: RustGS provides a high-throughput frame loader with asynchronous prefetch, bounded caching, and randomized batch delivery for color and depth data.
-FR4: RustGS preserves existing synthetic-depth fallback and current frame preprocessing semantics when moving frame ingestion out of `data_loading.rs`.
-FR5: RustGS can load COLMAP datasets directly, including camera and image parsing, sparse-point initialization, and eval split support.
-FR6: RustGS can load Nerfstudio datasets directly, including `transforms*.json`, optional init splats, and eval or test split support.
-FR7: RustGS supports dataset-local training configuration overlays that can be overridden from the CLI without code changes.
-FR8: RustGS extracts initial-map construction, topology decisions, and optimizer-state reshaping into focused modules that preserve current LiteGS and Legacy semantics.
-FR9: RustGS provides richer scene persistence with versioned metadata, dynamic SH-aware import and export, and round-trip safety.
-FR10: RustGS adds training, loader, persistence, and topology regression coverage together with benchmark harnesses for forward, backward, and training smoke runs.
-FR11: RustGS preserves current non-chunked, chunked, `LegacyMetal`, and `LiteGsMacV1` entry behavior while the migration lands incrementally.
-FR12: Each migration increment is shippable as a standalone story that a single dev agent can complete without waiting for future stories in the same epic.
+FR1: RustGS shall expose `Splats` as the only long-lived runtime splat owner for training.
+
+FR2: RustGS shall expose `HostSplats` as the host-side boundary type for initialization, import, export, and checkpointing.
+
+FR3: RustGS shall expose `SplatView` as the shared borrowed read-only interface for export, evaluation, and non-owning helpers.
+
+FR4: RustGS shall represent all owning splat parameter types using structure-of-arrays layout.
+
+FR5: RustGS runtime `Splats` shall own differentiable device-side fields for `positions`, `log_scales`, `rotations`, `opacity_logits`, `sh_coeffs`, `n`, and `sh_degree`.
+
+FR6: RustGS `HostSplats` shall own host-side vector fields for `positions`, `log_scales`, `rotations`, `opacity_logits`, `sh_coeffs`, and `sh_degree`.
+
+FR7: RustGS shall restrict owning conversion paths to `TrainingDataset -> HostSplats`, `HostSplats -> Splats`, and `Splats -> HostSplats`.
+
+FR8: RustGS shall treat `HostSplats` as a boundary artifact, not as an eagerly synchronized runtime mirror of `Splats`.
+
+FR9: RustGS `Splats` shall provide a `snapshot()` path that materializes `HostSplats` for host-facing workflows.
+
+FR10: RustGS shall keep optimizer state, topology state, and densify/prune accumulators outside of the core splat owners.
+
+FR11: RustGS shall unify SH storage so that `sh_degree = 0` represents the RGB-only case and `sh_coeffs` is always stored in coefficient-major RGB-triplet layout.
+
+FR12: RustGS shall remove owning AoS and scene-oriented core types including `Gaussian3D`, `GaussianMap`, `render::tiled_renderer::Gaussian`, and `training_pipeline::TrainableGaussian`.
+
+FR13: RustGS shall rename current `diff::TrainableGaussians` to `Splats`.
+
+FR14: RustGS shall rename current host-side `training::splats::Splats` to `HostSplats`.
+
+FR15: RustGS shall rename borrowed helper interfaces to `SplatView`.
+
+FR16: RustGS core APIs shall be shaped around `TrainingDataset`, not around `SlamOutput` or other SLAM-derived input types.
+
+FR17: RustGS shall demote `train_from_slam`, SLAM-centric entrypoints, and dataset autodetection to adapter or CLI layers outside the core splat architecture.
+
+FR18: RustGS shall rename scene-oriented IO APIs such as `save_scene_ply` and `load_scene_ply` to splat-oriented names.
 
 ### NonFunctional Requirements
 
-NFR1: Keep Metal and Candle as the runtime backbone; do not port RustGS to Burn, WGPU, or WGSL as part of this migration.
-NFR2: Bound new loader memory usage and avoid unbounded CPU image accumulation during training.
-NFR3: Preserve compatibility of existing CLI commands and scene outputs unless an explicit versioned format change is introduced.
-NFR4: New modules must reduce trainer cognitive load by making ownership boundaries explicit and testable.
-NFR5: Persistence changes must ship with round-trip and backward-compatibility regression coverage.
-NFR6: The final architecture must support reproducible benchmarking and developer handoff across long-running workstreams.
+NFR1: The core splat architecture shall avoid representational drift by limiting the system to one long-lived runtime splat owner and one host boundary splat owner.
+
+NFR2: SH information shall round-trip between `HostSplats` and `Splats` without semantic loss.
+
+NFR3: Conversion boundaries shall remain minimal and explicit.
+
+NFR4: The architecture shall preserve a logical distinction between host ownership and device ownership even on unified-memory Apple Silicon hardware.
+
+NFR5: The core architecture shall avoid public owning AoS Gaussian types.
+
+NFR6: The public naming model shall be simple and training-centric.
+
+NFR7: Rendering, evaluation, and export shall prefer borrowed views rather than additional owning splat types.
+
+NFR8: The migration shall be executable in phases without requiring a single destructive rewrite.
 
 ### Additional Requirements
 
-- Do not migrate Brush UI, mobile, browser, or viewer subsystems into RustGS.
-- Do not replace `chunk_planner`, Metal kernels, or the analytical backward path in phase one; wrap them behind clearer orchestration boundaries instead.
-- Keep `training_pipeline.rs` as legacy or reference utilities during migration instead of adding new production responsibilities.
-- Prefer facade-first refactors that preserve public APIs while internal modules are split.
-- Capture module ownership, rollout toggles, and migration notes in docs as part of the rollout epic.
-- Use maintainer, researcher, and training-operator outcomes as the user-value lens for epics and stories.
+- Introduce shared SH helper functions and remove duplicate color representation enums.
+
+- Keep runtime sidecars such as optimizer state and topology bookkeeping separate from `Splats`.
+
+- Ensure `HostSplats` can validate shape invariants before upload and after snapshot.
+
+- Ensure `Splats` validates tensor shapes and degree-dependent SH coefficient layout.
+
+- Keep `HostSplats` suitable for PLY import/export and checkpoint serialization.
+
+- Ensure the runtime design moves RustGS closer to Brush's dominant-owner model without copying Brush's packed `[n, 10]` transform layout.
 
 ### FR Coverage Map
 
-FR1: Epic 1 - Predictable Training Lifecycle
-FR2: Epic 1 - Predictable Training Lifecycle
-FR3: Epic 2 - Fast Frame Input Pipeline
-FR4: Epic 2 - Fast Frame Input Pipeline
-FR5: Epic 3 - Direct Dataset Onboarding
-FR6: Epic 3 - Direct Dataset Onboarding
-FR7: Epic 3 - Direct Dataset Onboarding
-FR8: Epic 4 - Safe Gaussian Topology Evolution
-FR9: Epic 5 - Reliable Scene Interchange
-FR10: Epic 6 - Regression-Safe Rollout
-FR11: Epic 6 - Regression-Safe Rollout
-FR12: Epic 6 - Regression-Safe Rollout
+FR1: Epic 1 - Establish `Splats` as the only long-lived runtime splat owner.
+
+FR2: Epic 1 - Establish `HostSplats` as the host-side boundary type.
+
+FR3: Epic 3 - Introduce `SplatView` as the shared borrowed read-only interface.
+
+FR4: Epic 1 - Make all owning splat parameter types SoA.
+
+FR5: Epic 1 - Define the runtime `Splats` device-side field model.
+
+FR6: Epic 1 - Define the `HostSplats` host-side field model.
+
+FR7: Epic 1 - Restrict owning conversion paths to initialization, upload, and snapshot.
+
+FR8: Epic 2 - Ensure `HostSplats` is boundary-only and not an eagerly synchronized runtime mirror.
+
+FR9: Epic 3 - Provide `snapshot()` from runtime `Splats` into `HostSplats` for host-facing workflows.
+
+FR10: Epic 2 - Move optimizer, topology, and densify/prune accumulators into runtime sidecars.
+
+FR11: Epic 1 - Unify SH storage semantics and treat `sh_degree = 0` as RGB-only.
+
+FR12: Epic 4 - Remove AoS and scene-oriented core types from the main architecture.
+
+FR13: Epic 1 - Rename current `diff::TrainableGaussians` to `Splats`.
+
+FR14: Epic 1 - Rename current host-side `training::splats::Splats` to `HostSplats`.
+
+FR15: Epic 3 - Rename borrowed helper interfaces to `SplatView`.
+
+FR16: Epic 4 - Shape the core API around `TrainingDataset` rather than SLAM-derived types.
+
+FR17: Epic 4 - Demote SLAM-centric entrypoints and dataset autodetection to adapter or CLI layers.
+
+FR18: Epic 3 - Rename scene-oriented IO APIs to splat-oriented names.
 
 ## Epic List
 
-### Epic 1: Predictable Training Lifecycle
-RustGS maintainers can reason about and extend training runs through a dedicated orchestration layer instead of a monolithic trainer file.
-**FRs covered:** FR1, FR2
+### Epic 1: Canonical Splat Model
+Enable RustGS maintainers to work against one coherent SoA splat model by defining `Splats`, `HostSplats`, shared SH storage rules, and explicit ownership conversions.
+**FRs covered:** FR1, FR2, FR4, FR5, FR6, FR7, FR11, FR13, FR14
 
-### Epic 2: Fast Frame Input Pipeline
-Training operators can feed large RGB and depth datasets through bounded, asynchronous, reusable frame-loading infrastructure without degrading current output semantics.
-**FRs covered:** FR3, FR4
+### Epic 2: Runtime Ownership And Sidecars
+Enable training-flow developers to run the system with `Splats` as the only long-lived runtime owner while keeping optimizer and topology process state outside the core model.
+**FRs covered:** FR8, FR10
 
-### Epic 3: Direct Dataset Onboarding
-Researchers can train RustGS directly from COLMAP and Nerfstudio datasets and apply per-dataset configuration without custom one-off conversion scripts.
-**FRs covered:** FR5, FR6, FR7
+### Epic 3: Artifact And Read-Only Interfaces
+Enable engineers to initialize, snapshot, evaluate, export, and checkpoint the model through `HostSplats` and `SplatView` without introducing more owning Gaussian types.
+**FRs covered:** FR3, FR9, FR15, FR18
 
-### Epic 4: Safe Gaussian Topology Evolution
-Maintainers can change densify, prune, and opacity-reset behavior and associated optimizer state without expanding `metal_trainer.rs` into another monolith.
-**FRs covered:** FR8
+### Epic 4: Pure-Training API Cleanup
+Enable RustGS to behave like a pure 3DGS training library by removing AoS and scene-oriented core types and pushing SLAM-shaped entrypoints out of the core architecture.
+**FRs covered:** FR12, FR16, FR17
 
-### Epic 5: Reliable Scene Interchange
-Users can save, load, and round-trip richer RustGS scene data safely across experiments and future SH-capable formats.
-**FRs covered:** FR9
+## Epic 1: Canonical Splat Model
 
-### Epic 6: Regression-Safe Rollout
-The team can land the migration incrementally with confidence through smoke tests, benchmarks, docs, and compatibility gates.
-**FRs covered:** FR10, FR11, FR12
+Define one coherent SoA splat model centered on runtime `Splats`, boundary `HostSplats`, and one shared SH storage contract.
 
-## Epic 1: Predictable Training Lifecycle
-
-Create a dedicated training orchestration layer that owns run lifecycle concerns, leaving `metal_trainer` responsible for step-level execution only.
-
-### Story 1.1: Introduce `train_stream.rs` as the Training Lifecycle Facade
+### Story 1.1: Shared SH Storage Contract
 
 As a RustGS maintainer,
-I want `training::train()` to delegate to a dedicated orchestration module,
-So that lifecycle flow is explicit and `metal_trainer` no longer acts as the only control surface.
+I want one shared SH storage contract and helper surface,
+So that all splat code paths encode color with the same semantics.
 
-**Implements:** FR1, FR2, FR11.
+**Implements:** FR11
 
 **Acceptance Criteria:**
 
-**Given** an existing `TrainingDataset` and `TrainingConfig`
-**When** `training::train()` is called
-**Then** execution is routed through `training/train_stream.rs`
-**And** the public return type and caller-facing API remain unchanged.
+**Given** the current split between RGB and SH representations
+**When** the shared SH helper module is introduced
+**Then** degree-based coefficient counting is defined in one place
+**And** `sh_degree = 0` is treated as the RGB-only case.
 
-**Given** `chunked_training` is enabled or disabled
-**When** route selection runs
-**Then** the existing standard and chunked execution paths are preserved
-**And** no caller changes are required to select them.
+**Given** host and runtime splat types
+**When** they store color coefficients
+**Then** both use the same coefficient-major RGB-triplet layout
+**And** there is no new path that stores separate owned `color`, `sh_dc`, and `sh_rest` fields.
 
-### Story 1.2: Extract Evaluation Scheduling into `training/eval.rs`
+### Story 1.2: Runtime `Splats` Rename And Field Alignment
 
 As a RustGS maintainer,
-I want evaluation scheduling and metric calculation to live in a dedicated module,
-So that training-loop control and metric logic can evolve independently.
+I want the device-side runtime owner renamed to `Splats`,
+So that the main training model has one simple, stable name.
 
-**Implements:** FR1, FR2, FR11.
-
-**Acceptance Criteria:**
-
-**Given** a training run with evaluation enabled
-**When** the configured evaluation interval is reached
-**Then** `training/eval.rs` owns evaluation dispatch and metric aggregation
-**And** `metal_trainer` is no longer responsible for orchestration-level eval timing.
-
-**Given** an evaluation failure occurs
-**When** the failure is surfaced to the caller
-**Then** the error message identifies the evaluation phase clearly
-**And** the surrounding training state remains diagnosable.
-
-### Story 1.3: Extract Export and Checkpoint Scheduling into `training/export.rs`
-
-As a training operator,
-I want export scheduling to be controlled by a dedicated module,
-So that checkpoint behavior is consistent across training routes and easier to test.
-
-**Implements:** FR1, FR11.
+**Implements:** FR1, FR5, FR13
 
 **Acceptance Criteria:**
 
-**Given** a training run with periodic export enabled
-**When** an export boundary is reached
-**Then** `training/export.rs` decides the output path, naming, and persistence action
-**And** the orchestration layer can call it without embedding export rules inline.
+**Given** the current `diff::TrainableGaussians` runtime owner
+**When** it is refactored
+**Then** the public runtime type is named `Splats`
+**And** its fields are aligned to `positions`, `log_scales`, `rotations`, `opacity_logits`, `sh_coeffs`, `n`, and `sh_degree`.
 
-**Given** export is disabled or unchanged from current defaults
-**When** training runs normally
-**Then** no extra export side effects occur
-**And** current output behavior remains compatible.
+**Given** runtime tensor storage
+**When** `Splats` is validated
+**Then** tensor shapes are checked against the declared `n` and `sh_degree`
+**And** shape validation fails on incompatible coefficient layout.
 
-### Story 1.4: Extract Training Telemetry Assembly into `training/telemetry.rs`
+### Story 1.3: `HostSplats` Rename And Boundary Field Alignment
 
 As a RustGS maintainer,
-I want telemetry assembly and last-step reporting to be centralized,
-So that training metrics can be extended without adding more lifecycle code to `metal_trainer`.
+I want the host-side splat buffer renamed to `HostSplats`,
+So that initialization and artifact workflows use a clearly named boundary type.
 
-**Implements:** FR1, FR2, FR11.
+**Implements:** FR2, FR6, FR14
 
 **Acceptance Criteria:**
 
-**Given** per-step timing, loss, and topology data are produced during training
-**When** telemetry is updated
-**Then** `training/telemetry.rs` owns snapshot assembly and persistence hooks
-**And** `metal_trainer` only returns raw step-level signals.
+**Given** the current host-side `training::splats::Splats`
+**When** it is refactored
+**Then** the public host boundary type is named `HostSplats`
+**And** its fields mirror the runtime model semantically using `Vec<f32>` storage.
 
-**Given** `LiteGsMacV1` telemetry fields already exist
-**When** the new telemetry module is introduced
-**Then** those fields remain available to existing callers
-**And** no profile-specific data is dropped during migration.
+**Given** a `HostSplats` instance
+**When** it is validated
+**Then** vector lengths are checked against `n` and `sh_degree`
+**And** invalid field lengths produce deterministic validation failure.
 
-## Epic 2: Fast Frame Input Pipeline
-
-Introduce reusable frame-loading infrastructure with bounded memory, deterministic prefetch, and randomized batch delivery for RGB and depth supervision.
-
-### Story 2.1: Extract Frame Decode Helpers from `data_loading.rs`
+### Story 1.4: Explicit Upload And Snapshot Conversions
 
 As a RustGS maintainer,
-I want image and depth decoding logic moved into a dedicated frame-loader module,
-So that raw IO is separated from training-state assembly.
+I want ownership transitions limited to explicit upload and snapshot paths,
+So that host/device boundaries remain obvious and testable.
 
-**Implements:** FR3, FR4.
-
-**Acceptance Criteria:**
-
-**Given** the current color and depth paths in `data_loading.rs`
-**When** decode helpers are moved into `training/frame_loader.rs`
-**Then** the decoded tensor-ready outputs match the previous implementation
-**And** existing unit tests for image and depth loading continue to pass.
-
-**Given** synthetic depth fallback is enabled
-**When** a frame lacks a depth map
-**Then** the extracted loader still produces the same synthetic-depth behavior
-**And** no caller needs to know whether the depth was real or synthetic.
-
-### Story 2.2: Add a Bounded Prefetch Cache for Training Frames
-
-As a training operator,
-I want RustGS to prefetch and cache a bounded set of frames,
-So that the training loop is less likely to stall on synchronous disk IO.
-
-**Implements:** FR3, NFR2.
+**Implements:** FR4, FR7
 
 **Acceptance Criteria:**
 
-**Given** a dataset larger than the immediate batch window
-**When** training starts
-**Then** the frame loader starts background prefetch for upcoming samples
-**And** cache growth is bounded by an explicit capacity policy.
+**Given** the canonical type model
+**When** owning conversions are implemented
+**Then** the only supported owning paths are `TrainingDataset -> HostSplats`, `HostSplats -> Splats`, and `Splats -> HostSplats`
+**And** no new direct owning conversion path is introduced through AoS Gaussian types.
 
-**Given** the cache reaches its configured limit
-**When** more frames are requested
-**Then** RustGS evicts or skips caching according to the defined policy
-**And** memory usage does not grow without bound.
+**Given** runtime-to-host snapshot behavior
+**When** `Splats::snapshot()` is called
+**Then** it produces a `HostSplats` artifact with the same semantic content
+**And** SH coefficient data round-trips without semantic loss.
 
-### Story 2.3: Add a Deterministic Randomized Batch Iterator
+## Epic 2: Runtime Ownership And Sidecars
 
-As a RustGS researcher,
-I want frame batches to be shuffled deterministically from a seed,
-So that training remains reproducible while still avoiding fixed-frame ordering.
+Make `Splats` the only long-lived runtime owner and push optimizer and topology process state into explicit sidecars.
 
-**Implements:** FR3, FR12.
+### Story 2.1: Extract Runtime Sidecars
+
+As a training-flow developer,
+I want optimizer and topology process state moved into explicit sidecar types,
+So that the core splat model only owns model parameters.
+
+**Implements:** FR10
 
 **Acceptance Criteria:**
 
-**Given** a fixed seed and the same dataset
-**When** the batch iterator is created twice
-**Then** it emits the same shuffled frame order
-**And** reproducibility can be asserted in tests.
+**Given** current runtime process data such as optimizer state, gradient accumulators, radii, and age counters
+**When** sidecar types are introduced
+**Then** those values are stored outside `Splats`
+**And** `Splats` only contains model parameter ownership.
 
-**Given** a different seed is supplied
-**When** batch iteration begins
-**Then** the frame order changes
-**And** the iterator still respects dataset bounds and cache rules.
+**Given** sidecar-managed runtime state
+**When** training steps execute
+**Then** sidecars stay index-aligned with the active splat count
+**And** sidecar updates do not require adding non-parameter fields back into `Splats`.
 
-### Story 2.4: Integrate the Frame Loader into `train_stream.rs`
+### Story 2.2: Runtime Training Loop Uses `Splats` As Sole Owner
+
+As a training-flow developer,
+I want the trainer to hold `Splats` as the sole long-lived runtime owner,
+So that the training loop has one authoritative model state.
+
+**Implements:** FR8
+
+**Acceptance Criteria:**
+
+**Given** the runtime training path
+**When** the trainer is refactored
+**Then** `Splats` is the only long-lived model owner during training
+**And** `HostSplats` is not kept as an eagerly synchronized runtime mirror.
+
+**Given** runtime ownership
+**When** forward, backward, and optimizer steps execute
+**Then** they operate on `Splats` plus sidecars
+**And** they do not depend on a parallel host-side owner staying live.
+
+### Story 2.3: Topology Mutations Operate On `Splats` Plus Sidecars
+
+As a training-flow developer,
+I want densify and prune logic to mutate `Splats` and sidecars together,
+So that runtime topology changes preserve model and process-state consistency.
+
+**Implements:** FR10
+
+**Acceptance Criteria:**
+
+**Given** densify or prune operations
+**When** the active splat count changes
+**Then** `Splats` tensors and all required sidecars are updated in the same logical operation
+**And** index alignment remains valid after insertions, removals, and reorders.
+
+**Given** topology updates that affect SH-carrying splats
+**When** those splats are cloned, split, or removed
+**Then** SH coefficient storage remains well-formed
+**And** no path silently drops SH data.
+
+## Epic 3: Artifact And Read-Only Interfaces
+
+Use `HostSplats` and `SplatView` to support initialization, snapshots, evaluation, export, and checkpointing without introducing extra owning Gaussian models.
+
+### Story 3.1: Shared Borrowed `SplatView`
 
 As a RustGS maintainer,
-I want the new frame loader to be the only training-loop source of frame batches,
-So that orchestration, batching, and preprocessing are controlled from one place.
+I want a single borrowed `SplatView` interface,
+So that read-only host-facing workflows do not require additional owning splat types.
 
-**Implements:** FR3, FR4, FR11.
+**Implements:** FR3, FR15
 
 **Acceptance Criteria:**
 
-**Given** the new frame loader exists
-**When** `train_stream.rs` runs a training session
-**Then** batch acquisition happens through the loader abstraction
-**And** direct synchronous per-step file reads are removed from orchestration code.
+**Given** the new type model
+**When** borrowed read-only access is needed
+**Then** `HostSplats` exposes `as_view()`
+**And** the shared borrowed interface is named `SplatView`.
 
-**Given** existing training datasets with and without depth maps
-**When** they are trained through the integrated loader
-**Then** current synthetic-depth and preprocessing semantics are preserved
-**And** training outputs remain behaviorally compatible at smoke-test scope.
+**Given** host-facing helper code
+**When** evaluation or export needs read-only access
+**Then** it accepts `SplatView` or `HostSplats`
+**And** it does not require a public owning render Gaussian type.
 
-## Epic 3: Direct Dataset Onboarding
+### Story 3.2: PLY Import And Export Use `HostSplats`
 
-Let RustGS consume common reconstruction datasets and per-dataset configuration directly, removing the need for one-off conversion steps for core training workflows.
+As an engineer producing model artifacts,
+I want PLY import and export to operate on `HostSplats`,
+So that artifact workflows use the host boundary type directly.
 
-### Story 3.1: Introduce a Unified Dataset Loader Facade
+**Implements:** FR2, FR11
+
+**Acceptance Criteria:**
+
+**Given** PLY import behavior
+**When** splat artifacts are loaded
+**Then** the import path produces `HostSplats`
+**And** RGB compatibility inputs are converted to the unified SH storage contract at the boundary.
+
+**Given** PLY export behavior
+**When** splat artifacts are written
+**Then** export accepts `HostSplats` or `SplatView`
+**And** exported SH-aware artifacts preserve coefficient data and declared degree.
+
+### Story 3.3: Snapshot And Checkpoint Artifacts
+
+As an engineer operating the training pipeline,
+I want snapshots and checkpoints to store `HostSplats`,
+So that artifacts are host-readable without keeping a second live runtime owner.
+
+**Implements:** FR2, FR9
+
+**Acceptance Criteria:**
+
+**Given** a running training session
+**When** a snapshot or checkpoint is requested
+**Then** runtime `Splats` materializes `HostSplats` through `snapshot()`
+**And** artifact serialization stores the `HostSplats` payload rather than AoS scene objects.
+
+**Given** a checkpoint restore path
+**When** a checkpoint is loaded
+**Then** it reconstructs `HostSplats`
+**And** upload into runtime `Splats` follows the standard boundary conversion path.
+
+### Story 3.4: Splat-Oriented IO And Evaluation Interfaces
+
+As a RustGS maintainer,
+I want IO and evaluation interfaces named around splats instead of scenes,
+So that the public API matches the pure training architecture.
+
+**Implements:** FR18
+
+**Acceptance Criteria:**
+
+**Given** current scene-oriented helper names
+**When** the interface cleanup is applied
+**Then** APIs are renamed to splat-oriented names such as `save_splats_ply` and `load_splats_ply`
+**And** metadata naming is updated away from scene vocabulary.
+
+**Given** evaluation and render helper code
+**When** host-facing paths are refactored
+**Then** they consume `SplatView` or `HostSplats`
+**And** they do not reintroduce a public owning render Gaussian model.
+
+## Epic 4: Pure-Training API Cleanup
+
+Remove AoS and scene-oriented core types from the main architecture and push SLAM-shaped entrypoints out of the core training API.
+
+### Story 4.1: Isolate Legacy AoS And Scene Owners
+
+As a RustGS maintainer,
+I want legacy AoS and scene owners isolated behind compatibility boundaries,
+So that new core code no longer depends on them.
+
+**Implements:** FR12
+
+**Acceptance Criteria:**
+
+**Given** current uses of `Gaussian3D`, `GaussianMap`, and related scene vocabulary
+**When** compatibility boundaries are introduced
+**Then** new core splat code stops depending on those types
+**And** any remaining references are isolated behind migration adapters.
+
+**Given** the updated architecture
+**When** core modules are inspected
+**Then** the primary ownership model is `TrainingDataset`, `HostSplats`, `Splats`, and sidecars
+**And** scene-oriented types are no longer the default code path.
+
+### Story 4.2: Remove Legacy Render And Training Gaussian Owners
+
+As a RustGS maintainer,
+I want legacy render and training Gaussian owners removed,
+So that the system no longer duplicates parameter ownership through AoS wrappers.
+
+**Implements:** FR12
+
+**Acceptance Criteria:**
+
+**Given** `render::tiled_renderer::Gaussian` and `training_pipeline::TrainableGaussian`
+**When** cleanup is completed
+**Then** these types are removed from the main architecture
+**And** any required compatibility logic is rewritten to use `HostSplats`, `Splats`, or `SplatView`.
+
+**Given** render and training call sites
+**When** they are migrated
+**Then** no public API depends on those legacy owners
+**And** render-facing code no longer needs a second owning Gaussian representation.
+
+### Story 4.3: Demote SLAM-Centric Entrypoints To Adapter Layers
 
 As a RustGS integrator,
-I want a single dataset-loading facade for supported dataset types,
-So that training entrypoints can consume multiple dataset formats through one normalized contract.
+I want SLAM-shaped entrypoints moved out of the core training architecture,
+So that the RustGS core stays focused on `TrainingDataset`-based training.
 
-**Implements:** FR5, FR6, FR7.
-
-**Acceptance Criteria:**
-
-**Given** a RustGS training input path
-**When** dataset discovery runs
-**Then** a unified dataset facade selects the appropriate loader implementation
-**And** the resulting dataset descriptor is normalized for downstream training code.
-
-**Given** an unsupported dataset layout
-**When** loader discovery fails
-**Then** RustGS returns a clear format-specific error
-**And** the caller can see which dataset types were expected.
-
-### Story 3.2: Add Direct COLMAP Dataset Support
-
-As a RustGS researcher,
-I want to train directly from a COLMAP reconstruction,
-So that I can use standard camera, image, and sparse-point outputs without writing a converter first.
-
-**Implements:** FR5.
+**Implements:** FR16, FR17
 
 **Acceptance Criteria:**
 
-**Given** a COLMAP dataset with camera and image metadata
-**When** the COLMAP loader runs
-**Then** RustGS produces normalized poses, intrinsics, and image references
-**And** world-to-camera data is converted into the camera convention expected by RustGS.
+**Given** current root-level helpers such as `train_from_slam` and dataset autodetection
+**When** adapter cleanup is applied
+**Then** those entrypoints are moved to adapter or CLI layers
+**And** the core training API is shaped around `TrainingDataset`.
 
-**Given** COLMAP sparse points are present
-**When** initialization is prepared
-**Then** the loader exposes sparse-point initialization data to RustGS
-**And** eval split support can be applied without breaking dataset loading.
+**Given** crate root exports
+**When** the public API is reviewed
+**Then** SLAM-derived types are not part of the core splat architecture surface
+**And** training-centric types are the primary public path.
 
-### Story 3.3: Add Direct Nerfstudio Dataset Support
-
-As a RustGS researcher,
-I want to train directly from a Nerfstudio dataset,
-So that I can use `transforms*.json` scenes and optional init splats without manual restructuring.
-
-**Implements:** FR6.
-
-**Acceptance Criteria:**
-
-**Given** a Nerfstudio dataset with `transforms.json` or train and val variants
-**When** the Nerfstudio loader runs
-**Then** RustGS loads train views and optional eval views correctly
-**And** pose and intrinsics data are normalized for the RustGS trainer.
-
-**Given** the dataset references an initialization PLY
-**When** that PLY is accessible
-**Then** the loader surfaces it as initialization input
-**And** missing optional init splats degrade gracefully rather than failing the whole load.
-
-### Story 3.4: Add Dataset-Local Config Overlay with CLI Override Merge
-
-As a training operator,
-I want dataset-local settings to live next to the dataset and still be overridable from the CLI,
-So that experiments are reproducible without hard-coding per-dataset parameters.
-
-**Implements:** FR7, FR12.
-
-**Acceptance Criteria:**
-
-**Given** a dataset-local config file is present
-**When** RustGS starts training from that dataset
-**Then** the config overlay is loaded automatically into the training configuration
-**And** the effective config is visible to the caller or logs.
-
-**Given** a CLI flag overrides the same field
-**When** the final config is assembled
-**Then** the CLI value wins
-**And** the precedence rule is documented and test-covered.
-
-### Story 3.5: Move Initial Map Construction into `training/init_map.rs`
+### Story 4.4: Final Core Naming And Documentation Cleanup
 
 As a RustGS maintainer,
-I want initial-map construction to be its own module,
-So that sparse-point initialization and frame-based fallback are no longer coupled to raw frame IO code.
+I want the final public naming and documentation aligned to the pure-training model,
+So that the architecture is understandable without scene or SLAM mental overhead.
 
-**Implements:** FR5, FR6, FR8.
-
-**Acceptance Criteria:**
-
-**Given** a dataset with sparse initialization points
-**When** `training/init_map.rs` builds the initial map
-**Then** it uses sparse-point initialization through a dedicated path
-**And** downstream training code receives the same `GaussianMap` contract as before.
-
-**Given** sparse initialization is absent
-**When** initial-map construction runs
-**Then** frame-based fallback is used through the same module
-**And** the caller does not need separate initialization logic.
-
-## Epic 4: Safe Gaussian Topology Evolution
-
-Make Gaussian topology edits explicit and testable by separating parameter views, refine scheduling, and optimizer-state reshaping from step-level Metal execution.
-
-### Story 4.1: Introduce a Compact Splat Parameter View and Validation Helpers
-
-As a RustGS maintainer,
-I want a consistent trainable splat parameter view with shape validation,
-So that topology edits can operate on one clear representation instead of ad hoc tensor slices.
-
-**Implements:** FR8, NFR4.
+**Implements:** FR16
 
 **Acceptance Criteria:**
 
-**Given** current trainable Gaussian parameters in RustGS
-**When** the compact parameter view is introduced
-**Then** means, rotations, log-scales, opacity, and color or SH state are addressable through one normalized abstraction
-**And** no runtime backend migration is introduced.
-
-**Given** malformed dimensions or incompatible parameter lengths
-**When** validation helpers run
-**Then** RustGS reports invariant violations clearly
-**And** the failures are test-covered before topology edits execute.
-
-### Story 4.2: Extract Topology Decision Logic into `training/topology.rs`
-
-As a RustGS maintainer,
-I want densify, prune, and opacity-reset decisions moved into a dedicated topology module,
-So that behavior changes can be made without rewriting training-loop control flow.
-
-**Implements:** FR8, FR11.
-
-**Acceptance Criteria:**
-
-**Given** the current topology heuristics in `metal_trainer.rs`
-**When** they are extracted into `training/topology.rs`
-**Then** scheduling and candidate selection logic live outside the step-level trainer
-**And** current profile semantics are preserved at regression-test scope.
-
-**Given** a future heuristic change is needed
-**When** a maintainer updates topology policy
-**Then** the change can be localized to topology modules
-**And** the orchestration and Metal execution layers do not need unrelated edits.
-
-### Story 4.3: Extract Optimizer-State Reshape Helpers into `training/optimizer_state.rs`
-
-As a RustGS maintainer,
-I want prune, clone, and split operations to update optimizer state through dedicated helpers,
-So that parameter resizing remains correct when topology changes occur.
-
-**Implements:** FR8, NFR4.
-
-**Acceptance Criteria:**
-
-**Given** a topology edit removes or adds Gaussians
-**When** optimizer-state reshape helpers run
-**Then** all affected optimizer tensors are resized consistently with the parameter tensors
-**And** the operation does not rely on scattered one-off logic inside `metal_trainer.rs`.
-
-**Given** a topology edit does not change tensor count
-**When** optimizer-state helpers are invoked
-**Then** they preserve existing state without introducing unnecessary copies
-**And** tests cover prune and split paths separately.
-
-### Story 4.4: Route Topology Scheduling Through `train_stream.rs`
-
-As a RustGS maintainer,
-I want topology scheduling to be called explicitly from the orchestration layer,
-So that lifecycle control determines when refine work happens and the trainer only performs step-level computation.
-
-**Implements:** FR1, FR8, FR11.
-
-**Acceptance Criteria:**
-
-**Given** a training run reaches a topology boundary
-**When** the orchestration layer evaluates scheduling rules
-**Then** `train_stream.rs` calls topology modules explicitly
-**And** `metal_trainer` no longer embeds orchestration-level refine timing.
-
-**Given** topology work is disabled by configuration or schedule
-**When** the same training run executes
-**Then** the orchestration layer skips topology actions cleanly
-**And** step-level training continues without behavior regressions.
-
-## Epic 5: Reliable Scene Interchange
-
-Strengthen RustGS persistence so scene files can evolve safely, preserve richer metadata, and survive round-trip tests as SH-aware formats are introduced.
-
-### Story 5.1: Introduce Versioned Scene Metadata
-
-As a RustGS user,
-I want scene files to carry explicit format metadata,
-So that future import and export changes can remain backward compatible.
-
-**Implements:** FR9, NFR3, NFR5.
-
-**Acceptance Criteria:**
-
-**Given** a RustGS scene is exported
-**When** metadata is written
-**Then** the file includes an explicit format version and relevant scene metadata fields
-**And** existing metadata such as iteration and loss remain available.
-
-**Given** an older scene file is loaded
-**When** the version field is absent or older
-**Then** RustGS falls back to compatible parsing behavior
-**And** the caller receives a warning only when compatibility assumptions matter.
-
-### Story 5.2: Split PLY Import and Export Behind the Existing `scene_io` Facade
-
-As a RustGS maintainer,
-I want import and export code split into focused modules behind the current facade,
-So that persistence logic can grow without turning `scene_io.rs` into another monolith.
-
-**Implements:** FR9, NFR4.
-
-**Acceptance Criteria:**
-
-**Given** the current `save_scene_ply` and `load_scene_ply` API
-**When** import and export logic are split into dedicated modules
-**Then** existing callers continue to use the facade unchanged
-**And** the new internal module boundaries are explicit and documented.
-
-**Given** a persistence bug is fixed in import or export logic
-**When** the fix is made
-**Then** it can be localized to the relevant module
-**And** no unrelated caller-facing API churn is introduced.
-
-### Story 5.3: Add Dynamic SH-Aware Scene Serialization
-
-As a RustGS researcher,
-I want scene serialization to preserve active SH degree and related parameter state,
-So that richer color representations can survive save and load boundaries.
-
-**Implements:** FR9, NFR3, NFR5.
-
-**Acceptance Criteria:**
-
-**Given** a scene uses RGB-only or SH-based color state
-**When** it is exported
-**Then** the persistence layer records the active color representation and SH degree explicitly
-**And** import reconstructs the same representation or fails clearly if unsupported.
-
-**Given** a scene does not use richer SH data
-**When** it is saved and loaded
-**Then** current RGB-only compatibility is preserved
-**And** no legacy caller must supply extra metadata manually.
-
-### Story 5.4: Add Round-Trip and Compatibility Regression Coverage for Scene IO
-
-As a RustGS maintainer,
-I want persistence changes guarded by regression tests,
-So that scene interchange can evolve without silent corruption.
-
-**Implements:** FR9, FR10, NFR5.
-
-**Acceptance Criteria:**
-
-**Given** representative RustGS scene fixtures
-**When** round-trip tests run
-**Then** exported scenes can be re-imported with matching metadata and parameter counts
-**And** failures identify the field or representation that drifted.
-
-**Given** compatibility fixtures from earlier scene versions
-**When** import regression tests run
-**Then** supported legacy files still load or fail with explicit versioned errors
-**And** the expected compatibility matrix is documented.
-
-## Epic 6: Regression-Safe Rollout
-
-Land the migration incrementally and safely through route-level smoke tests, benchmark harnesses, ownership docs, and compatibility gates.
-
-### Story 6.1: Add End-to-End Training Route Smoke Tests
-
-As a RustGS maintainer,
-I want smoke tests that exercise the main training routes,
-So that orchestration refactors do not silently break standard, chunked, or profile-specific entry behavior.
-
-**Implements:** FR10, FR11.
-
-**Acceptance Criteria:**
-
-**Given** representative tiny training fixtures
-**When** the smoke suite runs
-**Then** it exercises standard and chunked route selection through the new orchestration layer
-**And** verifies that `LegacyMetal` and `LiteGsMacV1` still reach their expected execution paths.
-
-**Given** a route regression is introduced
-**When** smoke tests fail
-**Then** the failure identifies the broken route clearly
-**And** maintainers can see whether the breakage was in orchestration, trainer selection, or config assembly.
-
-### Story 6.2: Add Loader, Topology, and Persistence Regression Suites
-
-As a RustGS maintainer,
-I want focused regression suites for the new modules,
-So that internal refactors remain safe even when route-level smoke tests are too coarse.
-
-**Implements:** FR10, FR11.
-
-**Acceptance Criteria:**
-
-**Given** the new loader, topology, and persistence modules
-**When** targeted regression tests run
-**Then** each module has fixtures that validate its core invariants independently
-**And** failures are localized to one subsystem instead of one giant training test.
-
-**Given** a dataset-specific or topology-specific bug is fixed
-**When** a regression is added
-**Then** that regression lands in the focused module test suite
-**And** future maintainers can reproduce the failure without running the full pipeline.
-
-### Story 6.3: Add Forward, Backward, and Training Benchmark Harnesses
-
-As a RustGS performance owner,
-I want benchmark harnesses for the core execution paths,
-So that the migration can be measured instead of judged only by code structure.
-
-**Implements:** FR10, NFR6.
-
-**Acceptance Criteria:**
-
-**Given** representative benchmark fixtures
-**When** the benchmark harness runs
-**Then** it reports forward, backward, and training-step timing separately
-**And** the harness can be reused after later optimizer or topology changes.
-
-**Given** a performance regression is introduced
-**When** benchmark results are compared across revisions
-**Then** the affected phase can be identified quickly
-**And** the results are reproducible enough for developer handoff.
-
-### Story 6.4: Publish Migration Ownership and Rollout Documentation
-
-As a RustGS maintainer,
-I want the migrated architecture and rollout rules documented,
-So that future contributors can extend the system without rediscovering module boundaries.
-
-**Implements:** FR10, FR12, NFR4, NFR6.
-
-**Acceptance Criteria:**
-
-**Given** the new module layout lands
-**When** documentation is updated
-**Then** it explains module ownership, call flow, rollout toggles, and compatibility constraints
-**And** it explicitly states which Brush ideas were adopted and which were intentionally rejected.
-
-**Given** a new contributor joins the project later
-**When** they read the migration documentation
-**Then** they can identify where orchestration, loading, topology, and persistence changes belong
-**And** they do not need to infer ownership from a single giant trainer file.
-
-### Story 6.5: Demote `training_pipeline.rs` to a Legacy and Reference Role After Validation Gates Pass
-
-As a RustGS maintainer,
-I want legacy pipeline utilities clearly separated from production training ownership,
-So that new work stops accumulating in the wrong module once the migrated path is validated.
-
-**Implements:** FR11, FR12, NFR4.
-
-**Acceptance Criteria:**
-
-**Given** orchestration, loading, topology, and persistence replacements are validated
-**When** the migration cleanup story runs
-**Then** `training_pipeline.rs` is explicitly marked and documented as legacy or reference-only
-**And** new production responsibilities are routed to the new modules instead.
-
-**Given** cleanup would break current callers or tests
-**When** the story is executed
-**Then** the migration stops short of unsafe deletion
-**And** the file is only reduced to the extent supported by passing compatibility gates.
+**Given** the renamed type model
+**When** documentation and public exports are updated
+**Then** `Splats`, `HostSplats`, and `SplatView` are the canonical terms
+**And** outdated references to trainable, scene, or map ownership are removed from primary docs.
+
+**Given** the final cleaned API surface
+**When** a maintainer reads the public architecture documentation
+**Then** the core model is described as pure 3DGS training
+**And** the migration path away from legacy AoS and SLAM-shaped concepts is explicit.

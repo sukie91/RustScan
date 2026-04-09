@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 
 use rustgs::{
-    evaluate_scene, evaluation_device, load_training_dataset, select_evaluation_frames,
-    EvaluationDevice, Gaussian, SceneEvaluationConfig, SceneMetadata, TrainingConfig,
+    evaluate_splats, evaluation_device, load_training_dataset, select_evaluation_frames,
+    EvaluationDevice, SceneEvaluationConfig, SceneMetadata, TrainingConfig,
     TumRgbdConfig,
 };
 
@@ -81,7 +81,7 @@ fn trains_directly_from_workspace_tum_directory() {
     config.iterations = 1;
     config.max_initial_gaussians = 10_000;
 
-    let scene = rustgs::train_from_path(
+    let splats = rustgs::train_splats_from_path(
         &root,
         &TumRgbdConfig {
             max_frames: 90,
@@ -92,7 +92,7 @@ fn trains_directly_from_workspace_tum_directory() {
     )
     .unwrap();
 
-    assert!(scene.len() > 0);
+    assert!(splats.len() > 0);
 }
 
 #[cfg(feature = "gpu")]
@@ -121,30 +121,17 @@ fn tum_training_smoke_produces_post_train_evaluation_summary() {
     config.iterations = 1;
     config.max_initial_gaussians = 2_000;
 
-    let scene = rustgs::train_from_path(&root, &tum_config, &config).unwrap();
-    let gaussians: Vec<Gaussian> = scene
-        .gaussians()
-        .iter()
-        .map(|g| {
-            Gaussian::new(
-                g.position.into(),
-                g.scale.into(),
-                [g.rotation.w, g.rotation.x, g.rotation.y, g.rotation.z],
-                g.opacity,
-                g.color,
-            )
-        })
-        .collect();
+    let splats = rustgs::train_splats_from_path(&root, &tum_config, &config).unwrap();
     let metadata = SceneMetadata {
         iterations: config.iterations,
         final_loss: 0.0,
-        gaussian_count: gaussians.len(),
-        sh_degree: config.litegs.sh_degree,
+        gaussian_count: splats.len(),
+        sh_degree: splats.sh_degree(),
     };
     let device = evaluation_device(EvaluationDevice::Cpu).unwrap();
-    let evaluation = evaluate_scene(
+    let evaluation = evaluate_splats(
         &dataset,
-        &gaussians,
+        &splats,
         &metadata,
         &SceneEvaluationConfig {
             render_scale: 0.25,
@@ -159,7 +146,7 @@ fn tum_training_smoke_produces_post_train_evaluation_summary() {
 
     assert_eq!(evaluation.summary.device, EvaluationDevice::Cpu);
     assert!(evaluation.summary.frame_count > 0);
-    assert_eq!(evaluation.summary.scene_gaussian_count, gaussians.len());
+    assert_eq!(evaluation.summary.splat_count, splats.len());
     assert!(evaluation.summary.psnr_mean_db.is_finite());
     assert!(evaluation.summary.elapsed_seconds >= 0.0);
 }

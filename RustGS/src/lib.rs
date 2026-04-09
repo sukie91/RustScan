@@ -1,7 +1,7 @@
 //! RustGS - 3D Gaussian Splatting Training Library
 //!
 //! This crate provides offline 3DGS training capabilities for RustScan.
-//! It takes images and camera poses as input and outputs trained Gaussian scenes.
+//! It takes images and camera poses as input and outputs trained splat sets.
 //!
 //! # Architecture
 //!
@@ -15,18 +15,21 @@
 //! # Example
 //!
 //! ```ignore
-//! use rustgs::{TrainingDataset, train_from_slam, TrainingConfig};
-//! use rustscan_types::SlamOutput;
+//! use rustgs::{train_splats, TrainingConfig, TrainingDataset};
 //!
-//! // Load SLAM output
-//! let slam_output = SlamOutput::load(&path)?;
+//! // Load a prepared training dataset artifact.
+//! let dataset = TrainingDataset::load(&path)?;
 //!
-//! // Train 3DGS scene
+//! // Train 3DGS splats.
 //! let config = TrainingConfig::default();
-//! let scene = train_from_slam(&slam_output, &config)?;
+//! let splats = train_splats(&dataset, &config)?;
 //!
-//! // Save scene
-//! scene.save("scene.ply")?;
+//! // Save the trained splats.
+//! rustgs::save_splats_ply(
+//!     "scene.ply".as_ref(),
+//!     &splats,
+//!     &rustgs::SceneMetadata::default(),
+//! )?;
 //! ```
 
 pub mod core;
@@ -43,10 +46,14 @@ use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
 // Re-export shared types from rustscan-types
-pub use rustscan_types::{Intrinsics, MapPointData, ScenePose, SlamOutput, TrainingDataset, SE3};
+pub use rustscan_types::{Intrinsics, MapPointData, ScenePose, TrainingDataset, SE3};
+#[deprecated(note = "Convert inputs to TrainingDataset before calling RustGS APIs.")]
+pub use rustscan_types::SlamOutput;
 
 // Re-export core types
-pub use crate::core::{Gaussian3D, GaussianCamera, GaussianMap, GaussianState};
+pub use crate::core::{Gaussian3D, GaussianCamera, GaussianState};
+#[deprecated(note = "Use HostSplats as the primary trained artifact; GaussianMap is legacy compatibility only.")]
+pub use crate::core::GaussianMap;
 
 // Re-export render types
 pub use crate::render::{
@@ -55,6 +62,7 @@ pub use crate::render::{
 };
 
 // Re-export training types
+#[allow(deprecated)]
 pub use crate::training::{
     compare_loss_curve_samples, default_litegs_parity_fixtures, default_parity_report_path,
     parity_fixture_id_for_input_path, resolve_litegs_parity_fixture_input_path,
@@ -64,7 +72,8 @@ pub use crate::training::{
     ParityGateEvaluation, ParityGateStatus, ParityHarnessReport, ParityLossCurveSample,
     ParityLossTerms, ParityMetricSnapshot, ParityReferenceComparison, ParityThresholds,
     ParityTimingMetrics, ParityTopologyMetrics, PsnrSummary, SceneEvaluationConfig,
-    SceneEvaluationError, SceneEvaluationResult, SceneEvaluationSummary, TrainingProfile,
+    SceneEvaluationError, SplatEvaluationResult, SplatEvaluationSummary,
+    SceneEvaluationResult, SceneEvaluationSummary, TrainingProfile,
     DEFAULT_CONVERGENCE_FIXTURE_ID, DEFAULT_TINY_FIXTURE_ID,
 };
 pub use crate::training::{
@@ -74,17 +83,27 @@ pub use crate::training::{
     MaterializedChunkDataset, PlannedChunk,
 };
 #[cfg(feature = "gpu")]
+#[allow(deprecated)]
 pub use crate::training::{
-    estimate_chunk_capacity, evaluate_scene, evaluation_device, last_metal_training_telemetry,
-    render_evaluation_frame, run_metal_training_benchmark, trainable_from_scene,
-    ChunkCapacityDisposition, ChunkCapacityEstimate, LiteGsOptimizerLrs, LiteGsTrainingTelemetry,
+    estimate_chunk_capacity, evaluate_gaussians, evaluate_splats, evaluation_device,
+    last_metal_training_telemetry, render_evaluation_frame, run_metal_training_benchmark,
+    runtime_from_gaussians, runtime_from_splats, trainable_from_gaussians,
+    trainable_from_splats, evaluate_scene, runtime_from_scene, trainable_from_scene,
+    ChunkCapacityDisposition,
+    ChunkCapacityEstimate, LiteGsOptimizerLrs, LiteGsTrainingTelemetry,
     MetalTrainingBenchmarkReport, MetalTrainingBenchmarkSpec,
 };
 pub use crate::training::{TrainingBackend, TrainingConfig, TrainingResult};
+#[cfg(feature = "gpu")]
+pub use crate::training::{HostSplats, SplatView};
+#[cfg(feature = "gpu")]
+pub use crate::diff::Splats;
 
 // Re-export IO types
 pub use crate::io::colmap_dataset::{load_colmap_dataset, ColmapConfig};
 pub use crate::io::scene_io::{load_scene_ply, save_scene_ply, SceneIoError, SceneMetadata};
+#[cfg(feature = "gpu")]
+pub use crate::io::scene_io::{load_splats_ply, save_splats_ply};
 pub use crate::io::tum_dataset::{load_tum_rgbd_dataset, TumRgbdConfig};
 pub use crate::io::TrainingCheckpoint;
 
@@ -212,37 +231,87 @@ pub fn load_training_dataset(
     load_training_dataset_with_source(input, tum_config, &colmap_config).map(|(dataset, _)| dataset)
 }
 
-/// Train a 3DGS scene from a SLAM output.
-///
-/// This is the main entry point for offline 3DGS training.
+/// Train 3DGS splats directly from a prepared training dataset.
+#[cfg(feature = "gpu")]
+pub fn train_splats(
+    dataset: &TrainingDataset,
+    config: &TrainingConfig,
+) -> Result<HostSplats, TrainingError> {
+    training::train_splats(dataset, config)
+}
+
+/// Compatibility wrapper that materializes a legacy `GaussianMap`.
+#[cfg(feature = "gpu")]
+#[deprecated(note = "Use train_splats(...) instead to keep HostSplats as the primary artifact.")]
+pub fn train_scene(
+    dataset: &TrainingDataset,
+    config: &TrainingConfig,
+) -> Result<GaussianMap, TrainingError> {
+    let splats = train_splats(dataset, config)?;
+    let mut map = GaussianMap::from_gaussians(splats.to_legacy_gaussians()?);
+    map.update_states();
+    Ok(map)
+}
+
+/// Compatibility adapter for SLAM-shaped inputs that materializes a legacy
+/// `GaussianMap`.
 ///
 /// # Arguments
 /// * `slam_output` - SLAM output containing images, poses, and initial points
 /// * `config` - Training configuration
 ///
 /// # Returns
-/// The trained Gaussian scene.
+/// The trained Gaussian map compatibility artifact.
 #[cfg(feature = "gpu")]
+#[deprecated(note = "Convert SlamOutput to TrainingDataset and call train_splats(...) instead.")]
 pub fn train_from_slam(
     slam_output: &SlamOutput,
     config: &TrainingConfig,
 ) -> Result<GaussianMap, TrainingError> {
-    let dataset = slam_output.to_dataset();
-    training::train(&dataset, config)
+    let splats = train_splats(&slam_output.to_dataset(), config)?;
+    let mut map = GaussianMap::from_gaussians(splats.to_legacy_gaussians()?);
+    map.update_states();
+    Ok(map)
 }
 
-/// Train a 3DGS scene directly from a dataset path.
+/// Compatibility adapter for SLAM-shaped inputs that returns the host-side splat artifact.
+#[cfg(feature = "gpu")]
+#[deprecated(note = "Convert SlamOutput to TrainingDataset and call train_splats(...) instead.")]
+pub fn train_splats_from_slam(
+    slam_output: &SlamOutput,
+    config: &TrainingConfig,
+) -> Result<HostSplats, TrainingError> {
+    let dataset = slam_output.to_dataset();
+    training::train_splats(&dataset, config)
+}
+
+/// Compatibility adapter that trains from a dataset path and materializes a
+/// legacy `GaussianMap`.
 ///
 /// `input` can be a TUM RGB-D dataset directory, a COLMAP directory, a
 /// serialized `SlamOutput` JSON file, or a serialized `TrainingDataset` JSON file.
 #[cfg(feature = "gpu")]
+#[deprecated(note = "Use train_splats_from_path(...) instead.")]
 pub fn train_from_path(
     input: &Path,
     tum_config: &TumRgbdConfig,
     config: &TrainingConfig,
 ) -> Result<GaussianMap, TrainingError> {
+    let splats = train_splats_from_path(input, tum_config, config)?;
+    let mut map = GaussianMap::from_gaussians(splats.to_legacy_gaussians()?);
+    map.update_states();
+    Ok(map)
+}
+
+/// Compatibility adapter for path-based dataset loading that returns the host-side splat artifact.
+#[cfg(feature = "gpu")]
+pub fn train_splats_from_path(
+    input: &Path,
+    tum_config: &TumRgbdConfig,
+    config: &TrainingConfig,
+) -> Result<HostSplats, TrainingError> {
     let dataset = load_training_dataset(input, tum_config)?;
-    training::train(&dataset, config)
+    training::train_splats(&dataset, config)
 }
 
 #[cfg(test)]

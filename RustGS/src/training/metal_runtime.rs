@@ -3,7 +3,7 @@ use std::mem::size_of;
 use candle_core::{DType, Device, Shape, Tensor};
 use candle_metal_kernels::metal::ComputePipeline;
 
-use crate::diff::diff_splat::{DiffCamera, TrainableGaussians};
+use crate::diff::diff_splat::{DiffCamera, Splats};
 
 use super::metal_dispatch;
 use super::metal_kernels::MetalKernel;
@@ -419,7 +419,7 @@ impl MetalRuntime {
 
     pub(crate) fn bind_gaussians<'a>(
         &self,
-        gaussians: &'a TrainableGaussians,
+        gaussians: &'a Splats,
         render_colors: &'a Tensor,
     ) -> candle_core::Result<MetalGaussianBindings<'a>> {
         self.resources.bind_gaussians(gaussians, render_colors)
@@ -427,7 +427,7 @@ impl MetalRuntime {
 
     pub(crate) fn project_gaussians(
         &mut self,
-        gaussians: &TrainableGaussians,
+        gaussians: &Splats,
         render_colors: &Tensor,
         extract_visible_source_indices: bool,
     ) -> candle_core::Result<ProjectedGpuBatch> {

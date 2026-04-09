@@ -1,6 +1,6 @@
 use candle_core::{DType, Device, Tensor};
 
-use crate::diff::diff_splat::{DiffCamera, TrainableGaussians, SH_C0};
+use crate::diff::diff_splat::{DiffCamera, Splats, SH_C0};
 
 use super::metal_forward::{
     finite_difference_sigma_wrt_rotation_component, projected_axis_covariance_terms,
@@ -173,7 +173,7 @@ pub(crate) fn backward_weighted_l1(
 }
 
 pub(crate) struct MetalParameterGradInputs<'a> {
-    pub gaussians: &'a TrainableGaussians,
+    pub gaussians: &'a Splats,
     pub raw_grads: &'a MetalBackwardGrads,
     pub projected: &'a ProjectedGaussians,
     pub rendered: &'a RenderedFrame,
@@ -233,7 +233,7 @@ pub(crate) fn assemble_parameter_grads(
 #[cfg(test)]
 pub(crate) fn rotation_parameter_grads(
     device: &Device,
-    gaussians: &TrainableGaussians,
+    gaussians: &Splats,
     projected: &ProjectedGaussians,
     rendered: &RenderedFrame,
     rendered_color_cpu: &[f32],
@@ -268,7 +268,7 @@ pub(crate) fn rotation_parameter_grads(
 
 fn geometry_parameter_grads(
     device: &Device,
-    gaussians: &TrainableGaussians,
+    gaussians: &Splats,
     projected: &ProjectedGaussians,
     rendered: &RenderedFrame,
     rendered_color_cpu: &[f32],
@@ -709,7 +709,7 @@ fn finite_difference_sigmas_wrt_camera_position(
 pub(crate) fn parameter_grads_from_render_color_grads(
     device: &Device,
     active_sh_degree: usize,
-    gaussians: &TrainableGaussians,
+    gaussians: &Splats,
     projected: &ProjectedGaussians,
     render_color_grads: &Tensor,
     camera: &DiffCamera,

@@ -4,13 +4,11 @@ use super::frame_loader::{ordered_frame_indices, FrameLoaderOptions, PrefetchFra
 use super::frame_targets::{resize_depth, resize_rgb_u8_to_f32};
 #[cfg(feature = "gpu")]
 use super::init_map::{
-    accumulate_frame_into_initial_map, build_initial_map, finalize_initial_map,
+    accumulate_frame_into_initial_splats, build_initial_splats, finalize_initial_splats,
     initial_frame_sampling_step,
 };
 #[cfg(feature = "gpu")]
-use super::splats::Splats;
-#[cfg(feature = "gpu")]
-use crate::core::GaussianMap;
+use super::splats::HostSplats;
 #[cfg(feature = "gpu")]
 use crate::diff::diff_splat::DiffCamera;
 #[cfg(feature = "gpu")]
@@ -33,7 +31,7 @@ pub(crate) struct LoadedTrainingData {
     pub depths: Vec<Vec<f32>>,
     pub target_width: usize,
     pub target_height: usize,
-    pub initial_splats: Splats,
+    pub initial_splats: HostSplats,
 }
 
 #[cfg(feature = "gpu")]
@@ -64,9 +62,12 @@ pub(crate) fn load_training_data(
     let mut cameras = Vec::with_capacity(dataset.poses.len());
     let mut colors = Vec::with_capacity(dataset.poses.len());
     let mut depths = Vec::with_capacity(dataset.poses.len());
-    let mut initial_map = if dataset.initial_points.is_empty() {
+    let mut initial_splats = if dataset.initial_points.is_empty() {
         Some((
-            GaussianMap::new(config.max_initial_gaussians.max(1)),
+            HostSplats::with_sh_degree_capacity(
+                super::splats::splat_color_representation_for_config(config).sh_degree(),
+                config.max_initial_gaussians.max(1),
+            ),
             initial_frame_sampling_step(dataset, dataset.poses.len(), config),
         ))
     } else {
@@ -93,9 +94,9 @@ pub(crate) fn load_training_data(
             device,
         )?;
 
-        if let Some((map, sampling_step)) = initial_map.as_mut() {
-            accumulate_frame_into_initial_map(
-                map,
+        if let Some((splats, sampling_step)) = initial_splats.as_mut() {
+            accumulate_frame_into_initial_splats(
+                splats,
                 dataset,
                 &rotation,
                 &translation,
@@ -123,7 +124,7 @@ pub(crate) fn load_training_data(
         ));
     }
 
-    let initial_map = if let Some((mut map, sampling_step)) = initial_map {
+    let initial_splats = if let Some((mut splats, sampling_step)) = initial_splats {
         log::info!(
             "Initializing gaussians from {} frames | resolution={}x{} | frame_budget={} | sampling_step={}",
             dataset.poses.len(),
@@ -136,10 +137,10 @@ pub(crate) fn load_training_data(
                 .max(1),
             sampling_step
         );
-        finalize_initial_map(&mut map, sampling_step, config)?;
-        map
+        finalize_initial_splats(&mut splats, sampling_step, config)?;
+        splats
     } else {
-        build_initial_map(dataset, &[], config)?
+        build_initial_splats(dataset, &[], config)?
     };
 
     if real_depth_frames == 0 && !config.use_synthetic_depth {
@@ -147,8 +148,6 @@ pub(crate) fn load_training_data(
             "Training dataset does not provide depth supervision; optimizing RGB loss only."
         );
     }
-
-    let initial_splats = Splats::from_gaussian_map_for_config(&initial_map, config)?;
 
     Ok(LoadedTrainingData {
         cameras,
@@ -194,9 +193,8 @@ fn diff_camera_from_scene_pose(
 #[cfg(all(test, feature = "gpu"))]
 mod tests {
     use super::*;
-    use crate::diff::diff_splat::{rgb_to_sh0_value, TrainableGaussians};
-    use crate::training::splats::Splats;
-    use crate::Gaussian3D;
+    use crate::diff::diff_splat::{rgb_to_sh0_value, Splats};
+    use crate::training::splats::HostSplats;
 
     fn test_opacity_to_logit(opacity: f32) -> f32 {
         let clamped = opacity.clamp(1e-6, 1.0 - 1e-6);
@@ -224,25 +222,28 @@ mod tests {
     #[test]
     fn litegs_profile_initializes_trainable_gaussians_with_sh_dc() {
         let device = Device::Cpu;
-        let mut map = GaussianMap::new(1);
-        let gaussian = Gaussian3D::from_depth_point(0.0, 0.0, 1.0, [64, 128, 255]);
-        let _ = map.add(gaussian);
-        map.update_states();
-
         let config = super::super::TrainingConfig {
             training_profile: super::super::TrainingProfile::LiteGsMacV1,
             ..super::super::TrainingConfig::default()
         };
-        let trainable = Splats::from_gaussian_map_for_config(&map, &config)
-            .unwrap()
-            .to_trainable(&device)
-            .unwrap();
+        let mut splats = HostSplats::with_sh_degree_capacity(
+            super::super::splats::splat_color_representation_for_config(&config).sh_degree(),
+            1,
+        );
+        splats.push_rgb(
+            [0.0, 0.0, 1.0],
+            [0.01f32.ln(), 0.01f32.ln(), 0.01f32.ln()],
+            [1.0, 0.0, 0.0, 0.0],
+            test_opacity_to_logit(0.5),
+            [64.0 / 255.0, 128.0 / 255.0, 1.0],
+        );
+        let runtime = splats.upload(&device).unwrap();
 
-        assert!(trainable.uses_spherical_harmonics());
-        assert_eq!(trainable.sh_degree(), 3);
-        assert_eq!(trainable.sh_rest().dims(), &[1, 15, 3]);
+        assert!(runtime.uses_spherical_harmonics());
+        assert_eq!(runtime.sh_degree(), 3);
+        assert_eq!(runtime.sh_rest().dims(), &[1, 15, 3]);
 
-        let rendered_rgb = trainable.render_colors().unwrap().to_vec2::<f32>().unwrap();
+        let rendered_rgb = runtime.render_colors().unwrap().to_vec2::<f32>().unwrap();
         assert!((rendered_rgb[0][0] - (64.0 / 255.0)).abs() < 1e-5);
         assert!((rendered_rgb[0][1] - (128.0 / 255.0)).abs() < 1e-5);
         assert!((rendered_rgb[0][2] - 1.0).abs() < 1e-5);
@@ -251,7 +252,7 @@ mod tests {
     #[test]
     fn map_export_restores_rgb_from_sh_dc_trainables() {
         let device = Device::Cpu;
-        let trainable = TrainableGaussians::new_with_sh(
+        let trainable = Splats::new_with_sh(
             &[0.0, 0.0, 1.0],
             &[0.1f32.ln(), 0.2f32.ln(), 0.3f32.ln()],
             &[1.0, 0.0, 0.0, 0.0],
@@ -267,10 +268,11 @@ mod tests {
         )
         .unwrap();
 
-        let map = Splats::from_trainable(&trainable)
+        let gaussians = HostSplats::from_runtime(&trainable)
             .unwrap()
-            .to_gaussian_map()
+            .to_legacy_gaussians()
             .unwrap();
+        let map = crate::core::GaussianMap::from_gaussians(gaussians);
         let gaussian = &map.gaussians()[0];
         assert!((gaussian.color[0] - 0.2).abs() < 1e-5);
         assert!((gaussian.color[1] - 0.4).abs() < 1e-5);

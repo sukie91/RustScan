@@ -1,25 +1,26 @@
-use crate::core::GaussianMap;
-use crate::init::{initialize_gaussian3d_from_points, GaussianInitConfig};
-use crate::{Gaussian3D, TrainingDataset, TrainingError};
+use crate::init::{initialize_gaussians_from_points, GaussianInitConfig};
+use crate::{TrainingDataset, TrainingError};
 
 use super::data_loading::FrameSample;
+use super::splats::{splat_color_representation_for_config, HostSplats};
 
-pub(super) fn build_initial_map(
+pub(super) fn build_initial_splats(
     dataset: &TrainingDataset,
     frames: &[FrameSample],
     config: &super::TrainingConfig,
-) -> Result<GaussianMap, TrainingError> {
+) -> Result<HostSplats, TrainingError> {
     if dataset.initial_points.is_empty() {
         if config.training_profile == super::TrainingProfile::LiteGsMacV1 {
             log::warn!(
                 "LiteGsMacV1 did not receive sparse-point initialization; falling back to frame-based initialization for this dataset"
             );
         }
-        return build_initial_map_from_frames(dataset, frames, config);
+        return build_initial_splats_from_frames(dataset, frames, config);
     }
 
+    let sh_degree = splat_color_representation_for_config(config).sh_degree();
     let init_config = gaussian_init_config_for_training(config);
-    let mut gaussians = initialize_gaussian3d_from_points(&dataset.initial_points, &init_config);
+    let mut gaussians = initialize_gaussians_from_points(&dataset.initial_points, &init_config);
     let max_initial = config.max_initial_gaussians.max(1);
     if gaussians.len() > max_initial {
         log::warn!(
@@ -29,9 +30,26 @@ pub(super) fn build_initial_map(
         );
         gaussians.truncate(max_initial);
     }
-    let mut map = GaussianMap::from_gaussians(gaussians);
-    map.update_states();
-    Ok(map)
+
+    let mut splats = HostSplats::with_sh_degree_capacity(sh_degree, gaussians.len());
+    for gaussian in gaussians {
+        splats.push_rgb(
+            gaussian.position,
+            [
+                gaussian.scale[0].max(1e-6).ln(),
+                gaussian.scale[1].max(1e-6).ln(),
+                gaussian.scale[2].max(1e-6).ln(),
+            ],
+            gaussian.rotation,
+            opacity_to_logit(gaussian.opacity),
+            gaussian.color,
+        );
+    }
+
+    splats
+        .validate()
+        .map_err(|err| TrainingError::TrainingFailed(err.to_string()))?;
+    Ok(splats)
 }
 
 pub(super) fn gaussian_init_config_for_training(
@@ -66,8 +84,8 @@ pub(super) fn initial_frame_sampling_step(
     }
 }
 
-pub(super) fn accumulate_frame_into_initial_map(
-    map: &mut GaussianMap,
+pub(super) fn accumulate_frame_into_initial_splats(
+    splats: &mut HostSplats,
     dataset: &TrainingDataset,
     rotation: &[[f32; 3]; 3],
     translation: &[f32; 3],
@@ -78,6 +96,7 @@ pub(super) fn accumulate_frame_into_initial_map(
 ) {
     let width = dataset.intrinsics.width as usize;
     let height = dataset.intrinsics.height as usize;
+    let max_initial = config.max_initial_gaussians.max(1);
     let rotation = glam::Mat3::from_cols(
         glam::Vec3::new(rotation[0][0], rotation[0][1], rotation[0][2]),
         glam::Vec3::new(rotation[1][0], rotation[1][1], rotation[1][2]),
@@ -87,6 +106,10 @@ pub(super) fn accumulate_frame_into_initial_map(
 
     for y in (0..height).step_by(sampling_step) {
         for x in (0..width).step_by(sampling_step) {
+            if splats.len() >= max_initial {
+                return;
+            }
+
             let idx = y * width + x;
             let depth = depth[idx];
             if depth < config.min_depth || depth > config.max_depth {
@@ -98,55 +121,61 @@ pub(super) fn accumulate_frame_into_initial_map(
             let camera_point = glam::Vec3::new(x_cam, y_cam, depth);
             let world_point = rotation * camera_point + translation;
             let color_base = idx * 3;
-            let gaussian = Gaussian3D::from_depth_point(
-                world_point.x,
-                world_point.y,
-                world_point.z,
+            splats.push_rgb(
+                [world_point.x, world_point.y, world_point.z],
+                [0.01f32.ln(), 0.01f32.ln(), 0.01f32.ln()],
+                [1.0, 0.0, 0.0, 0.0],
+                opacity_to_logit(0.5),
                 [
-                    color_u8[color_base],
-                    color_u8[color_base + 1],
-                    color_u8[color_base + 2],
+                    color_u8[color_base] as f32 / 255.0,
+                    color_u8[color_base + 1] as f32 / 255.0,
+                    color_u8[color_base + 2] as f32 / 255.0,
                 ],
             );
-            let _ = map.add(gaussian);
         }
     }
 }
 
-pub(super) fn finalize_initial_map(
-    map: &mut GaussianMap,
+pub(super) fn finalize_initial_splats(
+    splats: &mut HostSplats,
     sampling_step: usize,
     config: &super::TrainingConfig,
 ) -> Result<(), TrainingError> {
-    if map.is_empty() {
+    if splats.is_empty() {
         return Err(TrainingError::InvalidInput(
             "failed to build any initial gaussians from the training frames".to_string(),
         ));
     }
 
-    if sampling_step > 1 && map.len() > config.max_initial_gaussians.max(1) {
+    if sampling_step > 1 && splats.len() >= config.max_initial_gaussians.max(1) {
         log::warn!(
-            "initial Gaussian map exceeded budget ({} > {}) with sampling step {}",
-            map.len(),
+            "initial splat set reached the max_initial_gaussians budget ({}) with sampling step {}",
             config.max_initial_gaussians,
             sampling_step,
         );
     }
 
-    map.update_states();
-    log::info!("Initialized {} gaussians from training frames", map.len());
+    splats
+        .validate()
+        .map_err(|err| TrainingError::TrainingFailed(err.to_string()))?;
+    log::info!(
+        "Initialized {} gaussians from training frames",
+        splats.len()
+    );
     Ok(())
 }
 
-fn build_initial_map_from_frames(
+fn build_initial_splats_from_frames(
     dataset: &TrainingDataset,
     frames: &[FrameSample],
     config: &super::TrainingConfig,
-) -> Result<GaussianMap, TrainingError> {
+) -> Result<HostSplats, TrainingError> {
     let width = dataset.intrinsics.width as usize;
     let height = dataset.intrinsics.height as usize;
-    let mut map = GaussianMap::new(config.max_initial_gaussians.max(1));
     let sampling_step = initial_frame_sampling_step(dataset, frames.len(), config);
+    let sh_degree = splat_color_representation_for_config(config).sh_degree();
+    let mut splats =
+        HostSplats::with_sh_degree_capacity(sh_degree, config.max_initial_gaussians.max(1));
 
     log::info!(
         "Initializing gaussians from {} frames | resolution={}x{} | frame_budget={} | sampling_step={}",
@@ -162,8 +191,8 @@ fn build_initial_map_from_frames(
     );
 
     for frame in frames {
-        accumulate_frame_into_initial_map(
-            &mut map,
+        accumulate_frame_into_initial_splats(
+            &mut splats,
             dataset,
             &frame.rotation,
             &frame.translation,
@@ -172,16 +201,24 @@ fn build_initial_map_from_frames(
             sampling_step,
             config,
         );
+        if splats.len() >= config.max_initial_gaussians.max(1) {
+            break;
+        }
     }
 
-    finalize_initial_map(&mut map, sampling_step, config)?;
-    Ok(map)
+    finalize_initial_splats(&mut splats, sampling_step, config)?;
+    Ok(splats)
 }
 
 fn compute_sampling_step(width: usize, height: usize, max_gaussians: usize) -> usize {
     let pixels = width.saturating_mul(height).max(1);
     let ratio = (pixels as f32 / max_gaussians.max(1) as f32).sqrt();
     ratio.ceil().max(2.0) as usize
+}
+
+fn opacity_to_logit(opacity: f32) -> f32 {
+    let clamped = opacity.clamp(1e-6, 1.0 - 1e-6);
+    (clamped / (1.0 - clamped)).ln()
 }
 
 #[cfg(test)]

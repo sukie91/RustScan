@@ -1,7 +1,7 @@
 use super::chunk_training::ChunkTrainingOverridePlan;
-use super::splats::Splats;
+use super::splats::HostSplats;
 use super::{ChunkPlan, MaterializedChunkDataset, PlannedChunk, TrainingConfig};
-use crate::{GaussianMap, TrainingError};
+use crate::TrainingError;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -34,7 +34,8 @@ struct ChunkReportEntry {
 struct ChunkTrainingReport {
     merge_core_only: bool,
     requested_chunks: usize,
-    trainable_chunks: usize,
+    #[serde(alias = "trainable_chunks")]
+    training_chunks: usize,
     entries: Vec<ChunkReportEntry>,
 }
 
@@ -64,7 +65,7 @@ impl ChunkPersistenceContext {
             report: ChunkTrainingReport {
                 merge_core_only: config.merge_core_only,
                 requested_chunks: chunk_plan.chunks.len(),
-                trainable_chunks: chunk_plan.trainable_chunks().count(),
+                training_chunks: chunk_plan.training_chunks().count(),
                 entries: Vec::new(),
             },
         };
@@ -115,13 +116,13 @@ impl ChunkPersistenceContext {
         chunk: &PlannedChunk,
         materialized: &MaterializedChunkDataset,
         override_plan: &ChunkTrainingOverridePlan,
-        chunk_scene: &GaussianMap,
+        chunk_splats: &HostSplats,
         core_filter_removed: usize,
     ) -> Result<(), TrainingError> {
         let scene_path = if let Some(path) = self.scene_path(chunk.chunk_id) {
-            persist_gaussian_map_scene(
+            persist_host_splats_scene(
                 &path,
-                chunk_scene,
+                chunk_splats,
                 override_plan.effective_config.iterations,
             )?;
             Some(path)
@@ -142,7 +143,7 @@ impl ChunkPersistenceContext {
             ),
             effective_render_scale: Some(override_plan.effective_config.metal_render_scale),
             estimated_peak_gib: Some(override_plan.estimate.estimated_peak_gib()),
-            output_gaussians: Some(chunk_scene.len()),
+            output_gaussians: Some(chunk_splats.len()),
             core_filter_removed: Some(core_filter_removed),
         });
         self.flush_report()
@@ -195,43 +196,50 @@ impl ChunkPersistenceContext {
     }
 }
 
-pub(super) fn persist_gaussian_map_scene(
+pub(super) fn persist_host_splats_scene(
     path: &Path,
-    scene: &GaussianMap,
+    splats: &HostSplats,
     iterations: usize,
 ) -> Result<(), TrainingError> {
-    let splats = Splats::from_gaussian_map_inferred(scene)
-        .map_err(|err| TrainingError::TrainingFailed(err.to_string()))?;
-    let gaussians = splats
-        .to_scene_gaussians()
-        .map_err(|err| TrainingError::TrainingFailed(err.to_string()))?;
     let metadata = splats.to_scene_metadata(iterations, 0.0);
-    crate::save_scene_ply(path, &gaussians, &metadata).map_err(|err| {
+    crate::save_splats_ply(path, splats, &metadata).map_err(|err| {
         TrainingError::TrainingFailed(format!("failed to persist {}: {}", path.display(), err))
     })
 }
 
 #[cfg(all(test, feature = "gpu"))]
 mod tests {
-    use super::{persist_gaussian_map_scene, ChunkPersistenceContext};
-    use crate::core::GaussianColorRepresentation;
+    use super::{persist_host_splats_scene, ChunkPersistenceContext};
     use crate::diff::diff_splat::rgb_to_sh0_value;
     use crate::training::chunk_training::ChunkTrainingOverridePlan;
+    use crate::training::splats::HostSplats;
     use crate::training::{PlannedChunk, TrainingConfig};
     use crate::{
-        ChunkBounds, ChunkBoundsSource, ChunkDisposition, Gaussian3D, GaussianMap, Intrinsics,
-        MaterializedChunkDataset, ScenePose, TrainingDataset, SE3,
+        ChunkBounds, ChunkBoundsSource, ChunkDisposition, Intrinsics, MaterializedChunkDataset,
+        ScenePose, TrainingDataset, SE3,
     };
     use std::path::PathBuf;
     use tempfile::tempdir;
 
     #[test]
-    fn persist_gaussian_map_scene_writes_chunk_ply() {
+    fn persist_host_splats_scene_writes_chunk_ply() {
         let tempdir = tempdir().unwrap();
         let path = tempdir.path().join("chunk-000.ply");
-        let scene = GaussianMap::from_gaussians(vec![Gaussian3D::default()]);
+        let splats = HostSplats::from_raw_parts(
+            vec![0.0, 0.0, 0.0],
+            vec![0.01f32.ln(), 0.01f32.ln(), 0.01f32.ln()],
+            vec![1.0, 0.0, 0.0, 0.0],
+            vec![0.0],
+            vec![
+                rgb_to_sh0_value(0.5),
+                rgb_to_sh0_value(0.5),
+                rgb_to_sh0_value(0.5),
+            ],
+            0,
+        )
+        .unwrap();
 
-        persist_gaussian_map_scene(&path, &scene, 42).unwrap();
+        persist_host_splats_scene(&path, &splats, 42).unwrap();
 
         assert!(path.exists());
         let (gaussians, metadata) = crate::load_scene_ply(&path).unwrap();
@@ -240,27 +248,26 @@ mod tests {
     }
 
     #[test]
-    fn persist_gaussian_map_scene_preserves_spherical_harmonics_metadata() {
+    fn persist_host_splats_scene_preserves_spherical_harmonics_metadata() {
         let tempdir = tempdir().unwrap();
         let path = tempdir.path().join("chunk-sh.ply");
-        let scene = GaussianMap::from_gaussians(vec![Gaussian3D::new(
-            glam::Vec3::new(1.0, 2.0, 3.0),
-            glam::Vec3::new(0.1, 0.2, 0.3),
-            glam::Quat::IDENTITY,
-            0.25,
-            [0.2, 0.4, 0.6],
+        let mut sh_coeffs = vec![
+            rgb_to_sh0_value(0.2),
+            rgb_to_sh0_value(0.4),
+            rgb_to_sh0_value(0.6),
+        ];
+        sh_coeffs.extend(vec![0.5; 15 * 3]);
+        let splats = HostSplats::from_raw_parts(
+            vec![1.0, 2.0, 3.0],
+            vec![0.1f32.ln(), 0.2f32.ln(), 0.3f32.ln()],
+            vec![1.0, 0.0, 0.0, 0.0],
+            vec![(0.25f32 / (1.0 - 0.25)).ln()],
+            sh_coeffs,
+            3,
         )
-        .with_color_state(
-            GaussianColorRepresentation::SphericalHarmonics { degree: 3 },
-            Some([
-                rgb_to_sh0_value(0.2),
-                rgb_to_sh0_value(0.4),
-                rgb_to_sh0_value(0.6),
-            ]),
-            Some(vec![0.5; 15 * 3]),
-        )]);
+        .unwrap();
 
-        persist_gaussian_map_scene(&path, &scene, 42).unwrap();
+        persist_host_splats_scene(&path, &splats, 42).unwrap();
 
         let (gaussians, metadata) = crate::load_scene_ply(&path).unwrap();
         assert_eq!(metadata.iterations, 42);
@@ -327,13 +334,25 @@ mod tests {
             lowered_gaussian_cap: false,
             lowered_render_scale: false,
         };
-        let scene = GaussianMap::from_gaussians(vec![Gaussian3D::default()]);
+        let splats = HostSplats::from_raw_parts(
+            vec![0.0, 0.0, 0.0],
+            vec![0.01f32.ln(), 0.01f32.ln(), 0.01f32.ln()],
+            vec![1.0, 0.0, 0.0, 0.0],
+            vec![0.0],
+            vec![
+                rgb_to_sh0_value(0.5),
+                rgb_to_sh0_value(0.5),
+                rgb_to_sh0_value(0.5),
+            ],
+            0,
+        )
+        .unwrap();
 
         let mut persistence =
             ChunkPersistenceContext::new(config.chunk_artifact_dir.clone(), &config, &chunk_plan)
                 .unwrap();
         persistence
-            .record_success(&chunk, &materialized, &override_plan, &scene, 0)
+            .record_success(&chunk, &materialized, &override_plan, &splats, 0)
             .unwrap();
 
         let report_path = tempdir.path().join("artifacts").join("chunk-report.json");

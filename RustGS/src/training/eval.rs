@@ -1,4 +1,4 @@
-use crate::diff::{DiffCamera, DiffSplatRenderer, TrainableGaussians};
+use crate::diff::{DiffCamera, DiffSplatRenderer, Splats};
 use crate::{Gaussian, SceneMetadata, TrainingDataset};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -6,7 +6,7 @@ use std::str::FromStr;
 use std::time::Instant;
 
 #[cfg(feature = "gpu")]
-use super::splats::Splats;
+use super::splats::HostSplats;
 #[cfg(feature = "gpu")]
 use candle_core::Device;
 
@@ -105,7 +105,7 @@ pub struct PsnrSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SceneEvaluationSummary {
+pub struct SplatEvaluationSummary {
     pub device: EvaluationDevice,
     pub render_scale: f32,
     pub render_width: usize,
@@ -113,8 +113,10 @@ pub struct SceneEvaluationSummary {
     pub frame_stride: usize,
     pub max_frames: usize,
     pub frame_count: usize,
-    pub scene_iterations: usize,
-    pub scene_gaussian_count: usize,
+    #[serde(alias = "scene_iterations")]
+    pub splat_iterations: usize,
+    #[serde(alias = "scene_gaussian_count")]
+    pub splat_count: usize,
     pub final_loss: f32,
     pub final_step_loss: Option<f32>,
     pub elapsed_seconds: f32,
@@ -126,11 +128,28 @@ pub struct SceneEvaluationSummary {
     pub worst_frames: Vec<EvaluationFrameMetric>,
 }
 
+impl SplatEvaluationSummary {
+    #[deprecated(note = "Use the splat_iterations field instead.")]
+    pub fn scene_iterations(&self) -> usize {
+        self.splat_iterations
+    }
+
+    #[deprecated(note = "Use the splat_count field instead.")]
+    pub fn scene_gaussian_count(&self) -> usize {
+        self.splat_count
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
-pub struct SceneEvaluationResult {
-    pub summary: SceneEvaluationSummary,
+pub struct SplatEvaluationResult {
+    pub summary: SplatEvaluationSummary,
     pub frame_metrics: Vec<EvaluationFrameMetric>,
 }
+
+#[deprecated(note = "Use SplatEvaluationSummary instead.")]
+pub type SceneEvaluationSummary = SplatEvaluationSummary;
+#[deprecated(note = "Use SplatEvaluationResult instead.")]
+pub type SceneEvaluationResult = SplatEvaluationResult;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SceneEvaluationError {
@@ -260,16 +279,63 @@ pub fn evaluation_device(device: EvaluationDevice) -> Result<Device, SceneEvalua
 }
 
 #[cfg(feature = "gpu")]
+pub fn runtime_from_gaussians(
+    gaussians: &[Gaussian],
+    metadata: &SceneMetadata,
+    device: &Device,
+) -> Result<Splats, SceneEvaluationError> {
+    let inferred_degree = infer_sh_degree(gaussians);
+    let sh_degree = metadata.sh_degree.max(inferred_degree);
+    let splats = HostSplats::from_scene_gaussians(gaussians, sh_degree)
+        .map_err(|err| SceneEvaluationError::InvalidInput(err.to_string()))?
+        ;
+    runtime_from_splats(&splats, device)
+}
+
+#[cfg(feature = "gpu")]
+#[deprecated(note = "Use runtime_from_gaussians(...) instead.")]
+pub fn trainable_from_gaussians(
+    gaussians: &[Gaussian],
+    metadata: &SceneMetadata,
+    device: &Device,
+) -> Result<Splats, SceneEvaluationError> {
+    runtime_from_gaussians(gaussians, metadata, device)
+}
+
+#[cfg(feature = "gpu")]
+pub fn runtime_from_scene(
+    scene: &[Gaussian],
+    metadata: &SceneMetadata,
+    device: &Device,
+) -> Result<Splats, SceneEvaluationError> {
+    runtime_from_gaussians(scene, metadata, device)
+}
+
+#[cfg(feature = "gpu")]
+#[deprecated(note = "Use runtime_from_scene(...) instead.")]
 pub fn trainable_from_scene(
     scene: &[Gaussian],
     metadata: &SceneMetadata,
     device: &Device,
-) -> Result<TrainableGaussians, SceneEvaluationError> {
-    let inferred_degree = infer_sh_degree(scene);
-    let sh_degree = metadata.sh_degree.max(inferred_degree);
-    Ok(Splats::from_scene_gaussians(scene, sh_degree)
-        .map_err(|err| SceneEvaluationError::InvalidInput(err.to_string()))?
-        .to_trainable(device)?)
+) -> Result<Splats, SceneEvaluationError> {
+    runtime_from_scene(scene, metadata, device)
+}
+
+#[cfg(feature = "gpu")]
+pub fn runtime_from_splats(
+    splats: &HostSplats,
+    device: &Device,
+) -> Result<Splats, SceneEvaluationError> {
+    Ok(splats.upload(device)?)
+}
+
+#[cfg(feature = "gpu")]
+#[deprecated(note = "Use runtime_from_splats(...) instead.")]
+pub fn trainable_from_splats(
+    splats: &HostSplats,
+    device: &Device,
+) -> Result<Splats, SceneEvaluationError> {
+    runtime_from_splats(splats, device)
 }
 
 #[cfg(feature = "gpu")]
@@ -279,7 +345,7 @@ pub fn render_evaluation_frame(
     render_width: usize,
     render_height: usize,
     device: &Device,
-    trainable: &TrainableGaussians,
+    trainable: &Splats,
     renderer: &mut DiffSplatRenderer,
 ) -> Result<(Vec<f32>, Vec<f32>), SceneEvaluationError> {
     let target = load_resized_target(
@@ -307,6 +373,23 @@ pub fn render_evaluation_frame(
 }
 
 #[cfg(feature = "gpu")]
+pub fn evaluate_gaussians(
+    dataset: &TrainingDataset,
+    gaussians: &[Gaussian],
+    metadata: &SceneMetadata,
+    config: &SceneEvaluationConfig,
+    device: &Device,
+    training_metrics: Option<FinalTrainingMetrics>,
+) -> Result<SplatEvaluationResult, SceneEvaluationError> {
+    let inferred_degree = infer_sh_degree(gaussians);
+    let sh_degree = metadata.sh_degree.max(inferred_degree);
+    let splats = HostSplats::from_scene_gaussians(gaussians, sh_degree)
+        .map_err(|err| SceneEvaluationError::InvalidInput(err.to_string()))?;
+    evaluate_splats(dataset, &splats, metadata, config, device, training_metrics)
+}
+
+#[cfg(feature = "gpu")]
+#[deprecated(note = "Use evaluate_gaussians(...) or evaluate_splats(...) instead.")]
 pub fn evaluate_scene(
     dataset: &TrainingDataset,
     scene: &[Gaussian],
@@ -314,7 +397,19 @@ pub fn evaluate_scene(
     config: &SceneEvaluationConfig,
     device: &Device,
     training_metrics: Option<FinalTrainingMetrics>,
-) -> Result<SceneEvaluationResult, SceneEvaluationError> {
+) -> Result<SplatEvaluationResult, SceneEvaluationError> {
+    evaluate_gaussians(dataset, scene, metadata, config, device, training_metrics)
+}
+
+#[cfg(feature = "gpu")]
+pub fn evaluate_splats(
+    dataset: &TrainingDataset,
+    splats: &HostSplats,
+    metadata: &SceneMetadata,
+    config: &SceneEvaluationConfig,
+    device: &Device,
+    training_metrics: Option<FinalTrainingMetrics>,
+) -> Result<SplatEvaluationResult, SceneEvaluationError> {
     let dataset = select_evaluation_frames(dataset, config.max_frames, config.frame_stride);
     if dataset.poses.is_empty() {
         return Err(SceneEvaluationError::InvalidInput(
@@ -327,7 +422,7 @@ pub fn evaluate_scene(
         dataset.intrinsics.height as usize,
         config.render_scale,
     );
-    let trainable = trainable_from_scene(scene, metadata, device)?;
+    let runtime_splats = runtime_from_splats(splats, device)?;
     let mut renderer = DiffSplatRenderer::with_device(render_width, render_height, device.clone());
 
     let start = Instant::now();
@@ -341,7 +436,7 @@ pub fn evaluate_scene(
             render_width,
             render_height,
             device,
-            &trainable,
+            &runtime_splats,
             &mut renderer,
         )?;
         let psnr_db = compute_psnr_f32(&rendered, &target);
@@ -359,7 +454,7 @@ pub fn evaluate_scene(
         .map(|metrics| metrics.final_loss)
         .unwrap_or(metadata.final_loss);
     let final_step_loss = training_metrics.map(|metrics| metrics.final_step_loss);
-    let summary = SceneEvaluationSummary {
+    let summary = SplatEvaluationSummary {
         device: if matches!(device, Device::Cpu) {
             EvaluationDevice::Cpu
         } else {
@@ -371,8 +466,8 @@ pub fn evaluate_scene(
         frame_stride: config.frame_stride,
         max_frames: config.max_frames,
         frame_count: dataset.poses.len(),
-        scene_iterations: metadata.iterations,
-        scene_gaussian_count: metadata.gaussian_count,
+        splat_iterations: metadata.iterations,
+        splat_count: metadata.gaussian_count,
         final_loss,
         final_step_loss,
         elapsed_seconds: start.elapsed().as_secs_f32(),
@@ -384,7 +479,7 @@ pub fn evaluate_scene(
         worst_frames: worst_frame_metrics(&frame_metrics, config.worst_frame_count),
     };
 
-    Ok(SceneEvaluationResult {
+    Ok(SplatEvaluationResult {
         summary,
         frame_metrics,
     })

@@ -1,6 +1,6 @@
 use candle_core::{Device, Tensor, Var};
 
-use crate::diff::diff_splat::TrainableGaussians;
+use crate::diff::diff_splat::Splats;
 
 use super::metal_backward::MetalParameterGrads;
 use super::metal_runtime::{MetalBufferSlot, MetalRuntime};
@@ -21,7 +21,7 @@ pub(crate) struct MetalAdamState {
 }
 
 impl MetalAdamState {
-    pub(crate) fn new(gaussians: &TrainableGaussians) -> candle_core::Result<Self> {
+    pub(crate) fn new(gaussians: &Splats) -> candle_core::Result<Self> {
         Ok(Self {
             m_pos: gaussians.positions().zeros_like()?,
             v_pos: gaussians.positions().zeros_like()?,
@@ -75,7 +75,7 @@ pub(crate) struct MetalOptimizerConfig {
 }
 
 pub(crate) fn apply_optimizer_step(
-    gaussians: &mut TrainableGaussians,
+    gaussians: &mut Splats,
     runtime: &mut MetalRuntime,
     adam: &mut MetalAdamState,
     grads: &MetalParameterGrads,
@@ -198,7 +198,7 @@ pub(crate) fn apply_optimizer_step(
 }
 
 fn apply_non_rotation_step(
-    gaussians: &mut TrainableGaussians,
+    gaussians: &mut Splats,
     runtime: &mut MetalRuntime,
     adam: &mut MetalAdamState,
     grads: &MetalParameterGrads,

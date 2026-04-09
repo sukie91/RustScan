@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use candle_core::{DType, Device, Tensor};
 use glam::{Mat3, Quat, Vec3};
 
-use crate::diff::diff_splat::{DiffCamera, TrainableGaussians};
+use crate::diff::diff_splat::{DiffCamera, Splats};
 
 use super::metal_runtime::{
     ChunkPixelWindow, MetalBufferSlot, MetalProjectionRecord, MetalRuntime, MetalTileBins,
@@ -180,7 +180,7 @@ pub(super) struct MetalForwardSettings {
 
 #[derive(Clone, Copy)]
 pub(super) struct MetalForwardInputs<'a> {
-    pub(super) gaussians: &'a TrainableGaussians,
+    pub(super) gaussians: &'a Splats,
     pub(super) positions: &'a Tensor,
     pub(super) colors: &'a Tensor,
     pub(super) camera: &'a DiffCamera,

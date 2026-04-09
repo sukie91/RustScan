@@ -64,8 +64,8 @@ pub fn sh0_to_rgb_value(sh: f32) -> f32 {
     sh * SH_C0 + 0.5
 }
 
-/// Trainable Gaussian parameters (with gradients)
-pub struct TrainableGaussians {
+/// Runtime splat parameters owned on the device and optimized during training.
+pub struct Splats {
     /// Positions: [N, 3] - learnable
     pub positions: Var,
     /// Scales: [N, 3] - learnable (log scale)
@@ -83,7 +83,7 @@ pub struct TrainableGaussians {
     pub sh_rest: Var,
     /// Number of Gaussians
     pub n: usize,
-    color_representation: TrainableColorRepresentation,
+    sh_degree: usize,
     /// Device
     device: Device,
 }
@@ -110,8 +110,8 @@ impl SurrogateGradients {
     }
 }
 
-impl TrainableGaussians {
-    /// Create new trainable Gaussians
+impl Splats {
+    /// Create new runtime splats
     pub fn new(
         positions: &[f32],
         scales: &[f32],
@@ -130,12 +130,12 @@ impl TrainableGaussians {
             colors: Var::from_tensor(&Tensor::from_slice(colors, (n, 3), device)?)?,
             sh_rest: Var::from_tensor(&Tensor::zeros((n, 0usize, 3usize), DType::F32, device)?)?,
             n,
-            color_representation: TrainableColorRepresentation::Rgb,
+            sh_degree: 0,
             device: device.clone(),
         })
     }
 
-    /// Create trainable Gaussians whose color representation matches LiteGS.
+    /// Create runtime splats whose color representation matches LiteGS.
     pub fn new_with_sh(
         positions: &[f32],
         scales: &[f32],
@@ -147,9 +147,7 @@ impl TrainableGaussians {
         device: &Device,
     ) -> candle_core::Result<Self> {
         let n = positions.len() / 3;
-        let color_representation =
-            TrainableColorRepresentation::SphericalHarmonics { degree: sh_degree };
-        let sh_rest_coeff_count = color_representation.sh_rest_coeff_count();
+        let sh_rest_coeff_count = sh_coeff_count_for_degree(sh_degree).saturating_sub(1);
         let expected_sh0 = n * 3;
         let expected_sh_rest = n * sh_rest_coeff_count * 3;
 
@@ -178,7 +176,7 @@ impl TrainableGaussians {
                 device,
             )?)?,
             n,
-            color_representation,
+            sh_degree,
             device: device.clone(),
         })
     }
@@ -219,26 +217,28 @@ impl TrainableGaussians {
     }
 
     pub fn color_representation(&self) -> TrainableColorRepresentation {
-        self.color_representation
+        if self.sh_degree == 0 {
+            TrainableColorRepresentation::Rgb
+        } else {
+            TrainableColorRepresentation::SphericalHarmonics {
+                degree: self.sh_degree,
+            }
+        }
     }
 
     pub fn uses_spherical_harmonics(&self) -> bool {
-        matches!(
-            self.color_representation,
-            TrainableColorRepresentation::SphericalHarmonics { .. }
-        )
+        self.sh_degree > 0
     }
 
     pub fn sh_degree(&self) -> usize {
-        self.color_representation.sh_degree()
+        self.sh_degree
     }
 
     pub fn render_colors(&self) -> candle_core::Result<Tensor> {
-        match self.color_representation {
-            TrainableColorRepresentation::Rgb => Ok(self.colors().clone()),
-            TrainableColorRepresentation::SphericalHarmonics { .. } => {
-                self.colors().affine(SH_C0 as f64, 0.5)
-            }
+        if self.uses_spherical_harmonics() {
+            self.colors().affine(SH_C0 as f64, 0.5)
+        } else {
+            Ok(self.colors().clone())
         }
     }
 
@@ -246,11 +246,10 @@ impl TrainableGaussians {
         &self,
         render_color_grads: &Tensor,
     ) -> candle_core::Result<Tensor> {
-        match self.color_representation {
-            TrainableColorRepresentation::Rgb => Ok(render_color_grads.clone()),
-            TrainableColorRepresentation::SphericalHarmonics { .. } => {
-                render_color_grads.affine(SH_C0 as f64, 0.0)
-            }
+        if self.uses_spherical_harmonics() {
+            render_color_grads.affine(SH_C0 as f64, 0.0)
+        } else {
+            Ok(render_color_grads.clone())
         }
     }
 
@@ -268,7 +267,14 @@ impl TrainableGaussians {
     pub fn device(&self) -> &Device {
         &self.device
     }
+
+    /// Materialize a host-side snapshot for export, checkpointing, or topology edits.
+    pub fn snapshot(&self) -> candle_core::Result<crate::training::HostSplats> {
+        crate::training::HostSplats::from_runtime(self)
+    }
 }
+
+pub type TrainableGaussians = Splats;
 
 /// Helper: normalize quaternions
 fn normalize_quaternions(q: &Tensor) -> candle_core::Result<Tensor> {

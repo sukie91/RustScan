@@ -21,5 +21,5 @@ pub use diff_renderer::{CameraTensors, DiffGaussianRenderer, GaussianTensors, Re
 
 #[cfg(feature = "gpu")]
 pub use diff_splat::{
-    DiffCamera, DiffLoss, DiffRenderOutput, DiffSplatRenderer, TrainableGaussians,
+    DiffCamera, DiffLoss, DiffRenderOutput, DiffSplatRenderer, Splats, TrainableGaussians,
 };
