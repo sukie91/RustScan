@@ -3,7 +3,7 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
-use crate::core::GaussianColorRepresentation;
+use crate::legacy::GaussianColorRepresentation;
 use crate::render::tiled_renderer::Gaussian;
 
 use super::{SceneIoError, SceneMetadata};

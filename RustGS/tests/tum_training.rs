@@ -2,8 +2,7 @@ use std::path::PathBuf;
 
 use rustgs::{
     evaluate_splats, evaluation_device, load_training_dataset, select_evaluation_frames,
-    EvaluationDevice, SceneEvaluationConfig, SceneMetadata, TrainingConfig,
-    TumRgbdConfig,
+    EvaluationDevice, SceneEvaluationConfig, SceneMetadata, TrainingConfig, TumRgbdConfig,
 };
 
 fn tum_root() -> PathBuf {

@@ -2,7 +2,7 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
 
-use crate::core::GaussianColorRepresentation;
+use crate::legacy::GaussianColorRepresentation;
 use crate::render::tiled_renderer::Gaussian;
 
 use super::{SceneIoError, SceneMetadata, CURRENT_SCENE_FORMAT_VERSION};

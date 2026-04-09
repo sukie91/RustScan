@@ -272,7 +272,7 @@ mod tests {
             .unwrap()
             .to_legacy_gaussians()
             .unwrap();
-        let map = crate::core::GaussianMap::from_gaussians(gaussians);
+        let map = crate::legacy::GaussianMap::from_gaussians(gaussians);
         let gaussian = &map.gaussians()[0];
         assert!((gaussian.color[0] - 0.2).abs() < 1e-5);
         assert!((gaussian.color[1] - 0.4).abs() < 1e-5);

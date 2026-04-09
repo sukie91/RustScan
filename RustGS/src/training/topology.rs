@@ -4,7 +4,7 @@ use super::density_controller::{
     DensityController, DensityControllerConfig, OpacityResetMode, PruneMode,
 };
 use super::parity_harness::ParityTopologyMetrics;
-use super::splats::Splats;
+use super::splats::{sigmoid_scalar, Splats};
 use super::{LiteGsConfig, LiteGsOpacityResetMode, LiteGsPruneMode, TrainingProfile};
 
 #[cfg(test)]
@@ -902,7 +902,6 @@ pub(super) fn densify_snapshot_litegs(
         let opacity_logit = snapshot.opacity_logits[*idx];
         let sh_coeffs = snapshot.sh_coeffs_row(*idx).to_vec();
         let scale = snapshot.scale(*idx);
-
         let (max_axis, max_axis_scale) = scale
             .into_iter()
             .enumerate()
@@ -1306,10 +1305,6 @@ fn apply_morton_sort(
     *stats = new_stats;
     *origins = new_origins;
     true
-}
-
-fn sigmoid_scalar(value: f32) -> f32 {
-    1.0 / (1.0 + (-value).exp())
 }
 
 #[cfg(test)]

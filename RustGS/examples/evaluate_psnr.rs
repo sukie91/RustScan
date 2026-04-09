@@ -3,25 +3,26 @@ use std::path::PathBuf;
 use image::{ImageBuffer, RgbImage};
 use rustgs::diff::DiffSplatRenderer;
 use rustgs::{
-    evaluate_scene, evaluation_device, load_scene_ply, load_training_dataset,
-    render_evaluation_frame, select_evaluation_frames, trainable_from_scene, EvaluationDevice,
-    EvaluationFrameMetric, Gaussian, SceneEvaluationConfig, TumRgbdConfig,
+    evaluate_splats, evaluation_device, load_splats_ply, load_training_dataset,
+    render_evaluation_frame, runtime_from_splats, select_evaluation_frames, EvaluationDevice,
+    EvaluationFrameMetric, HostSplats, SceneEvaluationConfig, SplatEvaluationSummary,
+    TumRgbdConfig,
 };
 
 fn main() -> anyhow::Result<()> {
     let args = Args::parse()?;
 
     let dataset = load_training_dataset(&args.dataset, &TumRgbdConfig::default())?;
-    let (scene, metadata) = load_scene_ply(&args.scene)?;
+    let (splats, metadata) = load_splats_ply(&args.scene)?;
     let eval_device = args
         .device
         .parse::<EvaluationDevice>()
         .map_err(anyhow::Error::msg)?;
     let device = evaluation_device(eval_device)?;
     let selected_dataset = select_evaluation_frames(&dataset, args.max_frames, args.frame_stride);
-    let result = evaluate_scene(
+    let result = evaluate_splats(
         &dataset,
-        &scene,
+        &splats,
         &metadata,
         &SceneEvaluationConfig {
             render_scale: args.render_scale,
@@ -46,8 +47,7 @@ fn main() -> anyhow::Result<()> {
             .unwrap_or_else(|| default_export_dir(&args.scene));
         export_worst_frames(
             &selected_dataset,
-            &scene,
-            &metadata,
+            &splats,
             &result.frame_metrics,
             args.export_worst_k,
             &device,
@@ -168,7 +168,7 @@ fn summary_worst_count(export_worst_k: usize) -> usize {
     }
 }
 
-fn print_human_summary(args: &Args, summary: &rustgs::SceneEvaluationSummary) {
+fn print_human_summary(args: &Args, summary: &SplatEvaluationSummary) {
     println!("scene={}", args.scene.display());
     println!("dataset={}", args.dataset.display());
     println!("device={}", summary.device);
@@ -182,9 +182,9 @@ fn print_human_summary(args: &Args, summary: &rustgs::SceneEvaluationSummary) {
         summary.max_frames,
     );
     println!(
-        "scene_metadata iterations={} gaussian_count={} final_loss={} final_step_loss={}",
-        summary.scene_iterations,
-        summary.scene_gaussian_count,
+        "splat_metadata iterations={} splat_count={} final_loss={} final_step_loss={}",
+        summary.splat_iterations,
+        summary.splat_count,
         summary.final_loss,
         summary
             .final_step_loss
@@ -227,8 +227,7 @@ fn default_export_dir(scene: &std::path::Path) -> PathBuf {
 
 fn export_worst_frames(
     dataset: &rustgs::TrainingDataset,
-    scene: &[Gaussian],
-    metadata: &rustgs::SceneMetadata,
+    splats: &HostSplats,
     frame_metrics: &[EvaluationFrameMetric],
     export_worst_k: usize,
     device: &candle_core::Device,
@@ -242,7 +241,7 @@ fn export_worst_frames(
         dataset.intrinsics.height as usize,
         render_scale,
     );
-    let trainable = trainable_from_scene(scene, metadata, device)?;
+    let trainable = runtime_from_splats(splats, device)?;
     let mut renderer = DiffSplatRenderer::with_device(render_width, render_height, device.clone());
     let worst = rustgs::worst_frame_metrics(frame_metrics, export_worst_k);
 

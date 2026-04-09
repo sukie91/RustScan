@@ -36,11 +36,15 @@ Status snapshot as of 2026-04-09:
   - `save_splats_ply` / `load_splats_ply` now run directly on `HostSplats` SoA storage.
   - `evaluate_splats` / `trainable_from_splats` landed.
   - `evaluate_gaussians` / `trainable_from_gaussians` now provide splat-first canonical naming for Gaussian-array compatibility inputs.
+  - Remaining legacy map conversion helpers are now isolated in `training::splat_interop` instead of staying mixed into the canonical `HostSplats` implementation.
   - Import and some compatibility reporting paths still use scene-oriented helpers.
-- `Epic 4` is not complete.
+- `Epic 4` is partially complete.
+  - AoS and scene/map owners no longer live under `core`; they now sit in the explicit `legacy` namespace.
+  - Crate root no longer re-exports the legacy AoS owners or legacy scene PLY helpers as default top-level APIs.
+  - The PSNR evaluation example now exercises the splat-first API surface directly.
   - AoS and scene/map owners still exist in compatibility paths.
   - SLAM/path adapters still exist at crate root.
-  - Legacy CLI/evaluation/reporting terminology still exposes `scene` names in public compatibility surfaces.
+  - Legacy evaluation/reporting terminology still exposes `scene` names in compatibility surfaces.
 
 ## Requirements Inventory
 

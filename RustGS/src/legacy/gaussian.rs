@@ -1,4 +1,4 @@
-//! 3D Gaussian Splatting data structures.
+//! Legacy AoS scene-oriented Gaussian data structures.
 //!
 //! This module provides the core data structures and operations
 //! for 3D Gaussian Splatting based dense reconstruction.

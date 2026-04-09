@@ -1,7 +1,5 @@
-//! Core Gaussian data structures.
+//! Core shared data structures used by the canonical splat architecture.
 
 mod camera;
-mod gaussian;
 
 pub use camera::GaussianCamera;
-pub use gaussian::{Gaussian3D, GaussianColorRepresentation, GaussianMap, GaussianState};

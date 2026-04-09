@@ -7,7 +7,7 @@
 use glam::Vec3;
 use kiddo::{KdTree, SquaredEuclidean};
 
-use crate::core::Gaussian3D;
+use crate::legacy::Gaussian3D;
 use crate::render::tiled_renderer::Gaussian;
 
 #[cfg(feature = "gpu")]

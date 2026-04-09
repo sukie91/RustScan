@@ -135,7 +135,7 @@ pub fn load_nerfstudio_dataset(root: &Path) -> Result<TrainingDataset, TrainingE
             }
 
             #[cfg(not(feature = "gpu"))]
-            match crate::load_scene_ply(&ply_path) {
+            match crate::io::scene_io::load_scene_ply(&ply_path) {
                 Ok((gaussians, _)) => {
                     dataset.initial_points = gaussians
                         .into_iter()

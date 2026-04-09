@@ -12,8 +12,8 @@ use std::time::{Duration, Instant};
 use candle_core::Var;
 use candle_core::{DType, Device, Tensor};
 
-use crate::core::GaussianMap;
 use crate::diff::diff_splat::{DiffCamera, Splats, SH_C0};
+use crate::legacy::GaussianMap;
 use crate::training::clustering::ClusterAssignment;
 use crate::{TrainingDataset, TrainingError};
 
@@ -93,6 +93,8 @@ const LITEGS_SH_ACTIVATION_EPOCH_INTERVAL: usize = 5;
 const LITEGS_OPACITY_THRESHOLD: f32 = 0.005;
 const LITEGS_OPACITY_DECAY_RATE: f32 = 0.5;
 const LITEGS_OPACITY_DECAY_MIN: f32 = 1.0 / 128.0;
+const LITEGS_REFINE_OPACITY_DECAY: f32 = 0.004;
+const LITEGS_REFINE_SCALE_DECAY: f32 = 0.002;
 const SH_C1: f32 = 0.488_602_52;
 const SH_C2: [f32; 5] = [
     1.092_548_5,
@@ -824,6 +826,38 @@ impl MetalTrainer {
         Ok(())
     }
 
+    fn apply_litegs_refine_decay(&self, gaussians: &mut Splats) -> candle_core::Result<()> {
+        if !self.is_litegs_mode() || self.max_iterations == 0 {
+            return Ok(());
+        }
+
+        let train_t = (self.iteration as f32 / self.max_iterations as f32).clamp(0.0, 1.0);
+        let shrink_strength = 1.0 - train_t;
+        if shrink_strength <= 0.0 {
+            return Ok(());
+        }
+
+        let opacity_sub = LITEGS_REFINE_OPACITY_DECAY * shrink_strength;
+        if opacity_sub > 0.0 {
+            let opacities = gaussians.opacities()?;
+            let decayed_opacity = opacities
+                .affine(1.0, -(opacity_sub as f64))?
+                .clamp(1e-6, 1.0 - 1e-6)?;
+            gaussians
+                .opacities
+                .set(&inverse_sigmoid_tensor(&decayed_opacity)?)?;
+        }
+
+        let scale_scaling = (1.0 - LITEGS_REFINE_SCALE_DECAY * shrink_strength).max(1e-6);
+        if scale_scaling < 1.0 {
+            let log_scale_delta = scale_scaling.ln() as f64;
+            let decayed_log_scales = gaussians.scales.as_tensor().affine(1.0, log_scale_delta)?;
+            gaussians.scales.set(&decayed_log_scales)?;
+        }
+
+        Ok(())
+    }
+
     fn max_topology_gaussians(
         &self,
         requested_cap: usize,
@@ -1276,6 +1310,7 @@ impl MetalTrainer {
             self.apply_topology_mutation_aftermath(
                 gaussians, &snapshot, stats, &origins, aftermath,
             )?;
+            self.apply_litegs_refine_decay(gaussians)?;
             if should_log_topology || guardrail_triggered {
                 log::info!(
                     "Metal topology check at iter {} | epoch={:?} | late_stage={} | made no changes | densify={} | prune={} | reset_opacity={} | gaussians={} | budget_cap={} | topology={:.2}ms | step_share={:.0}% | max_grad_accum={:.6} | mean_grad_accum={:.6} | active_grad_stats={} | small_scale_stats={} | opacity_ready_stats={} | clone_candidates={} | split_candidates={} | prune_candidates={} | reference_clone_candidates={} | reference_split_candidates={} | reference_prune_candidates={} | reference_budget={}",
@@ -1319,6 +1354,7 @@ impl MetalTrainer {
         }
 
         self.apply_topology_mutation_aftermath(gaussians, &snapshot, stats, &origins, aftermath)?;
+        self.apply_litegs_refine_decay(gaussians)?;
 
         log::info!(
             "Metal topology update at iter {} | epoch={:?} | late_stage={} | densify={} | prune={} | reset_opacity={} | added {} | pruned {} | morton={} | gaussians {} -> {} | budget_cap={} | topology={:.2}ms | step_share={:.0}% | active_grad_stats={} | small_scale_stats={} | opacity_ready_stats={} | clone_candidates={} | split_candidates={} | prune_candidates={} | reference_clone_candidates={} | reference_split_candidates={} | reference_prune_candidates={} | reference_budget={} | max_grad_accum={:.6} | mean_grad_accum={:.6}",
@@ -5364,6 +5400,45 @@ mod tests {
         assert!(gaussians.uses_spherical_harmonics());
         assert_eq!(gaussians.sh_degree(), 3);
         assert_eq!(gaussians.sh_rest().dims()[0], gaussians.len());
+    }
+
+    #[test]
+    fn litegs_refine_decay_reduces_runtime_opacity_and_scale() {
+        let device = Device::Cpu;
+        let trainer_config = TrainingConfig {
+            training_profile: TrainingProfile::LiteGsMacV1,
+            iterations: 500,
+            metal_render_scale: 1.0,
+            ..TrainingConfig::default()
+        };
+        let mut trainer = MetalTrainer::new(32, 16, &trainer_config, device.clone()).unwrap();
+        trainer.iteration = 160;
+
+        let mut gaussians = Splats::new_with_sh(
+            &[0.0, 0.0, 1.0],
+            &[0.1f32.ln(), 0.1f32.ln(), 0.1f32.ln()],
+            &[1.0, 0.0, 0.0, 0.0],
+            &[0.0],
+            &[
+                crate::diff::diff_splat::rgb_to_sh0_value(0.2),
+                crate::diff::diff_splat::rgb_to_sh0_value(0.4),
+                crate::diff::diff_splat::rgb_to_sh0_value(0.6),
+            ],
+            &vec![0.0; 15 * 3],
+            3,
+            &device,
+        )
+        .unwrap();
+        let before_opacity = gaussians.opacities().unwrap().to_vec1::<f32>().unwrap()[0];
+        let before_log_scale = gaussians.scales.as_tensor().to_vec2::<f32>().unwrap()[0][0];
+
+        trainer.apply_litegs_refine_decay(&mut gaussians).unwrap();
+
+        let after_opacity = gaussians.opacities().unwrap().to_vec1::<f32>().unwrap()[0];
+        let after_log_scale = gaussians.scales.as_tensor().to_vec2::<f32>().unwrap()[0][0];
+
+        assert!(after_opacity < before_opacity);
+        assert!(after_log_scale < before_log_scale);
     }
 
     #[test]

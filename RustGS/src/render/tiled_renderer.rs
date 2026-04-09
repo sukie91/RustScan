@@ -9,9 +9,9 @@
 //! 3. Depth sorting
 //! 4. Alpha blending
 
-use crate::core::Gaussian3D;
 #[cfg(feature = "gpu")]
 use crate::diff::diff_splat::sh0_to_rgb_value;
+use crate::legacy::Gaussian3D;
 #[cfg(feature = "gpu")]
 use crate::training::SplatView;
 

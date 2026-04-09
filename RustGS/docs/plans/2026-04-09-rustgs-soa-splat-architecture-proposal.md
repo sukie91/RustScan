@@ -64,7 +64,13 @@ In Progress
 - Crate-root legacy type exports are now explicitly marked deprecated:
   - `rustgs::GaussianMap`
   - `rustgs::SlamOutput`
+- Legacy AoS scene ownership has been moved out of `core/` and into the explicit `legacy/` namespace:
+  - `core` now keeps only shared canonical types such as `GaussianCamera`
+  - `legacy::{Gaussian3D, GaussianMap, GaussianState, GaussianColorRepresentation}` now owns the compatibility scene model
+- Crate root no longer re-exports legacy AoS scene owners or legacy scene PLY helpers as default top-level names.
+- The PSNR evaluation example now uses `load_splats_ply(...)`, `evaluate_splats(...)`, and `runtime_from_splats(...)` instead of the scene-shaped compatibility wrappers.
 - `HostSplats <-> GaussianMap` conversion helpers are now explicitly marked deprecated, and RustGS's own compatibility wrappers no longer rely on them internally.
+- Remaining host/legacy compatibility conversions have been extracted out of `training::splats` into the dedicated `training::splat_interop` module, so `HostSplats` is now focused on canonical SoA storage and host/device boundary operations.
 - Legacy compatibility entrypoints are now explicitly marked deprecated:
   - `train_scene(...)`
   - `train_from_slam(...)`
@@ -87,6 +93,7 @@ In Progress
 ### Still Pending
 
 - `GaussianMap`, `Gaussian3D`, and scene-oriented conversions are still present in the compatibility path.
+- The main remaining legacy ownership holdouts now live under `legacy/` rather than `core/`, but they are still present and still participate in compatibility flows.
 - Topology/edit, render compatibility, and some legacy eval/reporting paths still route through `GaussianMap` or `Gaussian3D`, although both `GaussianRenderer` and `TiledRenderer` now have direct splat-facing entrypoints.
 - SLAM-shaped compatibility APIs such as `train_from_slam(...)` still exist at crate root, but they are now deprecated and no longer used by the primary CLI path.
 - Scene/map terminology still exists in parts of IO, compatibility reporting, and public compatibility APIs.
@@ -95,7 +102,7 @@ In Progress
   - `ChunkPlan::trainable_chunks()`
   - `TrainableGaussians`
   - `TrainableColorRepresentation`
-- The remaining biggest AoS holdout is now the legacy `render::Gaussian` compatibility surface in scene IO/import-export, `training_pipeline.rs`, and a few renderer wrappers; the numerical render core no longer needs an AoS owner, but the compatibility carrier has not been deleted yet.
+- The remaining biggest AoS holdout is now the legacy `render::Gaussian` compatibility surface in scene IO/import-export, `training_pipeline.rs`, and a few renderer wrappers; the numerical render core no longer needs an AoS owner, and the `HostSplats <-> GaussianMap` bridge has already been isolated into `training::splat_interop`, but the compatibility carrier has not been deleted yet.
 
 ### Migration Strategy
 

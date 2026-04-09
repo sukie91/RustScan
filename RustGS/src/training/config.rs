@@ -258,10 +258,10 @@ impl Default for LiteGsConfig {
             densify_from: 3,
             densify_until: None,
             topology_freeze_after_epoch: None,
-            refine_every: 200,
+            refine_every: 160,
             densification_interval: 5,
             growth_grad_threshold: LITEGS_DEFAULT_GROWTH_GRAD_THRESHOLD,
-            growth_select_fraction: 0.2,
+            growth_select_fraction: 0.25,
             growth_stop_iter: 15_000,
             opacity_reset_interval: 10,
             prune_offset_epochs: 0,
@@ -282,7 +282,7 @@ fn normalize_config_token(value: &str) -> String {
     value.trim().to_ascii_lowercase().replace('_', "-")
 }
 
-const LITEGS_DEFAULT_GROWTH_GRAD_THRESHOLD: f32 = 0.00015;
+const LITEGS_DEFAULT_GROWTH_GRAD_THRESHOLD: f32 = 0.00014;
 
 /// Training configuration.
 #[derive(Debug, Clone)]
@@ -482,13 +482,13 @@ mod tests {
         assert_eq!(litegs.densify_from, 3);
         assert_eq!(litegs.densify_until, None);
         assert_eq!(litegs.topology_freeze_after_epoch, None);
-        assert_eq!(litegs.refine_every, 200);
+        assert_eq!(litegs.refine_every, 160);
         assert_eq!(litegs.densification_interval, 5);
         assert_eq!(
             litegs.growth_grad_threshold,
             LITEGS_DEFAULT_GROWTH_GRAD_THRESHOLD
         );
-        assert_eq!(litegs.growth_select_fraction, 0.2);
+        assert_eq!(litegs.growth_select_fraction, 0.25);
         assert_eq!(litegs.growth_stop_iter, 15_000);
         assert_eq!(litegs.opacity_reset_interval, 10);
         assert_eq!(litegs.prune_offset_epochs, 0);

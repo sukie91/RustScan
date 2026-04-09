@@ -5,9 +5,10 @@
 //! - "3D Gaussian Splatting for Real-Time Radiance Field Rendering"
 //! - RTG-SLAM: Real-time 3D Reconstruction
 
-use crate::core::{Gaussian3D, GaussianCamera, GaussianMap};
+use crate::core::GaussianCamera;
 #[cfg(feature = "gpu")]
 use crate::diff::diff_splat::sh0_to_rgb_value;
+use crate::legacy::{Gaussian3D, GaussianMap};
 #[cfg(feature = "gpu")]
 use crate::training::{HostSplats, SplatView};
 use glam::{Mat3, Vec3};

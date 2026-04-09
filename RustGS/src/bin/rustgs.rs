@@ -123,15 +123,15 @@ struct TrainArgs {
     litegs_densification_interval: usize,
 
     /// LiteGS refine cadence in training iterations
-    #[arg(long, default_value = "200")]
+    #[arg(long, default_value = "160")]
     litegs_refine_every: usize,
 
     /// LiteGS xy-gradient threshold for growth candidates
-    #[arg(long, default_value = "0.00015")]
+    #[arg(long, default_value = "0.00014")]
     litegs_growth_grad_threshold: f32,
 
     /// LiteGS fraction of above-threshold candidates selected for extra growth
-    #[arg(long, default_value = "0.2")]
+    #[arg(long, default_value = "0.25")]
     litegs_growth_select_fraction: f32,
 
     /// LiteGS iteration after which extra growth stops
@@ -315,8 +315,11 @@ fn main() -> anyhow::Result<()> {
             log::info!("Backend: metal");
             log::info!("Training profile: {}", args.training_profile);
 
-            let dataset =
-                load_training_dataset_for_training(&args.input, args.max_frames, args.frame_stride)?;
+            let dataset = load_training_dataset_for_training(
+                &args.input,
+                args.max_frames,
+                args.frame_stride,
+            )?;
             log::info!(
                 "Loaded {} poses, {} initialization points",
                 dataset.poses.len(),

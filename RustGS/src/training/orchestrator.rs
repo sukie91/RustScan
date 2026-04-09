@@ -1,5 +1,5 @@
 use super::{LiteGsConfig, TrainingConfig, TrainingProfile};
-use crate::core::GaussianMap;
+use crate::legacy::GaussianMap;
 use crate::TrainingError;
 
 #[cfg(feature = "gpu")]

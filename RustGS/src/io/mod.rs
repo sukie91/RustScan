@@ -9,7 +9,7 @@ pub mod scene_io;
 pub mod tum_dataset;
 
 #[cfg(not(feature = "gpu"))]
-use crate::core::GaussianMap;
+use crate::legacy::GaussianMap;
 #[cfg(feature = "gpu")]
 use crate::training::HostSplats;
 use crate::TrainingError;
@@ -36,7 +36,7 @@ pub struct TrainingCheckpoint {
 struct LegacyTrainingCheckpoint {
     iteration: usize,
     loss: f32,
-    scene: crate::core::GaussianMap,
+    scene: crate::legacy::GaussianMap,
 }
 
 impl Default for TrainingCheckpoint {
@@ -145,8 +145,8 @@ mod tests {
         let legacy = super::LegacyTrainingCheckpoint {
             iteration: 3,
             loss: 0.75,
-            scene: crate::core::GaussianMap::from_gaussians(vec![
-                crate::Gaussian3D::from_depth_point(0.0, 0.0, 1.0, [255, 128, 64]),
+            scene: crate::legacy::GaussianMap::from_gaussians(vec![
+                crate::legacy::Gaussian3D::from_depth_point(0.0, 0.0, 1.0, [255, 128, 64]),
             ]),
         };
 

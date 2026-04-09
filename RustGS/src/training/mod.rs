@@ -81,6 +81,9 @@ mod metal_resources;
 mod splats;
 
 #[cfg(feature = "gpu")]
+mod splat_interop;
+
+#[cfg(feature = "gpu")]
 mod topology;
 
 #[cfg(feature = "gpu")]
