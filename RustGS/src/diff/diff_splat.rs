@@ -25,18 +25,18 @@ fn fast_exp(x: f32) -> f32 {
 pub const SH_C0: f32 = 0.282_094_8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TrainableColorRepresentation {
+pub enum SplatColorRepresentation {
     Rgb,
     SphericalHarmonics { degree: usize },
 }
 
-impl Default for TrainableColorRepresentation {
+impl Default for SplatColorRepresentation {
     fn default() -> Self {
         Self::Rgb
     }
 }
 
-impl TrainableColorRepresentation {
+impl SplatColorRepresentation {
     pub fn sh_degree(self) -> usize {
         match self {
             Self::Rgb => 0,
@@ -48,6 +48,8 @@ impl TrainableColorRepresentation {
         sh_coeff_count_for_degree(self.sh_degree()).saturating_sub(1)
     }
 }
+
+pub type TrainableColorRepresentation = SplatColorRepresentation;
 
 pub const fn sh_coeff_count_for_degree(degree: usize) -> usize {
     let degree_plus_one = degree + 1;
@@ -216,11 +218,11 @@ impl Splats {
         self.sh_rest.as_tensor()
     }
 
-    pub fn color_representation(&self) -> TrainableColorRepresentation {
+    pub fn color_representation(&self) -> SplatColorRepresentation {
         if self.sh_degree == 0 {
-            TrainableColorRepresentation::Rgb
+            SplatColorRepresentation::Rgb
         } else {
-            TrainableColorRepresentation::SphericalHarmonics {
+            SplatColorRepresentation::SphericalHarmonics {
                 degree: self.sh_degree,
             }
         }
@@ -798,7 +800,7 @@ impl DiffSplatRenderer {
     /// Full differentiable render
     pub fn render(
         &mut self,
-        gaussians: &TrainableGaussians,
+        gaussians: &Splats,
         camera: &DiffCamera,
     ) -> candle_core::Result<DiffRenderOutput> {
         if gaussians.n == 0 {
@@ -861,7 +863,7 @@ impl DiffSplatRenderer {
     /// intermediate values needed by `analytical_backward::backward()`.
     pub fn render_with_intermediates(
         &mut self,
-        gaussians: &TrainableGaussians,
+        gaussians: &Splats,
         camera: &DiffCamera,
     ) -> candle_core::Result<(DiffRenderOutput, ForwardIntermediate)> {
         let pixel_count = self.width * self.height;
@@ -1091,11 +1093,11 @@ impl DiffSplatRenderer {
 
     /// Compute parameter gradients via a differentiable surrogate objective.
     ///
-    /// This establishes a real `.backward()` path on TrainableGaussians so
+    /// This establishes a real `.backward()` path on runtime splats so
     /// optimizer steps can consume gradients from Candle autograd.
     pub fn compute_surrogate_gradients(
         &self,
-        gaussians: &TrainableGaussians,
+        gaussians: &Splats,
     ) -> candle_core::Result<SurrogateGradients> {
         if gaussians.n == 0 {
             return Ok(SurrogateGradients::zeros(0));
@@ -1425,9 +1427,9 @@ mod tests {
     }
 
     #[test]
-    fn test_trainable_gaussians() {
+    fn test_runtime_splats() {
         let device = crate::preferred_device();
-        let gaussians = TrainableGaussians::new(
+        let gaussians = Splats::new(
             &[0.0, 0.0, 0.0, 1.0, 0.0, 0.0],
             &[-2.0, -2.0, -2.0, -2.0, -2.0, -2.0],
             &[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
@@ -1441,11 +1443,11 @@ mod tests {
     }
 
     #[test]
-    fn test_trainable_gaussians_with_sh_round_trip_dc_rgb() {
+    fn test_runtime_splats_with_sh_round_trip_dc_rgb() {
         let device = Device::Cpu;
         let rgb = [0.2f32, 0.6, 0.8];
         let sh_0: Vec<f32> = rgb.into_iter().map(rgb_to_sh0_value).collect();
-        let gaussians = TrainableGaussians::new_with_sh(
+        let gaussians = Splats::new_with_sh(
             &[0.0, 0.0, 1.0],
             &[-2.0, -2.0, -2.0],
             &[1.0, 0.0, 0.0, 0.0],
@@ -1470,7 +1472,7 @@ mod tests {
     #[test]
     fn test_sh_render_gradients_scale_to_sh_dc_parameters() {
         let device = Device::Cpu;
-        let gaussians = TrainableGaussians::new_with_sh(
+        let gaussians = Splats::new_with_sh(
             &[0.0, 0.0, 1.0],
             &[-2.0, -2.0, -2.0],
             &[1.0, 0.0, 0.0, 0.0],
@@ -1517,7 +1519,7 @@ mod tests {
     fn test_compute_surrogate_gradients_backward_path() {
         let device = Device::Cpu;
         let renderer = DiffSplatRenderer::with_device(4, 4, device.clone());
-        let gaussians = TrainableGaussians::new(
+        let gaussians = Splats::new(
             &[0.3, -0.2, 1.5, -0.4, 0.1, 2.0],
             &[-2.0, -1.8, -1.6, -2.2, -2.0, -1.9],
             &[1.0, 0.1, 0.0, 0.0, 0.95, 0.0, 0.1, 0.0],
@@ -1545,7 +1547,7 @@ mod tests {
         let mut renderer = DiffSplatRenderer::with_device(32, 32, device.clone());
 
         // Create Gaussians at known positions in front of camera
-        let gaussians = TrainableGaussians::new(
+        let gaussians = Splats::new(
             &[0.0, 0.0, 2.0, 0.5, 0.3, 3.0, -0.3, -0.2, 2.5],
             &[-1.5, -1.5, -1.5, -1.8, -1.8, -1.8, -1.6, -1.6, -1.6],
             &[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
@@ -1589,7 +1591,7 @@ mod tests {
     fn test_project_gaussians_applies_camera_transform() {
         let device = Device::Cpu;
         let renderer = DiffSplatRenderer::with_device(32, 32, device.clone());
-        let gaussians = TrainableGaussians::new(
+        let gaussians = Splats::new(
             &[1.0, 2.0, 4.0],
             &[-2.0, -2.0, -2.0],
             &[1.0, 0.0, 0.0, 0.0],
@@ -1646,7 +1648,7 @@ mod tests {
         )
         .unwrap();
 
-        let identity = TrainableGaussians::new(
+        let identity = Splats::new(
             &[0.0, 0.0, 2.0],
             &[0.4f32.ln(), 0.05f32.ln(), 0.05f32.ln()],
             &[1.0, 0.0, 0.0, 0.0],
@@ -1655,7 +1657,7 @@ mod tests {
             &device,
         )
         .unwrap();
-        let rotated = TrainableGaussians::new(
+        let rotated = Splats::new(
             &[0.0, 0.0, 2.0],
             &[0.4f32.ln(), 0.05f32.ln(), 0.05f32.ln()],
             &[

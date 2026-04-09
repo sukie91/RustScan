@@ -9,4 +9,8 @@ pub use initialization::{
 };
 
 #[cfg(feature = "gpu")]
-pub use initialization::initialize_trainable_gaussians_from_points;
+#[allow(deprecated)]
+pub use initialization::{
+    initialize_host_splats_from_points, initialize_runtime_splats_from_points,
+    initialize_trainable_gaussians_from_points,
+};

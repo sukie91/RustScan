@@ -15,6 +15,8 @@ use candle_core::Device;
 
 #[cfg(feature = "gpu")]
 use crate::diff::diff_splat::Splats;
+#[cfg(feature = "gpu")]
+use crate::training::HostSplats;
 
 /// Configuration for Gaussian initialization from point clouds.
 #[derive(Debug, Clone)]
@@ -114,31 +116,65 @@ pub fn initialize_gaussian3d_from_points(
         .collect()
 }
 
-/// Initialize trainable Gaussians (for differentiable training) from a point cloud.
+/// Initialize runtime splats directly on device from a point cloud.
 #[cfg(feature = "gpu")]
+pub fn initialize_runtime_splats_from_points(
+    points: &[([f32; 3], Option<[f32; 3]>)],
+    config: &GaussianInitConfig,
+    device: &Device,
+) -> candle_core::Result<Splats> {
+    initialize_host_splats_from_points(points, config, 0)?.upload(device)
+}
+
+/// Compatibility wrapper for older callers.
+#[cfg(feature = "gpu")]
+#[deprecated(note = "Use initialize_runtime_splats_from_points(...) instead.")]
 pub fn initialize_trainable_gaussians_from_points(
     points: &[([f32; 3], Option<[f32; 3]>)],
     config: &GaussianInitConfig,
     device: &Device,
 ) -> candle_core::Result<Splats> {
-    let gaussians = initialize_gaussians_from_points(points, config);
-    let n = gaussians.len();
+    initialize_runtime_splats_from_points(points, config, device)
+}
 
-    let mut positions = Vec::with_capacity(n * 3);
-    let mut scales = Vec::with_capacity(n * 3);
-    let mut rotations = Vec::with_capacity(n * 4);
-    let mut opacities = Vec::with_capacity(n);
-    let mut colors = Vec::with_capacity(n * 3);
-
-    for g in gaussians {
-        positions.extend_from_slice(&g.position);
-        scales.extend_from_slice(&[g.scale[0].ln(), g.scale[1].ln(), g.scale[2].ln()]);
-        rotations.extend_from_slice(&g.rotation);
-        opacities.push(opacity_to_logit(g.opacity));
-        colors.extend_from_slice(&g.color);
+/// Initialize host-side splats from a point cloud without materializing AoS gaussians.
+#[cfg(feature = "gpu")]
+pub fn initialize_host_splats_from_points(
+    points: &[([f32; 3], Option<[f32; 3]>)],
+    config: &GaussianInitConfig,
+    sh_degree: usize,
+) -> candle_core::Result<HostSplats> {
+    if points.is_empty() {
+        return HostSplats::from_raw_parts(
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            sh_degree,
+        );
     }
 
-    Splats::new(&positions, &scales, &rotations, &opacities, &colors, device)
+    let positions_vec3: Vec<Vec3> = points
+        .iter()
+        .map(|(p, _)| Vec3::new(p[0], p[1], p[2]))
+        .collect();
+    let scales = compute_scales(&positions_vec3, config);
+
+    let mut splats = HostSplats::with_sh_degree_capacity(sh_degree, points.len());
+    for ((position, color), scale) in points.iter().zip(scales.iter()) {
+        let rgb = color.unwrap_or(config.default_color);
+        splats.push_rgb(
+            *position,
+            [scale.ln(), scale.ln(), scale.ln()],
+            [1.0, 0.0, 0.0, 0.0],
+            opacity_to_logit(config.opacity),
+            rgb,
+        );
+    }
+
+    splats.validate()?;
+    Ok(splats)
 }
 
 fn compute_scales(points: &[Vec3], config: &GaussianInitConfig) -> Vec<f32> {
@@ -242,5 +278,20 @@ mod tests {
         let config = GaussianInitConfig::default();
         let gaussians = initialize_gaussians_from_points(&points, &config);
         assert!(gaussians.is_empty());
+    }
+
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn test_initialize_host_splats_defaults() {
+        let points = vec![([0.0, 0.0, 1.0], None)];
+
+        let config = GaussianInitConfig::default();
+        let splats = initialize_host_splats_from_points(&points, &config, 0).unwrap();
+        let view = splats.as_view();
+
+        assert_eq!(splats.len(), 1);
+        assert_eq!(view.positions, &[0.0, 0.0, 1.0]);
+        assert_eq!(view.rotations, &[1.0, 0.0, 0.0, 0.0]);
+        assert!((view.opacity_logits[0] - opacity_to_logit(config.opacity)).abs() < 1e-6);
     }
 }

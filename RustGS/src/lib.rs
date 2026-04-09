@@ -46,14 +46,16 @@ use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
 // Re-export shared types from rustscan-types
-pub use rustscan_types::{Intrinsics, MapPointData, ScenePose, TrainingDataset, SE3};
 #[deprecated(note = "Convert inputs to TrainingDataset before calling RustGS APIs.")]
 pub use rustscan_types::SlamOutput;
+pub use rustscan_types::{Intrinsics, MapPointData, ScenePose, TrainingDataset, SE3};
 
 // Re-export core types
-pub use crate::core::{Gaussian3D, GaussianCamera, GaussianState};
-#[deprecated(note = "Use HostSplats as the primary trained artifact; GaussianMap is legacy compatibility only.")]
+#[deprecated(
+    note = "Use HostSplats as the primary trained artifact; GaussianMap is legacy compatibility only."
+)]
 pub use crate::core::GaussianMap;
+pub use crate::core::{Gaussian3D, GaussianCamera, GaussianState};
 
 // Re-export render types
 pub use crate::render::{
@@ -62,6 +64,8 @@ pub use crate::render::{
 };
 
 // Re-export training types
+#[cfg(feature = "gpu")]
+pub use crate::diff::Splats;
 #[allow(deprecated)]
 pub use crate::training::{
     compare_loss_curve_samples, default_litegs_parity_fixtures, default_parity_report_path,
@@ -72,9 +76,9 @@ pub use crate::training::{
     ParityGateEvaluation, ParityGateStatus, ParityHarnessReport, ParityLossCurveSample,
     ParityLossTerms, ParityMetricSnapshot, ParityReferenceComparison, ParityThresholds,
     ParityTimingMetrics, ParityTopologyMetrics, PsnrSummary, SceneEvaluationConfig,
-    SceneEvaluationError, SplatEvaluationResult, SplatEvaluationSummary,
-    SceneEvaluationResult, SceneEvaluationSummary, TrainingProfile,
-    DEFAULT_CONVERGENCE_FIXTURE_ID, DEFAULT_TINY_FIXTURE_ID,
+    SceneEvaluationError, SceneEvaluationResult, SceneEvaluationSummary, SplatEvaluationResult,
+    SplatEvaluationSummary, TrainingProfile, DEFAULT_CONVERGENCE_FIXTURE_ID,
+    DEFAULT_TINY_FIXTURE_ID,
 };
 pub use crate::training::{
     compute_psnr_f32, materialize_chunk_dataset, plan_spatial_chunks, scaled_dimensions,
@@ -85,22 +89,20 @@ pub use crate::training::{
 #[cfg(feature = "gpu")]
 #[allow(deprecated)]
 pub use crate::training::{
-    estimate_chunk_capacity, evaluate_gaussians, evaluate_splats, evaluation_device,
-    last_metal_training_telemetry, render_evaluation_frame, run_metal_training_benchmark,
-    runtime_from_gaussians, runtime_from_splats, trainable_from_gaussians,
-    trainable_from_splats, evaluate_scene, runtime_from_scene, trainable_from_scene,
-    ChunkCapacityDisposition,
-    ChunkCapacityEstimate, LiteGsOptimizerLrs, LiteGsTrainingTelemetry,
+    estimate_chunk_capacity, evaluate_gaussians, evaluate_scene, evaluate_splats,
+    evaluation_device, last_metal_training_telemetry, render_evaluation_frame,
+    run_metal_training_benchmark, runtime_from_gaussians, runtime_from_scene, runtime_from_splats,
+    trainable_from_gaussians, trainable_from_scene, trainable_from_splats,
+    ChunkCapacityDisposition, ChunkCapacityEstimate, LiteGsOptimizerLrs, LiteGsTrainingTelemetry,
     MetalTrainingBenchmarkReport, MetalTrainingBenchmarkSpec,
 };
-pub use crate::training::{TrainingBackend, TrainingConfig, TrainingResult};
 #[cfg(feature = "gpu")]
 pub use crate::training::{HostSplats, SplatView};
-#[cfg(feature = "gpu")]
-pub use crate::diff::Splats;
+pub use crate::training::{TrainingBackend, TrainingConfig, TrainingResult};
 
 // Re-export IO types
 pub use crate::io::colmap_dataset::{load_colmap_dataset, ColmapConfig};
+#[allow(deprecated)]
 pub use crate::io::scene_io::{load_scene_ply, save_scene_ply, SceneIoError, SceneMetadata};
 #[cfg(feature = "gpu")]
 pub use crate::io::scene_io::{load_splats_ply, save_splats_ply};
@@ -108,8 +110,13 @@ pub use crate::io::tum_dataset::{load_tum_rgbd_dataset, TumRgbdConfig};
 pub use crate::io::TrainingCheckpoint;
 
 // Re-export initialization types
+#[cfg(feature = "gpu")]
+#[allow(deprecated)]
+pub use crate::init::initialize_trainable_gaussians_from_points;
 pub use crate::init::GaussianInitConfig;
 pub use crate::init::{initialize_gaussian3d_from_points, initialize_gaussians_from_points};
+#[cfg(feature = "gpu")]
+pub use crate::init::{initialize_host_splats_from_points, initialize_runtime_splats_from_points};
 
 #[cfg(feature = "gpu")]
 pub(crate) fn preferred_device() -> Device {

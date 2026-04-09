@@ -100,11 +100,9 @@ fn write_ply_header<W: Write>(
             source,
         }
     })?;
-    writeln!(writer, "element vertex {}", vertex_count).map_err(|source| {
-        SceneIoError::Write {
-            path: path.display().to_string(),
-            source,
-        }
+    writeln!(writer, "element vertex {}", vertex_count).map_err(|source| SceneIoError::Write {
+        path: path.display().to_string(),
+        source,
     })?;
     writeln!(writer, "property float x").map_err(|source| SceneIoError::Write {
         path: path.display().to_string(),
@@ -208,6 +206,7 @@ fn opacity_to_logit(opacity: f32) -> f32 {
 /// - opacity: sigmoid opacity
 /// - scale_0, scale_1, scale_2: log-scale values
 /// - rot_0, rot_1, rot_2, rot_3: quaternion (w, x, y, z)
+#[deprecated(note = "Use save_splats_ply(...) instead to persist HostSplats directly.")]
 pub fn save_scene_ply(
     path: &Path,
     gaussians: &[Gaussian],
@@ -298,9 +297,11 @@ pub fn save_splats_ply(
     splats: &crate::training::HostSplats,
     metadata: &SceneMetadata,
 ) -> Result<(), SceneIoError> {
-    splats.validate().map_err(|err| SceneIoError::InvalidFormat {
-        message: err.to_string(),
-    })?;
+    splats
+        .validate()
+        .map_err(|err| SceneIoError::InvalidFormat {
+            message: err.to_string(),
+        })?;
 
     let file = File::create(path).map_err(|source| SceneIoError::Write {
         path: path.display().to_string(),
@@ -334,12 +335,15 @@ pub fn save_splats_ply(
             path: path.display().to_string(),
             source,
         })?;
-        write!(writer, "{} {} {} ", sh_coeffs[0], sh_coeffs[1], sh_coeffs[2]).map_err(
-            |source| SceneIoError::Write {
-                path: path.display().to_string(),
-                source,
-            },
-        )?;
+        write!(
+            writer,
+            "{} {} {} ",
+            sh_coeffs[0], sh_coeffs[1], sh_coeffs[2]
+        )
+        .map_err(|source| SceneIoError::Write {
+            path: path.display().to_string(),
+            source,
+        })?;
 
         let sh_rest = &sh_coeffs[3..];
         for i in 0..45 {
@@ -383,6 +387,7 @@ pub fn save_splats_ply(
 /// Load scene from PLY file.
 ///
 /// Supports both legacy RustGS format and LiteGS-compatible format.
+#[deprecated(note = "Use load_splats_ply(...) instead to load HostSplats directly.")]
 pub fn load_scene_ply(path: &Path) -> Result<(Vec<Gaussian>, SceneMetadata), SceneIoError> {
     let file = File::open(path).map_err(|source| SceneIoError::Read {
         path: path.display().to_string(),
@@ -636,8 +641,7 @@ pub fn load_splats_ply(
             return Err(SceneIoError::InvalidFormat {
                 message: format!(
                     "vertex count mismatch: header {}, parsed {}",
-                    expected,
-                    parsed_vertices
+                    expected, parsed_vertices
                 ),
             });
         }

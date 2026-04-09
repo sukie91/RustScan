@@ -795,7 +795,7 @@ mod tests {
     /// A rotated Gaussian (45°) with sx ≠ sy should produce non-zero scale gradients.
     #[test]
     fn test_cov_xy_gradient_nonzero_for_rotated_gaussian() {
-        use crate::diff::diff_splat::{DiffCamera, DiffSplatRenderer, TrainableGaussians};
+        use crate::diff::diff_splat::{DiffCamera, DiffSplatRenderer, Splats};
         use candle_core::Device;
 
         let device = Device::Cpu;
@@ -804,7 +804,7 @@ mod tests {
 
         // One elongated Gaussian at (0,0,3) rotated 45° around z so cov_xy ≠ 0
         let angle = std::f32::consts::FRAC_PI_4;
-        let gaussians = TrainableGaussians::new(
+        let gaussians = Splats::new(
             &[0.0f32, 0.0, 3.0],
             &[
                 (-2.0f32).exp().ln(),

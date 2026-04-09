@@ -60,8 +60,9 @@ impl TrainingCheckpoint {
 
     /// Save checkpoint to file.
     pub fn save(&self, path: &Path) -> Result<(), TrainingError> {
-        let serialized = serde_json::to_vec_pretty(self)
-            .map_err(|err| TrainingError::TrainingFailed(format!("failed to serialize checkpoint: {err}")))?;
+        let serialized = serde_json::to_vec_pretty(self).map_err(|err| {
+            TrainingError::TrainingFailed(format!("failed to serialize checkpoint: {err}"))
+        })?;
         std::fs::write(path, serialized)?;
         Ok(())
     }

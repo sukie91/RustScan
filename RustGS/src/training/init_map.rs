@@ -1,4 +1,4 @@
-use crate::init::{initialize_gaussians_from_points, GaussianInitConfig};
+use crate::init::{initialize_host_splats_from_points, GaussianInitConfig};
 use crate::{TrainingDataset, TrainingError};
 
 use super::data_loading::FrameSample;
@@ -20,30 +20,17 @@ pub(super) fn build_initial_splats(
 
     let sh_degree = splat_color_representation_for_config(config).sh_degree();
     let init_config = gaussian_init_config_for_training(config);
-    let mut gaussians = initialize_gaussians_from_points(&dataset.initial_points, &init_config);
+    let mut splats =
+        initialize_host_splats_from_points(&dataset.initial_points, &init_config, sh_degree)
+            .map_err(TrainingError::from)?;
     let max_initial = config.max_initial_gaussians.max(1);
-    if gaussians.len() > max_initial {
+    if splats.len() > max_initial {
         log::warn!(
             "Truncating point-initialized chunk from {} to {} gaussians to respect max_initial_gaussians",
-            gaussians.len(),
+            splats.len(),
             max_initial,
         );
-        gaussians.truncate(max_initial);
-    }
-
-    let mut splats = HostSplats::with_sh_degree_capacity(sh_degree, gaussians.len());
-    for gaussian in gaussians {
-        splats.push_rgb(
-            gaussian.position,
-            [
-                gaussian.scale[0].max(1e-6).ln(),
-                gaussian.scale[1].max(1e-6).ln(),
-                gaussian.scale[2].max(1e-6).ln(),
-            ],
-            gaussian.rotation,
-            opacity_to_logit(gaussian.opacity),
-            gaussian.color,
-        );
+        splats.truncate_rows(max_initial);
     }
 
     splats

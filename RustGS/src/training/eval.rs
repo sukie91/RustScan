@@ -287,8 +287,7 @@ pub fn runtime_from_gaussians(
     let inferred_degree = infer_sh_degree(gaussians);
     let sh_degree = metadata.sh_degree.max(inferred_degree);
     let splats = HostSplats::from_scene_gaussians(gaussians, sh_degree)
-        .map_err(|err| SceneEvaluationError::InvalidInput(err.to_string()))?
-        ;
+        .map_err(|err| SceneEvaluationError::InvalidInput(err.to_string()))?;
     runtime_from_splats(&splats, device)
 }
 

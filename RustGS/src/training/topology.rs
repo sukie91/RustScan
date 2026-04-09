@@ -1323,7 +1323,7 @@ mod tests {
         TopologyStatsAction, TopologyStepContext,
     };
     use crate::diff::diff_splat::{
-        rgb_to_sh0_value, sh_coeff_count_for_degree, TrainableColorRepresentation,
+        rgb_to_sh0_value, sh_coeff_count_for_degree, SplatColorRepresentation,
     };
     use crate::training::parity_harness::ParityTopologyMetrics;
     use crate::training::splats::Splats;
@@ -1349,7 +1349,7 @@ mod tests {
         opacity_logits: Vec<f32>,
         colors: Vec<f32>,
         sh_rest: Vec<f32>,
-        color_representation: TrainableColorRepresentation,
+        color_representation: SplatColorRepresentation,
     ) -> Splats {
         let sh_degree = color_representation.sh_degree();
         let row_count = opacity_logits.len();
@@ -1359,7 +1359,7 @@ mod tests {
         for idx in 0..row_count {
             let color_base = idx * 3;
             match color_representation {
-                TrainableColorRepresentation::Rgb => {
+                SplatColorRepresentation::Rgb => {
                     sh_coeffs.extend(
                         colors[color_base..color_base + 3]
                             .iter()
@@ -1367,7 +1367,7 @@ mod tests {
                             .map(rgb_to_sh0_value),
                     );
                 }
-                TrainableColorRepresentation::SphericalHarmonics { .. } => {
+                SplatColorRepresentation::SphericalHarmonics { .. } => {
                     sh_coeffs.extend_from_slice(&colors[color_base..color_base + 3]);
                     let rest = super::super::splats::row_slice(&sh_rest, sh_rest_row_width, idx);
                     sh_coeffs.extend_from_slice(rest);
@@ -1567,7 +1567,7 @@ mod tests {
             vec![-10.0, -1.0],
             vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             Vec::new(),
-            TrainableColorRepresentation::Rgb,
+            SplatColorRepresentation::Rgb,
         );
         let mut stats = vec![MetalGaussianStats::default(), MetalGaussianStats::default()];
         let mut origins = vec![Some(0), Some(1)];
@@ -1598,7 +1598,7 @@ mod tests {
             vec![0.5],
             vec![0.2, 0.4, 0.6],
             vec![0.1; 15 * 3],
-            TrainableColorRepresentation::SphericalHarmonics { degree: 3 },
+            SplatColorRepresentation::SphericalHarmonics { degree: 3 },
         );
         let mut stats = vec![MetalGaussianStats::default()];
         let mut origins = vec![Some(0)];
@@ -1637,7 +1637,7 @@ mod tests {
             vec![2.0, -10.0],
             vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             vec![0.0; 2 * 15 * 3],
-            TrainableColorRepresentation::SphericalHarmonics { degree: 3 },
+            SplatColorRepresentation::SphericalHarmonics { degree: 3 },
         );
         let stats = vec![
             MetalGaussianStats {
@@ -1699,7 +1699,7 @@ mod tests {
             vec![2.0, 2.0, -10.0],
             vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
             vec![0.0; 3 * 15 * 3],
-            TrainableColorRepresentation::SphericalHarmonics { degree: 3 },
+            SplatColorRepresentation::SphericalHarmonics { degree: 3 },
         );
         let stats = vec![
             MetalGaussianStats {
@@ -1755,7 +1755,7 @@ mod tests {
             vec![2.0, 2.0, 2.0],
             vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
             vec![0.0; 3 * 15 * 3],
-            TrainableColorRepresentation::SphericalHarmonics { degree: 3 },
+            SplatColorRepresentation::SphericalHarmonics { degree: 3 },
         );
         let stats = vec![
             MetalGaussianStats {
@@ -1856,7 +1856,7 @@ mod tests {
             vec![2.0, -10.0],
             vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             Vec::new(),
-            TrainableColorRepresentation::Rgb,
+            SplatColorRepresentation::Rgb,
         );
         let mut stats = vec![
             MetalGaussianStats {
@@ -1934,7 +1934,7 @@ mod tests {
             vec![2.0],
             vec![1.0, 0.0, 0.0],
             Vec::new(),
-            TrainableColorRepresentation::Rgb,
+            SplatColorRepresentation::Rgb,
         );
         let mut stats = vec![MetalGaussianStats::default()];
         let mut origins = vec![Some(0)];

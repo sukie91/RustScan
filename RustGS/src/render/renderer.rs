@@ -105,8 +105,7 @@ impl GaussianRenderer {
         let mut depth = vec![0.0f32; self.width * self.height];
         let mut projected_splats = self.project_visible_splats(splats.as_view(), camera);
 
-        projected_splats
-            .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        projected_splats.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
         for (gc, cam_depth, ux, uy, radius) in projected_splats {
             self.render_gaussian(
@@ -201,8 +200,7 @@ impl GaussianRenderer {
         let mut depth = vec![0.0f32; self.width * self.height];
         let mut projected_splats = self.project_visible_splats(splats.as_view(), camera);
 
-        projected_splats
-            .sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        projected_splats.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
 
         for (_, cam_depth, ux, uy, radius) in projected_splats {
             self.render_depth_circle(&mut depth, cam_depth, ux as i32, uy as i32, radius);
@@ -265,8 +263,7 @@ impl GaussianRenderer {
         let mut color = self.background_color_buffer();
         let mut projected_splats = self.project_visible_splats(splats.as_view(), camera);
 
-        projected_splats
-            .sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        projected_splats.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
 
         for (gc, cam_depth, ux, uy, radius) in projected_splats {
             self.render_depth_color_circle(
@@ -442,10 +439,8 @@ impl GaussianRenderer {
                 let sh_base = idx * sh_row_width;
                 let gc = [
                     (sh0_to_rgb_value(splats.sh_coeffs[sh_base]).clamp(0.0, 1.0) * 255.0) as u8,
-                    (sh0_to_rgb_value(splats.sh_coeffs[sh_base + 1]).clamp(0.0, 1.0) * 255.0)
-                        as u8,
-                    (sh0_to_rgb_value(splats.sh_coeffs[sh_base + 2]).clamp(0.0, 1.0) * 255.0)
-                        as u8,
+                    (sh0_to_rgb_value(splats.sh_coeffs[sh_base + 1]).clamp(0.0, 1.0) * 255.0) as u8,
+                    (sh0_to_rgb_value(splats.sh_coeffs[sh_base + 2]).clamp(0.0, 1.0) * 255.0) as u8,
                 ];
 
                 Some((gc, cam_pos.z, u, v, radius))

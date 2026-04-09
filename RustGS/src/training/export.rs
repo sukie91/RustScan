@@ -242,8 +242,8 @@ mod tests {
         persist_host_splats_scene(&path, &splats, 42).unwrap();
 
         assert!(path.exists());
-        let (gaussians, metadata) = crate::load_scene_ply(&path).unwrap();
-        assert_eq!(gaussians.len(), 1);
+        let (loaded_splats, metadata) = crate::load_splats_ply(&path).unwrap();
+        assert_eq!(loaded_splats.len(), 1);
         assert_eq!(metadata.iterations, 42);
     }
 
@@ -269,7 +269,8 @@ mod tests {
 
         persist_host_splats_scene(&path, &splats, 42).unwrap();
 
-        let (gaussians, metadata) = crate::load_scene_ply(&path).unwrap();
+        let (gaussians, metadata) = crate::load_splats_ply(&path).unwrap();
+        let gaussians = gaussians.to_scene_gaussians().unwrap();
         assert_eq!(metadata.iterations, 42);
         assert_eq!(metadata.sh_degree, 3);
         assert_eq!(gaussians.len(), 1);

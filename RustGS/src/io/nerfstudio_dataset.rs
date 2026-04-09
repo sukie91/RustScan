@@ -4,6 +4,9 @@ use serde::Deserialize;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+#[cfg(feature = "gpu")]
+use crate::diff::diff_splat::{sh0_to_rgb_value, sh_coeff_count_for_degree};
+
 #[derive(Debug, Deserialize)]
 struct NerfstudioScene {
     #[serde(default)]
@@ -98,6 +101,40 @@ pub fn load_nerfstudio_dataset(root: &Path) -> Result<TrainingDataset, TrainingE
     if let Some(ply_file_path) = scene.ply_file_path.as_ref() {
         let ply_path = transforms_dir.join(ply_file_path);
         if ply_path.exists() {
+            #[cfg(feature = "gpu")]
+            match crate::load_splats_ply(&ply_path) {
+                Ok((splats, _)) => {
+                    let view = splats.as_view();
+                    let sh_row_width = sh_coeff_count_for_degree(view.sh_degree) * 3;
+                    dataset.initial_points = (0..splats.len())
+                        .map(|idx| {
+                            let pos_base = idx * 3;
+                            let sh_base = idx * sh_row_width;
+                            (
+                                [
+                                    view.positions[pos_base],
+                                    view.positions[pos_base + 1],
+                                    view.positions[pos_base + 2],
+                                ],
+                                Some([
+                                    sh0_to_rgb_value(view.sh_coeffs[sh_base]),
+                                    sh0_to_rgb_value(view.sh_coeffs[sh_base + 1]),
+                                    sh0_to_rgb_value(view.sh_coeffs[sh_base + 2]),
+                                ]),
+                            )
+                        })
+                        .collect();
+                }
+                Err(err) => {
+                    log::warn!(
+                        "Ignoring Nerfstudio init splat {} because it could not be parsed as a RustGS splat payload: {}",
+                        ply_path.display(),
+                        err
+                    );
+                }
+            }
+
+            #[cfg(not(feature = "gpu"))]
             match crate::load_scene_ply(&ply_path) {
                 Ok((gaussians, _)) => {
                     dataset.initial_points = gaussians

@@ -97,18 +97,15 @@ pub use eval::{
     compute_psnr_f32, scaled_dimensions, select_evaluation_frames, summarize_psnr_samples,
     summarize_training_metrics, worst_frame_metrics, EvaluationDevice, EvaluationFrameMetric,
     FinalTrainingMetrics, PsnrSummary, SceneEvaluationConfig, SceneEvaluationError,
-    SplatEvaluationResult, SplatEvaluationSummary, SceneEvaluationResult,
-    SceneEvaluationSummary,
+    SceneEvaluationResult, SceneEvaluationSummary, SplatEvaluationResult, SplatEvaluationSummary,
 };
 #[cfg(feature = "gpu")]
 #[allow(deprecated)]
 pub use eval::{
-    evaluate_gaussians, evaluate_splats, evaluation_device, render_evaluation_frame,
-    runtime_from_gaussians, runtime_from_splats, trainable_from_gaussians,
-    trainable_from_splats, evaluate_scene, runtime_from_scene, trainable_from_scene,
+    evaluate_gaussians, evaluate_scene, evaluate_splats, evaluation_device,
+    render_evaluation_frame, runtime_from_gaussians, runtime_from_scene, runtime_from_splats,
+    trainable_from_gaussians, trainable_from_scene, trainable_from_splats,
 };
-#[cfg(feature = "gpu")]
-pub use splats::{HostSplats, SplatView};
 pub use parity_harness::{
     compare_loss_curve_samples, default_litegs_parity_fixtures, default_parity_report_path,
     parity_fixture_id_for_input_path, resolve_litegs_parity_fixture_input_path,
@@ -118,6 +115,8 @@ pub use parity_harness::{
     ParityReferenceComparison, ParityThresholds, ParityTimingMetrics, ParityTopologyMetrics,
     DEFAULT_CONVERGENCE_FIXTURE_ID, DEFAULT_TINY_FIXTURE_ID,
 };
+#[cfg(feature = "gpu")]
+pub use splats::{HostSplats, SplatView};
 
 pub use config::{
     LiteGsConfig, LiteGsOpacityResetMode, LiteGsPruneMode, LiteGsTileSize, TrainingBackend,

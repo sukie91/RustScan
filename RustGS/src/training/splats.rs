@@ -3,8 +3,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::{Gaussian3D, GaussianColorRepresentation, GaussianMap, GaussianState};
 use crate::diff::diff_splat::{
-    rgb_to_sh0_value, sh0_to_rgb_value, sh_coeff_count_for_degree, Splats as RuntimeSplats,
-    TrainableColorRepresentation, TrainableGaussians,
+    rgb_to_sh0_value, sh0_to_rgb_value, sh_coeff_count_for_degree, SplatColorRepresentation,
+    Splats as RuntimeSplats, TrainableGaussians,
 };
 use crate::Gaussian;
 
@@ -46,7 +46,7 @@ pub struct SplatView<'a> {
 pub(crate) type Splats = HostSplats;
 
 impl HostSplats {
-    pub(super) fn with_sh_degree_capacity(sh_degree: usize, row_count: usize) -> Self {
+    pub(crate) fn with_sh_degree_capacity(sh_degree: usize, row_count: usize) -> Self {
         Self {
             positions: Vec::with_capacity(row_count * 3),
             log_scales: Vec::with_capacity(row_count * 3),
@@ -113,7 +113,7 @@ impl HostSplats {
 
     pub fn from_legacy_gaussians(
         gaussians: &[Gaussian3D],
-        color_representation: TrainableColorRepresentation,
+        color_representation: SplatColorRepresentation,
     ) -> candle_core::Result<Self> {
         let sh_degree = color_representation.sh_degree();
         let mut splats = Self {
@@ -149,10 +149,10 @@ impl HostSplats {
                 .push(opacity_to_logit(gaussian.opacity));
 
             match color_representation {
-                TrainableColorRepresentation::Rgb => {
+                SplatColorRepresentation::Rgb => {
                     splats.push_sh_coeffs(gaussian.color.map(rgb_to_sh0_value), &[]);
                 }
-                TrainableColorRepresentation::SphericalHarmonics { degree } => {
+                SplatColorRepresentation::SphericalHarmonics { degree } => {
                     match gaussian.color_representation {
                         GaussianColorRepresentation::Rgb => {
                             splats.push_sh_coeffs(gaussian.color.map(rgb_to_sh0_value), &[]);
@@ -196,7 +196,7 @@ impl HostSplats {
     #[deprecated(note = "Use HostSplats::from_legacy_gaussians(...) instead.")]
     pub fn from_gaussian_map(
         map: &GaussianMap,
-        color_representation: TrainableColorRepresentation,
+        color_representation: SplatColorRepresentation,
     ) -> candle_core::Result<Self> {
         Self::from_legacy_gaussians(map.gaussians(), color_representation)
     }
@@ -504,7 +504,7 @@ impl HostSplats {
         self.push_sh_coeffs_row(sh_coeffs);
     }
 
-    pub(super) fn push_rgb(
+    pub(crate) fn push_rgb(
         &mut self,
         position: [f32; 3],
         log_scale: [f32; 3],
@@ -522,6 +522,19 @@ impl HostSplats {
             self.sh_coeffs
                 .resize(self.sh_coeffs.len() + sh_rest_width, 0.0);
         }
+    }
+
+    pub(super) fn truncate_rows(&mut self, row_count: usize) {
+        if row_count >= self.len() {
+            return;
+        }
+
+        self.positions.truncate(row_count * 3);
+        self.log_scales.truncate(row_count * 3);
+        self.rotations.truncate(row_count * 4);
+        self.opacity_logits.truncate(row_count);
+        self.sh_coeffs
+            .truncate(row_count * self.sh_coeffs_row_width());
     }
 
     #[allow(dead_code)]
@@ -637,32 +650,32 @@ impl HostSplats {
 
 pub(super) fn splat_color_representation_for_config(
     config: &TrainingConfig,
-) -> TrainableColorRepresentation {
+) -> SplatColorRepresentation {
     if config.training_profile == TrainingProfile::LiteGsMacV1 {
-        TrainableColorRepresentation::SphericalHarmonics {
+        SplatColorRepresentation::SphericalHarmonics {
             degree: config.litegs.sh_degree,
         }
     } else {
-        TrainableColorRepresentation::Rgb
+        SplatColorRepresentation::Rgb
     }
 }
 
 pub(super) fn infer_color_representation_from_legacy_gaussians(
     gaussians: &[Gaussian3D],
-) -> candle_core::Result<TrainableColorRepresentation> {
-    let mut inferred = TrainableColorRepresentation::Rgb;
+) -> candle_core::Result<SplatColorRepresentation> {
+    let mut inferred = SplatColorRepresentation::Rgb;
     for gaussian in gaussians {
         match gaussian.color_representation {
             GaussianColorRepresentation::Rgb => {
-                if inferred != TrainableColorRepresentation::Rgb {
+                if inferred != SplatColorRepresentation::Rgb {
                     candle_core::bail!(
                         "gaussian map mixes RGB and spherical harmonics color representations"
                     );
                 }
             }
             GaussianColorRepresentation::SphericalHarmonics { degree } => {
-                let next = TrainableColorRepresentation::SphericalHarmonics { degree };
-                if inferred == TrainableColorRepresentation::Rgb {
+                let next = SplatColorRepresentation::SphericalHarmonics { degree };
+                if inferred == SplatColorRepresentation::Rgb {
                     inferred = next;
                 } else if inferred != next {
                     candle_core::bail!(
@@ -723,7 +736,7 @@ mod tests {
     };
     use crate::core::{Gaussian3D, GaussianColorRepresentation};
     use crate::diff::diff_splat::{
-        rgb_to_sh0_value, TrainableColorRepresentation, TrainableGaussians,
+        rgb_to_sh0_value, SplatColorRepresentation, Splats as RuntimeSplats,
     };
     use crate::{LiteGsConfig, TrainingConfig, TrainingProfile};
     use candle_core::Device;
@@ -747,7 +760,7 @@ mod tests {
     #[test]
     fn rgb_splats_round_trip_trainables() {
         let device = Device::Cpu;
-        let gaussians = TrainableGaussians::new(
+        let gaussians = RuntimeSplats::new(
             &[0.0, 0.0, 1.0, 1.0, 0.5, 2.0],
             &[0.1, 0.2, 0.3, 0.4, 0.5, 0.6],
             &[1.0, 0.0, 0.0, 0.0, 0.707, 0.0, 0.707, 0.0],
@@ -776,7 +789,7 @@ mod tests {
     #[test]
     fn sh_splats_round_trip_trainables() {
         let device = Device::Cpu;
-        let gaussians = TrainableGaussians::new_with_sh(
+        let gaussians = RuntimeSplats::new_with_sh(
             &[0.0, 0.0, 1.0],
             &[0.1, 0.2, 0.3],
             &[1.0, 0.0, 0.0, 0.0],
@@ -815,7 +828,7 @@ mod tests {
         )];
 
         let splats =
-            Splats::from_legacy_gaussians(&gaussians, TrainableColorRepresentation::Rgb).unwrap();
+            Splats::from_legacy_gaussians(&gaussians, SplatColorRepresentation::Rgb).unwrap();
         let runtime = splats.to_runtime(&device).unwrap();
         let rebuilt = Splats::from_runtime(&runtime)
             .unwrap()
@@ -855,7 +868,7 @@ mod tests {
 
         let splats = Splats::from_legacy_gaussians(
             &gaussians,
-            TrainableColorRepresentation::SphericalHarmonics { degree: 3 },
+            SplatColorRepresentation::SphericalHarmonics { degree: 3 },
         )
         .unwrap();
         let runtime = splats.to_runtime(&device).unwrap();
@@ -883,7 +896,7 @@ mod tests {
     #[test]
     fn config_selects_internal_splat_color_representation() {
         let legacy = splat_color_representation_for_config(&TrainingConfig::default());
-        assert_eq!(legacy, TrainableColorRepresentation::Rgb);
+        assert_eq!(legacy, SplatColorRepresentation::Rgb);
 
         let litegs = splat_color_representation_for_config(&TrainingConfig {
             training_profile: TrainingProfile::LiteGsMacV1,
@@ -895,7 +908,7 @@ mod tests {
         });
         assert_eq!(
             litegs,
-            TrainableColorRepresentation::SphericalHarmonics { degree: 3 }
+            SplatColorRepresentation::SphericalHarmonics { degree: 3 }
         );
     }
 
@@ -923,7 +936,7 @@ mod tests {
 
         assert_eq!(
             representation,
-            TrainableColorRepresentation::SphericalHarmonics { degree: 3 }
+            SplatColorRepresentation::SphericalHarmonics { degree: 3 }
         );
     }
 

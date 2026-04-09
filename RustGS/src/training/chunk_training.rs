@@ -518,7 +518,7 @@ mod tests {
         let tempdir = tempdir().unwrap();
         let path = tempdir.path().join("merged-scene.ply");
         super::super::export::persist_host_splats_scene(&path, &merged, 10).unwrap();
-        let (gaussians, _) = crate::load_scene_ply(&path).unwrap();
-        assert_eq!(gaussians.len(), 2);
+        let (splats, _) = crate::load_splats_ply(&path).unwrap();
+        assert_eq!(splats.len(), 2);
     }
 }

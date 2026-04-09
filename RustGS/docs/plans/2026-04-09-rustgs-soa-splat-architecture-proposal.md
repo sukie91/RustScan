@@ -10,6 +10,7 @@ In Progress
 
 - Runtime device owner has been renamed to `diff::Splats`.
 - A compatibility alias `TrainableGaussians` is still kept so the migration can land incrementally.
+- The canonical runtime color-mode name is now `SplatColorRepresentation`; `TrainableColorRepresentation` is retained only as a compatibility alias.
 - Host boundary storage has been renamed to `training::HostSplats`.
 - `HostSplats` now stores one unified SH payload:
   - `sh_coeffs`
@@ -29,13 +30,16 @@ In Progress
   - `save_splats_ply(...)`
   - `load_splats_ply(...)`
 - `save_splats_ply(...)` and `load_splats_ply(...)` now operate directly on `HostSplats` SoA storage instead of round-tripping through `Gaussian` AoS values first.
+- Nerfstudio dataset import now prefers `load_splats_ply(...)` and extracts sparse-point bootstrapping data directly from `HostSplats` when GPU support is enabled.
 - Evaluation now exposes splat-oriented wrappers:
   - `runtime_from_splats(...)`
   - `evaluate_splats(...)`
 - Checkpoint artifacts now serialize the host-side splat payload instead of `GaussianMap`.
-- Internal GPU training modules now primarily use the canonical `Splats` name; the `TrainableGaussians` alias is increasingly confined to compatibility helpers and tests.
+- Internal GPU training modules now primarily use the canonical `Splats` / `SplatColorRepresentation` names; the old `Trainable*` aliases are increasingly confined to compatibility helpers and wrappers.
 - Training module compatibility wrappers are now explicit as `train_scene(...)`, while `train(...)` remains as a legacy forwarding alias.
 - Training initialization now builds `HostSplats` directly in the main data-loading path instead of materializing an intermediate `GaussianMap`.
+- Sparse-point initialization now also has a direct `initialize_host_splats_from_points(...)` path, and `training::init_map` no longer round-trips sparse point bootstrapping through `Vec<render::Gaussian>`.
+- Initialization now also exposes `initialize_runtime_splats_from_points(...)` as the canonical device-side constructor; `initialize_trainable_gaussians_from_points(...)` remains only as a compatibility wrapper.
 - Synthetic benchmark fixtures now build `HostSplats` directly instead of routing through `GaussianMap`.
 - Evaluation now exposes splat-first canonical wrappers alongside scene-shaped compatibility wrappers:
   - `evaluate_gaussians(...)`
@@ -73,6 +77,8 @@ In Progress
   - `GaussianRenderer::render(...)`
   - `GaussianRenderer::render_depth(...)`
   - `GaussianRenderer::render_depth_and_color(...)`
+  - `save_scene_ply(...)`
+  - `load_scene_ply(...)`
   - `HostSplats::from_gaussian_map(...)`
   - `HostSplats::from_gaussian_map_for_config(...)`
   - `HostSplats::from_gaussian_map_inferred(...)`
