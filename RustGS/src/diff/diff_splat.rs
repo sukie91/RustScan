@@ -49,8 +49,6 @@ impl SplatColorRepresentation {
     }
 }
 
-pub type TrainableColorRepresentation = SplatColorRepresentation;
-
 pub const fn sh_coeff_count_for_degree(degree: usize) -> usize {
     let degree_plus_one = degree + 1;
     degree_plus_one * degree_plus_one
@@ -275,8 +273,6 @@ impl Splats {
         crate::training::HostSplats::from_runtime(self)
     }
 }
-
-pub type TrainableGaussians = Splats;
 
 /// Helper: normalize quaternions
 fn normalize_quaternions(q: &Tensor) -> candle_core::Result<Tensor> {

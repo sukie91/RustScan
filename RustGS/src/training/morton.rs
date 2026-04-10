@@ -19,6 +19,8 @@ pub const DEFAULT_MORTON_BITS: usize = 21;
 ///
 /// # Example
 /// ```
+/// use rustgs::training::morton::morton_encode_3d;
+///
 /// let code = morton_encode_3d(5, 10, 15, 21);
 /// ```
 pub fn morton_encode_3d(x: u32, y: u32, z: u32, bits: usize) -> u64 {

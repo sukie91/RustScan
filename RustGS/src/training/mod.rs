@@ -2,10 +2,6 @@
 //!
 //! Primary runtime path:
 //! - `metal_trainer` - Metal-native training loop used by the top-level API.
-//!
-//! - `training_pipeline` - Shared densify/prune heuristics and utility losses.
-
-pub mod training_pipeline;
 
 #[cfg(feature = "gpu")]
 mod benchmark;
@@ -95,19 +91,16 @@ pub use chunk_planner::{
     ChunkDisposition, ChunkPlan, MaterializedChunkDataset, PlannedChunk,
 };
 pub use eval::MIN_RENDER_SCALE;
-#[allow(deprecated)]
 pub use eval::{
     compute_psnr_f32, scaled_dimensions, select_evaluation_frames, summarize_psnr_samples,
     summarize_training_metrics, worst_frame_metrics, EvaluationDevice, EvaluationFrameMetric,
     FinalTrainingMetrics, PsnrSummary, SceneEvaluationConfig, SceneEvaluationError,
-    SceneEvaluationResult, SceneEvaluationSummary, SplatEvaluationResult, SplatEvaluationSummary,
+    SplatEvaluationResult, SplatEvaluationSummary,
 };
 #[cfg(feature = "gpu")]
-#[allow(deprecated)]
 pub use eval::{
-    evaluate_gaussians, evaluate_scene, evaluate_splats, evaluation_device,
-    render_evaluation_frame, runtime_from_gaussians, runtime_from_scene, runtime_from_splats,
-    trainable_from_gaussians, trainable_from_scene, trainable_from_splats,
+    evaluate_gaussians, evaluate_splats, evaluation_device, render_evaluation_frame,
+    runtime_from_gaussians, runtime_from_splats,
 };
 pub use parity_harness::{
     compare_loss_curve_samples, default_litegs_parity_fixtures, default_parity_report_path,
@@ -132,5 +125,4 @@ pub use metal_trainer::{
 };
 
 #[cfg(feature = "gpu")]
-#[allow(deprecated)]
-pub use orchestrator::{train, train_scene, train_splats};
+pub use orchestrator::train_splats;

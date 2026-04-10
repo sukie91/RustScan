@@ -7,7 +7,6 @@
 use glam::Vec3;
 use kiddo::{KdTree, SquaredEuclidean};
 
-use crate::legacy::Gaussian3D;
 use crate::render::tiled_renderer::Gaussian;
 
 #[cfg(feature = "gpu")]
@@ -84,38 +83,6 @@ pub fn initialize_gaussians_from_points(
         .collect()
 }
 
-/// Initialize Gaussians as `Gaussian3D` (glam-based) from a point cloud.
-pub fn initialize_gaussian3d_from_points(
-    points: &[([f32; 3], Option<[f32; 3]>)],
-    config: &GaussianInitConfig,
-) -> Vec<Gaussian3D> {
-    if points.is_empty() {
-        return Vec::new();
-    }
-
-    let positions: Vec<Vec3> = points
-        .iter()
-        .map(|(p, _)| Vec3::new(p[0], p[1], p[2]))
-        .collect();
-
-    let scales = compute_scales(&positions, config);
-
-    points
-        .iter()
-        .zip(scales.iter())
-        .map(|((pos, color), scale)| {
-            let rgb = color.unwrap_or(config.default_color);
-            Gaussian3D::new(
-                Vec3::new(pos[0], pos[1], pos[2]),
-                Vec3::splat(*scale),
-                glam::Quat::IDENTITY,
-                config.opacity,
-                rgb,
-            )
-        })
-        .collect()
-}
-
 /// Initialize runtime splats directly on device from a point cloud.
 #[cfg(feature = "gpu")]
 pub fn initialize_runtime_splats_from_points(
@@ -124,17 +91,6 @@ pub fn initialize_runtime_splats_from_points(
     device: &Device,
 ) -> candle_core::Result<Splats> {
     initialize_host_splats_from_points(points, config, 0)?.upload(device)
-}
-
-/// Compatibility wrapper for older callers.
-#[cfg(feature = "gpu")]
-#[deprecated(note = "Use initialize_runtime_splats_from_points(...) instead.")]
-pub fn initialize_trainable_gaussians_from_points(
-    points: &[([f32; 3], Option<[f32; 3]>)],
-    config: &GaussianInitConfig,
-    device: &Device,
-) -> candle_core::Result<Splats> {
-    initialize_runtime_splats_from_points(points, config, device)
 }
 
 /// Initialize host-side splats from a point cloud without materializing AoS gaussians.
@@ -244,15 +200,6 @@ mod tests {
 
         assert!(gaussians.iter().any(|g| g.color == [0.2, 0.3, 0.4]));
         assert!(gaussians.iter().any(|g| g.color == [0.9, 0.1, 0.2]));
-    }
-
-    #[test]
-    fn test_initialize_gaussian3d_count() {
-        let points = vec![([0.0, 0.0, 1.0], None)];
-
-        let config = GaussianInitConfig::default();
-        let gaussians = initialize_gaussian3d_from_points(&points, &config);
-        assert_eq!(gaussians.len(), 1);
     }
 
     #[test]

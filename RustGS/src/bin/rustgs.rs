@@ -1,7 +1,7 @@
 //! RustGS CLI - 3D Gaussian Splatting Training
 //!
 //! Usage:
-//!   rustgs train --input <slam_output.json|training_dataset.json|tum_dataset_dir|colmap_dir> --output <scene.ply>
+//!   rustgs train --input <training_dataset.json|tum_dataset_dir|colmap_dir> --output <scene.ply>
 //!   rustgs render --input <scene.ply> --camera <pose.json> --output <image.png>
 
 use anyhow::bail;
@@ -18,7 +18,7 @@ struct Cli {
 
 #[derive(Debug, Clone, clap::Args)]
 struct TrainArgs {
-    /// Path to SLAM output JSON, TrainingDataset JSON, TUM RGB-D directory, or COLMAP directory
+    /// Path to TrainingDataset JSON, TUM RGB-D directory, or COLMAP directory
     #[arg(short, long)]
     input: PathBuf,
 

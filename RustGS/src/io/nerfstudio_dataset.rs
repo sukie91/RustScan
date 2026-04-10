@@ -135,21 +135,10 @@ pub fn load_nerfstudio_dataset(root: &Path) -> Result<TrainingDataset, TrainingE
             }
 
             #[cfg(not(feature = "gpu"))]
-            match crate::io::scene_io::load_scene_ply(&ply_path) {
-                Ok((gaussians, _)) => {
-                    dataset.initial_points = gaussians
-                        .into_iter()
-                        .map(|gaussian| (gaussian.position, Some(gaussian.color)))
-                        .collect();
-                }
-                Err(err) => {
-                    log::warn!(
-                        "Ignoring Nerfstudio init splat {} because it could not be parsed as a RustGS scene: {}",
-                        ply_path.display(),
-                        err
-                    );
-                }
-            }
+            log::warn!(
+                "Ignoring Nerfstudio init splat {} because RustGS without GPU support cannot load host splat payloads",
+                ply_path.display(),
+            );
         }
     }
 

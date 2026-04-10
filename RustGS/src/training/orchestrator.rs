@@ -1,5 +1,4 @@
 use super::{LiteGsConfig, TrainingConfig, TrainingProfile};
-use crate::legacy::GaussianMap;
 use crate::TrainingError;
 
 #[cfg(feature = "gpu")]
@@ -24,30 +23,6 @@ pub fn train_splats(
         TrainingProfile::LegacyMetal => train_legacy_metal(dataset, config),
         TrainingProfile::LiteGsMacV1 => train_litegs_mac_v1(dataset, config),
     }
-}
-
-#[cfg(feature = "gpu")]
-#[deprecated(note = "Use train_splats(...) instead to avoid materializing a legacy GaussianMap.")]
-pub fn train_scene(
-    dataset: &TrainingDataset,
-    config: &TrainingConfig,
-) -> Result<GaussianMap, TrainingError> {
-    let splats = train_splats(dataset, config)?;
-    let mut map = GaussianMap::from_gaussians(splats.to_legacy_gaussians()?);
-    map.update_states();
-    Ok(map)
-}
-
-#[cfg(feature = "gpu")]
-#[deprecated(note = "Use train_splats(...) instead.")]
-pub fn train(
-    dataset: &TrainingDataset,
-    config: &TrainingConfig,
-) -> Result<GaussianMap, TrainingError> {
-    let splats = train_splats(dataset, config)?;
-    let mut map = GaussianMap::from_gaussians(splats.to_legacy_gaussians()?);
-    map.update_states();
-    Ok(map)
 }
 
 #[cfg(feature = "gpu")]

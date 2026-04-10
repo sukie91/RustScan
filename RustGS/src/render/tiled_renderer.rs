@@ -11,7 +11,6 @@
 
 #[cfg(feature = "gpu")]
 use crate::diff::diff_splat::sh0_to_rgb_value;
-use crate::legacy::Gaussian3D;
 #[cfg(feature = "gpu")]
 use crate::training::SplatView;
 
@@ -85,35 +84,6 @@ impl Gaussian {
             ],
             sh_rest: None,
         }
-    }
-
-    /// Convert from Gaussian3D
-    pub fn from_gaussian3d(g: &Gaussian3D) -> Self {
-        Self {
-            position: g.position.to_array(),
-            scale: g.scale.to_array(),
-            rotation: [g.rotation.w, g.rotation.x, g.rotation.y, g.rotation.z],
-            opacity: g.opacity,
-            color: g.color,
-            sh_rest: None,
-        }
-    }
-
-    /// Convert to Gaussian3D
-    pub fn to_gaussian3d(&self) -> Gaussian3D {
-        use glam::{Quat, Vec3};
-        Gaussian3D::new(
-            Vec3::from(self.position),
-            Vec3::from(self.scale),
-            Quat::from_xyzw(
-                self.rotation[1],
-                self.rotation[2],
-                self.rotation[3],
-                self.rotation[0],
-            ),
-            self.opacity,
-            self.color,
-        )
     }
 }
 
@@ -767,25 +737,4 @@ mod tests {
         assert_eq!(gaussians[2].depth, 3.0);
     }
 
-    #[test]
-    fn test_gaussian_conversion() {
-        use glam::{Quat, Vec3};
-
-        let g3d = Gaussian3D::new(
-            Vec3::new(1.0, 2.0, 3.0),
-            Vec3::splat(0.01),
-            Quat::IDENTITY,
-            0.5,
-            [1.0, 0.5, 0.0],
-        );
-
-        let g = Gaussian::from_gaussian3d(&g3d);
-        assert_eq!(g.position, [1.0, 2.0, 3.0]);
-        assert_eq!(g.opacity, 0.5);
-
-        let back = g.to_gaussian3d();
-        assert_eq!(back.position, g3d.position);
-        assert_eq!(back.opacity, g3d.opacity);
-        assert_eq!(back.color, g3d.color);
-    }
 }

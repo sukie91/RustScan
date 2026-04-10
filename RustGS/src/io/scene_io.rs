@@ -1,29 +1,21 @@
-//! 3DGS scene export and import utilities (PLY).
-//!
-//! Stores Gaussian parameters in an ASCII PLY with metadata comments.
-//! Supports both legacy RustGS format and LiteGS-compatible format.
+//! Host-side splat export and import utilities (PLY).
 
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
 
-use thiserror::Error;
-
 #[cfg(feature = "gpu")]
 use crate::diff::diff_splat::sh_coeff_count_for_degree;
-use crate::render::tiled_renderer::Gaussian;
+use thiserror::Error;
 
+#[cfg(test)]
 /// SH DC coefficient constant for RGB to SH conversion.
 const SH_C0: f32 = 0.282_094_8;
 
 /// Convert RGB [0,1] to SH DC coefficient.
+#[cfg(test)]
 fn rgb_to_sh_dc(rgb: f32) -> f32 {
     (rgb - 0.5) / SH_C0
-}
-
-/// Convert SH DC coefficient to RGB [0,1].
-fn sh_dc_to_rgb(sh: f32) -> f32 {
-    sh * SH_C0 + 0.5
 }
 
 #[derive(Debug, Clone)]
@@ -104,80 +96,35 @@ fn write_ply_header<W: Write>(
         path: path.display().to_string(),
         source,
     })?;
-    writeln!(writer, "property float x").map_err(|source| SceneIoError::Write {
-        path: path.display().to_string(),
-        source,
-    })?;
-    writeln!(writer, "property float y").map_err(|source| SceneIoError::Write {
-        path: path.display().to_string(),
-        source,
-    })?;
-    writeln!(writer, "property float z").map_err(|source| SceneIoError::Write {
-        path: path.display().to_string(),
-        source,
-    })?;
-    writeln!(writer, "property float nx").map_err(|source| SceneIoError::Write {
-        path: path.display().to_string(),
-        source,
-    })?;
-    writeln!(writer, "property float ny").map_err(|source| SceneIoError::Write {
-        path: path.display().to_string(),
-        source,
-    })?;
-    writeln!(writer, "property float nz").map_err(|source| SceneIoError::Write {
-        path: path.display().to_string(),
-        source,
-    })?;
-    writeln!(writer, "property float f_dc_0").map_err(|source| SceneIoError::Write {
-        path: path.display().to_string(),
-        source,
-    })?;
-    writeln!(writer, "property float f_dc_1").map_err(|source| SceneIoError::Write {
-        path: path.display().to_string(),
-        source,
-    })?;
-    writeln!(writer, "property float f_dc_2").map_err(|source| SceneIoError::Write {
-        path: path.display().to_string(),
-        source,
-    })?;
-    for i in 0..45 {
-        writeln!(writer, "property float f_rest_{}", i).map_err(|source| SceneIoError::Write {
+    for property in [
+        "x",
+        "y",
+        "z",
+        "nx",
+        "ny",
+        "nz",
+        "f_dc_0",
+        "f_dc_1",
+        "f_dc_2",
+    ] {
+        writeln!(writer, "property float {property}").map_err(|source| SceneIoError::Write {
             path: path.display().to_string(),
             source,
         })?;
     }
-    writeln!(writer, "property float opacity").map_err(|source| SceneIoError::Write {
-        path: path.display().to_string(),
-        source,
-    })?;
-    writeln!(writer, "property float scale_0").map_err(|source| SceneIoError::Write {
-        path: path.display().to_string(),
-        source,
-    })?;
-    writeln!(writer, "property float scale_1").map_err(|source| SceneIoError::Write {
-        path: path.display().to_string(),
-        source,
-    })?;
-    writeln!(writer, "property float scale_2").map_err(|source| SceneIoError::Write {
-        path: path.display().to_string(),
-        source,
-    })?;
-    writeln!(writer, "property float rot_0").map_err(|source| SceneIoError::Write {
-        path: path.display().to_string(),
-        source,
-    })?;
-    writeln!(writer, "property float rot_1").map_err(|source| SceneIoError::Write {
-        path: path.display().to_string(),
-        source,
-    })?;
-    writeln!(writer, "property float rot_2").map_err(|source| SceneIoError::Write {
-        path: path.display().to_string(),
-        source,
-    })?;
-    writeln!(writer, "property float rot_3").map_err(|source| SceneIoError::Write {
-        path: path.display().to_string(),
-        source,
-    })?;
+    for i in 0..45 {
+        writeln!(writer, "property float f_rest_{i}").map_err(|source| SceneIoError::Write {
+            path: path.display().to_string(),
+            source,
+        })?;
+    }
+    for property in ["opacity", "scale_0", "scale_1", "scale_2", "rot_0", "rot_1", "rot_2", "rot_3"]
+    {
+        writeln!(writer, "property float {property}").map_err(|source| SceneIoError::Write {
+            path: path.display().to_string(),
+            source,
+        })?;
+    }
     writeln!(writer, "end_header").map_err(|source| SceneIoError::Write {
         path: path.display().to_string(),
         source,
@@ -194,101 +141,6 @@ fn sigmoid_logit(value: f32) -> f32 {
 fn opacity_to_logit(opacity: f32) -> f32 {
     let clamped = opacity.clamp(1e-6, 1.0 - 1e-6);
     (clamped / (1.0 - clamped)).ln()
-}
-
-/// Save scene in LiteGS-compatible PLY format.
-///
-/// The format includes:
-/// - x, y, z: position
-/// - nx, ny, nz: normals (zeros, for compatibility)
-/// - f_dc_0, f_dc_1, f_dc_2: SH DC coefficients (RGB)
-/// - f_rest_0...f_rest_44: higher-order SH coefficients (zeros for RGB-only)
-/// - opacity: sigmoid opacity
-/// - scale_0, scale_1, scale_2: log-scale values
-/// - rot_0, rot_1, rot_2, rot_3: quaternion (w, x, y, z)
-#[deprecated(note = "Use save_splats_ply(...) instead to persist HostSplats directly.")]
-pub fn save_scene_ply(
-    path: &Path,
-    gaussians: &[Gaussian],
-    metadata: &SceneMetadata,
-) -> Result<(), SceneIoError> {
-    let file = File::create(path).map_err(|source| SceneIoError::Write {
-        path: path.display().to_string(),
-        source,
-    })?;
-    let mut writer = BufWriter::new(file);
-
-    write_ply_header(&mut writer, path, metadata, gaussians.len())?;
-
-    // Data rows
-    for g in gaussians {
-        // Convert RGB to SH DC
-        let f_dc_0 = rgb_to_sh_dc(g.color[0]);
-        let f_dc_1 = rgb_to_sh_dc(g.color[1]);
-        let f_dc_2 = rgb_to_sh_dc(g.color[2]);
-
-        // Write all 62 values:
-        // 3 position + 3 normal + 3 f_dc + 45 f_rest + 1 opacity + 3 scale + 4 rotation
-        write!(
-            writer,
-            "{} {} {} ",
-            g.position[0], g.position[1], g.position[2]
-        )
-        .map_err(|source| SceneIoError::Write {
-            path: path.display().to_string(),
-            source,
-        })?; // 3 position
-        write!(writer, "0 0 0 ").map_err(|source| SceneIoError::Write {
-            path: path.display().to_string(),
-            source,
-        })?; // 3 normal (zeros)
-        write!(writer, "{} {} {} ", f_dc_0, f_dc_1, f_dc_2).map_err(|source| {
-            SceneIoError::Write {
-                path: path.display().to_string(),
-                source,
-            }
-        })?; // 3 f_dc
-
-        // 45 f_rest (from sh_rest if available, otherwise zeros)
-        if let Some(ref sh_rest) = g.sh_rest {
-            // Write actual SH coefficients
-            for i in 0..45 {
-                let val = sh_rest.get(i).copied().unwrap_or(0.0);
-                write!(writer, "{} ", val).map_err(|source| SceneIoError::Write {
-                    path: path.display().to_string(),
-                    source,
-                })?;
-            }
-        } else {
-            // Write zeros for RGB-only
-            for _ in 0..45 {
-                write!(writer, "0 ").map_err(|source| SceneIoError::Write {
-                    path: path.display().to_string(),
-                    source,
-                })?;
-            }
-        }
-
-        // opacity, scale, rotation
-        writeln!(
-            writer,
-            "{} {} {} {} {} {} {} {}",
-            g.opacity,
-            g.scale[0].ln(), // Log-scale for compatibility
-            g.scale[1].ln(),
-            g.scale[2].ln(),
-            g.rotation[0], // w
-            g.rotation[1], // x
-            g.rotation[2], // y
-            g.rotation[3], // z
-        )
-        .map_err(|source| SceneIoError::Write {
-            path: path.display().to_string(),
-            source,
-        })?;
-    }
-
-    Ok(())
 }
 
 #[cfg(feature = "gpu")]
@@ -312,7 +164,6 @@ pub fn save_splats_ply(
 
     let view = splats.as_view();
     let sh_coeff_row_width = sh_coeff_count_for_degree(view.sh_degree) * 3;
-    let sh_rest_row_width = sh_coeff_row_width.saturating_sub(3);
 
     for idx in 0..splats.len() {
         let position_base = idx * 3;
@@ -322,23 +173,13 @@ pub fn save_splats_ply(
 
         write!(
             writer,
-            "{} {} {} ",
+            "{} {} {} 0 0 0 {} {} {} ",
             view.positions[position_base],
             view.positions[position_base + 1],
             view.positions[position_base + 2],
-        )
-        .map_err(|source| SceneIoError::Write {
-            path: path.display().to_string(),
-            source,
-        })?;
-        write!(writer, "0 0 0 ").map_err(|source| SceneIoError::Write {
-            path: path.display().to_string(),
-            source,
-        })?;
-        write!(
-            writer,
-            "{} {} {} ",
-            sh_coeffs[0], sh_coeffs[1], sh_coeffs[2]
+            sh_coeffs[0],
+            sh_coeffs[1],
+            sh_coeffs[2],
         )
         .map_err(|source| SceneIoError::Write {
             path: path.display().to_string(),
@@ -353,23 +194,14 @@ pub fn save_splats_ply(
                 source,
             })?;
         }
-        debug_assert!(sh_rest.len() <= sh_rest_row_width);
 
-        write!(
+        writeln!(
             writer,
-            "{} {} {} {} ",
+            "{} {} {} {} {} {} {} {}",
             sigmoid_logit(view.opacity_logits[idx]).clamp(0.0, 1.0),
             view.log_scales[position_base],
             view.log_scales[position_base + 1],
             view.log_scales[position_base + 2],
-        )
-        .map_err(|source| SceneIoError::Write {
-            path: path.display().to_string(),
-            source,
-        })?;
-        writeln!(
-            writer,
-            "{} {} {} {}",
             view.rotations[rotation_base],
             view.rotations[rotation_base + 1],
             view.rotations[rotation_base + 2],
@@ -382,154 +214,6 @@ pub fn save_splats_ply(
     }
 
     Ok(())
-}
-
-/// Load scene from PLY file.
-///
-/// Supports both legacy RustGS format and LiteGS-compatible format.
-#[deprecated(note = "Use load_splats_ply(...) instead to load HostSplats directly.")]
-pub fn load_scene_ply(path: &Path) -> Result<(Vec<Gaussian>, SceneMetadata), SceneIoError> {
-    let file = File::open(path).map_err(|source| SceneIoError::Read {
-        path: path.display().to_string(),
-        source,
-    })?;
-    let reader = BufReader::new(file);
-
-    let mut gaussians = Vec::new();
-    let mut metadata = SceneMetadata::default();
-    let mut in_header = true;
-    let mut expected_vertices: Option<usize> = None;
-    let mut _property_count = 0;
-    let mut _has_normals = false;
-    let mut has_sh = false;
-
-    for line in reader.lines() {
-        let line = line.map_err(|source| SceneIoError::Read {
-            path: path.display().to_string(),
-            source,
-        })?;
-        let trimmed = line.trim();
-
-        if in_header {
-            if trimmed.starts_with("comment iterations ") {
-                metadata.iterations = trimmed["comment iterations ".len()..]
-                    .trim()
-                    .parse()
-                    .unwrap_or(0);
-            } else if trimmed.starts_with("comment final_loss ") {
-                metadata.final_loss = trimmed["comment final_loss ".len()..]
-                    .trim()
-                    .parse()
-                    .unwrap_or(0.0);
-            } else if trimmed.starts_with("comment sh_degree ") {
-                metadata.sh_degree = trimmed["comment sh_degree ".len()..]
-                    .trim()
-                    .parse()
-                    .unwrap_or(0);
-            } else if trimmed.starts_with("element vertex ") {
-                expected_vertices = trimmed["element vertex ".len()..]
-                    .trim()
-                    .parse::<usize>()
-                    .ok();
-            } else if trimmed.starts_with("property ") {
-                _property_count += 1;
-                if trimmed.contains("nx") {
-                    _has_normals = true;
-                }
-                if trimmed.contains("f_dc") {
-                    has_sh = true;
-                }
-            } else if trimmed == "end_header" {
-                in_header = false;
-            }
-            continue;
-        }
-
-        if trimmed.is_empty() {
-            continue;
-        }
-
-        let values: Vec<f32> = trimmed
-            .split_whitespace()
-            .map(|v| v.parse::<f32>())
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|err| SceneIoError::Parse(err.to_string()))?;
-
-        // Parse based on format
-        if has_sh && values.len() >= 62 {
-            // LiteGS format: 3 pos + 3 normal + 3 f_dc + 45 f_rest + 1 opacity + 3 scale + 4 rot
-            // Indices: 0-2 pos, 3-5 normal, 6-8 f_dc, 9-53 f_rest (45 values), 54 opacity, 55-57 scale, 58-61 rot
-
-            // Extract sh_rest values (indices 9-53, 45 values)
-            let sh_rest: Vec<f32> = values[9..54].to_vec();
-
-            // Check if sh_rest contains any non-zero values
-            let has_sh_rest = sh_rest.iter().any(|&v| v.abs() > 1e-8);
-
-            let gaussian = if has_sh_rest {
-                Gaussian::with_sh(
-                    [values[0], values[1], values[2]],                      // position
-                    [values[55].exp(), values[56].exp(), values[57].exp()], // scale (from log)
-                    [values[58], values[59], values[60], values[61]],       // rotation (w,x,y,z)
-                    values[54],                                             // opacity
-                    [
-                        sh_dc_to_rgb(values[6]), // f_dc_0 -> r
-                        sh_dc_to_rgb(values[7]), // f_dc_1 -> g
-                        sh_dc_to_rgb(values[8]), // f_dc_2 -> b
-                    ],
-                    sh_rest,
-                )
-            } else {
-                Gaussian::new(
-                    [values[0], values[1], values[2]],                      // position
-                    [values[55].exp(), values[56].exp(), values[57].exp()], // scale (from log)
-                    [values[58], values[59], values[60], values[61]],       // rotation (w,x,y,z)
-                    values[54],                                             // opacity
-                    [
-                        sh_dc_to_rgb(values[6]), // f_dc_0 -> r
-                        sh_dc_to_rgb(values[7]), // f_dc_1 -> g
-                        sh_dc_to_rgb(values[8]), // f_dc_2 -> b
-                    ],
-                )
-            };
-            gaussians.push(gaussian);
-        } else if values.len() >= 14 {
-            // Legacy RustGS format: 3 pos + 3 scale + 4 rot + 1 opacity + 3 color
-            let gaussian = Gaussian::new(
-                [values[0], values[1], values[2]],
-                [values[3], values[4], values[5]],
-                [values[6], values[7], values[8], values[9]],
-                values[10],
-                [values[11], values[12], values[13]],
-            );
-            gaussians.push(gaussian);
-        } else {
-            return Err(SceneIoError::InvalidFormat {
-                message: format!(
-                    "expected at least 14 values per vertex, got {}",
-                    values.len()
-                ),
-            });
-        }
-    }
-
-    if let Some(expected) = expected_vertices {
-        if gaussians.len() != expected {
-            return Err(SceneIoError::InvalidFormat {
-                message: format!(
-                    "vertex count mismatch: header {}, parsed {}",
-                    expected,
-                    gaussians.len()
-                ),
-            });
-        }
-    }
-
-    if metadata.gaussian_count == 0 {
-        metadata.gaussian_count = gaussians.len();
-    }
-
-    Ok((gaussians, metadata))
 }
 
 #[cfg(feature = "gpu")]
@@ -545,7 +229,6 @@ pub fn load_splats_ply(
     let mut metadata = SceneMetadata::default();
     let mut in_header = true;
     let mut expected_vertices: Option<usize> = None;
-    let mut has_sh = false;
 
     let mut positions = Vec::new();
     let mut log_scales = Vec::new();
@@ -581,8 +264,6 @@ pub fn load_splats_ply(
                     .trim()
                     .parse::<usize>()
                     .ok();
-            } else if trimmed.starts_with("property ") && trimmed.contains("f_dc") {
-                has_sh = true;
             } else if trimmed == "end_header" {
                 in_header = false;
             }
@@ -599,40 +280,34 @@ pub fn load_splats_ply(
             .collect::<Result<Vec<_>, _>>()
             .map_err(|err| SceneIoError::Parse(err.to_string()))?;
 
-        if has_sh && values.len() >= 62 {
-            if metadata.sh_degree > 3 {
-                return Err(SceneIoError::InvalidFormat {
-                    message: format!(
-                        "unsupported sh_degree {} in splat loader; PLY splat path currently supports up to degree 3",
-                        metadata.sh_degree
-                    ),
-                });
-            }
-
-            positions.extend_from_slice(&values[0..3]);
-            log_scales.extend_from_slice(&values[55..58]);
-            rotations.extend_from_slice(&values[58..62]);
-            opacity_logits.push(opacity_to_logit(values[54]));
-
-            sh_coeffs.extend_from_slice(&values[6..9]);
-            let sh_rest_to_keep = sh_coeff_count_for_degree(metadata.sh_degree)
-                .saturating_sub(1)
-                .saturating_mul(3);
-            sh_coeffs.extend_from_slice(&values[9..9 + sh_rest_to_keep.min(45)]);
-        } else if values.len() >= 14 {
-            positions.extend_from_slice(&values[0..3]);
-            log_scales.extend(values[3..6].iter().map(|scale| scale.max(1e-6).ln()));
-            rotations.extend_from_slice(&values[6..10]);
-            opacity_logits.push(opacity_to_logit(values[10]));
-            sh_coeffs.extend(values[11..14].iter().copied().map(rgb_to_sh_dc));
-        } else {
+        if values.len() != 62 {
             return Err(SceneIoError::InvalidFormat {
                 message: format!(
-                    "expected at least 14 values per vertex, got {}",
+                    "expected 62 values per vertex in splat PLY, got {}",
                     values.len()
                 ),
             });
         }
+
+        if metadata.sh_degree > 3 {
+            return Err(SceneIoError::InvalidFormat {
+                message: format!(
+                    "unsupported sh_degree {} in splat loader; current path supports up to degree 3",
+                    metadata.sh_degree
+                ),
+            });
+        }
+
+        positions.extend_from_slice(&values[0..3]);
+        log_scales.extend_from_slice(&values[55..58]);
+        rotations.extend_from_slice(&values[58..62]);
+        opacity_logits.push(opacity_to_logit(values[54]));
+
+        sh_coeffs.extend_from_slice(&values[6..9]);
+        let sh_rest_to_keep = sh_coeff_count_for_degree(metadata.sh_degree)
+            .saturating_sub(1)
+            .saturating_mul(3);
+        sh_coeffs.extend_from_slice(&values[9..9 + sh_rest_to_keep.min(45)]);
     }
 
     let parsed_vertices = opacity_logits.len();
@@ -651,14 +326,13 @@ pub fn load_splats_ply(
         metadata.gaussian_count = parsed_vertices;
     }
 
-    let effective_sh_degree = if has_sh { metadata.sh_degree } else { 0 };
     let splats = crate::training::HostSplats::from_raw_parts(
         positions,
         log_scales,
         rotations,
         opacity_logits,
         sh_coeffs,
-        effective_sh_degree,
+        metadata.sh_degree,
     )
     .map_err(|err| SceneIoError::InvalidFormat {
         message: err.to_string(),
@@ -671,101 +345,6 @@ pub fn load_splats_ply(
 mod tests {
     use super::*;
     use tempfile::tempdir;
-
-    #[test]
-    fn test_scene_roundtrip_litegs_format() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("scene.ply");
-
-        let gaussians = vec![
-            Gaussian::new(
-                [0.0, 0.0, 1.0],
-                [0.1, 0.1, 0.1],
-                [1.0, 0.0, 0.0, 0.0],
-                0.5,
-                [0.2, 0.3, 0.4],
-            ),
-            Gaussian::new(
-                [1.0, 0.0, 2.0],
-                [0.2, 0.2, 0.2],
-                [1.0, 0.0, 0.0, 0.0],
-                0.6,
-                [0.5, 0.4, 0.3],
-            ),
-        ];
-
-        let metadata = SceneMetadata {
-            iterations: 3000,
-            final_loss: 0.42,
-            gaussian_count: gaussians.len(),
-            sh_degree: 0,
-        };
-
-        save_scene_ply(&path, &gaussians, &metadata).unwrap();
-
-        let (loaded, loaded_meta) = load_scene_ply(&path).unwrap();
-        assert_eq!(loaded.len(), gaussians.len());
-        assert_eq!(loaded_meta.iterations, 3000);
-        assert!((loaded_meta.final_loss - 0.42).abs() < 1e-6);
-
-        // Check position and opacity are preserved
-        for (orig, loaded_g) in gaussians.iter().zip(loaded.iter()) {
-            for i in 0..3 {
-                assert!((orig.position[i] - loaded_g.position[i]).abs() < 1e-5);
-            }
-            assert!((orig.opacity - loaded_g.opacity).abs() < 1e-5);
-        }
-    }
-
-    #[test]
-    fn test_scene_roundtrip_with_sh() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("scene_sh.ply");
-
-        // Create gaussian with SH coefficients (45 values for degree 3)
-        let sh_rest: Vec<f32> = (0..45).map(|i| i as f32 * 0.01).collect();
-
-        let gaussians = vec![Gaussian::with_sh(
-            [0.0, 0.0, 1.0],
-            [0.1, 0.1, 0.1],
-            [1.0, 0.0, 0.0, 0.0],
-            0.5,
-            [0.2, 0.3, 0.4],
-            sh_rest.clone(),
-        )];
-
-        let metadata = SceneMetadata {
-            iterations: 3000,
-            final_loss: 0.42,
-            gaussian_count: gaussians.len(),
-            sh_degree: 3,
-        };
-
-        save_scene_ply(&path, &gaussians, &metadata).unwrap();
-
-        let (loaded, loaded_meta) = load_scene_ply(&path).unwrap();
-        assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded_meta.sh_degree, 3);
-
-        // Check SH coefficients are preserved
-        let loaded_g = &loaded[0];
-        assert!(
-            loaded_g.sh_rest.is_some(),
-            "SH coefficients should be loaded"
-        );
-        let loaded_sh = loaded_g.sh_rest.as_ref().unwrap();
-        assert_eq!(loaded_sh.len(), 45, "Should have 45 SH coefficients");
-
-        for (i, (&orig, &loaded)) in sh_rest.iter().zip(loaded_sh.iter()).enumerate() {
-            assert!(
-                (orig - loaded).abs() < 1e-5,
-                "SH coefficient {} mismatch: {} vs {}",
-                i,
-                orig,
-                loaded
-            );
-        }
-    }
 
     #[cfg(feature = "gpu")]
     #[test]

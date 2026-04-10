@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::diff::diff_splat::{
     rgb_to_sh0_value, sh0_to_rgb_value, sh_coeff_count_for_degree, SplatColorRepresentation,
-    Splats as RuntimeSplats, TrainableGaussians,
+    Splats as RuntimeSplats,
 };
 
 use super::{TrainingConfig, TrainingProfile};
@@ -104,11 +104,6 @@ impl HostSplats {
         Ok(splats)
     }
 
-    #[deprecated(note = "Use HostSplats::from_runtime(...) instead.")]
-    pub fn from_trainable(gaussians: &TrainableGaussians) -> candle_core::Result<Self> {
-        Self::from_runtime(gaussians)
-    }
-
     pub fn upload(&self, device: &Device) -> candle_core::Result<RuntimeSplats> {
         self.validate()?;
         match self.sh_degree {
@@ -138,11 +133,6 @@ impl HostSplats {
 
     pub fn to_runtime(&self, device: &Device) -> candle_core::Result<RuntimeSplats> {
         self.upload(device)
-    }
-
-    #[deprecated(note = "Use HostSplats::to_runtime(...) or HostSplats::upload(...) instead.")]
-    pub fn to_trainable(&self, device: &Device) -> candle_core::Result<TrainableGaussians> {
-        self.to_runtime(device)
     }
 
     pub fn as_view(&self) -> SplatView<'_> {

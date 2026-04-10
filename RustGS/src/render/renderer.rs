@@ -8,10 +8,11 @@
 use crate::core::GaussianCamera;
 #[cfg(feature = "gpu")]
 use crate::diff::diff_splat::sh0_to_rgb_value;
-use crate::legacy::{Gaussian3D, GaussianMap};
 #[cfg(feature = "gpu")]
 use crate::training::{HostSplats, SplatView};
 use glam::{Mat3, Vec3};
+
+use super::tiled_renderer::Gaussian;
 
 /// Output of rendering
 #[derive(Debug, Clone)]
@@ -56,7 +57,7 @@ impl GaussianRenderer {
     /// Render gaussians from a camera view.
     pub fn render_gaussians(
         &self,
-        gaussians: &[Gaussian3D],
+        gaussians: &[Gaussian],
         camera: &GaussianCamera,
     ) -> RenderOutput {
         let mut color = self.background_rgb_buffer();
@@ -87,12 +88,6 @@ impl GaussianRenderer {
             width: self.width,
             height: self.height,
         }
-    }
-
-    /// Compatibility wrapper that renders a legacy `GaussianMap`.
-    #[deprecated(note = "Use render_gaussians(...) or render_splats(...) instead.")]
-    pub fn render(&self, map: &GaussianMap, camera: &GaussianCamera) -> RenderOutput {
-        self.render_gaussians(map.gaussians(), camera)
     }
 
     /// Render host-side splats by converting them to the renderer's gaussian slice input.
@@ -168,7 +163,7 @@ impl GaussianRenderer {
     /// Returns a depth map in camera-space (z-distance from camera center).
     pub fn render_depth_gaussians(
         &self,
-        gaussians: &[Gaussian3D],
+        gaussians: &[Gaussian],
         camera: &GaussianCamera,
     ) -> Vec<f32> {
         let mut depth = vec![0.0f32; self.width * self.height];
@@ -183,12 +178,6 @@ impl GaussianRenderer {
         }
 
         depth
-    }
-
-    /// Compatibility wrapper that renders depth from a legacy `GaussianMap`.
-    #[deprecated(note = "Use render_depth_gaussians(...) or render_depth_splats(...) instead.")]
-    pub fn render_depth(&self, map: &GaussianMap, camera: &GaussianCamera) -> Vec<f32> {
-        self.render_depth_gaussians(map.gaussians(), camera)
     }
 
     /// Render depth directly from host-side splats.
@@ -215,7 +204,7 @@ impl GaussianRenderer {
     /// Returns (depth_map, color_map) where color is [u8; 3] per pixel.
     pub fn render_depth_and_color_gaussians(
         &self,
-        gaussians: &[Gaussian3D],
+        gaussians: &[Gaussian],
         camera: &GaussianCamera,
     ) -> (Vec<f32>, Vec<[u8; 3]>) {
         let mut depth = vec![0.0f32; self.width * self.height];
@@ -239,18 +228,6 @@ impl GaussianRenderer {
         }
 
         (depth, color)
-    }
-
-    /// Compatibility wrapper that renders depth and color from a legacy `GaussianMap`.
-    #[deprecated(
-        note = "Use render_depth_and_color_gaussians(...) or render_depth_and_color_splats(...) instead."
-    )]
-    pub fn render_depth_and_color(
-        &self,
-        map: &GaussianMap,
-        camera: &GaussianCamera,
-    ) -> (Vec<f32>, Vec<[u8; 3]>) {
-        self.render_depth_and_color_gaussians(map.gaussians(), camera)
     }
 
     /// Render depth and color directly from host-side splats.
@@ -361,9 +338,9 @@ impl GaussianRenderer {
 
     fn project_visible_gaussians<'a>(
         &self,
-        gaussians: &'a [Gaussian3D],
+        gaussians: &'a [Gaussian],
         camera: &GaussianCamera,
-    ) -> Vec<(&'a Gaussian3D, f32, f32, f32, f32)> {
+    ) -> Vec<(&'a Gaussian, f32, f32, f32, f32)> {
         let (fx, fy, cx, cy) = (
             camera.intrinsics.fx,
             camera.intrinsics.fy,
@@ -382,16 +359,23 @@ impl GaussianRenderer {
         gaussians
             .iter()
             .filter_map(|gaussian| {
-                if let Some([ux, uy, radius]) =
-                    gaussian.project(fx, fy, cx, cy, &rotation, &translation)
-                {
-                    let cam_pos = rotation_mat.transpose() * (gaussian.position - camera_origin);
-                    let cam_depth = cam_pos.z;
-                    if cam_depth > 0.001 && cam_depth < 100.0 {
-                        Some((gaussian, cam_depth, ux, uy, radius))
-                    } else {
-                        None
-                    }
+                let position = Vec3::new(
+                    gaussian.position[0],
+                    gaussian.position[1],
+                    gaussian.position[2],
+                );
+                let cam_pos = rotation_mat.transpose() * (position - camera_origin);
+                let cam_depth = cam_pos.z;
+                if !(0.001..100.0).contains(&cam_depth) {
+                    return None;
+                }
+
+                let ux = fx * cam_pos.x / cam_depth + cx;
+                let uy = fy * cam_pos.y / cam_depth + cy;
+                let radius = (fx + fy) * gaussian.scale[0].abs() * 0.5 / cam_depth;
+
+                if ux.is_finite() && uy.is_finite() && radius.is_finite() {
+                    Some((gaussian, cam_depth, ux, uy, radius))
                 } else {
                     None
                 }
@@ -477,7 +461,7 @@ mod tests {
     #[test]
     fn test_render_depth() {
         let renderer = GaussianRenderer::new(64, 64);
-        let gaussians = vec![Gaussian3D::from_depth_point(0.0, 0.0, 1.0, [255, 128, 64])];
+        let gaussians = vec![Gaussian::from_depth_point(0.0, 0.0, 1.0, [255, 128, 64])];
 
         let intrinsics = Intrinsics::from_focal(500.0, 64, 64);
         let camera = GaussianCamera::new(intrinsics, SE3::identity());
@@ -491,7 +475,7 @@ mod tests {
     #[test]
     fn test_render_depth_and_color() {
         let renderer = GaussianRenderer::new(64, 64);
-        let gaussians = vec![Gaussian3D::from_depth_point(0.0, 0.0, 1.0, [255, 128, 64])];
+        let gaussians = vec![Gaussian::from_depth_point(0.0, 0.0, 1.0, [255, 128, 64])];
 
         let intrinsics = Intrinsics::from_focal(500.0, 64, 64);
         let camera = GaussianCamera::new(intrinsics, SE3::identity());
@@ -508,18 +492,13 @@ mod tests {
     #[test]
     fn test_render_splats() {
         let renderer = GaussianRenderer::new(64, 64).with_background(0.1, 0.2, 0.3);
-        let splats = HostSplats::from_legacy_gaussians_inferred(&[Gaussian3D::from_depth_point(
-            0.0,
-            0.0,
-            1.0,
-            [255, 128, 64],
-        )])
-        .unwrap();
+        let gaussians = vec![Gaussian::from_depth_point(0.0, 0.0, 1.0, [255, 128, 64])];
+        let splats = HostSplats::from_scene_gaussians(&gaussians, 0).unwrap();
         let intrinsics = Intrinsics::from_focal(500.0, 64, 64);
         let camera = GaussianCamera::new(intrinsics, SE3::identity());
 
         let output = renderer.render_splats(&splats, &camera).unwrap();
-        let reference = renderer.render_gaussians(&splats.to_legacy_gaussians().unwrap(), &camera);
+        let reference = renderer.render_gaussians(&gaussians, &camera);
 
         assert_eq!(output.color, reference.color);
         assert_eq!(output.depth, reference.depth);

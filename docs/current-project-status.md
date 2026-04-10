@@ -1,59 +1,44 @@
 # RustScan Current Project Status
 
-**Updated:** 2026-04-08  
+**Updated:** 2026-04-10  
 **Branch:** `main`
 
 ## Overall
 
-当前 `main` 的活跃工程主线是 RustGS 训练重构与验证闭环，不再是 `rm-opt` 上的 RustMesh LOD/OpenMesh 专项工作。仓库仍然是多 crate workspace，但 `docs/` 目录现在只保留和当前主线一致的文档。
+当前 `main` 的活跃主线仍然是 RustGS 训练架构收口与 TUM 质量闭环，但这轮状态已经向前推进了一步：RustGS 的 legacy API 和对应文件已经从源码主路径里清掉，文档也同步收口到 splat-first 架构。
 
 ## Verified Snapshot
 
-本次状态清理时，本地已确认：
+本轮清理后的本地验证目标是：
 
-- `cargo check -p rustgs --all-features` 通过
-- `cargo test -p rustgs --features gpu synthetic_loaded_training_data_matches_requested_fixture_shape -- --nocapture` 通过
-- `cargo test -p rustgs --features gpu splats_ -- --nocapture` 通过
-- `cargo test -p rustgs --features gpu execution_plan -- --nocapture` 通过
-- `cargo test -p rustgs --features gpu sequential_chunk_executor_runs_chunks_one_at_a_time -- --nocapture` 通过
-- `cargo test -p rustgs --features gpu adaptive_chunk_configs_keep_each_trainable_chunk_within_budget_envelope -- --nocapture` 通过
-- `cargo test -p rustgs --features gpu chunk_persistence_writes_report_entries -- --nocapture` 通过
-- `cargo test -p rustgs --features gpu persist_gaussian_map_scene_writes_chunk_ply -- --nocapture` 通过
-- `cargo test -p rustgs --features gpu persist_gaussian_map_scene_preserves_spherical_harmonics_metadata -- --nocapture` 通过
-- `cargo test -p rustgs --features gpu litegs_mac_v1_accepts_bootstrap_defaults -- --nocapture` 通过
-- `cargo test -p rustgs --features gpu default_training_backend_is_metal -- --nocapture` 通过
-- `cargo test -p rustgs --features gpu topology_update_densifies_and_prunes_with_matching_adam_state -- --nocapture` 通过
-- `cargo test --manifest-path RustGS/Cargo.toml --features gpu density_controller_reference_summary_ -- --nocapture` 通过
-- `cargo test -p rustgs --features gpu pose_parameter_grads_returns_tensor_pair -- --nocapture` 通过
-- `cargo test -p rustgs --features gpu scale_regularization_ -- --nocapture` 通过
-- `cargo test -p rustgs --features gpu test_pose_embeddings_adam_step_updates_selected_frame -- --nocapture` 通过
-- `cargo test -p rustgs --features gpu tile_bins_only_include_overlapping_gaussians -- --nocapture` 通过
-- RustGS refactor guardrails 文档最后验证时间为 2026-04-07
+- `cargo check -p rustgs`
+- `cargo test -p rustgs`
+- 已删除的 public legacy API 名称只会出现在“removed/deleted”说明里，不再作为当前 active surface 出现
+
+本轮完成后，guardrail 文档和索引只保留当前代码事实对应的文档集合。
 
 ## Current Progress
 
-- Epic 2 已基本完成：内部统一训练态模型 `splats.rs` 已接入主路径，旧的 `train_stream.rs` 与 `splat_params.rs` 已退出编译主路径。
-- Epic 3 已继续收口：前向执行与 Metal runtime 已拆分为 `metal_forward`、`metal_projection`、`metal_raster`、`metal_resources`、`metal_dispatch`、`metal_pipelines` 等模块，`ProjectedTileBins` 已成为前向返回的契约类型，trainer/backward 不再直接依赖 `MetalTileBins`，生产 trainer 主路径上的 tile-index slot 细节也已收口到 `MetalRuntime` helper。
-- Epic 4 当前 active story 已落地：`metal_loss`、`metal_backward`、`metal_optimizer` 已抽离，`learnable_viewproj` 的 render-camera 解析、pose FD 梯度和 pose update 现在都在 `pose_embedding.rs` 边界后，LiteGS scale regularization 的 full-tensor scatter 也已移出 `MetalTrainer::training_step()`。
-- Epic 5 已继续推进：`TopologyMutationAftermath`/`TopologyMetricsDelta` 已把 densify/prune 之后的 rebuild、stats action、cluster resync、runtime reserve、opacity reset、telemetry 更新 contract 化；同时 `training::topology::{DensityControllerReferenceAdapter, density_controller_reference_summary}` 已把 `density_controller.rs` 接成显式 reference adapter，LiteGS 拓扑日志开始并列输出 reference clone/split/prune/budget 遥测。
-- Epic 6 已继续收口：`training::orchestrator`、`training::execution_plan`、`training::chunk_training`、`training::export` 已接管 train route、execution-plan 选择、chunk 顺序执行和 chunk artifact/report 持久化；同时 `training::config` 已接管训练配置/枚举定义，`training_pipeline` 的根级 re-export 已移除，`training/mod.rs` 已缩成约 124 行的模块装配层，chunk scene export 已修正为保留 SH metadata 与 `sh_rest`，而 `training::splats` 现在还接管了 `GaussianMap <-> TrainableGaussians` 和 `GaussianMap -> scene Gaussian/metadata` 的核心桥接逻辑。
-- Epic 6.5 又往前走了一步：`LoadedTrainingData` 已改成直接输出 `initial_splats`，production trainer 和 benchmark 都从 `Splats` 进入 step loop，原来的 `map_from_trainable(...)` 兼容 helper 已删除，训练内部的 scene/trainable 回转现在显式经过 `Splats::from_trainable(...).to_gaussian_map()`。
-- TUM 对照已经给出清晰结论：`litegs-mac-v1` 的 late-stage topology freeze 值得保留，`freeze80` 在当前配置下能减少训练开销且几乎不损失质量。
+- RustGS 的公开训练路径已经收口到 splat-first 入口：`train_splats`、`train_splats_from_path`、`evaluate_splats`、`save_splats_ply`、`load_splats_ply`。
+- 旧兼容层已从源码主路径删除：`legacy/`、`training_pipeline.rs`、`io/dataset_loader.rs`、`io/scene_io/scene_import.rs`、`io/scene_io/scene_export.rs`。
+- Canonical 表示已经明确：
+  - `training::HostSplats` 负责 host 侧边界、checkpoint 与 PLY。
+  - `diff::Splats` 负责 device/runtime 侧可微训练状态。
+  - `training::SplatView` 负责 host 侧只读借用。
+- 训练装配层已经缩到 `training/mod.rs`，活跃逻辑由 `orchestrator`、`execution_plan`、`chunk_training`、`export`、`metal_*` 子模块承担。
+- Metal runtime 与 trainer 拆分保持成立，`topology.rs`、`density_controller.rs`、`parity_harness.rs`、`eval.rs` 的职责边界比前一轮更清楚。
+- 文档层也已经同步：旧的 execution-plan/brush-epic 文档不再作为 active docs 保留。
 
 ## Active Gaps
 
-- Epic 5 仍未完全收口：`density_controller.rs` 已经有显式 reference adapter，但生产 mutation path 还没有直接由这层 adapter/strategy 驱动；topology telemetry / regression coverage 也还可以继续补强。
-- Epic 3 仍有内部边界泄漏：生产调用方已经不再直接吃 `MetalTileBins`，但 `metal_forward` 内部仍要处理 runtime projection record / staging 细节，forward boundary 还没完全成为纯 DTO 内核。
-- Epic 4 还剩最后一点结构债：底层 raster backward 仍先产出 `MetalBackwardGrads`，再被装配成最终的 `MetalParameterGrads`，不过这已经不再阻塞主训练路径的可读性。
-- Epic 6 仍有尾项，但 6.6/6.7 的主收口已经完成：当前剩余主要是 6.1/6.5 级别的问题。现在角色分工已经更清楚了: `GaussianMap` 负责公共 scene IO，`Splats` 负责内部 snapshot/exchange 边界，`TrainableGaussians` 负责 live step-loop mutation；剩下的债主要是减少 trainer 在 topology/export 检查点附近重建 `Splats` snapshot 的次数。
-- LiteGS parity 仍缺真实参考 fixture 与稳定阈值门禁。
-- TUM 评估闭环仍需要继续固定输出格式与回归口径。
-- scene-scale-aware normalization 仍未落地。
+- 纯 SoA 目标还没有完全走完：`render::Gaussian` 仍然作为 CPU renderer / 测试 / 局部兼容路径的 AoS 适配类型存在。
+- 评估与导出命名仍有少量 scene-era 术语残留，例如 `SceneMetadata`、`SceneEvaluationConfig`、`SceneEvaluationError`。
+- `LegacyMetal` profile 仍然是有效训练行为，不是兼容 API，但如果产品方向只保留 LiteGS，后续仍可考虑删掉这条 profile。
+- LiteGS parity gate、TUM PSNR 回归口径、scene-scale-aware normalization 仍然属于待开发任务。
 
 ## Next Priorities
 
-1. 继续完成 Epic 6.5 的尾项：把 trainer/topology/export 附近仍然存在的 `Splats` snapshot churn 再压回更窄的边界，避免 canonical state 虽然已明确但调用点仍偏散。
-2. 回到 Epic 5：决定 LiteGS production topology 是否直接转向新的 `density_controller` adapter；如果不转，就把 reference-only 边界和差异回归门禁写死。
-3. 继续补 Story 3.5 的内部收口，把 projection-record/staging 选择进一步压回 `metal_forward`/`metal_runtime` 内部。
-4. 在上述边界稳定后，继续固化 TUM train/eval 摘要与 LiteGS parity gate，把对照验证升级成长期回归门禁。
-5. 继续推进 scene-scale-aware normalization，这项仍然缺实现。
+1. 继续收口 splat-first 命名，把评估/导出周边仍然残留的 scene-era 术语清理掉。
+2. 评估是否要继续删除 `render::Gaussian` 这层 AoS 适配，推动 renderer/eval 端进一步直接吃 SoA 视图。
+3. 固化 LiteGS parity gate 和 TUM PSNR 回归输出，避免后续质量工作缺统一验收口径。
+4. 推进 scene-scale-aware normalization，这仍然是训练质量侧最直接的结构性待办。

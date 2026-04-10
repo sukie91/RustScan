@@ -270,10 +270,9 @@ mod tests {
 
         let gaussians = HostSplats::from_runtime(&trainable)
             .unwrap()
-            .to_legacy_gaussians()
+            .to_scene_gaussians()
             .unwrap();
-        let map = crate::legacy::GaussianMap::from_gaussians(gaussians);
-        let gaussian = &map.gaussians()[0];
+        let gaussian = &gaussians[0];
         assert!((gaussian.color[0] - 0.2).abs() < 1e-5);
         assert!((gaussian.color[1] - 0.4).abs() < 1e-5);
         assert!((gaussian.color[2] - 0.6).abs() < 1e-5);

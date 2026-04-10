@@ -13,7 +13,6 @@ use candle_core::Var;
 use candle_core::{DType, Device, Tensor};
 
 use crate::diff::diff_splat::{DiffCamera, Splats, SH_C0};
-use crate::legacy::GaussianMap;
 use crate::training::clustering::ClusterAssignment;
 use crate::{TrainingDataset, TrainingError};
 
@@ -2551,28 +2550,6 @@ pub fn train_splats(
     Ok(trained_splats)
 }
 
-#[deprecated(note = "Use train_splats(...) instead to keep HostSplats as the primary artifact.")]
-pub fn train_scene(
-    dataset: &TrainingDataset,
-    config: &TrainingConfig,
-) -> Result<GaussianMap, TrainingError> {
-    let splats = train_splats(dataset, config)?;
-    let mut map = GaussianMap::from_gaussians(splats.to_legacy_gaussians()?);
-    map.update_states();
-    Ok(map)
-}
-
-#[deprecated(note = "Use train_splats(...) instead.")]
-pub fn train(
-    dataset: &TrainingDataset,
-    config: &TrainingConfig,
-) -> Result<GaussianMap, TrainingError> {
-    let splats = train_splats(dataset, config)?;
-    let mut map = GaussianMap::from_gaussians(splats.to_legacy_gaussians()?);
-    map.update_states();
-    Ok(map)
-}
-
 fn effective_metal_config(config: &TrainingConfig) -> TrainingConfig {
     let mut effective = config.clone();
     if effective.training_profile == TrainingProfile::LiteGsMacV1
@@ -4308,17 +4285,30 @@ mod tests {
         let color_delta = max_abs_delta(&before_colors, &gaussians.colors()).unwrap();
         let trained_gaussians = HostSplats::from_runtime(&gaussians)
             .unwrap()
-            .to_legacy_gaussians()
+            .to_scene_gaussians()
             .unwrap();
         let mut map_position_delta = 0.0f32;
         let mut map_scale_delta = 0.0f32;
         let mut map_opacity_delta = 0.0f32;
         let mut map_color_delta = 0.0f32;
-        let initial_gaussians = loaded.initial_splats.to_legacy_gaussians().unwrap();
+        let initial_gaussians = loaded.initial_splats.to_scene_gaussians().unwrap();
         for (before, after) in initial_gaussians.iter().zip(trained_gaussians.iter()) {
-            map_position_delta =
-                map_position_delta.max((before.position - after.position).abs().max_element());
-            map_scale_delta = map_scale_delta.max((before.scale - after.scale).abs().max_element());
+            map_position_delta = map_position_delta.max(
+                before
+                    .position
+                    .iter()
+                    .zip(after.position.iter())
+                    .map(|(lhs, rhs)| (lhs - rhs).abs())
+                    .fold(0.0f32, f32::max),
+            );
+            map_scale_delta = map_scale_delta.max(
+                before
+                    .scale
+                    .iter()
+                    .zip(after.scale.iter())
+                    .map(|(lhs, rhs)| (lhs - rhs).abs())
+                    .fold(0.0f32, f32::max),
+            );
             map_opacity_delta = map_opacity_delta.max((before.opacity - after.opacity).abs());
             for channel in 0..3 {
                 map_color_delta =
