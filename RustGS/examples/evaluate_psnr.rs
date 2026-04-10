@@ -1,12 +1,11 @@
 use std::path::PathBuf;
 
 use image::{ImageBuffer, RgbImage};
-use rustgs::diff::DiffSplatRenderer;
 use rustgs::{
     evaluate_splats, evaluation_device, load_splats_ply, load_training_dataset,
     render_evaluation_frame, runtime_from_splats, select_evaluation_frames, EvaluationDevice,
-    EvaluationFrameMetric, HostSplats, SceneEvaluationConfig, SplatEvaluationSummary,
-    TumRgbdConfig,
+    EvaluationFrameMetric, HostSplats, SceneEvaluationConfig, SplatEvaluationRenderer,
+    SplatEvaluationSummary, TumRgbdConfig,
 };
 
 fn main() -> anyhow::Result<()> {
@@ -242,7 +241,7 @@ fn export_worst_frames(
         render_scale,
     );
     let trainable = runtime_from_splats(splats, device)?;
-    let mut renderer = DiffSplatRenderer::with_device(render_width, render_height, device.clone());
+    let mut renderer = SplatEvaluationRenderer::new(render_width, render_height, device.clone())?;
     let worst = rustgs::worst_frame_metrics(frame_metrics, export_worst_k);
 
     let mut summary = String::from("rank\tdataset_index\tframe_id\tpsnr_db\timage_path\n");

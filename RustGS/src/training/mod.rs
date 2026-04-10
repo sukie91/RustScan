@@ -74,6 +74,9 @@ mod metal_raster;
 mod metal_resources;
 
 #[cfg(feature = "gpu")]
+mod runtime_splats;
+
+#[cfg(feature = "gpu")]
 mod splats;
 
 #[cfg(feature = "gpu")]
@@ -90,6 +93,8 @@ pub use chunk_planner::{
     materialize_chunk_dataset, plan_spatial_chunks, ChunkBounds, ChunkBoundsSource,
     ChunkDisposition, ChunkPlan, MaterializedChunkDataset, PlannedChunk,
 };
+#[cfg(feature = "gpu")]
+pub use eval::SplatEvaluationRenderer;
 pub use eval::MIN_RENDER_SCALE;
 pub use eval::{
     compute_psnr_f32, scaled_dimensions, select_evaluation_frames, summarize_psnr_samples,

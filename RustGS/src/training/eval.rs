@@ -1,4 +1,4 @@
-use crate::diff::{DiffCamera, DiffSplatRenderer, Splats};
+use crate::diff::{DiffCamera, Splats};
 use crate::{Gaussian, SceneMetadata, TrainingDataset};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -6,11 +6,18 @@ use std::str::FromStr;
 use std::time::Instant;
 
 #[cfg(feature = "gpu")]
+use super::metal_forward::{self as metal_forward, MetalForwardInputs, MetalForwardSettings};
+#[cfg(feature = "gpu")]
+use super::metal_runtime::MetalRuntime;
+#[cfg(feature = "gpu")]
 use super::splats::HostSplats;
 #[cfg(feature = "gpu")]
 use candle_core::Device;
 
 pub const MIN_RENDER_SCALE: f32 = 0.0625;
+
+#[cfg(feature = "gpu")]
+const EVALUATION_GAUSSIAN_CHUNK_SIZE: usize = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct FinalTrainingMetrics {
@@ -283,6 +290,76 @@ pub fn runtime_from_splats(
 }
 
 #[cfg(feature = "gpu")]
+pub struct SplatEvaluationRenderer {
+    device: Device,
+    runtime: MetalRuntime,
+    render_width: usize,
+    render_height: usize,
+    pixel_count: usize,
+    chunk_size: usize,
+}
+
+#[cfg(feature = "gpu")]
+impl SplatEvaluationRenderer {
+    pub fn new(
+        render_width: usize,
+        render_height: usize,
+        device: Device,
+    ) -> Result<Self, SceneEvaluationError> {
+        Ok(Self {
+            runtime: MetalRuntime::new(render_width, render_height, device.clone())?,
+            device,
+            render_width,
+            render_height,
+            pixel_count: render_width.saturating_mul(render_height),
+            chunk_size: EVALUATION_GAUSSIAN_CHUNK_SIZE,
+        })
+    }
+
+    fn forward_settings(&self) -> MetalForwardSettings {
+        MetalForwardSettings {
+            pixel_count: self.pixel_count,
+            render_width: self.render_width,
+            render_height: self.render_height,
+            chunk_size: self.chunk_size,
+            use_native_forward: self.device.is_metal(),
+            litegs_mode: false,
+        }
+    }
+
+    pub fn render(
+        &mut self,
+        trainable: &Splats,
+        camera: &DiffCamera,
+    ) -> Result<Vec<f32>, SceneEvaluationError> {
+        let positions = trainable.positions().detach();
+        let render_colors = metal_forward::render_colors_for_camera(
+            trainable,
+            &positions,
+            camera,
+            &self.device,
+            trainable.sh_degree(),
+        )?;
+        let settings = self.forward_settings();
+        let (rendered, _, _) = metal_forward::execute_forward_pass_on_runtime(
+            &mut self.runtime,
+            &self.device,
+            settings,
+            MetalForwardInputs {
+                gaussians: trainable,
+                positions: &positions,
+                colors: &render_colors,
+                camera,
+                should_profile: false,
+                collect_visible_indices: false,
+                cluster_visible_mask: None,
+            },
+        )?;
+        Ok(rendered.color.flatten_all()?.to_vec1::<f32>()?)
+    }
+}
+
+#[cfg(feature = "gpu")]
 pub fn render_evaluation_frame(
     dataset: &TrainingDataset,
     pose: &rustscan_types::ScenePose,
@@ -290,7 +367,7 @@ pub fn render_evaluation_frame(
     render_height: usize,
     device: &Device,
     trainable: &Splats,
-    renderer: &mut DiffSplatRenderer,
+    renderer: &mut SplatEvaluationRenderer,
 ) -> Result<(Vec<f32>, Vec<f32>), SceneEvaluationError> {
     let target = load_resized_target(
         &pose.image_path,
@@ -311,8 +388,7 @@ pub fn render_evaluation_frame(
         render_height,
         device,
     )?;
-    let output = renderer.render(trainable, &camera)?;
-    let rendered = output.color.flatten_all()?.to_vec1::<f32>()?;
+    let rendered = renderer.render(trainable, &camera)?;
     Ok((target, rendered))
 }
 
@@ -354,7 +430,7 @@ pub fn evaluate_splats(
         config.render_scale,
     );
     let runtime_splats = runtime_from_splats(splats, device)?;
-    let mut renderer = DiffSplatRenderer::with_device(render_width, render_height, device.clone());
+    let mut renderer = SplatEvaluationRenderer::new(render_width, render_height, device.clone())?;
 
     let start = Instant::now();
     let mut psnrs = Vec::with_capacity(dataset.poses.len());

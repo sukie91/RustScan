@@ -12,6 +12,35 @@ use super::metal_runtime::{
 };
 use super::splats::row_slice;
 
+pub(crate) const SH_C1: f32 = 0.488_602_52;
+const SH_C2: [f32; 5] = [
+    1.092_548_5,
+    -1.092_548_5,
+    0.315_391_57,
+    -1.092_548_5,
+    0.546_274_24,
+];
+const SH_C3: [f32; 7] = [
+    -0.590_043_6,
+    2.890_611_4,
+    -0.457_045_8,
+    0.373_176_34,
+    -0.457_045_8,
+    1.445_305_7,
+    -0.590_043_6,
+];
+const SH_C4: [f32; 9] = [
+    2.503_343,
+    -1.770_130_8,
+    0.946_174_7,
+    -0.669_046_5,
+    0.105_785_55,
+    -0.669_046_5,
+    0.473_087_34,
+    -1.770_130_8,
+    0.625_835_7,
+];
+
 #[derive(Debug, Clone, Copy, Default)]
 pub(super) struct TileBinningStats {
     pub(super) active_tiles: usize,
@@ -440,6 +469,198 @@ pub(super) fn scale_camera(
         &src.translation,
         device,
     )
+}
+
+fn camera_center_world(camera: &DiffCamera) -> [f32; 3] {
+    [
+        -(camera.rotation[0][0] * camera.translation[0]
+            + camera.rotation[1][0] * camera.translation[1]
+            + camera.rotation[2][0] * camera.translation[2]),
+        -(camera.rotation[0][1] * camera.translation[0]
+            + camera.rotation[1][1] * camera.translation[1]
+            + camera.rotation[2][1] * camera.translation[2]),
+        -(camera.rotation[0][2] * camera.translation[0]
+            + camera.rotation[1][2] * camera.translation[1]
+            + camera.rotation[2][2] * camera.translation[2]),
+    ]
+}
+
+fn view_directions_for_camera(
+    positions: &Tensor,
+    camera: &DiffCamera,
+    device: &Device,
+) -> candle_core::Result<Tensor> {
+    let camera_center = Tensor::from_slice(&camera_center_world(camera), (1, 3), device)?;
+    let dirs = positions.broadcast_sub(&camera_center)?;
+    let norms = dirs
+        .sqr()?
+        .sum(1)?
+        .sqrt()?
+        .clamp(1e-6, f32::MAX)?
+        .reshape((positions.dim(0)?, 1))?;
+    dirs.broadcast_div(&norms)
+}
+
+pub(crate) fn render_colors_for_camera(
+    gaussians: &Splats,
+    positions: &Tensor,
+    camera: &DiffCamera,
+    device: &Device,
+    active_sh_degree: usize,
+) -> candle_core::Result<Tensor> {
+    if !gaussians.uses_spherical_harmonics() {
+        return Ok(gaussians.render_colors()?.detach());
+    }
+
+    let active_degree = active_sh_degree.min(gaussians.sh_degree());
+    let row_count = gaussians.len();
+    if row_count == 0 {
+        return Tensor::zeros((0, 3), DType::F32, device);
+    }
+
+    let dirs = view_directions_for_camera(positions, camera, device)?;
+    let x = dirs.narrow(1, 0, 1)?.squeeze(1)?;
+    let y = dirs.narrow(1, 1, 1)?.squeeze(1)?;
+    let z = dirs.narrow(1, 2, 1)?.squeeze(1)?;
+    let xx = x.sqr()?;
+    let yy = y.sqr()?;
+    let zz = z.sqr()?;
+    let xy = x.broadcast_mul(&y)?;
+    let yz = y.broadcast_mul(&z)?;
+    let xz = x.broadcast_mul(&z)?;
+
+    let sh_0 = gaussians.sh_0().detach();
+    let sh_rest = gaussians.sh_rest().detach();
+    let mut color = sh_0.affine(crate::diff::diff_splat::SH_C0 as f64, 0.5)?;
+
+    macro_rules! add_sh_term {
+        ($coeff_idx:expr, $basis:expr) => {{
+            let coeff = sh_rest.narrow(1, $coeff_idx, 1)?.squeeze(1)?;
+            let basis = ($basis)?.reshape((row_count, 1))?;
+            color = color.broadcast_add(&coeff.broadcast_mul(&basis)?)?;
+        }};
+    }
+
+    if active_degree > 0 {
+        add_sh_term!(0, y.affine((-SH_C1) as f64, 0.0));
+        add_sh_term!(1, z.affine(SH_C1 as f64, 0.0));
+        add_sh_term!(2, x.affine((-SH_C1) as f64, 0.0));
+    }
+
+    if active_degree > 1 {
+        add_sh_term!(3, xy.affine(SH_C2[0] as f64, 0.0));
+        add_sh_term!(4, yz.affine(SH_C2[1] as f64, 0.0));
+        add_sh_term!(
+            5,
+            zz.affine((2.0 * SH_C2[2]) as f64, 0.0)?
+                .broadcast_sub(&xx.affine(SH_C2[2] as f64, 0.0)?)?
+                .broadcast_sub(&yy.affine(SH_C2[2] as f64, 0.0)?)
+        );
+        add_sh_term!(6, xz.affine(SH_C2[3] as f64, 0.0));
+        add_sh_term!(
+            7,
+            xx.affine(SH_C2[4] as f64, 0.0)?
+                .broadcast_sub(&yy.affine(SH_C2[4] as f64, 0.0)?)
+        );
+    }
+
+    if active_degree > 2 {
+        add_sh_term!(
+            8,
+            y.broadcast_mul(&xx.affine(3.0, 0.0)?.broadcast_sub(&yy)?)?
+                .affine(SH_C3[0] as f64, 0.0)
+        );
+        add_sh_term!(9, xy.broadcast_mul(&z)?.affine(SH_C3[1] as f64, 0.0));
+        add_sh_term!(
+            10,
+            y.broadcast_mul(
+                &zz.affine(4.0, 0.0)?
+                    .broadcast_sub(&xx)?
+                    .broadcast_sub(&yy)?,
+            )?
+            .affine(SH_C3[2] as f64, 0.0)
+        );
+        add_sh_term!(
+            11,
+            z.broadcast_mul(
+                &zz.affine(2.0, 0.0)?
+                    .broadcast_sub(&xx.affine(3.0, 0.0)?)?
+                    .broadcast_sub(&yy.affine(3.0, 0.0)?)?,
+            )?
+            .affine(SH_C3[3] as f64, 0.0)
+        );
+        add_sh_term!(
+            12,
+            x.broadcast_mul(
+                &zz.affine(4.0, 0.0)?
+                    .broadcast_sub(&xx)?
+                    .broadcast_sub(&yy)?,
+            )?
+            .affine(SH_C3[4] as f64, 0.0)
+        );
+        add_sh_term!(
+            13,
+            z.broadcast_mul(&xx.broadcast_sub(&yy)?)?
+                .affine(SH_C3[5] as f64, 0.0)
+        );
+        add_sh_term!(
+            14,
+            x.broadcast_mul(&xx.broadcast_sub(&yy.affine(3.0, 0.0)?)?)?
+                .affine(SH_C3[6] as f64, 0.0)
+        );
+    }
+
+    if active_degree > 3 {
+        let zz7_minus_1 = zz.affine(7.0, -1.0)?;
+        let zz7_minus_3 = zz.affine(7.0, -3.0)?;
+        add_sh_term!(
+            15,
+            xy.broadcast_mul(&xx.broadcast_sub(&yy)?)?
+                .affine(SH_C4[0] as f64, 0.0)
+        );
+        add_sh_term!(
+            16,
+            yz.broadcast_mul(&xx.affine(3.0, 0.0)?.broadcast_sub(&yy)?)?
+                .affine(SH_C4[1] as f64, 0.0)
+        );
+        add_sh_term!(
+            17,
+            xy.broadcast_mul(&zz.affine(7.0, -1.0)?)?
+                .affine(SH_C4[2] as f64, 0.0)
+        );
+        add_sh_term!(
+            18,
+            yz.broadcast_mul(&zz7_minus_3)?.affine(SH_C4[3] as f64, 0.0)
+        );
+        add_sh_term!(
+            19,
+            zz.broadcast_mul(&zz.affine(35.0, -30.0)?)?
+                .affine(SH_C4[4] as f64, 3.0 * SH_C4[4] as f64)
+        );
+        add_sh_term!(
+            20,
+            xz.broadcast_mul(&zz7_minus_3)?.affine(SH_C4[5] as f64, 0.0)
+        );
+        add_sh_term!(
+            21,
+            xx.broadcast_sub(&yy)?
+                .broadcast_mul(&zz7_minus_1)?
+                .affine(SH_C4[6] as f64, 0.0)
+        );
+        add_sh_term!(
+            22,
+            xz.broadcast_mul(&xx.broadcast_sub(&yy.affine(3.0, 0.0)?)?)?
+                .affine(SH_C4[7] as f64, 0.0)
+        );
+        add_sh_term!(
+            23,
+            xx.broadcast_mul(&xx.broadcast_sub(&yy.affine(3.0, 0.0)?)?)?
+                .broadcast_sub(&yy.broadcast_mul(&xx.affine(3.0, 0.0)?.broadcast_sub(&yy)?)?)?
+                .affine(SH_C4[8] as f64, 0.0)
+        );
+    }
+
+    color.clamp(0.0, f32::MAX)
 }
 
 pub(super) fn filter_projected_gaussians_by_cluster_visibility(

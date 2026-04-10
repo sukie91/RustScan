@@ -87,7 +87,7 @@ pub use crate::training::{
     MetalTrainingBenchmarkSpec,
 };
 #[cfg(feature = "gpu")]
-pub use crate::training::{HostSplats, SplatView};
+pub use crate::training::{HostSplats, SplatEvaluationRenderer, SplatView};
 pub use crate::training::{TrainingBackend, TrainingConfig, TrainingResult};
 
 // Re-export IO types
@@ -100,8 +100,8 @@ pub use crate::io::tum_dataset::{load_tum_rgbd_dataset, TumRgbdConfig};
 pub use crate::io::TrainingCheckpoint;
 
 // Re-export initialization types
-pub use crate::init::GaussianInitConfig;
 pub use crate::init::initialize_gaussians_from_points;
+pub use crate::init::GaussianInitConfig;
 #[cfg(feature = "gpu")]
 pub use crate::init::{initialize_host_splats_from_points, initialize_runtime_splats_from_points};
 

@@ -4,6 +4,7 @@ use crate::diff::diff_splat::Splats;
 
 use super::metal_backward::MetalParameterGrads;
 use super::metal_runtime::{MetalBufferSlot, MetalRuntime};
+use super::topology::TopologyMutationPlan;
 
 pub(crate) struct MetalAdamState {
     pub(crate) m_pos: Tensor,
@@ -409,6 +410,14 @@ pub(crate) fn rebuild_adam_state(
         m_sh_rest,
         v_sh_rest,
     })
+}
+
+pub(crate) fn rebuild_adam_state_with_plan(
+    device: &Device,
+    old_state: &MetalAdamState,
+    plan: &TopologyMutationPlan,
+) -> candle_core::Result<MetalAdamState> {
+    rebuild_adam_state(device, old_state, &plan.origins())
 }
 
 pub(crate) fn adam_step_var_fused(

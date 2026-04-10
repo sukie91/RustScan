@@ -41,6 +41,7 @@ pub struct SplatView<'a> {
     pub sh_degree: usize,
 }
 
+#[cfg(test)]
 pub(crate) type Splats = HostSplats;
 
 impl HostSplats {

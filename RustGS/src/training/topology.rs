@@ -4,7 +4,11 @@ use super::density_controller::{
     DensityController, DensityControllerConfig, OpacityResetMode, PruneMode,
 };
 use super::parity_harness::ParityTopologyMetrics;
-use super::splats::{sigmoid_scalar, Splats};
+use super::runtime_splats::TopologySplatMetrics;
+#[cfg(test)]
+use super::splats::sigmoid_scalar;
+#[cfg(test)]
+use super::splats::Splats;
 use super::{LiteGsConfig, LiteGsOpacityResetMode, LiteGsPruneMode, TrainingProfile};
 
 #[cfg(test)]
@@ -251,7 +255,7 @@ pub(super) struct DensityControllerReferenceAdapter {
 impl DensityControllerReferenceAdapter {
     pub(super) fn from_topology_state(
         policy: &TopologyPolicy,
-        splats: &Splats,
+        splats: &TopologySplatMetrics,
         stats: &[MetalGaussianStats],
     ) -> Self {
         let mut controller = DensityController::new(
@@ -284,8 +288,8 @@ impl DensityControllerReferenceAdapter {
                         * gaussian_stats.fragment_err.mean,
                 fragment_err_count,
             );
-            controller.stats.opacity[idx] = sigmoid_scalar(splats.opacity_logits[idx]);
-            controller.stats.max_scale[idx] = splats.scale(idx).into_iter().fold(0.0f32, f32::max);
+            controller.stats.opacity[idx] = splats.opacity(idx);
+            controller.stats.max_scale[idx] = splats.max_scale(idx);
         }
 
         Self { controller }
@@ -320,7 +324,7 @@ impl DensityControllerReferenceAdapter {
 
 pub(super) fn density_controller_reference_summary(
     policy: &TopologyPolicy,
-    splats: &Splats,
+    splats: &TopologySplatMetrics,
     stats: &[MetalGaussianStats],
     completed_epoch: Option<usize>,
 ) -> DensityControllerReferenceSummary {
@@ -457,7 +461,7 @@ pub(super) fn plan_topology_execution(
 
 pub(super) fn analyze_topology_candidates(
     policy: &TopologyPolicy,
-    splats: &Splats,
+    splats: &TopologySplatMetrics,
     stats: &[MetalGaussianStats],
 ) -> TopologyAnalysis {
     let mut analysis = TopologyAnalysis {
@@ -472,8 +476,8 @@ pub(super) fn analyze_topology_candidates(
     };
 
     for idx in 0..splats.len() {
-        let max_scale = splats.scale(idx).into_iter().fold(0.0f32, f32::max);
-        let opacity = sigmoid_scalar(splats.opacity_logits[idx]);
+        let max_scale = splats.max_scale(idx);
+        let opacity = splats.opacity(idx);
         let gaussian_stats = stats.get(idx).copied().unwrap_or_default();
         let mean2d_grad = gaussian_stats.mean2d_grad.mean;
 
@@ -677,6 +681,7 @@ pub(super) fn requested_gaussian_cap(
     }
 }
 
+#[cfg(test)]
 pub(super) fn densify_snapshot(
     policy: &TopologyPolicy,
     snapshot: &mut Splats,
@@ -799,6 +804,7 @@ pub(super) fn densify_snapshot(
     added
 }
 
+#[cfg(test)]
 pub(super) fn prune_snapshot(
     policy: &TopologyPolicy,
     snapshot: &mut Splats,
@@ -861,6 +867,7 @@ pub(super) fn prune_snapshot(
     filter_snapshot(snapshot, stats, origins, &keep_mask)
 }
 
+#[cfg(test)]
 pub(super) fn densify_snapshot_litegs(
     policy: &TopologyPolicy,
     snapshot: &mut Splats,
@@ -936,9 +943,11 @@ pub(super) fn densify_snapshot_litegs(
 }
 
 #[derive(Debug, Clone, Copy, Default)]
+#[cfg(test)]
 pub(super) struct TopologyMutationResult {
     pub(super) added: usize,
     pub(super) pruned: usize,
+    #[allow(dead_code)]
     pub(super) morton_sorted: bool,
     pub(super) aftermath: TopologyMutationAftermath,
 }
@@ -1000,6 +1009,353 @@ pub(super) struct TopologyMutationRequest<'a> {
     pub(super) morton_sort_on_densify: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum TopologyPlanRow {
+    Existing { source_idx: usize },
+    LegacyOffsetClone { source_idx: usize, axis: usize },
+    LegacySplit { source_idx: usize, direction: i8 },
+    LiteClone { source_idx: usize },
+    LiteSplit { source_idx: usize, axis: usize },
+}
+
+impl TopologyPlanRow {
+    pub(super) fn source_idx(&self) -> usize {
+        match *self {
+            Self::Existing { source_idx }
+            | Self::LegacyOffsetClone { source_idx, .. }
+            | Self::LegacySplit { source_idx, .. }
+            | Self::LiteClone { source_idx }
+            | Self::LiteSplit { source_idx, .. } => source_idx,
+        }
+    }
+
+    pub(super) fn is_existing(&self) -> bool {
+        matches!(self, Self::Existing { .. })
+    }
+
+    fn position(&self, metrics: &TopologySplatMetrics) -> [f32; 3] {
+        let source_idx = self.source_idx();
+        let mut position = metrics.position(source_idx);
+        match *self {
+            Self::Existing { .. } | Self::LiteClone { .. } => position,
+            Self::LegacyOffsetClone { axis, .. } => {
+                let scale = metrics.scale(source_idx);
+                if axis < 3 {
+                    position[axis] += scale[axis].max(0.01) * 0.5;
+                }
+                position
+            }
+            Self::LegacySplit { direction, .. } => {
+                position[0] += (direction as f32) * metrics.max_scale(source_idx) * 0.1;
+                position
+            }
+            Self::LiteSplit { axis, .. } => {
+                let scale = metrics.scale(source_idx);
+                if axis < 3 {
+                    position[axis] += scale[axis] * 0.5;
+                }
+                position
+            }
+        }
+    }
+
+    fn scale(&self, metrics: &TopologySplatMetrics) -> [f32; 3] {
+        let source_idx = self.source_idx();
+        let mut scale = metrics.scale(source_idx);
+        match *self {
+            Self::Existing { .. } | Self::LegacyOffsetClone { .. } | Self::LiteClone { .. } => {
+                scale
+            }
+            Self::LegacySplit { .. } => {
+                scale[0] = (metrics.max_scale(source_idx) * 0.5).max(1e-6);
+                scale
+            }
+            Self::LiteSplit { axis, .. } => {
+                if axis < 3 {
+                    scale[axis] = (scale[axis] / 1.6).max(1e-6);
+                }
+                scale
+            }
+        }
+    }
+
+    fn max_scale(&self, metrics: &TopologySplatMetrics) -> f32 {
+        let scale = self.scale(metrics);
+        scale[0].max(scale[1]).max(scale[2])
+    }
+
+    fn opacity(&self, metrics: &TopologySplatMetrics) -> f32 {
+        metrics.opacity(self.source_idx())
+    }
+
+    fn retainable(&self, metrics: &TopologySplatMetrics) -> bool {
+        metrics.retainable(self.source_idx())
+            && self.position(metrics).iter().all(|value| value.is_finite())
+    }
+
+    fn keep_for_legacy_prune(
+        &self,
+        metrics: &TopologySplatMetrics,
+        policy: &TopologyPolicy,
+    ) -> bool {
+        let opacity = self.opacity(metrics);
+        let max_scale = self.max_scale(metrics);
+        opacity.is_finite()
+            && opacity >= policy.prune_threshold
+            && max_scale.is_finite()
+            && max_scale <= policy.legacy_prune_scale_threshold
+            && self.retainable(metrics)
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct TopologyMutationPlan {
+    pub(super) rows: Vec<TopologyPlanRow>,
+    pub(super) added: usize,
+    pub(super) pruned: usize,
+    pub(super) morton_sorted: bool,
+    pub(super) aftermath: TopologyMutationAftermath,
+}
+
+impl TopologyMutationPlan {
+    pub(super) fn origins(&self) -> Vec<Option<usize>> {
+        self.rows
+            .iter()
+            .map(|row| row.is_existing().then_some(row.source_idx()))
+            .collect()
+    }
+
+    pub(super) fn remap_stats(&self, current: &[MetalGaussianStats]) -> Vec<MetalGaussianStats> {
+        self.rows
+            .iter()
+            .map(|row| {
+                if row.is_existing() {
+                    current.get(row.source_idx()).copied().unwrap_or_default()
+                } else {
+                    MetalGaussianStats::default()
+                }
+            })
+            .collect()
+    }
+}
+
+pub(super) fn plan_topology_mutation(
+    metrics: &TopologySplatMetrics,
+    request: TopologyMutationRequest<'_>,
+) -> TopologyMutationPlan {
+    let mut rows: Vec<TopologyPlanRow> = (0..metrics.len())
+        .map(|source_idx| TopologyPlanRow::Existing { source_idx })
+        .collect();
+    let additions = if request.should_densify {
+        if request.policy.is_litegs_mode() {
+            plan_litegs_densify_rows(
+                request.policy,
+                metrics,
+                request.max_gaussians,
+                &request.litegs_selection.selected_indices,
+            )
+        } else {
+            plan_legacy_densify_rows(
+                request.policy,
+                metrics,
+                request.infos,
+                request.max_gaussians,
+            )
+        }
+    } else {
+        Vec::new()
+    };
+    let added = additions.len();
+    rows.extend(additions);
+
+    let mut pruned = 0usize;
+    if request.should_prune && rows.len() > 1 {
+        let mut keep_mask = if request.policy.is_litegs_mode() {
+            let mut keep_mask = vec![true; rows.len()];
+            for (idx, info) in request.infos.iter().enumerate() {
+                if info.prune_candidate {
+                    keep_mask[idx] = false;
+                }
+            }
+            keep_mask
+        } else {
+            rows.iter()
+                .map(|row| row.keep_for_legacy_prune(metrics, request.policy))
+                .collect::<Vec<_>>()
+        };
+
+        if !keep_mask.iter().any(|keep| *keep) {
+            if let Some((best_idx, _)) = rows.iter().enumerate().max_by(|lhs, rhs| {
+                lhs.1
+                    .opacity(metrics)
+                    .partial_cmp(&rhs.1.opacity(metrics))
+                    .unwrap_or(Ordering::Equal)
+            }) {
+                keep_mask[best_idx] = true;
+            }
+        }
+
+        pruned = keep_mask.iter().filter(|keep| !**keep).count();
+        if pruned > 0 {
+            rows = rows
+                .into_iter()
+                .zip(keep_mask)
+                .filter_map(|(row, keep)| keep.then_some(row))
+                .collect();
+        }
+    }
+
+    let morton_sorted = if request.policy.is_litegs_mode()
+        && request.morton_sort_on_densify
+        && added > 0
+        && rows.len() > 1
+    {
+        let mut positions = Vec::with_capacity(rows.len() * 3);
+        for row in &rows {
+            positions.extend_from_slice(&row.position(metrics));
+        }
+        let permutation =
+            super::morton::morton_sort_permutation(&positions, super::morton::DEFAULT_MORTON_BITS);
+        if permutation.len() == rows.len() {
+            rows = permutation.into_iter().map(|idx| rows[idx]).collect();
+            true
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    let aftermath = topology_mutation_aftermath(&request, rows.len(), added, pruned);
+    TopologyMutationPlan {
+        rows,
+        added,
+        pruned,
+        morton_sorted,
+        aftermath,
+    }
+}
+
+fn plan_legacy_densify_rows(
+    policy: &TopologyPolicy,
+    metrics: &TopologySplatMetrics,
+    infos: &[TopologyCandidateInfo],
+    max_gaussians: usize,
+) -> Vec<TopologyPlanRow> {
+    if metrics.len() >= max_gaussians {
+        return Vec::new();
+    }
+
+    let clone_opacity_threshold = policy.prune_threshold;
+    let original_len = metrics.len();
+    let mut clone_candidates = Vec::new();
+    let mut split_candidates = Vec::new();
+
+    for idx in 0..original_len {
+        let info = infos.get(idx).copied().unwrap_or(TopologyCandidateInfo {
+            max_scale: 0.0,
+            opacity: 0.0,
+            mean2d_grad: 0.0,
+            visible_count: 0,
+            age_eligible: false,
+            invisible: true,
+            prune_candidate: false,
+            growth_candidate: false,
+        });
+        let opacity = info.opacity;
+        let max_scale = info.max_scale;
+        let grad_accum = info.mean2d_grad;
+        if !grad_accum.is_finite() || !opacity.is_finite() {
+            continue;
+        }
+        if grad_accum <= policy.legacy_densify_grad_threshold {
+            continue;
+        }
+        if max_scale < policy.legacy_clone_scale_threshold && opacity > clone_opacity_threshold {
+            clone_candidates.push((idx, grad_accum));
+        }
+        if max_scale > policy.legacy_split_scale_threshold && opacity > policy.prune_threshold {
+            split_candidates.push((idx, grad_accum * max_scale));
+        }
+    }
+
+    clone_candidates.sort_by(|lhs, rhs| rhs.1.partial_cmp(&lhs.1).unwrap_or(Ordering::Equal));
+    split_candidates.sort_by(|lhs, rhs| rhs.1.partial_cmp(&lhs.1).unwrap_or(Ordering::Equal));
+
+    let mut rows = Vec::new();
+    let mut available = max_gaussians.saturating_sub(metrics.len());
+    let per_pass_limit = policy
+        .legacy_max_densify_per_update
+        .min(available)
+        .min((original_len / 32).max(32));
+    let clone_limit = clone_candidates.len().min(per_pass_limit);
+    for (rank, (idx, score)) in clone_candidates.into_iter().take(clone_limit).enumerate() {
+        if score <= 0.0 {
+            continue;
+        }
+        rows.push(TopologyPlanRow::LegacyOffsetClone {
+            source_idx: idx,
+            axis: rank % 3,
+        });
+        available = available.saturating_sub(1);
+        if available == 0 {
+            return rows;
+        }
+    }
+
+    let split_limit = split_candidates
+        .len()
+        .min((per_pass_limit / 4).max(1))
+        .min(available / 2);
+    for (idx, score) in split_candidates.into_iter().take(split_limit) {
+        if score <= policy.legacy_densify_grad_threshold {
+            continue;
+        }
+        for direction in [1i8, -1i8] {
+            if available == 0 {
+                break;
+            }
+            rows.push(TopologyPlanRow::LegacySplit {
+                source_idx: idx,
+                direction,
+            });
+            available = available.saturating_sub(1);
+        }
+    }
+
+    rows
+}
+
+fn plan_litegs_densify_rows(
+    policy: &TopologyPolicy,
+    metrics: &TopologySplatMetrics,
+    max_gaussians: usize,
+    selected_indices: &[usize],
+) -> Vec<TopologyPlanRow> {
+    if metrics.len() >= max_gaussians || selected_indices.is_empty() {
+        return Vec::new();
+    }
+
+    let clone_scale_threshold = policy.litegs_clone_scale_threshold();
+    let mut rows = Vec::new();
+    for &idx in selected_indices
+        .iter()
+        .take(max_gaussians.saturating_sub(metrics.len()))
+    {
+        let max_scale = metrics.max_scale(idx);
+        if max_scale <= clone_scale_threshold {
+            rows.push(TopologyPlanRow::LiteClone { source_idx: idx });
+        } else {
+            rows.push(TopologyPlanRow::LiteSplit {
+                source_idx: idx,
+                axis: metrics.max_scale_axis(idx),
+            });
+        }
+    }
+    rows
+}
+
+#[cfg(test)]
 pub(super) fn apply_snapshot_mutations(
     snapshot: &mut Splats,
     stats: &mut Vec<MetalGaussianStats>,
@@ -1170,6 +1526,7 @@ fn record_topology_epoch(
     *last = Some(last.map_or(epoch, |current| current.max(epoch)));
 }
 
+#[cfg(test)]
 pub(super) fn prune_snapshot_litegs(
     snapshot: &mut Splats,
     stats: &mut Vec<MetalGaussianStats>,
@@ -1230,6 +1587,7 @@ fn litegs_current_epoch(iteration: usize, frame_count: usize) -> Option<usize> {
     Some(iteration.saturating_sub(1) / frame_count)
 }
 
+#[cfg(test)]
 fn filter_snapshot(
     snapshot: &mut Splats,
     stats: &mut Vec<MetalGaussianStats>,
@@ -1265,6 +1623,7 @@ fn filter_snapshot(
     pruned
 }
 
+#[cfg(test)]
 fn apply_morton_sort(
     snapshot: &mut Splats,
     stats: &mut Vec<MetalGaussianStats>,
@@ -1321,6 +1680,7 @@ mod tests {
         rgb_to_sh0_value, sh_coeff_count_for_degree, SplatColorRepresentation,
     };
     use crate::training::parity_harness::ParityTopologyMetrics;
+    use crate::training::runtime_splats::TopologySplatMetrics;
     use crate::training::splats::Splats;
     use crate::training::{LiteGsConfig, TrainingConfig, TrainingProfile};
 
@@ -1652,7 +2012,8 @@ mod tests {
             },
         ];
 
-        let analysis = analyze_topology_candidates(&policy, &snapshot, &stats);
+        let metrics = TopologySplatMetrics::from_snapshot(&snapshot);
+        let analysis = analyze_topology_candidates(&policy, &metrics, &stats);
 
         assert_eq!(analysis.clone_candidates, 1);
         assert_eq!(analysis.prune_candidates, 1);
@@ -1718,7 +2079,8 @@ mod tests {
             MetalGaussianStats::default(),
         ];
 
-        let summary = density_controller_reference_summary(&policy, &snapshot, &stats, Some(2));
+        let metrics = TopologySplatMetrics::from_snapshot(&snapshot);
+        let summary = density_controller_reference_summary(&policy, &metrics, &stats, Some(2));
 
         assert_eq!(summary.clone_candidates(), 1);
         assert_eq!(summary.split_candidates(), 1);
@@ -1802,7 +2164,8 @@ mod tests {
             },
         ];
 
-        let summary = density_controller_reference_summary(&policy, &snapshot, &stats, Some(3));
+        let metrics = TopologySplatMetrics::from_snapshot(&snapshot);
+        let summary = density_controller_reference_summary(&policy, &metrics, &stats, Some(3));
 
         assert_eq!(summary.prune_candidates(), 1);
         assert_eq!(summary.clone_candidates(), 3);

@@ -9,10 +9,14 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 #[cfg(test)]
+use candle_core::DType;
+#[cfg(test)]
 use candle_core::Var;
-use candle_core::{DType, Device, Tensor};
+use candle_core::{Device, Tensor};
 
-use crate::diff::diff_splat::{DiffCamera, Splats, SH_C0};
+#[cfg(test)]
+use crate::diff::diff_splat::SH_C0;
+use crate::diff::diff_splat::{DiffCamera, Splats};
 use crate::training::clustering::ClusterAssignment;
 use crate::{TrainingDataset, TrainingError};
 
@@ -47,6 +51,7 @@ use super::metal_runtime::{
 };
 use super::parity_harness::{ParityLossCurveSample, ParityLossTerms, ParityTopologyMetrics};
 use super::pose_embedding;
+use super::runtime_splats::{apply_topology_plan, TopologySplatMetrics};
 use super::splats::HostSplats;
 use super::topology::{
     self, MetalGaussianStats, RunningMoments, TopologyExecutionDisposition,
@@ -94,34 +99,6 @@ const LITEGS_OPACITY_DECAY_RATE: f32 = 0.5;
 const LITEGS_OPACITY_DECAY_MIN: f32 = 1.0 / 128.0;
 const LITEGS_REFINE_OPACITY_DECAY: f32 = 0.004;
 const LITEGS_REFINE_SCALE_DECAY: f32 = 0.002;
-const SH_C1: f32 = 0.488_602_52;
-const SH_C2: [f32; 5] = [
-    1.092_548_5,
-    -1.092_548_5,
-    0.315_391_57,
-    -1.092_548_5,
-    0.546_274_24,
-];
-const SH_C3: [f32; 7] = [
-    -0.590_043_6,
-    2.890_611_4,
-    -0.457_045_8,
-    0.373_176_34,
-    -0.457_045_8,
-    1.445_305_7,
-    -0.590_043_6,
-];
-const SH_C4: [f32; 9] = [
-    2.503_343,
-    -1.770_130_8,
-    0.946_174_7,
-    -0.669_046_5,
-    0.105_785_55,
-    -0.669_046_5,
-    0.473_087_34,
-    -1.770_130_8,
-    0.625_835_7,
-];
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct LiteGsOptimizerLrs {
@@ -170,8 +147,6 @@ pub(crate) struct MetalTrainingFrame {
     target_color_cpu: Vec<f32>,
     target_depth_cpu: Vec<f32>,
 }
-
-type GaussianParameterSnapshot = HostSplats;
 
 pub struct MetalTrainer {
     training_profile: TrainingProfile,
@@ -678,13 +653,6 @@ impl MetalTrainer {
         }
     }
 
-    fn export_snapshot(
-        &self,
-        gaussians: &Splats,
-    ) -> candle_core::Result<GaussianParameterSnapshot> {
-        GaussianParameterSnapshot::from_runtime(gaussians)
-    }
-
     fn update_gaussian_stats(
         &mut self,
         param_grad_magnitudes: &[f32],
@@ -908,24 +876,33 @@ impl MetalTrainer {
     fn rebuild_adam_state(
         &self,
         old_state: &MetalAdamState,
-        origins: &[Option<usize>],
+        plan: &topology::TopologyMutationPlan,
     ) -> candle_core::Result<MetalAdamState> {
-        metal_optimizer::rebuild_adam_state(&self.device, old_state, origins)
+        metal_optimizer::rebuild_adam_state_with_plan(&self.device, old_state, plan)
     }
 
     fn apply_topology_mutation_aftermath(
         &mut self,
         gaussians: &mut Splats,
-        snapshot: &HostSplats,
+        rebuilt: Option<Splats>,
         stats: Vec<MetalGaussianStats>,
-        origins: &[Option<usize>],
+        plan: Option<&topology::TopologyMutationPlan>,
         aftermath: topology::TopologyMutationAftermath,
     ) -> candle_core::Result<()> {
         if aftermath.requires_runtime_rebuild {
-            let rebuilt = snapshot.upload(&self.device)?;
+            let rebuilt = rebuilt.ok_or_else(|| {
+                candle_core::Error::Msg("topology aftermath expected rebuilt runtime splats".into())
+            })?;
             let new_adam = match self.adam.take() {
                 Some(old_state) if aftermath.requires_adam_rebuild => {
-                    self.rebuild_adam_state(&old_state, origins)?
+                    self.rebuild_adam_state(
+                        &old_state,
+                        plan.ok_or_else(|| {
+                            candle_core::Error::Msg(
+                                "topology aftermath expected mutation plan for adam rebuild".into(),
+                            )
+                        })?,
+                    )?
                 }
                 _ => MetalAdamState::new(&rebuilt)?,
             };
@@ -1153,18 +1130,18 @@ impl MetalTrainer {
 
         let topology_start = Instant::now();
         let old_len = gaussians.len();
-        let mut stats = self.gaussian_stats.clone();
-        if stats.len() != old_len {
-            stats.resize(old_len, MetalGaussianStats::default());
+        let mut current_stats = self.gaussian_stats.clone();
+        if current_stats.len() != old_len {
+            current_stats.resize(old_len, MetalGaussianStats::default());
         }
-
-        let current_splats = HostSplats::from_runtime(gaussians)?;
-        let analysis = topology::analyze_topology_candidates(&policy, &current_splats, &stats);
+        let topology_splats = TopologySplatMetrics::from_runtime(gaussians)?;
+        let analysis =
+            topology::analyze_topology_candidates(&policy, &topology_splats, &current_stats);
         let density_reference = if self.is_litegs_mode() {
             Some(topology::density_controller_reference_summary(
                 &policy,
-                &current_splats,
-                &stats,
+                &topology_splats,
+                &current_stats,
                 completed_epoch,
             ))
         } else {
@@ -1262,16 +1239,12 @@ impl MetalTrainer {
             return Ok(());
         }
 
-        let mut snapshot = self.export_snapshot(gaussians)?;
-        let mut origins: Vec<Option<usize>> = (0..snapshot.len()).map(Some).collect();
         let late_stage = completed_epoch
             .map(|epoch| self.is_litegs_late_stage_epoch(epoch, frame_count))
             .unwrap_or(false);
 
-        let mutation = topology::apply_snapshot_mutations(
-            &mut snapshot,
-            &mut stats,
-            &mut origins,
+        let mutation = topology::plan_topology_mutation(
+            &topology_splats,
             TopologyMutationRequest {
                 policy: &policy,
                 should_densify,
@@ -1289,6 +1262,7 @@ impl MetalTrainer {
         let pruned = mutation.pruned;
         let morton_sorted = mutation.morton_sorted;
         let aftermath = mutation.aftermath;
+        let stats = mutation.remap_stats(&current_stats);
 
         let topology_duration = topology_start.elapsed();
         let topology_ms = duration_ms(topology_duration);
@@ -1306,9 +1280,7 @@ impl MetalTrainer {
         let guardrail_triggered = topology_ms >= 50.0 || topology_ratio >= 0.35;
 
         if added == 0 && pruned == 0 {
-            self.apply_topology_mutation_aftermath(
-                gaussians, &snapshot, stats, &origins, aftermath,
-            )?;
+            self.apply_topology_mutation_aftermath(gaussians, None, stats, None, aftermath)?;
             self.apply_litegs_refine_decay(gaussians)?;
             if should_log_topology || guardrail_triggered {
                 log::info!(
@@ -1352,7 +1324,14 @@ impl MetalTrainer {
             return Ok(());
         }
 
-        self.apply_topology_mutation_aftermath(gaussians, &snapshot, stats, &origins, aftermath)?;
+        let rebuilt = apply_topology_plan(gaussians, &mutation, &self.device)?;
+        self.apply_topology_mutation_aftermath(
+            gaussians,
+            Some(rebuilt),
+            stats,
+            Some(&mutation),
+            aftermath,
+        )?;
         self.apply_litegs_refine_decay(gaussians)?;
 
         log::info!(
@@ -1944,159 +1923,13 @@ impl MetalTrainer {
         positions: &Tensor,
         camera: &DiffCamera,
     ) -> candle_core::Result<Tensor> {
-        if !gaussians.uses_spherical_harmonics() {
-            return Ok(gaussians.render_colors()?.detach());
-        }
-
-        let active_degree = self.active_sh_degree.min(gaussians.sh_degree());
-        let row_count = gaussians.len();
-        if row_count == 0 {
-            return Tensor::zeros((0, 3), DType::F32, &self.device);
-        }
-
-        let dirs = view_directions_for_camera(positions, camera, &self.device)?;
-        let x = dirs.narrow(1, 0, 1)?.squeeze(1)?;
-        let y = dirs.narrow(1, 1, 1)?.squeeze(1)?;
-        let z = dirs.narrow(1, 2, 1)?.squeeze(1)?;
-        let xx = x.sqr()?;
-        let yy = y.sqr()?;
-        let zz = z.sqr()?;
-        let xy = x.broadcast_mul(&y)?;
-        let yz = y.broadcast_mul(&z)?;
-        let xz = x.broadcast_mul(&z)?;
-
-        let sh_0 = gaussians.sh_0().detach();
-        let sh_rest = gaussians.sh_rest().detach();
-        let mut color = sh_0.affine(SH_C0 as f64, 0.5)?;
-
-        macro_rules! add_sh_term {
-            ($coeff_idx:expr, $basis:expr) => {{
-                let coeff = sh_rest.narrow(1, $coeff_idx, 1)?.squeeze(1)?;
-                let basis = ($basis)?.reshape((row_count, 1))?;
-                color = color.broadcast_add(&coeff.broadcast_mul(&basis)?)?;
-            }};
-        }
-
-        if active_degree > 0 {
-            add_sh_term!(0, y.affine((-SH_C1) as f64, 0.0));
-            add_sh_term!(1, z.affine(SH_C1 as f64, 0.0));
-            add_sh_term!(2, x.affine((-SH_C1) as f64, 0.0));
-        }
-
-        if active_degree > 1 {
-            add_sh_term!(3, xy.affine(SH_C2[0] as f64, 0.0));
-            add_sh_term!(4, yz.affine(SH_C2[1] as f64, 0.0));
-            add_sh_term!(
-                5,
-                zz.affine((2.0 * SH_C2[2]) as f64, 0.0)?
-                    .broadcast_sub(&xx.affine(SH_C2[2] as f64, 0.0)?)?
-                    .broadcast_sub(&yy.affine(SH_C2[2] as f64, 0.0)?)
-            );
-            add_sh_term!(6, xz.affine(SH_C2[3] as f64, 0.0));
-            add_sh_term!(
-                7,
-                xx.affine(SH_C2[4] as f64, 0.0)?
-                    .broadcast_sub(&yy.affine(SH_C2[4] as f64, 0.0,)?)
-            );
-        }
-
-        if active_degree > 2 {
-            add_sh_term!(
-                8,
-                y.broadcast_mul(&xx.affine(3.0, 0.0)?.broadcast_sub(&yy)?)?
-                    .affine(SH_C3[0] as f64, 0.0)
-            );
-            add_sh_term!(9, xy.broadcast_mul(&z)?.affine(SH_C3[1] as f64, 0.0));
-            add_sh_term!(
-                10,
-                y.broadcast_mul(
-                    &zz.affine(4.0, 0.0)?
-                        .broadcast_sub(&xx)?
-                        .broadcast_sub(&yy)?,
-                )?
-                .affine(SH_C3[2] as f64, 0.0)
-            );
-            add_sh_term!(
-                11,
-                z.broadcast_mul(
-                    &zz.affine(2.0, 0.0)?
-                        .broadcast_sub(&xx.affine(3.0, 0.0)?)?
-                        .broadcast_sub(&yy.affine(3.0, 0.0)?)?,
-                )?
-                .affine(SH_C3[3] as f64, 0.0)
-            );
-            add_sh_term!(
-                12,
-                x.broadcast_mul(
-                    &zz.affine(4.0, 0.0)?
-                        .broadcast_sub(&xx)?
-                        .broadcast_sub(&yy)?,
-                )?
-                .affine(SH_C3[4] as f64, 0.0)
-            );
-            add_sh_term!(
-                13,
-                z.broadcast_mul(&xx.broadcast_sub(&yy)?)?
-                    .affine(SH_C3[5] as f64, 0.0)
-            );
-            add_sh_term!(
-                14,
-                x.broadcast_mul(&xx.broadcast_sub(&yy.affine(3.0, 0.0)?)?)?
-                    .affine(SH_C3[6] as f64, 0.0)
-            );
-        }
-
-        if active_degree > 3 {
-            let zz7_minus_1 = zz.affine(7.0, -1.0)?;
-            let zz7_minus_3 = zz.affine(7.0, -3.0)?;
-            add_sh_term!(
-                15,
-                xy.broadcast_mul(&xx.broadcast_sub(&yy)?)?
-                    .affine(SH_C4[0] as f64, 0.0)
-            );
-            add_sh_term!(
-                16,
-                yz.broadcast_mul(&xx.affine(3.0, 0.0)?.broadcast_sub(&yy)?)?
-                    .affine(SH_C4[1] as f64, 0.0)
-            );
-            add_sh_term!(
-                17,
-                xy.broadcast_mul(&zz.affine(7.0, -1.0)?)?
-                    .affine(SH_C4[2] as f64, 0.0)
-            );
-            add_sh_term!(
-                18,
-                yz.broadcast_mul(&zz7_minus_3)?.affine(SH_C4[3] as f64, 0.0)
-            );
-            add_sh_term!(
-                19,
-                zz.broadcast_mul(&zz.affine(35.0, -30.0)?)?
-                    .affine(SH_C4[4] as f64, 3.0 * SH_C4[4] as f64)
-            );
-            add_sh_term!(
-                20,
-                xz.broadcast_mul(&zz7_minus_3)?.affine(SH_C4[5] as f64, 0.0)
-            );
-            add_sh_term!(
-                21,
-                xx.broadcast_sub(&yy)?
-                    .broadcast_mul(&zz7_minus_1)?
-                    .affine(SH_C4[6] as f64, 0.0)
-            );
-            add_sh_term!(
-                22,
-                xz.broadcast_mul(&xx.broadcast_sub(&yy.affine(3.0, 0.0)?)?)?
-                    .affine(SH_C4[7] as f64, 0.0)
-            );
-            add_sh_term!(
-                23,
-                xx.broadcast_mul(&xx.broadcast_sub(&yy.affine(3.0, 0.0)?)?)?
-                    .broadcast_sub(&yy.broadcast_mul(&xx.affine(3.0, 0.0)?.broadcast_sub(&yy)?)?,)?
-                    .affine(SH_C4[8] as f64, 0.0)
-            );
-        }
-
-        color.clamp(0.0, f32::MAX)
+        metal_forward::render_colors_for_camera(
+            gaussians,
+            positions,
+            camera,
+            &self.device,
+            self.active_sh_degree,
+        )
     }
 
     #[cfg(test)]
@@ -2955,36 +2788,6 @@ fn adam_updated_tensors(
 fn inverse_sigmoid_tensor(values: &Tensor) -> candle_core::Result<Tensor> {
     let one = Tensor::ones_like(values)?;
     values.broadcast_div(&one.sub(values)?)?.log()
-}
-
-fn camera_center_world(camera: &DiffCamera) -> [f32; 3] {
-    [
-        -(camera.rotation[0][0] * camera.translation[0]
-            + camera.rotation[1][0] * camera.translation[1]
-            + camera.rotation[2][0] * camera.translation[2]),
-        -(camera.rotation[0][1] * camera.translation[0]
-            + camera.rotation[1][1] * camera.translation[1]
-            + camera.rotation[2][1] * camera.translation[2]),
-        -(camera.rotation[0][2] * camera.translation[0]
-            + camera.rotation[1][2] * camera.translation[1]
-            + camera.rotation[2][2] * camera.translation[2]),
-    ]
-}
-
-fn view_directions_for_camera(
-    positions: &Tensor,
-    camera: &DiffCamera,
-    device: &Device,
-) -> candle_core::Result<Tensor> {
-    let camera_center = Tensor::from_slice(&camera_center_world(camera), (1, 3), device)?;
-    let dirs = positions.broadcast_sub(&camera_center)?;
-    let norms = dirs
-        .sqr()?
-        .sum(1)?
-        .sqrt()?
-        .clamp(1e-6, f32::MAX)?
-        .reshape((positions.dim(0)?, 1))?;
-    dirs.broadcast_div(&norms)
 }
 
 #[cfg(test)]
@@ -5528,7 +5331,16 @@ mod tests {
             Tensor::from_slice(&[7.0f32, 8.0, 9.0, 10.0, 11.0, 12.0], (2, 3), &device).unwrap();
 
         let reordered = trainer
-            .rebuild_adam_state(&adam, &[Some(1), Some(0)])
+            .rebuild_adam_state(
+                &adam,
+                &topology::TopologyMutationPlan {
+                    rows: vec![
+                        topology::TopologyPlanRow::Existing { source_idx: 1 },
+                        topology::TopologyPlanRow::Existing { source_idx: 0 },
+                    ],
+                    ..topology::TopologyMutationPlan::default()
+                },
+            )
             .unwrap();
         assert_eq!(
             reordered.m_pos.to_vec2::<f32>().unwrap(),
@@ -5737,7 +5549,7 @@ mod tests {
             .unwrap()
             .to_vec2::<f32>()
             .unwrap();
-        let expected_red = 0.5 + (-SH_C1) * -0.5;
+        let expected_red = 0.5 + (-metal_forward::SH_C1) * -0.5;
 
         assert!((colors[0][0] - expected_red).abs() < 1e-5);
         assert!((colors[0][1] - 0.5).abs() < 1e-6);
@@ -5990,7 +5802,7 @@ mod tests {
         let position_grads = position_grads.to_vec2::<f32>().unwrap();
         let sh_0_grads = sh_0_grads.to_vec2::<f32>().unwrap();
         let sh_rest_grads = sh_rest_grads.to_vec3::<f32>().unwrap();
-        let expected_basis = -SH_C1;
+        let expected_basis = -metal_forward::SH_C1;
 
         assert!(position_grads[0].iter().all(|value| value.abs() < 1e-6));
         assert!((sh_0_grads[0][0] - SH_C0).abs() < 1e-6);
