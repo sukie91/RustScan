@@ -14,80 +14,7 @@ use crate::diff::diff_splat::sh0_to_rgb_value;
 #[cfg(feature = "gpu")]
 use crate::training::SplatView;
 
-/// A single Gaussian with all parameters (array-based for rendering)
-#[derive(Debug, Clone)]
-pub struct Gaussian {
-    /// Position in world space [x, y, z]
-    pub position: [f32; 3],
-    /// Scale [sx, sy, sz]
-    pub scale: [f32; 3],
-    /// Rotation (quaternion) [w, x, y, z]
-    pub rotation: [f32; 4],
-    /// Opacity [0, 1]
-    pub opacity: f32,
-    /// Color RGB [r, g, b]
-    pub color: [f32; 3],
-    /// Higher-order spherical harmonics coefficients (optional).
-    /// Layout: [coeff_count * 3] where coeff_count = (degree+1)^2 - 1.
-    /// For degree 3: 15 coeffs * 3 channels = 45 values.
-    pub sh_rest: Option<Vec<f32>>,
-}
-
-impl Gaussian {
-    pub fn new(
-        position: [f32; 3],
-        scale: [f32; 3],
-        rotation: [f32; 4],
-        opacity: f32,
-        color: [f32; 3],
-    ) -> Self {
-        Self {
-            position,
-            scale,
-            rotation,
-            opacity,
-            color,
-            sh_rest: None,
-        }
-    }
-
-    /// Create with SH coefficients
-    pub fn with_sh(
-        position: [f32; 3],
-        scale: [f32; 3],
-        rotation: [f32; 4],
-        opacity: f32,
-        color: [f32; 3],
-        sh_rest: Vec<f32>,
-    ) -> Self {
-        Self {
-            position,
-            scale,
-            rotation,
-            opacity,
-            color,
-            sh_rest: Some(sh_rest),
-        }
-    }
-
-    /// Create from depth point
-    pub fn from_depth_point(x: f32, y: f32, z: f32, color: [u8; 3]) -> Self {
-        Self {
-            position: [x, y, z],
-            scale: [0.01, 0.01, 0.01],
-            rotation: [1.0, 0.0, 0.0, 0.0],
-            opacity: 0.5,
-            color: [
-                color[0] as f32 / 255.0,
-                color[1] as f32 / 255.0,
-                color[2] as f32 / 255.0,
-            ],
-            sh_rest: None,
-        }
-    }
-}
-
-/// 2D projected Gaussian
+/// 2D projected splat
 #[derive(Debug, Clone)]
 pub struct ProjectedGaussian {
     /// Center x in image coordinates
@@ -135,42 +62,6 @@ impl TiledRenderer {
             num_tiles_x,
             num_tiles_y,
         }
-    }
-
-    /// Project 3D Gaussians to 2D with covariance
-    ///
-    /// Based on Eq. 3 in the paper:
-    /// Project 3D covariance to 2D using Jacobian of projection
-    pub fn project_gaussians(
-        &self,
-        gaussians: &[Gaussian],
-        fx: f32,
-        fy: f32,
-        _cx: f32,
-        _cy: f32,
-        rotation: &[[f32; 3]; 3],
-        translation: &[f32; 3],
-    ) -> Vec<ProjectedGaussian> {
-        let mut projected = Vec::with_capacity(gaussians.len());
-
-        for (idx, g) in gaussians.iter().enumerate() {
-            if let Some(projected_gaussian) = project_projected_gaussian(
-                idx,
-                g.position,
-                g.scale,
-                g.rotation,
-                g.opacity,
-                g.color,
-                fx,
-                fy,
-                rotation,
-                translation,
-            ) {
-                projected.push(projected_gaussian);
-            }
-        }
-
-        projected
     }
 
     #[cfg(feature = "gpu")]
@@ -268,20 +159,6 @@ impl TiledRenderer {
     /// 2. Compute tile bounds
     /// 3. For each tile, sort Gaussians that overlap it
     /// 4. Render with alpha blending (front to back)
-    pub fn render(
-        &self,
-        gaussians: &[Gaussian],
-        fx: f32,
-        fy: f32,
-        cx: f32,
-        cy: f32,
-        rotation: &[[f32; 3]; 3],
-        translation: &[f32; 3],
-    ) -> RenderBuffer {
-        let projected = self.project_gaussians(gaussians, fx, fy, cx, cy, rotation, translation);
-        self.render_projected(projected)
-    }
-
     #[cfg(feature = "gpu")]
     pub fn render_splats(
         &self,
@@ -515,43 +392,36 @@ impl RenderBuffer {
     }
 }
 
-/// Densification - add new Gaussians
-pub fn densify(gaussians: &mut Vec<Gaussian>, grads: &[f32], threshold: f32) {
-    let _n = gaussians.len();
-    let mut new_gaussians = Vec::new();
-
-    for (i, g) in gaussians.iter().enumerate() {
-        let grad_mag = if i < grads.len() { grads[i].abs() } else { 0.0 };
-
-        // Split large Gaussians with high gradient
-        if grad_mag > threshold && g.scale[0] < 0.1 {
-            // Create two smaller Gaussians
-            let offset = g.scale[0] * 0.1;
-
-            let mut g1 = g.clone();
-            g1.position[0] += offset;
-            g1.scale[0] *= 0.8;
-
-            let mut g2 = g.clone();
-            g2.position[0] -= offset;
-            g2.scale[0] *= 0.8;
-
-            new_gaussians.push(g1);
-            new_gaussians.push(g2);
-        }
-    }
-
-    gaussians.extend(new_gaussians);
-}
-
-/// Pruning - remove low opacity Gaussians
-pub fn prune(gaussians: &mut Vec<Gaussian>, threshold: f32) {
-    gaussians.retain(|g| g.opacity > threshold);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "gpu")]
+    fn opacity_to_logit(opacity: f32) -> f32 {
+        let clamped = opacity.clamp(1e-6, 1.0 - 1e-6);
+        (clamped / (1.0 - clamped)).ln()
+    }
+
+    #[cfg(feature = "gpu")]
+    fn single_rgb_splats(
+        position: [f32; 3],
+        scale: [f32; 3],
+        rotation: [f32; 4],
+        opacity: f32,
+        color: [f32; 3],
+    ) -> crate::training::HostSplats {
+        crate::training::HostSplats::from_raw_parts(
+            position.into(),
+            scale.map(f32::ln).into(),
+            rotation.into(),
+            vec![opacity_to_logit(opacity)],
+            color
+                .map(crate::diff::diff_splat::rgb_to_sh0_value)
+                .into(),
+            0,
+        )
+        .unwrap()
+    }
 
     #[test]
     fn test_tiled_renderer() {
@@ -560,22 +430,22 @@ mod tests {
         assert_eq!(renderer.num_tiles_y, 30);
     }
 
+    #[cfg(feature = "gpu")]
     #[test]
-    fn test_gaussian_projection() {
+    fn test_splat_projection() {
         let renderer = TiledRenderer::new(64, 64);
-
-        let gaussians = vec![Gaussian::new(
+        let splats = single_rgb_splats(
             [0.0, 0.0, 1.0],
             [0.01, 0.01, 0.01],
             [1.0, 0.0, 0.0, 0.0],
             0.5,
             [1.0, 0.5, 0.25],
-        )];
+        );
 
         let rotation = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
 
-        let projected = renderer.project_gaussians(
-            &gaussians,
+        let projected = renderer.project_splats(
+            splats.as_view(),
             500.0,
             500.0,
             32.0,
@@ -590,20 +460,19 @@ mod tests {
 
     #[cfg(feature = "gpu")]
     #[test]
-    fn test_render_splats_matches_gaussian_render() {
+    fn test_render_splats_matches_project_then_render() {
         let renderer = TiledRenderer::new(64, 64);
-        let gaussians = vec![Gaussian::new(
+        let splats = single_rgb_splats(
             [0.0, 0.0, 1.0],
             [0.01, 0.01, 0.01],
             [1.0, 0.0, 0.0, 0.0],
             0.5,
             [1.0, 0.5, 0.25],
-        )];
-        let splats = crate::training::HostSplats::from_scene_gaussians(&gaussians, 0).unwrap();
+        );
         let rotation = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
 
-        let gaussian_render = renderer.render(
-            &gaussians,
+        let projected = renderer.project_splats(
+            splats.as_view(),
             500.0,
             500.0,
             32.0,
@@ -611,6 +480,7 @@ mod tests {
             &rotation,
             &[0.0, 0.0, 0.0],
         );
+        let projected_render = renderer.render_projected(projected);
         let splat_render = renderer.render_splats(
             splats.as_view(),
             500.0,
@@ -621,20 +491,19 @@ mod tests {
             &[0.0, 0.0, 0.0],
         );
 
-        assert_eq!(gaussian_render.color, splat_render.color);
-        assert_eq!(gaussian_render.depth, splat_render.depth);
+        assert_eq!(projected_render.color, splat_render.color);
+        assert_eq!(projected_render.depth, splat_render.depth);
     }
 
     /// Verify that the full 2D covariance projection is correct.
     ///
     /// For an axis-aligned Gaussian (identity rotation) at [0,0,z] the cross-term
     /// cov_xy should be zero.  For a tilted Gaussian it should be non-zero.
+    #[cfg(feature = "gpu")]
     #[test]
     fn test_full_2d_covariance_identity_rotation() {
         let renderer = TiledRenderer::new(64, 64);
-
-        // Identity rotation quaternion: [w=1, x=0, y=0, z=0]
-        let g = Gaussian::new(
+        let splats = single_rgb_splats(
             [0.0, 0.0, 2.0],
             [0.1, 0.05, 0.02],
             [1.0, 0.0, 0.0, 0.0], // identity
@@ -643,8 +512,15 @@ mod tests {
         );
 
         let rotation = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
-        let projected =
-            renderer.project_gaussians(&[g], 500.0, 500.0, 0.0, 0.0, &rotation, &[0.0, 0.0, 0.0]);
+        let projected = renderer.project_splats(
+            splats.as_view(),
+            500.0,
+            500.0,
+            0.0,
+            0.0,
+            &rotation,
+            &[0.0, 0.0, 0.0],
+        );
 
         assert!(!projected.is_empty());
         let p = &projected[0];
@@ -659,6 +535,7 @@ mod tests {
         assert!(p.cov_yy > 0.0, "cov_yy must be positive, got {}", p.cov_yy);
     }
 
+    #[cfg(feature = "gpu")]
     #[test]
     fn test_full_2d_covariance_rotated_gaussian() {
         let renderer = TiledRenderer::new(64, 64);
@@ -667,8 +544,7 @@ mod tests {
         let angle = std::f32::consts::PI / 4.0;
         let (sin_half, cos_half) = ((angle / 2.0).sin(), (angle / 2.0).cos());
 
-        // Off-center point so cov_xy won't cancel by symmetry.
-        let g = Gaussian::new(
+        let splats = single_rgb_splats(
             [0.5, 0.5, 2.0],
             [0.3, 0.05, 0.01],
             [cos_half, 0.0, 0.0, sin_half], // 45° around Z
@@ -677,8 +553,15 @@ mod tests {
         );
 
         let rotation = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
-        let projected =
-            renderer.project_gaussians(&[g], 500.0, 500.0, 0.0, 0.0, &rotation, &[0.0, 0.0, 0.0]);
+        let projected = renderer.project_splats(
+            splats.as_view(),
+            500.0,
+            500.0,
+            0.0,
+            0.0,
+            &rotation,
+            &[0.0, 0.0, 0.0],
+        );
 
         assert!(!projected.is_empty());
         let p = &projected[0];

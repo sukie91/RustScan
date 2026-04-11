@@ -282,7 +282,7 @@ impl MetalTrainer {
                 self.pixel_count,
                 self.source_pixel_count,
                 frame_count,
-                self.chunk_size,
+                self.batch_size,
             ),
             &memory_budget,
         ) != MetalMemoryDecision::Block
@@ -300,7 +300,7 @@ impl MetalTrainer {
                     self.pixel_count,
                     self.source_pixel_count,
                     frame_count,
-                    self.chunk_size,
+                    self.batch_size,
                 ),
                 &memory_budget,
             );

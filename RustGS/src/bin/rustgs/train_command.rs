@@ -4,92 +4,6 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 #[cfg(feature = "gpu")]
-#[derive(Debug, Default)]
-struct CliTrainingEventRecorder {
-    plan: Option<rustgs::TrainingPlanSelected>,
-    completed_chunks: usize,
-    final_merged_gaussians: Option<usize>,
-}
-
-#[cfg(feature = "gpu")]
-impl CliTrainingEventRecorder {
-    fn record(&mut self, event: rustgs::TrainingEvent) {
-        match event {
-            rustgs::TrainingEvent::PlanSelected(plan) => {
-                self.plan = Some(plan);
-            }
-            rustgs::TrainingEvent::ChunkCompleted(chunk) => {
-                self.completed_chunks += 1;
-                self.final_merged_gaussians = Some(chunk.merged_gaussian_count);
-            }
-            _ => {}
-        }
-    }
-
-    fn log_summary(&self, report: &rustgs::TrainingRunReport) {
-        let route = self
-            .plan
-            .as_ref()
-            .map(|plan| training_route_label(plan.route))
-            .unwrap_or("unknown");
-        let estimate = self.plan.as_ref().and_then(|plan| plan.estimate.as_ref());
-        let training_chunks = self
-            .plan
-            .as_ref()
-            .and_then(|plan| plan.training_chunks)
-            .unwrap_or(0);
-
-        match estimate {
-            Some(estimate) if training_chunks > 0 => log::info!(
-                "CLI training summary | route={} | completed_chunks={}/{} | planner_requested_gaussians={} | planner_affordable_gaussians={} | planner_peak_gib≈{:.1} | planner_budget_gib≈{:.1} | final_gaussians={} | elapsed={:.2}s",
-                route,
-                self.completed_chunks,
-                training_chunks,
-                estimate.requested_initial_gaussians,
-                estimate.affordable_initial_gaussians,
-                estimate.estimated_peak_gib,
-                estimate.effective_budget_gib,
-                report.gaussian_count,
-                report.elapsed.as_secs_f64(),
-            ),
-            Some(estimate) => log::info!(
-                "CLI training summary | route={} | planner_requested_gaussians={} | planner_affordable_gaussians={} | planner_peak_gib≈{:.1} | planner_budget_gib≈{:.1} | final_gaussians={} | elapsed={:.2}s",
-                route,
-                estimate.requested_initial_gaussians,
-                estimate.affordable_initial_gaussians,
-                estimate.estimated_peak_gib,
-                estimate.effective_budget_gib,
-                report.gaussian_count,
-                report.elapsed.as_secs_f64(),
-            ),
-            None if training_chunks > 0 => log::info!(
-                "CLI training summary | route={} | completed_chunks={}/{} | final_gaussians={} | elapsed={:.2}s",
-                route,
-                self.completed_chunks,
-                training_chunks,
-                report.gaussian_count,
-                report.elapsed.as_secs_f64(),
-            ),
-            None => log::info!(
-                "CLI training summary | route={} | final_gaussians={} | elapsed={:.2}s",
-                route,
-                report.gaussian_count,
-                report.elapsed.as_secs_f64(),
-            ),
-        }
-    }
-}
-
-#[cfg(feature = "gpu")]
-fn training_route_label(route: rustgs::TrainingEventRoute) -> &'static str {
-    match route {
-        rustgs::TrainingEventRoute::Standard => "standard",
-        rustgs::TrainingEventRoute::ChunkedSingleChunk => "chunked-single",
-        rustgs::TrainingEventRoute::ChunkedSequential => "chunked-sequential",
-    }
-}
-
-#[cfg(feature = "gpu")]
 pub(super) fn run_train_command(args: TrainArgs) -> anyhow::Result<()> {
     env_logger::Builder::new()
         .parse_filters(&args.log_level)
@@ -110,21 +24,20 @@ pub(super) fn run_train_command(args: TrainArgs) -> anyhow::Result<()> {
     );
 
     let config = build_training_config(&args)?;
-    validate_chunked_training_args(&config)?;
-    log_chunked_training_config(&config);
     log_litegs_training_config(&config);
 
-    let mut event_recorder = CliTrainingEventRecorder::default();
-    let training_run = rustgs::train_splats_with_events(&dataset, &config, |event| {
-        event_recorder.record(event);
-    })?;
+    let training_run = rustgs::train_splats_with_report(&dataset, &config)?;
     let rustgs::TrainingRun {
         splats,
         report: training_report,
     } = training_run;
     let training_telemetry = training_report.telemetry.as_ref();
 
-    event_recorder.log_summary(&training_report);
+    log::info!(
+        "CLI training summary | route=standard | final_gaussians={} | elapsed={:.2}s",
+        training_report.gaussian_count,
+        training_report.elapsed.as_secs_f64(),
+    );
     log::info!("Trained {} Gaussians", splats.len());
 
     let metadata = rustgs::SplatMetadata {
@@ -337,36 +250,19 @@ pub(super) fn build_training_config(args: &TrainArgs) -> anyhow::Result<rustgs::
     config.max_initial_gaussians = args.max_initial_gaussians;
     config.sampling_step = args.sampling_step;
     config.metal_render_scale = args.metal_render_scale;
-    config.metal_gaussian_chunk_size = args.metal_gaussian_chunk_size;
+    config.metal_gaussian_batch_size = args.metal_gaussian_batch_size;
     config.metal_profile_steps = args.metal_profile_steps;
     config.metal_profile_interval = args.metal_profile_interval;
     config.prune_interval = args.prune_interval;
     config.topology_warmup = args.topology_warmup;
     config.topology_log_interval = args.topology_log_interval;
     config.metal_use_native_forward = !args.metal_disable_native_forward;
-    config.chunked_training = args.chunked_training;
-    config.chunk_budget_gb = args.chunk_budget_gb;
-    config.chunk_overlap_ratio = args.chunk_overlap_ratio;
-    config.min_cameras_per_chunk = args.min_cameras_per_chunk;
-    config.max_chunks = args.max_chunks;
     config.lr_position = args.lr_position;
     config.lr_pos_final = args.lr_position_final;
     config.lr_scale = args.lr_scale;
     config.lr_rotation = args.lr_rotation;
     config.lr_opacity = args.lr_opacity;
     config.lr_color = args.lr_color;
-    config.merge_core_only = if args.no_merge_core_only {
-        false
-    } else if args.merge_core_only {
-        true
-    } else {
-        true
-    };
-    config.chunk_artifact_dir = if config.chunked_training {
-        Some(default_chunk_artifact_dir(&args.output))
-    } else {
-        None
-    };
     config.litegs = rustgs::LiteGsConfig {
         sh_degree: args.litegs_sh_degree,
         cluster_size: args.litegs_cluster_size,
@@ -397,61 +293,6 @@ pub(super) fn build_training_config(args: &TrainArgs) -> anyhow::Result<rustgs::
     };
 
     Ok(config)
-}
-
-pub(super) fn validate_chunked_training_args(
-    config: &rustgs::TrainingConfig,
-) -> anyhow::Result<()> {
-    if !config.chunked_training {
-        return Ok(());
-    }
-
-    if config.chunk_budget_gb <= 0.0 {
-        bail!(
-            "--chunk-budget-gb must be > 0, got {}",
-            config.chunk_budget_gb
-        );
-    }
-    if !(0.0..0.5).contains(&config.chunk_overlap_ratio) {
-        bail!(
-            "--chunk-overlap-ratio must be in [0.0, 0.5), got {}",
-            config.chunk_overlap_ratio
-        );
-    }
-    if config.min_cameras_per_chunk == 0 {
-        bail!("--min-cameras-per-chunk must be >= 1");
-    }
-    if config.max_chunks > 0 && config.max_chunks < 2 {
-        bail!("--max-chunks must be 0 (auto) or >= 2 when --chunked-training is enabled");
-    }
-
-    Ok(())
-}
-
-fn log_chunked_training_config(config: &rustgs::TrainingConfig) {
-    if !config.chunked_training {
-        return;
-    }
-
-    let max_chunks = if config.max_chunks == 0 {
-        "auto".to_string()
-    } else {
-        config.max_chunks.to_string()
-    };
-
-    log::info!(
-        "Chunked training enabled | budget_gb={:.2} | overlap={:.2} | min_cameras={} | max_chunks={} | merge_core_only={} | artifact_dir={}",
-        config.chunk_budget_gb,
-        config.chunk_overlap_ratio,
-        config.min_cameras_per_chunk,
-        max_chunks,
-        config.merge_core_only,
-        config
-            .chunk_artifact_dir
-            .as_ref()
-            .map(|path| path.display().to_string())
-            .unwrap_or_else(|| "<disabled>".to_string()),
-    );
 }
 
 fn log_litegs_training_config(config: &rustgs::TrainingConfig) {
@@ -677,68 +518,74 @@ fn splats_have_non_finite(splats: &rustgs::HostSplats) -> bool {
         || view.sh_coeffs.iter().any(|value| !value.is_finite())
 }
 
-pub(super) fn default_chunk_artifact_dir(output: &Path) -> PathBuf {
-    let parent = output
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."));
-    let stem = output
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .filter(|stem| !stem.is_empty())
-        .unwrap_or("scene");
-    parent.join(format!("{stem}-chunks"))
-}
-
 #[cfg(all(test, feature = "gpu"))]
 mod tests {
-    use super::CliTrainingEventRecorder;
+    use super::run_train_command;
+    use crate::TrainArgs;
+    use std::path::PathBuf;
 
     #[test]
-    fn event_recorder_tracks_plan_and_chunk_completion() {
-        let mut recorder = CliTrainingEventRecorder::default();
+    fn run_train_command_surfaces_missing_input_cleanly() {
+        let args = TrainArgs {
+            input: PathBuf::from("missing-dataset"),
+            output: PathBuf::from("scene.ply"),
+            iterations: 1,
+            max_initial_gaussians: 16,
+            sampling_step: 0,
+            max_frames: 0,
+            frame_stride: 1,
+            metal_render_scale: 0.5,
+            metal_gaussian_batch_size: 32,
+            metal_profile_steps: false,
+            metal_profile_interval: 25,
+            prune_interval: 100,
+            topology_warmup: 100,
+            topology_log_interval: 500,
+            training_profile: rustgs::TrainingProfile::LegacyMetal,
+            litegs_sh_degree: 3,
+            litegs_cluster_size: 0,
+            litegs_tile_size: rustgs::LiteGsTileSize::new(8, 16),
+            litegs_sparse_grad: false,
+            litegs_reg_weight: 0.0,
+            litegs_enable_transmittance: false,
+            litegs_enable_depth: false,
+            litegs_densify_from: 3,
+            litegs_densify_until: None,
+            litegs_topology_freeze_after_epoch: None,
+            litegs_refine_every: 16,
+            litegs_densification_interval: 100,
+            litegs_growth_grad_threshold: 0.0002,
+            litegs_growth_select_fraction: 0.2,
+            litegs_growth_stop_iter: 15_000,
+            litegs_opacity_reset_interval: 3000,
+            litegs_opacity_reset_mode: rustgs::LiteGsOpacityResetMode::Decay,
+            litegs_prune_mode: rustgs::LiteGsPruneMode::Weight,
+            litegs_prune_offset_epochs: 0,
+            litegs_prune_min_age: 5,
+            litegs_prune_invisible_epochs: 10,
+            litegs_target_primitives: 300_000,
+            litegs_learnable_viewproj: false,
+            litegs_lr_pose: 0.0001,
+            litegs_morton_sort_on_densify: false,
+            litegs_prune_scale_threshold: 0.5,
+            lr_position: 0.00016,
+            lr_position_final: 0.0000016,
+            lr_scale: 0.005,
+            lr_rotation: 0.001,
+            lr_opacity: 0.05,
+            lr_color: 0.0025,
+            metal_disable_native_forward: false,
+            log_level: "error".to_string(),
+            eval_after_train: false,
+            eval_render_scale: 0.25,
+            eval_max_frames: 180,
+            eval_frame_stride: 30,
+            eval_worst_frames: 5,
+            eval_device: "metal".to_string(),
+            eval_json: false,
+        };
 
-        recorder.record(rustgs::TrainingEvent::PlanSelected(
-            rustgs::TrainingPlanSelected {
-                route: rustgs::TrainingEventRoute::ChunkedSequential,
-                training_chunks: Some(2),
-                estimate: Some(rustgs::TrainingPlanEstimate {
-                    requested_initial_gaussians: 10_000,
-                    affordable_initial_gaussians: 4_096,
-                    estimated_peak_gib: 8.5,
-                    effective_budget_gib: 6.0,
-                }),
-            },
-        ));
-        recorder.record(rustgs::TrainingEvent::ChunkCompleted(
-            rustgs::TrainingChunkCompleted {
-                chunk_index: 1,
-                total_chunks: 2,
-                chunk_id: 0,
-                chunk_gaussian_count: 512,
-                merged_gaussian_count: 512,
-            },
-        ));
-        recorder.record(rustgs::TrainingEvent::ChunkCompleted(
-            rustgs::TrainingChunkCompleted {
-                chunk_index: 2,
-                total_chunks: 2,
-                chunk_id: 1,
-                chunk_gaussian_count: 480,
-                merged_gaussian_count: 992,
-            },
-        ));
-
-        assert_eq!(recorder.completed_chunks, 2);
-        assert_eq!(recorder.final_merged_gaussians, Some(992));
-        let plan = recorder.plan.expect("plan should be recorded");
-        assert_eq!(plan.route, rustgs::TrainingEventRoute::ChunkedSequential);
-        assert_eq!(plan.training_chunks, Some(2));
-        assert_eq!(
-            plan.estimate
-                .expect("estimate should be recorded")
-                .affordable_initial_gaussians,
-            4_096
-        );
+        let err = run_train_command(args).expect_err("missing input should fail");
+        assert!(err.to_string().contains("failed to load"));
     }
 }

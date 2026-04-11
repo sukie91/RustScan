@@ -14,6 +14,11 @@
 1. Brush 为什么没有演化出一个和 `metal_trainer.rs` 等价的巨型文件。
 2. RustGS 应该如何沿着现有代码继续重构，尤其是 `RustGS/src/training/metal_trainer.rs` 应该怎么拆。
 
+说明:
+
+- 这份文档里的 `execution_plan.rs`、`chunk_training.rs`、`ChunkCapacityEstimate` 等内容属于当时的重构设想。
+- 在后续代码整理中，RustGS 已明确回到单一路径训练，这些 chunked-training 模块和公开 API 已删除；阅读本文时请以当前代码为准。
+
 ## 结论先行
 
 Brush 的核心优势不是“算法更少”，而是“边界更稳定”:
@@ -25,7 +30,7 @@ Brush 的核心优势不是“算法更少”，而是“边界更稳定”:
 RustGS 已经做对了一半:
 
 - `metal_forward.rs`、`metal_backward.rs`、`metal_runtime.rs`、`metal_loss.rs`、`metal_optimizer.rs`、`topology.rs` 已经被抽出来了。
-- `orchestrator.rs`、`execution_plan.rs`、`chunk_training.rs` 也已经把顶层路由部分拆出来了。
+- 顶层训练编排已经从巨型 trainer 中抽离；其中早期探索过的 `execution_plan.rs` / `chunk_training.rs` 后来因放弃分块训练而被删除，当前保留的是标准训练路径的 `orchestrator.rs`。
 
 但 RustGS 还没有完成第二步:
 

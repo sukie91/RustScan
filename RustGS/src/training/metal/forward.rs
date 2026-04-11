@@ -7,7 +7,7 @@ use glam::{Mat3, Quat, Vec3};
 use crate::diff::diff_splat::{DiffCamera, Splats};
 
 use super::runtime::{
-    ChunkPixelWindow, MetalBufferSlot, MetalProjectionRecord, MetalRuntime, MetalTileBins,
+    BatchPixelWindow, MetalBufferSlot, MetalProjectionRecord, MetalRuntime, MetalTileBins,
     NativeForwardProfile,
 };
 use super::splats::row_slice;
@@ -202,7 +202,7 @@ pub(crate) struct MetalForwardSettings {
     pub(crate) pixel_count: usize,
     pub(crate) render_width: usize,
     pub(crate) render_height: usize,
-    pub(crate) chunk_size: usize,
+    pub(crate) batch_size: usize,
     pub(crate) use_native_forward: bool,
     pub(crate) litegs_mode: bool,
 }
@@ -711,7 +711,7 @@ pub(super) fn execute_forward_pass(
             ctx.runtime,
             ctx.device,
             ctx.settings.pixel_count,
-            ctx.settings.chunk_size,
+            ctx.settings.batch_size,
             &projected,
             &tile_bins,
         )?;
@@ -732,7 +732,7 @@ pub(super) fn execute_forward_pass(
                 ctx.runtime,
                 ctx.device,
                 ctx.settings.pixel_count,
-                ctx.settings.chunk_size,
+                ctx.settings.batch_size,
                 &projected,
                 &projected.tile_bins,
             )?;
@@ -1083,7 +1083,7 @@ pub(super) fn rasterize(
     runtime: &mut MetalRuntime,
     device: &Device,
     pixel_count: usize,
-    chunk_size: usize,
+    batch_size: usize,
     projected: &ProjectedGaussians,
     tile_bins: &ProjectedTileBins,
 ) -> candle_core::Result<(RenderedFrame, TileBinningStats)> {
@@ -1115,30 +1115,30 @@ pub(super) fn rasterize(
         let mut tile_alpha_acc = Tensor::zeros((window.pixel_count,), DType::F32, device)?;
         let mut tile_trans = Tensor::ones((window.pixel_count,), DType::F32, device)?;
 
-        for start in (0..record.count()).step_by(chunk_size) {
-            let len = (record.count() - start).min(chunk_size);
-            let chunk_indices = tile_index_tensor.narrow(0, record.start() + start, len)?;
-            let alpha = chunk_alpha(
+        for start in (0..record.count()).step_by(batch_size) {
+            let len = (record.count() - start).min(batch_size);
+            let batch_indices = tile_index_tensor.narrow(0, record.start() + start, len)?;
+            let alpha = batch_alpha(
                 &window,
-                &projected.u.index_select(&chunk_indices, 0)?,
-                &projected.v.index_select(&chunk_indices, 0)?,
-                &projected.sigma_x.index_select(&chunk_indices, 0)?,
-                &projected.sigma_y.index_select(&chunk_indices, 0)?,
-                &projected.opacity.index_select(&chunk_indices, 0)?,
+                &projected.u.index_select(&batch_indices, 0)?,
+                &projected.v.index_select(&batch_indices, 0)?,
+                &projected.sigma_x.index_select(&batch_indices, 0)?,
+                &projected.sigma_y.index_select(&batch_indices, 0)?,
+                &projected.opacity.index_select(&batch_indices, 0)?,
             )?;
-            let (chunk_color, chunk_depth, chunk_alpha, tail_trans) = integrate_chunk(
+            let (batch_color, batch_depth, batch_alpha, tail_trans) = integrate_batch(
                 device,
                 &alpha,
-                &projected.colors.index_select(&chunk_indices, 0)?,
-                &projected.depth.index_select(&chunk_indices, 0)?,
+                &projected.colors.index_select(&batch_indices, 0)?,
+                &projected.depth.index_select(&batch_indices, 0)?,
             )?;
             let tile_trans_col = tile_trans.reshape((window.pixel_count, 1))?;
             tile_color_acc =
-                tile_color_acc.broadcast_add(&chunk_color.broadcast_mul(&tile_trans_col)?)?;
+                tile_color_acc.broadcast_add(&batch_color.broadcast_mul(&tile_trans_col)?)?;
             tile_depth_acc =
-                tile_depth_acc.broadcast_add(&chunk_depth.broadcast_mul(&tile_trans)?)?;
+                tile_depth_acc.broadcast_add(&batch_depth.broadcast_mul(&tile_trans)?)?;
             tile_alpha_acc =
-                tile_alpha_acc.broadcast_add(&chunk_alpha.broadcast_mul(&tile_trans)?)?;
+                tile_alpha_acc.broadcast_add(&batch_alpha.broadcast_mul(&tile_trans)?)?;
             tile_trans = tile_trans.broadcast_mul(&tail_trans)?;
         }
 
@@ -1322,8 +1322,8 @@ pub(super) fn tile_binning_stats(tile_bins: &ProjectedTileBins) -> TileBinningSt
     }
 }
 
-fn chunk_alpha(
-    window: &ChunkPixelWindow,
+fn batch_alpha(
+    window: &BatchPixelWindow,
     u: &Tensor,
     v: &Tensor,
     sigma_x: &Tensor,
@@ -1346,7 +1346,7 @@ fn chunk_alpha(
         .clamp(0.0, 0.99)
 }
 
-fn integrate_chunk(
+fn integrate_batch(
     device: &Device,
     alpha: &Tensor,
     colors: &Tensor,
@@ -1367,13 +1367,13 @@ fn integrate_chunk(
     };
     let local_contrib = alpha.broadcast_mul(&exclusive.exp()?)?;
     let local_contrib_t = local_contrib.t()?;
-    let chunk_color = local_contrib_t.matmul(colors)?;
-    let chunk_depth = local_contrib_t
+    let batch_color = local_contrib_t.matmul(colors)?;
+    let batch_depth = local_contrib_t
         .matmul(&depth.reshape((len, 1))?)?
         .squeeze(1)?;
-    let chunk_alpha = local_contrib.sum(0)?;
+    let batch_alpha = local_contrib.sum(0)?;
     let tail_trans = inclusive.get_on_dim(0, len - 1)?.exp()?;
-    Ok((chunk_color, chunk_depth, chunk_alpha, tail_trans))
+    Ok((batch_color, batch_depth, batch_alpha, tail_trans))
 }
 
 fn synchronize_if_needed(device: &Device, should_profile: bool) -> candle_core::Result<()> {

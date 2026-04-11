@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 use std::str::FromStr;
 
 /// Training backend selection.
@@ -351,28 +350,14 @@ pub struct TrainingConfig {
     pub frame_shuffle_seed: u64,
     /// Render scale used by the Metal backend (relative to input resolution).
     pub metal_render_scale: f32,
-    /// Number of Gaussians processed per GPU chunk in the Metal backend.
-    pub metal_gaussian_chunk_size: usize,
+    /// Number of Gaussians processed per GPU micro-batch in the Metal backend.
+    pub metal_gaussian_batch_size: usize,
     /// Emit per-step timing breakdowns for the Metal backend.
     pub metal_profile_steps: bool,
     /// Log the Metal timing breakdown every N steps when profiling is enabled.
     pub metal_profile_interval: usize,
     /// Use the native Metal forward rasterizer during normal training.
     pub metal_use_native_forward: bool,
-    /// Enable budget-driven chunked training orchestration.
-    pub chunked_training: bool,
-    /// Per-chunk memory budget in GiB used by future chunk planning.
-    pub chunk_budget_gb: f32,
-    /// Fractional overlap applied when expanding chunk bounds.
-    pub chunk_overlap_ratio: f32,
-    /// Minimum camera count required for a chunk to remain trainable.
-    pub min_cameras_per_chunk: usize,
-    /// Maximum number of chunks to generate (0 = automatic).
-    pub max_chunks: usize,
-    /// Keep only chunk core-region Gaussians during merge by default.
-    pub merge_core_only: bool,
-    /// Optional directory for chunk artifacts and machine-readable reports.
-    pub chunk_artifact_dir: Option<PathBuf>,
 }
 
 impl Default for TrainingConfig {
@@ -407,17 +392,10 @@ impl Default for TrainingConfig {
             frame_prefetch_ahead: 4,
             frame_shuffle_seed: 0,
             metal_render_scale: 0.5,
-            metal_gaussian_chunk_size: 32,
+            metal_gaussian_batch_size: 32,
             metal_profile_steps: false,
             metal_profile_interval: 25,
             metal_use_native_forward: true,
-            chunked_training: false,
-            chunk_budget_gb: 12.0,
-            chunk_overlap_ratio: 0.15,
-            min_cameras_per_chunk: 3,
-            max_chunks: 0,
-            merge_core_only: true,
-            chunk_artifact_dir: None,
         }
     }
 }
@@ -449,13 +427,6 @@ mod tests {
         assert_eq!(config.training_profile, TrainingProfile::LegacyMetal);
         assert!(config.metal_use_native_forward);
         assert_eq!(config.prune_interval, 100);
-        assert!(!config.chunked_training);
-        assert_eq!(config.chunk_budget_gb, 12.0);
-        assert_eq!(config.chunk_overlap_ratio, 0.15);
-        assert_eq!(config.min_cameras_per_chunk, 3);
-        assert_eq!(config.max_chunks, 0);
-        assert!(config.merge_core_only);
-        assert!(config.chunk_artifact_dir.is_none());
         assert_eq!(config.litegs, LiteGsConfig::default());
     }
 

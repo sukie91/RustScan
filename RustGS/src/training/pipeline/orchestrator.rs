@@ -2,16 +2,9 @@ use super::{LiteGsConfig, TrainingConfig, TrainingProfile};
 use crate::TrainingError;
 
 #[cfg(feature = "gpu")]
-use super::chunk_training::train_chunked_sequentially_with_report;
-#[cfg(feature = "gpu")]
 use super::events::{
-    emit_training_event, TrainingEvent, TrainingEventRoute, TrainingEventSink,
-    TrainingPlanEstimate, TrainingPlanSelected, TrainingRun, TrainingRunCompleted,
-    TrainingRunStarted,
-};
-#[cfg(feature = "gpu")]
-use super::execution_plan::{
-    select_training_execution_plan, TrainingExecutionPlan, TrainingExecutionRoute,
+    emit_training_event, TrainingEvent, TrainingEventRoute, TrainingEventSink, TrainingPlanSelected,
+    TrainingRun, TrainingRunCompleted, TrainingRunStarted,
 };
 #[cfg(feature = "gpu")]
 use super::metal::entry as metal_entry;
@@ -56,7 +49,6 @@ where
             iterations: config.iterations,
             frame_count: dataset.poses.len(),
             input_point_count: dataset.initial_points.len(),
-            chunked: config.chunked_training,
         }),
     );
 
@@ -81,8 +73,8 @@ fn train_legacy_metal(
     config: &TrainingConfig,
     sink: &mut TrainingEventSink<'_>,
 ) -> Result<TrainingRun, TrainingError> {
-    let plan = select_training_execution_plan(dataset, config)?;
-    execute_training_plan(dataset, config, plan, sink)
+    emit_standard_training_plan_event(sink);
+    metal_entry::train_splats_with_report(dataset, config)
 }
 
 #[cfg(feature = "gpu")]
@@ -105,76 +97,18 @@ fn train_litegs_mac_v1(
         config.litegs.lr_pose,
     );
 
-    let plan = select_training_execution_plan(dataset, config)?;
-    execute_training_plan(dataset, config, plan, sink)
+    emit_standard_training_plan_event(sink);
+    metal_entry::train_splats_with_report(dataset, config)
 }
 
 #[cfg(feature = "gpu")]
-fn execute_training_plan(
-    dataset: &TrainingDataset,
-    config: &TrainingConfig,
-    plan: TrainingExecutionPlan,
-    sink: &mut TrainingEventSink<'_>,
-) -> Result<TrainingRun, TrainingError> {
+fn emit_standard_training_plan_event(sink: &mut TrainingEventSink<'_>) {
     emit_training_event(
         sink,
         TrainingEvent::PlanSelected(TrainingPlanSelected {
-            route: public_training_route(plan.route),
-            training_chunks: plan
-                .chunk_plan
-                .as_ref()
-                .map(|chunk_plan| chunk_plan.training_chunks().count()),
-            estimate: plan
-                .chunk_estimate
-                .as_ref()
-                .map(|estimate| TrainingPlanEstimate {
-                    requested_initial_gaussians: estimate.requested_initial_gaussians,
-                    affordable_initial_gaussians: estimate.affordable_initial_gaussians,
-                    estimated_peak_gib: estimate.estimated_peak_gib(),
-                    effective_budget_gib: estimate.effective_budget_gib(),
-                }),
+            route: TrainingEventRoute::Standard,
         }),
     );
-    match plan.route {
-        TrainingExecutionRoute::Standard => metal_entry::train_splats_with_report(dataset, config),
-        TrainingExecutionRoute::ChunkedSingleChunk => {
-            if let Some(estimate) = plan.chunk_estimate.as_ref() {
-                log::info!(
-                    "Chunked planner selected single-chunk pass-through | requested_gaussians={} | affordable_gaussians={} | estimated_peak≈{:.1} GiB | effective_budget≈{:.1} GiB",
-                    estimate.requested_initial_gaussians,
-                    estimate.affordable_initial_gaussians,
-                    estimate.estimated_peak_gib(),
-                    estimate.effective_budget_gib(),
-                );
-            }
-            metal_entry::train_splats_with_report(dataset, config)
-        }
-        TrainingExecutionRoute::ChunkedSequential => {
-            let chunk_plan = plan
-                .chunk_plan
-                .as_ref()
-                .expect("sequential route requires chunk plan");
-            if let Some(estimate) = plan.chunk_estimate.as_ref() {
-                log::info!(
-                    "Chunked planner selected sequential chunk execution | requested_gaussians={} | affordable_gaussians={} | chunks={} | training_chunks={}",
-                    estimate.requested_initial_gaussians,
-                    estimate.affordable_initial_gaussians,
-                    chunk_plan.chunks.len(),
-                    chunk_plan.training_chunks().count(),
-                );
-            }
-            train_chunked_sequentially_with_report(dataset, config, chunk_plan, sink)
-        }
-    }
-}
-
-#[cfg(feature = "gpu")]
-fn public_training_route(route: TrainingExecutionRoute) -> TrainingEventRoute {
-    match route {
-        TrainingExecutionRoute::Standard => TrainingEventRoute::Standard,
-        TrainingExecutionRoute::ChunkedSingleChunk => TrainingEventRoute::ChunkedSingleChunk,
-        TrainingExecutionRoute::ChunkedSequential => TrainingEventRoute::ChunkedSequential,
-    }
 }
 
 pub(crate) fn validate_litegs_mac_v1_config(config: &TrainingConfig) -> Result<(), TrainingError> {

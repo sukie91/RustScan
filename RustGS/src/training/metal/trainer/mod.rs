@@ -16,8 +16,6 @@ use candle_core::{Device, Tensor};
 use crate::diff::diff_splat::SH_C0;
 use crate::diff::diff_splat::{DiffCamera, Splats};
 use crate::training::clustering::ClusterAssignment;
-#[cfg(test)]
-use crate::TrainingDataset;
 use crate::TrainingError;
 
 use super::backward::{
@@ -81,9 +79,8 @@ use super::forward::ProjectedTileBins;
 use super::forward::{ProjectionStagingSource, TileBinningStats};
 #[cfg(test)]
 use super::memory::{
-    affordable_initial_gaussian_cap, apply_ratio, bytes_to_gib, estimate_chunk_capacity,
-    estimate_peak_memory, gib_to_bytes, preflight_initial_gaussian_cap,
-    resolve_chunk_memory_budget, DEFAULT_METAL_MEMORY_BUDGET_BYTES, GIB,
+    affordable_initial_gaussian_cap, apply_ratio, bytes_to_gib, estimate_peak_memory,
+    preflight_initial_gaussian_cap, DEFAULT_METAL_MEMORY_BUDGET_BYTES, GIB,
     METAL_SYSTEM_MEMORY_BUDGET_DENOMINATOR, METAL_SYSTEM_MEMORY_BUDGET_NUMERATOR,
 };
 #[cfg(test)]
@@ -106,7 +103,7 @@ pub struct MetalTrainer {
     render_height: usize,
     pixel_count: usize,
     source_pixel_count: usize,
-    chunk_size: usize,
+    batch_size: usize,
     densify_interval: usize,
     prune_interval: usize,
     topology_warmup: usize,
@@ -325,7 +322,7 @@ impl MetalTrainer {
             render_height,
             pixel_count,
             source_pixel_count,
-            chunk_size: config.metal_gaussian_chunk_size.max(1),
+            batch_size: config.metal_gaussian_batch_size.max(1),
             densify_interval: config.densify_interval,
             prune_interval: config.prune_interval,
             topology_warmup: config.topology_warmup,
@@ -337,7 +334,7 @@ impl MetalTrainer {
             legacy_prune_scale_threshold: config.legacy_prune_scale_threshold,
             legacy_max_densify_per_update: config.legacy_max_densify_per_update.max(1),
             max_gaussian_budget: config.max_initial_gaussians.max(1),
-            topology_memory_budget: Some(training_memory_budget(config)),
+            topology_memory_budget: Some(training_memory_budget()),
             scene_extent: 1.0,
             lr_pos: config.lr_position,
             lr_pos_final: config.lr_pos_final,
@@ -385,8 +382,8 @@ impl MetalTrainer {
         self.source_pixel_count
     }
 
-    pub(crate) fn chunk_size(&self) -> usize {
-        self.chunk_size
+    pub(crate) fn batch_size(&self) -> usize {
+        self.batch_size
     }
 
     pub(crate) fn device(&self) -> &Device {

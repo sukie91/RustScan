@@ -100,10 +100,10 @@ impl MetalTrainer {
         let runtime_stats = self.runtime.stats();
 
         log::info!(
-            "MetalTrainer running at {}x{} | chunk_size={} | native_forward={} | topology(densify={} prune={} warmup={} log={}) | frames={} | initial_gaussians={} | tiles={} | runtime_buffers={} | pipeline_warmups={} | tile_index_capacity={}B",
+            "MetalTrainer running at {}x{} | gaussian_batch_size={} | native_forward={} | topology(densify={} prune={} warmup={} log={}) | frames={} | initial_gaussians={} | tiles={} | runtime_buffers={} | pipeline_warmups={} | tile_index_capacity={}B",
             self.render_width,
             self.render_height,
-            self.chunk_size,
+            self.batch_size,
             self.use_native_forward,
             self.densify_interval,
             self.prune_interval,
@@ -172,10 +172,10 @@ impl MetalTrainer {
         let runtime_stats = self.runtime.stats();
 
         log::info!(
-            "MetalTrainer running at {}x{} | chunk_size={} | native_forward={} | topology(densify={} prune={} warmup={} log={}) | frames={} | initial_gaussians={} | tiles={} | runtime_buffers={} | pipeline_warmups={} | tile_index_capacity={}B",
+            "MetalTrainer running at {}x{} | gaussian_batch_size={} | native_forward={} | topology(densify={} prune={} warmup={} log={}) | frames={} | initial_gaussians={} | tiles={} | runtime_buffers={} | pipeline_warmups={} | tile_index_capacity={}B",
             self.render_width,
             self.render_height,
-            self.chunk_size,
+            self.batch_size,
             self.use_native_forward,
             self.densify_interval,
             self.prune_interval,

@@ -169,8 +169,7 @@ impl HostSplats {
         self.len() == 0
     }
 
-    #[allow(dead_code)]
-    pub(super) fn position(&self, idx: usize) -> [f32; 3] {
+    pub fn position(&self, idx: usize) -> [f32; 3] {
         let base = idx * 3;
         [
             self.positions[base],
@@ -179,7 +178,7 @@ impl HostSplats {
         ]
     }
 
-    pub(super) fn log_scale(&self, idx: usize) -> [f32; 3] {
+    pub fn log_scale(&self, idx: usize) -> [f32; 3] {
         let base = idx * 3;
         [
             self.log_scales[base],
@@ -188,7 +187,7 @@ impl HostSplats {
         ]
     }
 
-    pub(super) fn rotation(&self, idx: usize) -> [f32; 4] {
+    pub fn rotation(&self, idx: usize) -> [f32; 4] {
         let base = idx * 4;
         [
             self.rotations[base],
@@ -198,7 +197,7 @@ impl HostSplats {
         ]
     }
 
-    pub(super) fn sh_0(&self, idx: usize) -> [f32; 3] {
+    pub fn sh_0(&self, idx: usize) -> [f32; 3] {
         let base = idx * 3;
         [
             self.sh_coeffs[base],
@@ -207,7 +206,7 @@ impl HostSplats {
         ]
     }
 
-    pub(super) fn rgb_color(&self, idx: usize) -> [f32; 3] {
+    pub fn rgb_color(&self, idx: usize) -> [f32; 3] {
         self.sh_0(idx).map(sh0_to_rgb_value)
     }
 
@@ -223,17 +222,25 @@ impl HostSplats {
         self.sh_coeffs_row_width().saturating_sub(3)
     }
 
-    pub(super) fn sh_coeffs_row(&self, idx: usize) -> &[f32] {
+    pub fn sh_coeffs_row(&self, idx: usize) -> &[f32] {
         row_slice(&self.sh_coeffs, self.sh_coeffs_row_width(), idx)
     }
 
-    pub(super) fn sh_rest(&self, idx: usize) -> &[f32] {
+    pub fn sh_rest(&self, idx: usize) -> &[f32] {
         self.sh_coeffs_row(idx).get(3..).unwrap_or(&[])
     }
 
-    pub(super) fn scale(&self, idx: usize) -> [f32; 3] {
+    pub fn scale(&self, idx: usize) -> [f32; 3] {
         let log = self.log_scale(idx);
         [log[0].exp(), log[1].exp(), log[2].exp()]
+    }
+
+    pub fn opacity_logit(&self, idx: usize) -> f32 {
+        self.opacity_logits.get(idx).copied().unwrap_or_default()
+    }
+
+    pub fn opacity(&self, idx: usize) -> f32 {
+        sigmoid_scalar(self.opacity_logit(idx)).clamp(0.0, 1.0)
     }
 
     #[allow(dead_code)]
@@ -318,8 +325,17 @@ impl HostSplats {
         *self = sampled;
     }
 
-    pub(super) fn positions_vec3(&self) -> Vec<[f32; 3]> {
+    pub fn positions_vec3(&self) -> Vec<[f32; 3]> {
         (0..self.len()).map(|idx| self.position(idx)).collect()
+    }
+
+    pub fn to_splat_metadata(&self, iterations: usize, final_loss: f32) -> crate::SplatMetadata {
+        crate::SplatMetadata {
+            iterations,
+            final_loss,
+            gaussian_count: self.len(),
+            sh_degree: self.sh_degree(),
+        }
     }
 
     pub(super) fn scene_extent(&self) -> f32 {
@@ -348,20 +364,6 @@ impl HostSplats {
             max_dist = max_dist.max((dx * dx + dy * dy + dz * dz).sqrt());
         }
         max_dist.max(1e-3)
-    }
-
-    pub(super) fn push_sh_coeffs(&mut self, sh_0: [f32; 3], sh_rest: &[f32]) {
-        self.sh_coeffs.extend_from_slice(&sh_0);
-        let sh_rest_row_width = self.sh_rest_row_width();
-        if sh_rest_row_width == 0 {
-            return;
-        }
-        let copied = sh_rest.len().min(sh_rest_row_width);
-        self.sh_coeffs.extend_from_slice(&sh_rest[..copied]);
-        if copied < sh_rest_row_width {
-            self.sh_coeffs
-                .resize(self.sh_coeffs.len() + (sh_rest_row_width - copied), 0.0);
-        }
     }
 
     fn push_sh_coeffs_row(&mut self, sh_coeffs: &[f32]) {
@@ -435,11 +437,6 @@ fn flatten_rows(rows: Vec<Vec<f32>>) -> Vec<f32> {
 
 fn flatten_3d(rows: Vec<Vec<Vec<f32>>>) -> Vec<f32> {
     rows.into_iter().flatten().flatten().collect()
-}
-
-pub(super) fn opacity_to_logit(opacity: f32) -> f32 {
-    let clamped = opacity.clamp(1e-6, 1.0 - 1e-6);
-    (clamped / (1.0 - clamped)).ln()
 }
 
 pub(super) fn sigmoid_scalar(value: f32) -> f32 {
@@ -545,6 +542,24 @@ mod tests {
         assert_eq!(
             litegs,
             SplatColorRepresentation::SphericalHarmonics { degree: 3 }
+        );
+    }
+
+    #[test]
+    fn scene_extent_tracks_radius_from_positions() {
+        let splats = Splats {
+            positions: vec![-2.0, 0.0, 0.0, 2.0, 0.0, 0.0],
+            log_scales: vec![0.0; 6],
+            rotations: vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+            opacity_logits: vec![0.0, 0.0],
+            sh_coeffs: vec![rgb_to_sh0_value(0.2); 6],
+            sh_degree: 0,
+        };
+
+        assert!((splats.scene_extent() - 2.0).abs() < 1e-6);
+        assert_eq!(
+            splats.positions_vec3(),
+            vec![[-2.0, 0.0, 0.0], [2.0, 0.0, 0.0]]
         );
     }
 }

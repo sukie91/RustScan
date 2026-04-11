@@ -1,5 +1,5 @@
 use crate::diff::{DiffCamera, Splats};
-use crate::{Gaussian, SplatMetadata, TrainingDataset};
+use crate::{SplatMetadata, TrainingDataset};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -17,7 +17,7 @@ use candle_core::Device;
 pub const MIN_RENDER_SCALE: f32 = 0.0625;
 
 #[cfg(feature = "gpu")]
-const EVALUATION_GAUSSIAN_CHUNK_SIZE: usize = 32;
+const EVALUATION_GAUSSIAN_BATCH_SIZE: usize = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct FinalTrainingMetrics {
@@ -94,9 +94,6 @@ impl Default for SplatEvaluationConfig {
     }
 }
 
-#[deprecated(note = "use SplatEvaluationConfig instead")]
-pub type SceneEvaluationConfig = SplatEvaluationConfig;
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EvaluationFrameMetric {
     pub dataset_index: usize,
@@ -159,9 +156,6 @@ pub enum SplatEvaluationError {
     #[error("invalid evaluation input: {0}")]
     InvalidInput(String),
 }
-
-#[deprecated(note = "use SplatEvaluationError instead")]
-pub type SceneEvaluationError = SplatEvaluationError;
 
 pub fn select_evaluation_frames(
     dataset: &TrainingDataset,
@@ -275,19 +269,6 @@ pub fn evaluation_device(device: EvaluationDevice) -> Result<Device, SplatEvalua
 }
 
 #[cfg(feature = "gpu")]
-pub fn runtime_from_gaussians(
-    gaussians: &[Gaussian],
-    metadata: &SplatMetadata,
-    device: &Device,
-) -> Result<Splats, SplatEvaluationError> {
-    let inferred_degree = infer_sh_degree(gaussians);
-    let sh_degree = metadata.sh_degree.max(inferred_degree);
-    let splats = HostSplats::from_scene_gaussians(gaussians, sh_degree)
-        .map_err(|err| SplatEvaluationError::InvalidInput(err.to_string()))?;
-    runtime_from_splats(&splats, device)
-}
-
-#[cfg(feature = "gpu")]
 pub fn runtime_from_splats(
     splats: &HostSplats,
     device: &Device,
@@ -302,7 +283,7 @@ pub struct SplatEvaluationRenderer {
     render_width: usize,
     render_height: usize,
     pixel_count: usize,
-    chunk_size: usize,
+    batch_size: usize,
 }
 
 #[cfg(feature = "gpu")]
@@ -318,7 +299,7 @@ impl SplatEvaluationRenderer {
             render_width,
             render_height,
             pixel_count: render_width.saturating_mul(render_height),
-            chunk_size: EVALUATION_GAUSSIAN_CHUNK_SIZE,
+            batch_size: EVALUATION_GAUSSIAN_BATCH_SIZE,
         })
     }
 
@@ -327,7 +308,7 @@ impl SplatEvaluationRenderer {
             pixel_count: self.pixel_count,
             render_width: self.render_width,
             render_height: self.render_height,
-            chunk_size: self.chunk_size,
+            batch_size: self.batch_size,
             use_native_forward: self.device.is_metal(),
             litegs_mode: false,
         }
@@ -396,22 +377,6 @@ pub fn render_evaluation_frame(
     )?;
     let rendered = renderer.render(trainable, &camera)?;
     Ok((target, rendered))
-}
-
-#[cfg(feature = "gpu")]
-pub fn evaluate_gaussians(
-    dataset: &TrainingDataset,
-    gaussians: &[Gaussian],
-    metadata: &SplatMetadata,
-    config: &SplatEvaluationConfig,
-    device: &Device,
-    training_metrics: Option<FinalTrainingMetrics>,
-) -> Result<SplatEvaluationResult, SplatEvaluationError> {
-    let inferred_degree = infer_sh_degree(gaussians);
-    let sh_degree = metadata.sh_degree.max(inferred_degree);
-    let splats = HostSplats::from_scene_gaussians(gaussians, sh_degree)
-        .map_err(|err| SplatEvaluationError::InvalidInput(err.to_string()))?;
-    evaluate_splats(dataset, &splats, metadata, config, device, training_metrics)
 }
 
 #[cfg(feature = "gpu")]
@@ -598,34 +563,11 @@ fn resize_rgb_box(
     dst
 }
 
-fn infer_sh_degree(scene: &[Gaussian]) -> usize {
-    scene
-        .iter()
-        .filter_map(|gaussian| gaussian.sh_rest.as_ref())
-        .find_map(|values| infer_sh_degree_from_value_count(values.len()))
-        .unwrap_or(0)
-}
-
-fn infer_sh_degree_from_value_count(value_count: usize) -> Option<usize> {
-    if value_count == 0 || value_count % 3 != 0 {
-        return None;
-    }
-
-    let coeff_count = value_count / 3;
-    for degree in 1..=8 {
-        if (degree + 1) * (degree + 1) - 1 == coeff_count {
-            return Some(degree);
-        }
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        infer_sh_degree_from_value_count, select_evaluation_frames, summarize_psnr_samples,
-        summarize_training_metrics, worst_frame_metrics, EvaluationFrameMetric,
-        FinalTrainingMetrics,
+        select_evaluation_frames, summarize_psnr_samples, summarize_training_metrics,
+        worst_frame_metrics, EvaluationFrameMetric, FinalTrainingMetrics,
     };
     use crate::{Intrinsics, ScenePose, TrainingDataset, SE3};
     use std::path::PathBuf;
@@ -678,13 +620,6 @@ mod tests {
         assert_eq!(worst.len(), 2);
         assert_eq!(worst[0].frame_id, 1);
         assert_eq!(worst[1].frame_id, 2);
-    }
-
-    #[test]
-    fn infer_sh_degree_from_value_count_maps_degree_three_layout() {
-        assert_eq!(infer_sh_degree_from_value_count(45), Some(3));
-        assert_eq!(infer_sh_degree_from_value_count(0), None);
-        assert_eq!(infer_sh_degree_from_value_count(4), None);
     }
 
     #[test]

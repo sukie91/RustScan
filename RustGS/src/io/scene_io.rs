@@ -38,9 +38,6 @@ impl Default for SplatMetadata {
     }
 }
 
-#[deprecated(note = "use SplatMetadata instead")]
-pub type SceneMetadata = SplatMetadata;
-
 #[derive(Debug, Error)]
 pub enum SceneIoError {
     #[error("failed to write scene {path}: {source}")]

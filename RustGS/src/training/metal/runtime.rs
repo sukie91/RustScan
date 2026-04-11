@@ -23,7 +23,7 @@ pub(crate) struct ScreenRect {
     pub max_y: usize,
 }
 
-pub(crate) struct ChunkPixelWindow {
+pub(crate) struct BatchPixelWindow {
     pub pixel_x: Tensor,
     pub pixel_y: Tensor,
     pub indices: Tensor,
@@ -231,7 +231,7 @@ pub(crate) struct MetalRuntimeStats {
 
 pub(crate) struct MetalRuntime {
     pub(crate) device: Device,
-    tile_windows: Vec<ChunkPixelWindow>,
+    tile_windows: Vec<BatchPixelWindow>,
     num_tiles_x: usize,
     num_tiles_y: usize,
     resources: MetalResources,
@@ -259,7 +259,7 @@ impl MetalRuntime {
                 let max_y = (min_y + METAL_TILE_SIZE)
                     .min(render_height)
                     .saturating_sub(1);
-                tile_windows.push(build_chunk_pixel_window(
+                tile_windows.push(build_batch_pixel_window(
                     &device,
                     render_width,
                     ScreenRect {
@@ -283,7 +283,7 @@ impl MetalRuntime {
         })
     }
 
-    pub(crate) fn tile_window(&self, tile_idx: usize) -> candle_core::Result<&ChunkPixelWindow> {
+    pub(crate) fn tile_window(&self, tile_idx: usize) -> candle_core::Result<&BatchPixelWindow> {
         self.tile_windows
             .get(tile_idx)
             .ok_or_else(|| candle_core::Error::Msg(format!("invalid tile index {tile_idx}")))
@@ -804,11 +804,11 @@ impl MetalRuntime {
     }
 }
 
-fn build_chunk_pixel_window(
+fn build_batch_pixel_window(
     device: &Device,
     render_width: usize,
     rect: ScreenRect,
-) -> candle_core::Result<ChunkPixelWindow> {
+) -> candle_core::Result<BatchPixelWindow> {
     let width = rect.max_x - rect.min_x + 1;
     let height = rect.max_y - rect.min_y + 1;
     let mut xs = Vec::with_capacity(width * height);
@@ -824,7 +824,7 @@ fn build_chunk_pixel_window(
     }
 
     let pixel_count = indices.len();
-    Ok(ChunkPixelWindow {
+    Ok(BatchPixelWindow {
         pixel_x: Tensor::from_slice(&xs, (1, pixel_count), device)?,
         pixel_y: Tensor::from_slice(&ys, (1, pixel_count), device)?,
         indices: Tensor::from_slice(&indices, pixel_count, device)?,

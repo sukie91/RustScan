@@ -3,7 +3,6 @@
 //! Primary runtime path:
 //! - `metal` - Metal-native backend used by the top-level API.
 
-pub mod chunk_planner;
 #[path = "spatial/clustering.rs"]
 pub mod clustering;
 mod config;
@@ -34,19 +33,11 @@ mod runtime_splats;
 mod splats;
 
 #[cfg(feature = "gpu")]
-#[path = "state/splat_interop.rs"]
-mod splat_interop;
-
-#[cfg(feature = "gpu")]
 mod telemetry;
 
 #[cfg(feature = "gpu")]
 mod topology;
 
-pub use chunk_planner::{
-    materialize_chunk_dataset, plan_spatial_chunks, ChunkBounds, ChunkBoundsSource,
-    ChunkDisposition, ChunkPlan, MaterializedChunkDataset, PlannedChunk,
-};
 #[cfg(feature = "gpu")]
 pub use eval::SplatEvaluationRenderer;
 pub use eval::MIN_RENDER_SCALE;
@@ -58,11 +49,8 @@ pub use eval::{
 };
 #[cfg(feature = "gpu")]
 pub use eval::{
-    evaluate_gaussians, evaluate_splats, evaluation_device, render_evaluation_frame,
-    runtime_from_gaussians, runtime_from_splats,
+    evaluate_splats, evaluation_device, render_evaluation_frame, runtime_from_splats,
 };
-#[allow(deprecated)]
-pub use eval::{SceneEvaluationConfig, SceneEvaluationError};
 pub use parity_harness::{
     compare_loss_curve_samples, default_litegs_parity_fixtures, default_parity_report_path,
     parity_fixture_id_for_input_path, resolve_litegs_parity_fixture_input_path,
@@ -78,9 +66,8 @@ pub use pipeline::benchmark::{
 };
 #[cfg(feature = "gpu")]
 pub use pipeline::events::{
-    TrainingChunkCompleted, TrainingChunkStarted, TrainingEvent, TrainingEventRoute,
-    TrainingPlanEstimate, TrainingPlanSelected, TrainingRun, TrainingRunCompleted,
-    TrainingRunReport, TrainingRunStarted,
+    TrainingEvent, TrainingEventRoute, TrainingPlanSelected, TrainingRun,
+    TrainingRunCompleted, TrainingRunReport, TrainingRunStarted,
 };
 #[cfg(feature = "gpu")]
 pub use splats::{HostSplats, SplatView};
@@ -89,8 +76,6 @@ pub use config::{
     LiteGsConfig, LiteGsOpacityResetMode, LiteGsPruneMode, LiteGsTileSize, TrainingBackend,
     TrainingConfig, TrainingProfile, TrainingResult,
 };
-#[cfg(feature = "gpu")]
-pub use metal::memory::{estimate_chunk_capacity, ChunkCapacityDisposition, ChunkCapacityEstimate};
 #[cfg(feature = "gpu")]
 pub use metal::trainer::MetalTrainer;
 #[cfg(feature = "gpu")]

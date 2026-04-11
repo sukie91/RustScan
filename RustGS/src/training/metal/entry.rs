@@ -51,21 +51,21 @@ pub(crate) fn train_splats_with_report(
         &effective_config,
         device,
     )?;
-    let memory_budget = training_memory_budget(config);
+    let memory_budget = training_memory_budget();
     let frame_count = loaded.cameras.len();
     log::info!(
-        "MetalTrainer preflight | gaussians={} | frames={} | pixels={} | chunk_size={} | estimated_peak≈{:.1} GiB | budget={} | dominant={}",
+        "MetalTrainer preflight | gaussians={} | frames={} | pixels={} | gaussian_batch_size={} | estimated_peak≈{:.1} GiB | budget={} | dominant={}",
         loaded.initial_splats.len(),
         frame_count,
         trainer.pixel_count(),
-        trainer.chunk_size(),
+        trainer.batch_size(),
         bytes_to_gib(
             estimate_peak_memory_with_source_pixels(
                 loaded.initial_splats.len(),
                 trainer.pixel_count(),
                 trainer.source_pixel_count(),
                 frame_count,
-                trainer.chunk_size(),
+                trainer.batch_size(),
             )
             .total_bytes()
         ),
@@ -75,7 +75,7 @@ pub(crate) fn train_splats_with_report(
             trainer.pixel_count(),
             trainer.source_pixel_count(),
             frame_count,
-            trainer.chunk_size(),
+            trainer.batch_size(),
         )
         .top_components_summary(3),
     );
@@ -92,7 +92,7 @@ pub(crate) fn train_splats_with_report(
         trainer.pixel_count(),
         trainer.source_pixel_count(),
         frame_count,
-        trainer.chunk_size(),
+        trainer.batch_size(),
         &memory_budget,
     );
     if !skip_memory_guard && affordable_cap > 0 && loaded.initial_splats.len() > affordable_cap {
@@ -134,7 +134,7 @@ pub(crate) fn train_splats_with_report(
         trainer.pixel_count(),
         trainer.source_pixel_count(),
         frame_count,
-        trainer.chunk_size(),
+        trainer.batch_size(),
     );
     match assess_memory_estimate(&estimated_peak, &memory_budget) {
         MetalMemoryDecision::Allow => {

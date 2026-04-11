@@ -5,9 +5,7 @@
 //! - `tiled_renderer`: Tiled rasterization for efficient rendering
 
 mod renderer;
-pub mod tiled_renderer;
+mod tiled_renderer;
 
 pub use renderer::{GaussianRenderer, RenderOutput};
-pub use tiled_renderer::{
-    densify, prune, Gaussian, ProjectedGaussian, RenderBuffer, TiledRenderer,
-};
+pub use tiled_renderer::{ProjectedGaussian, RenderBuffer, TiledRenderer};

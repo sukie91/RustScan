@@ -1,12 +1,9 @@
 use std::mem::size_of;
 
-use super::entry::effective_metal_config;
-use super::eval::scaled_dimensions;
 use super::runtime::{
     MetalProjectedGaussian, MetalProjectionRecord, MetalTileDispatchRecord, METAL_TILE_SIZE,
 };
-use super::{TrainingConfig, TrainingProfile};
-use crate::{TrainingDataset, TrainingError};
+use super::TrainingProfile;
 
 const MIB: u64 = 1024 * 1024;
 #[cfg(test)]
@@ -65,54 +62,6 @@ pub(crate) enum MetalMemoryDecision {
     Allow,
     Warn,
     Block,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ChunkCapacityDisposition {
-    FitsBudget,
-    NeedsSubdivisionOrDegradation,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ChunkCapacityEstimate {
-    pub requested_initial_gaussians: usize,
-    pub affordable_initial_gaussians: usize,
-    pub frame_count: usize,
-    pub render_width: usize,
-    pub render_height: usize,
-    pub estimated_peak_bytes: u64,
-    pub requested_budget_bytes: u64,
-    pub effective_budget_bytes: u64,
-    pub physical_memory_bytes: Option<u64>,
-    pub disposition: ChunkCapacityDisposition,
-    dominant_components: String,
-    recommendations: Vec<String>,
-}
-
-impl ChunkCapacityEstimate {
-    pub fn estimated_peak_gib(&self) -> f64 {
-        bytes_to_gib(self.estimated_peak_bytes)
-    }
-
-    pub fn requested_budget_gib(&self) -> f64 {
-        bytes_to_gib(self.requested_budget_bytes)
-    }
-
-    pub fn effective_budget_gib(&self) -> f64 {
-        bytes_to_gib(self.effective_budget_bytes)
-    }
-
-    pub fn requires_subdivision_or_degradation(&self) -> bool {
-        self.disposition == ChunkCapacityDisposition::NeedsSubdivisionOrDegradation
-    }
-
-    pub fn dominant_components(&self) -> &str {
-        &self.dominant_components
-    }
-
-    pub fn recommendations(&self) -> &[String] {
-        &self.recommendations
-    }
 }
 
 impl MetalMemoryEstimate {
@@ -195,97 +144,8 @@ impl MetalMemoryBudget {
     }
 }
 
-pub fn estimate_chunk_capacity(
-    dataset: &TrainingDataset,
-    config: &TrainingConfig,
-) -> Result<ChunkCapacityEstimate, TrainingError> {
-    if dataset.poses.is_empty() {
-        return Err(TrainingError::InvalidInput(
-            "training dataset does not contain any poses".to_string(),
-        ));
-    }
-
-    let effective_config = effective_metal_config(config);
-    let requested_initial_gaussians = if dataset.initial_points.is_empty() {
-        effective_config.max_initial_gaussians.max(1)
-    } else {
-        dataset
-            .initial_points
-            .len()
-            .min(effective_config.max_initial_gaussians.max(1))
-            .max(1)
-    };
-    let frame_count = dataset.poses.len();
-    let (render_width, render_height) = scaled_dimensions(
-        dataset.intrinsics.width as usize,
-        dataset.intrinsics.height as usize,
-        effective_config.metal_render_scale,
-    );
-    let pixel_count = render_width.saturating_mul(render_height);
-    let source_pixel_count = pixel_count;
-    let requested_budget_bytes = gib_to_bytes(config.chunk_budget_gb);
-    let effective_budget =
-        resolve_chunk_memory_budget(requested_budget_bytes, detect_metal_memory_budget());
-    let estimate = estimate_peak_memory_with_source_pixels(
-        requested_initial_gaussians,
-        pixel_count,
-        source_pixel_count,
-        frame_count,
-        effective_config.metal_gaussian_chunk_size,
-    );
-    let affordable_initial_gaussians = affordable_initial_gaussian_cap(
-        requested_initial_gaussians,
-        pixel_count,
-        source_pixel_count,
-        frame_count,
-        effective_config.metal_gaussian_chunk_size,
-        &effective_budget,
-    );
-    let disposition = if affordable_initial_gaussians < requested_initial_gaussians {
-        ChunkCapacityDisposition::NeedsSubdivisionOrDegradation
-    } else {
-        ChunkCapacityDisposition::FitsBudget
-    };
-    let mut recommendations = estimate
-        .recommendations()
-        .into_iter()
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-    if disposition == ChunkCapacityDisposition::NeedsSubdivisionOrDegradation {
-        recommendations.insert(
-            0,
-            format!(
-                "subdivide the chunk or degrade it to at most {} initial gaussians",
-                affordable_initial_gaussians.max(1)
-            ),
-        );
-    }
-
-    Ok(ChunkCapacityEstimate {
-        requested_initial_gaussians,
-        affordable_initial_gaussians,
-        frame_count,
-        render_width,
-        render_height,
-        estimated_peak_bytes: estimate.total_bytes(),
-        requested_budget_bytes,
-        effective_budget_bytes: effective_budget.safe_bytes,
-        physical_memory_bytes: effective_budget.physical_bytes,
-        disposition,
-        dominant_components: estimate.top_components_summary(3),
-        recommendations,
-    })
-}
-
-pub(crate) fn training_memory_budget(config: &TrainingConfig) -> MetalMemoryBudget {
-    if config.chunked_training {
-        resolve_chunk_memory_budget(
-            gib_to_bytes(config.chunk_budget_gb),
-            detect_metal_memory_budget(),
-        )
-    } else {
-        detect_metal_memory_budget()
-    }
+pub(crate) fn training_memory_budget() -> MetalMemoryBudget {
+    detect_metal_memory_budget()
 }
 
 pub(crate) fn affordable_initial_gaussian_cap(
@@ -293,7 +153,7 @@ pub(crate) fn affordable_initial_gaussian_cap(
     pixel_count: usize,
     source_pixel_count: usize,
     frame_count: usize,
-    chunk_size: usize,
+    batch_size: usize,
     memory_budget: &MetalMemoryBudget,
 ) -> usize {
     let requested_cap = requested_cap.max(1);
@@ -303,7 +163,7 @@ pub(crate) fn affordable_initial_gaussian_cap(
             pixel_count,
             source_pixel_count,
             frame_count,
-            chunk_size,
+            batch_size,
         ),
         memory_budget,
     ) != MetalMemoryDecision::Block
@@ -321,7 +181,7 @@ pub(crate) fn affordable_initial_gaussian_cap(
                 pixel_count,
                 source_pixel_count,
                 frame_count,
-                chunk_size,
+                batch_size,
             ),
             memory_budget,
         );
@@ -357,14 +217,14 @@ pub(crate) fn estimate_peak_memory(
     num_gaussians: usize,
     pixel_count: usize,
     frame_count: usize,
-    chunk_size: usize,
+    batch_size: usize,
 ) -> MetalMemoryEstimate {
     estimate_peak_memory_with_source_pixels(
         num_gaussians,
         pixel_count,
         pixel_count,
         frame_count,
-        chunk_size,
+        batch_size,
     )
 }
 
@@ -373,7 +233,7 @@ pub(crate) fn estimate_peak_memory_with_source_pixels(
     pixel_count: usize,
     source_pixel_count: usize,
     frame_count: usize,
-    _chunk_size: usize,
+    _batch_size: usize,
 ) -> MetalMemoryEstimate {
     let padded_gaussians = num_gaussians.max(1).next_power_of_two() as u64;
     let num_gaussians = num_gaussians as u64;
@@ -461,30 +321,8 @@ pub(crate) fn detect_metal_memory_budget() -> MetalMemoryBudget {
     }
 }
 
-pub(crate) fn resolve_chunk_memory_budget(
-    requested_budget_bytes: u64,
-    system_budget: MetalMemoryBudget,
-) -> MetalMemoryBudget {
-    let safe_bytes = requested_budget_bytes
-        .max(1)
-        .min(system_budget.safe_bytes.max(1));
-    MetalMemoryBudget {
-        safe_bytes,
-        physical_bytes: system_budget.physical_bytes,
-    }
-}
-
 pub(crate) fn bytes_to_gib(bytes: u64) -> f64 {
     bytes as f64 / 1024f64 / 1024f64 / 1024f64
-}
-
-pub(crate) fn gib_to_bytes(gib: f32) -> u64 {
-    if !gib.is_finite() || gib <= 0.0 {
-        return 0;
-    }
-    ((gib as f64) * 1024f64 * 1024f64 * 1024f64)
-        .round()
-        .clamp(0.0, u64::MAX as f64) as u64
 }
 
 fn detect_physical_memory_bytes() -> Option<u64> {

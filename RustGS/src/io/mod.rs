@@ -68,20 +68,23 @@ impl TrainingCheckpoint {
 #[cfg(test)]
 mod tests {
     use super::TrainingCheckpoint;
+    use crate::diff::diff_splat::rgb_to_sh0_value;
     use tempfile::tempdir;
 
     #[test]
     fn checkpoint_round_trips_host_splats() {
         let tempdir = tempdir().unwrap();
         let path = tempdir.path().join("checkpoint.json");
-        let splats = crate::training::HostSplats::from_scene_gaussians(
-            &[crate::Gaussian::new(
-                [0.0, 0.0, 1.0],
-                [0.1, 0.1, 0.1],
-                [1.0, 0.0, 0.0, 0.0],
-                0.5,
-                [0.2, 0.3, 0.4],
-            )],
+        let splats = crate::training::HostSplats::from_raw_parts(
+            vec![0.0, 0.0, 1.0],
+            vec![0.1f32.ln(), 0.1f32.ln(), 0.1f32.ln()],
+            vec![1.0, 0.0, 0.0, 0.0],
+            vec![0.0],
+            vec![
+                rgb_to_sh0_value(0.2),
+                rgb_to_sh0_value(0.3),
+                rgb_to_sh0_value(0.4),
+            ],
             0,
         )
         .unwrap();

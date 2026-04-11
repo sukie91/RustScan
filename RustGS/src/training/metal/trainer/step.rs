@@ -435,7 +435,7 @@ impl MetalTrainer {
             pixel_count: self.pixel_count,
             render_width: self.render_width,
             render_height: self.render_height,
-            chunk_size: self.chunk_size,
+            batch_size: self.batch_size,
             use_native_forward: self.use_native_forward,
             litegs_mode: self.is_litegs_mode(),
         }
@@ -521,7 +521,7 @@ impl MetalTrainer {
             &mut self.runtime,
             &self.device,
             self.pixel_count,
-            self.chunk_size,
+            self.batch_size,
             projected,
             tile_bins,
         )

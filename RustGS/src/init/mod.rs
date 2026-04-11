@@ -4,7 +4,7 @@
 
 pub mod initialization;
 
-pub use initialization::{initialize_gaussians_from_points, GaussianInitConfig};
+pub use initialization::GaussianInitConfig;
 
 #[cfg(feature = "gpu")]
 pub use initialization::{

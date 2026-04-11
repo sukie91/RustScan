@@ -10,7 +10,7 @@
 //! - `diff`: Differentiable rendering with Candle
 //! - `training`: Training loops and optimizers
 //! - `io`: Scene file I/O (PLY, checkpoints)
-//! - `init`: Gaussian initialization from point clouds
+//! - `init`: Splat initialization from point clouds
 //!
 //! # Example
 //!
@@ -51,15 +51,11 @@ pub use rustscan_types::{Intrinsics, MapPointData, ScenePose, TrainingDataset, S
 pub use crate::core::GaussianCamera;
 
 // Re-export render types
-pub use crate::render::{
-    densify, prune, Gaussian, GaussianRenderer, ProjectedGaussian, RenderBuffer, RenderOutput,
-    TiledRenderer,
-};
+pub use crate::render::{GaussianRenderer, ProjectedGaussian, RenderBuffer, RenderOutput, TiledRenderer};
 
 // Re-export training types
 #[cfg(feature = "gpu")]
 pub use crate::diff::Splats;
-#[allow(deprecated)]
 pub use crate::training::{
     compare_loss_curve_samples, default_litegs_parity_fixtures, default_parity_report_path,
     parity_fixture_id_for_input_path, resolve_litegs_parity_fixture_input_path,
@@ -73,31 +69,23 @@ pub use crate::training::{
     DEFAULT_CONVERGENCE_FIXTURE_ID, DEFAULT_TINY_FIXTURE_ID,
 };
 pub use crate::training::{
-    compute_psnr_f32, materialize_chunk_dataset, plan_spatial_chunks, scaled_dimensions,
-    select_evaluation_frames, summarize_psnr_samples, summarize_training_metrics,
-    worst_frame_metrics, ChunkBounds, ChunkBoundsSource, ChunkDisposition, ChunkPlan,
-    MaterializedChunkDataset, PlannedChunk,
+    compute_psnr_f32, scaled_dimensions, select_evaluation_frames, summarize_psnr_samples,
+    summarize_training_metrics, worst_frame_metrics,
 };
 #[cfg(feature = "gpu")]
 pub use crate::training::{
-    estimate_chunk_capacity, evaluate_gaussians, evaluate_splats, evaluation_device,
-    last_metal_training_telemetry, render_evaluation_frame, run_metal_training_benchmark,
-    runtime_from_gaussians, runtime_from_splats, ChunkCapacityDisposition, ChunkCapacityEstimate,
-    LiteGsOptimizerLrs, LiteGsTrainingTelemetry, MetalTrainingBenchmarkReport,
-    MetalTrainingBenchmarkSpec, TrainingChunkCompleted, TrainingChunkStarted, TrainingEvent,
-    TrainingEventRoute, TrainingPlanEstimate, TrainingPlanSelected, TrainingRun,
+    evaluate_splats, evaluation_device, last_metal_training_telemetry, render_evaluation_frame,
+    run_metal_training_benchmark, runtime_from_splats, LiteGsOptimizerLrs,
+    LiteGsTrainingTelemetry, MetalTrainingBenchmarkReport, MetalTrainingBenchmarkSpec,
+    TrainingEvent, TrainingEventRoute, TrainingPlanSelected, TrainingRun,
     TrainingRunCompleted, TrainingRunReport, TrainingRunStarted,
 };
 #[cfg(feature = "gpu")]
 pub use crate::training::{HostSplats, SplatEvaluationRenderer, SplatView};
-#[allow(deprecated)]
-pub use crate::training::{SceneEvaluationConfig, SceneEvaluationError};
 pub use crate::training::{TrainingBackend, TrainingConfig, TrainingResult};
 
 // Re-export IO types
 pub use crate::io::colmap_dataset::{load_colmap_dataset, ColmapConfig};
-#[allow(deprecated)]
-pub use crate::io::scene_io::SceneMetadata;
 #[cfg(feature = "gpu")]
 pub use crate::io::scene_io::{load_splats_ply, save_splats_ply};
 pub use crate::io::scene_io::{SceneIoError, SplatMetadata};
@@ -106,7 +94,6 @@ pub use crate::io::tum_dataset::{load_tum_rgbd_dataset, TumRgbdConfig};
 pub use crate::io::TrainingCheckpoint;
 
 // Re-export initialization types
-pub use crate::init::initialize_gaussians_from_points;
 pub use crate::init::GaussianInitConfig;
 #[cfg(feature = "gpu")]
 pub use crate::init::{initialize_host_splats_from_points, initialize_runtime_splats_from_points};

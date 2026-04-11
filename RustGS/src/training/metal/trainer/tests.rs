@@ -1178,7 +1178,7 @@ fn tum_frame_initialized_backward_probe_on_metal() {
         device.clone(),
     )
     .unwrap();
-    let memory_budget = training_memory_budget(&config);
+    let memory_budget = training_memory_budget();
     let affordable_cap = affordable_initial_gaussian_cap(
         effective_config
             .max_initial_gaussians
@@ -1186,7 +1186,7 @@ fn tum_frame_initialized_backward_probe_on_metal() {
         trainer.pixel_count,
         trainer.source_pixel_count,
         loaded.cameras.len(),
-        trainer.chunk_size,
+        trainer.batch_size,
         &memory_budget,
     );
     if affordable_cap > 0 && loaded.initial_splats.len() > affordable_cap {
@@ -1285,36 +1285,38 @@ fn tum_frame_initialized_backward_probe_on_metal() {
     let scale_delta = max_abs_delta(&before_scales, gaussians.scales.as_tensor()).unwrap();
     let opacity_delta = max_abs_delta(&before_opacities, gaussians.opacities.as_tensor()).unwrap();
     let color_delta = max_abs_delta(&before_colors, &gaussians.colors()).unwrap();
-    let trained_gaussians = HostSplats::from_runtime(&gaussians)
-        .unwrap()
-        .to_scene_gaussians()
-        .unwrap();
+    let trained_splats = HostSplats::from_runtime(&gaussians).unwrap();
     let mut map_position_delta = 0.0f32;
     let mut map_scale_delta = 0.0f32;
     let mut map_opacity_delta = 0.0f32;
     let mut map_color_delta = 0.0f32;
-    let initial_gaussians = loaded.initial_splats.to_scene_gaussians().unwrap();
-    for (before, after) in initial_gaussians.iter().zip(trained_gaussians.iter()) {
+    for idx in 0..loaded.initial_splats.len().min(trained_splats.len()) {
+        let before_position = loaded.initial_splats.position(idx);
+        let after_position = trained_splats.position(idx);
         map_position_delta = map_position_delta.max(
-            before
-                .position
+            before_position
                 .iter()
-                .zip(after.position.iter())
+                .zip(after_position.iter())
                 .map(|(lhs, rhs)| (lhs - rhs).abs())
                 .fold(0.0f32, f32::max),
         );
+        let before_scale = loaded.initial_splats.scale(idx);
+        let after_scale = trained_splats.scale(idx);
         map_scale_delta = map_scale_delta.max(
-            before
-                .scale
+            before_scale
                 .iter()
-                .zip(after.scale.iter())
+                .zip(after_scale.iter())
                 .map(|(lhs, rhs)| (lhs - rhs).abs())
                 .fold(0.0f32, f32::max),
         );
-        map_opacity_delta = map_opacity_delta.max((before.opacity - after.opacity).abs());
+        map_opacity_delta = map_opacity_delta.max(
+            (loaded.initial_splats.opacity(idx) - trained_splats.opacity(idx)).abs(),
+        );
+        let before_color = loaded.initial_splats.rgb_color(idx);
+        let after_color = trained_splats.rgb_color(idx);
         for channel in 0..3 {
             map_color_delta =
-                map_color_delta.max((before.color[channel] - after.color[channel]).abs());
+                map_color_delta.max((before_color[channel] - after_color[channel]).abs());
         }
     }
 
@@ -1398,7 +1400,7 @@ fn tum_frame_initialized_train_loop_updates_params_on_metal() {
         device.clone(),
     )
     .unwrap();
-    let memory_budget = training_memory_budget(&config);
+    let memory_budget = training_memory_budget();
     let affordable_cap = affordable_initial_gaussian_cap(
         effective_config
             .max_initial_gaussians
@@ -1406,7 +1408,7 @@ fn tum_frame_initialized_train_loop_updates_params_on_metal() {
         trainer.pixel_count,
         trainer.source_pixel_count,
         loaded.cameras.len(),
-        trainer.chunk_size,
+        trainer.batch_size,
         &memory_budget,
     );
     if affordable_cap > 0 && loaded.initial_splats.len() > affordable_cap {
@@ -1678,12 +1680,12 @@ fn peak_estimate_scales_with_problem_size() {
 }
 
 #[test]
-fn peak_estimate_accounts_for_frames_but_not_chunk_size() {
+fn peak_estimate_accounts_for_frames_but_not_batch_size() {
     let baseline = estimate_peak_memory(4_096, 4_800, 5, 32);
     let more_frames = estimate_peak_memory(4_096, 4_800, 25, 32);
-    let larger_chunk = estimate_peak_memory(4_096, 4_800, 5, 128);
+    let larger_batch = estimate_peak_memory(4_096, 4_800, 5, 128);
     assert!(more_frames.total_bytes() > baseline.total_bytes());
-    assert_eq!(larger_chunk.total_bytes(), baseline.total_bytes());
+    assert_eq!(larger_batch.total_bytes(), baseline.total_bytes());
 }
 
 #[test]
@@ -1794,78 +1796,6 @@ fn splats_downsample_evenly_spreads_samples_across_map() {
 }
 
 #[test]
-fn resolve_chunk_memory_budget_caps_requested_budget_to_system_limit() {
-    let system_budget = MetalMemoryBudget {
-        safe_bytes: 10 * GIB,
-        physical_bytes: Some(16 * GIB),
-    };
-    let resolved = resolve_chunk_memory_budget(12 * GIB, system_budget);
-    assert_eq!(resolved.safe_bytes, 10 * GIB);
-    assert_eq!(resolved.physical_bytes, Some(16 * GIB));
-}
-
-#[test]
-fn gib_to_bytes_rejects_non_positive_values() {
-    assert_eq!(gib_to_bytes(0.0), 0);
-    assert_eq!(gib_to_bytes(-1.0), 0);
-}
-
-#[test]
-fn chunk_capacity_marks_over_budget_requests_for_subdivision() {
-    let config = TrainingConfig {
-        chunked_training: true,
-        // Keep this deliberately tight so the estimator reliably requests
-        // subdivision even as per-gaussian accounting evolves.
-        chunk_budget_gb: 0.25,
-        metal_render_scale: 1.0,
-        max_initial_gaussians: 57_474,
-        ..TrainingConfig::default()
-    };
-    let dataset = TrainingDataset {
-        intrinsics: crate::Intrinsics::from_focal(500.0, 1920, 1080),
-        depth_scale: 1000.0,
-        poses: vec![crate::ScenePose::new(
-            0,
-            std::path::PathBuf::from("frame.png"),
-            crate::SE3::identity(),
-            0.0,
-        )],
-        initial_points: Vec::new(),
-    };
-    let estimate = estimate_chunk_capacity(&dataset, &config).unwrap();
-    assert!(estimate.requires_subdivision_or_degradation());
-    assert!(estimate.affordable_initial_gaussians < estimate.requested_initial_gaussians);
-    assert!(estimate
-        .recommendations()
-        .first()
-        .expect("recommendations should not be empty")
-        .contains("subdivide the chunk"));
-}
-
-#[test]
-fn chunk_capacity_uses_existing_initial_points_as_requested_scale() {
-    let config = TrainingConfig {
-        chunked_training: true,
-        chunk_budget_gb: 1.0,
-        max_initial_gaussians: 16,
-        ..TrainingConfig::default()
-    };
-    let dataset = TrainingDataset {
-        intrinsics: crate::Intrinsics::from_focal(500.0, 32, 32),
-        depth_scale: 1000.0,
-        poses: vec![crate::ScenePose::new(
-            0,
-            std::path::PathBuf::from("frame.png"),
-            crate::SE3::identity(),
-            0.0,
-        )],
-        initial_points: vec![([0.0, 0.0, 1.0], None); 64],
-    };
-    let estimate = estimate_chunk_capacity(&dataset, &config).unwrap();
-    assert_eq!(estimate.requested_initial_gaussians, 16);
-}
-
-#[test]
 fn profile_tracks_visible_gaussians() {
     let render = MetalRenderProfile {
         visible_gaussians: 12,
@@ -1878,7 +1808,7 @@ fn profile_tracks_visible_gaussians() {
 }
 
 #[test]
-fn chunk_rect_area_matches_bounds() {
+fn screen_rect_area_matches_bounds() {
     let rect = ScreenRect {
         min_x: 2,
         max_x: 5,

@@ -1,13 +1,11 @@
-//! Gaussian initialization from point clouds.
+//! Splat initialization from point clouds.
 //!
-//! Provides utilities to create initial Gaussians for 3DGS training
+//! Provides utilities to create initial splats for 3DGS training
 //! from sparse point clouds (e.g., SLAM map points).
 //! Uses KdTree for nearest-neighbor scale computation.
 
 use glam::Vec3;
 use kiddo::{KdTree, SquaredEuclidean};
-
-use crate::render::tiled_renderer::Gaussian;
 
 #[cfg(feature = "gpu")]
 use candle_core::Device;
@@ -42,45 +40,6 @@ impl Default for GaussianInitConfig {
             opacity: 0.5,
         }
     }
-}
-
-/// Initialize Gaussians from a point cloud.
-///
-/// # Arguments
-/// * `points` - Points as (position [x,y,z], optional color [r,g,b]) tuples
-/// * `config` - Initialization configuration
-///
-/// # Returns
-/// A vector of initialized `Gaussian` (array-based) primitives.
-pub fn initialize_gaussians_from_points(
-    points: &[([f32; 3], Option<[f32; 3]>)],
-    config: &GaussianInitConfig,
-) -> Vec<Gaussian> {
-    if points.is_empty() {
-        return Vec::new();
-    }
-
-    let positions: Vec<Vec3> = points
-        .iter()
-        .map(|(p, _)| Vec3::new(p[0], p[1], p[2]))
-        .collect();
-
-    let scales = compute_scales(&positions, config);
-
-    points
-        .iter()
-        .zip(scales.iter())
-        .map(|((pos, color), scale)| {
-            let rgb = color.unwrap_or(config.default_color);
-            Gaussian::new(
-                *pos,
-                [*scale, *scale, *scale],
-                [1.0, 0.0, 0.0, 0.0],
-                config.opacity,
-                rgb,
-            )
-        })
-        .collect()
 }
 
 /// Initialize runtime splats directly on device from a point cloud.
@@ -173,8 +132,9 @@ fn opacity_to_logit(opacity: f32) -> f32 {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "gpu")]
     #[test]
-    fn test_initialize_gaussians_scale_and_color() {
+    fn test_initialize_host_splats_scale_and_color() {
         let points = vec![
             ([0.0, 0.0, 0.0], Some([0.2, 0.3, 0.4])),
             ([1.0, 0.0, 0.0], Some([0.9, 0.1, 0.2])),
@@ -188,43 +148,23 @@ mod tests {
             opacity: 0.5,
         };
 
-        let gaussians = initialize_gaussians_from_points(&points, &config);
-        assert_eq!(gaussians.len(), 2);
+        let splats = initialize_host_splats_from_points(&points, &config, 0).unwrap();
+        assert_eq!(splats.len(), 2);
 
-        for g in &gaussians {
-            assert!((g.scale[0] - 0.5).abs() < 1e-6);
-            assert_eq!(g.scale[0], g.scale[1]);
-            assert_eq!(g.scale[1], g.scale[2]);
-            assert_eq!(g.opacity, 0.5);
+        for idx in 0..splats.len() {
+            let scale = splats.scale(idx);
+            assert!((scale[0] - 0.5).abs() < 1e-6);
+            assert_eq!(scale[0], scale[1]);
+            assert_eq!(scale[1], scale[2]);
+            assert!((splats.opacity(idx) - 0.5).abs() < 1e-6);
         }
 
-        assert!(gaussians.iter().any(|g| g.color == [0.2, 0.3, 0.4]));
-        assert!(gaussians.iter().any(|g| g.color == [0.9, 0.1, 0.2]));
-    }
-
-    #[test]
-    fn test_initialize_gaussians_defaults() {
-        let points = vec![([0.0, 0.0, 1.0], None)];
-
-        let config = GaussianInitConfig::default();
-        let gaussians = initialize_gaussians_from_points(&points, &config);
-        assert_eq!(gaussians.len(), 1);
-
-        let g = &gaussians[0];
-        assert_eq!(g.rotation, [1.0, 0.0, 0.0, 0.0]);
-        assert_eq!(g.opacity, config.opacity);
-        assert_eq!(g.color, config.default_color);
-        assert_eq!(g.scale[0], config.min_scale);
-        assert_eq!(g.scale[1], config.min_scale);
-        assert_eq!(g.scale[2], config.min_scale);
-    }
-
-    #[test]
-    fn test_empty_points() {
-        let points: Vec<([f32; 3], Option<[f32; 3]>)> = vec![];
-        let config = GaussianInitConfig::default();
-        let gaussians = initialize_gaussians_from_points(&points, &config);
-        assert!(gaussians.is_empty());
+        assert!((splats.rgb_color(0)[0] - 0.2).abs() < 1e-6);
+        assert!((splats.rgb_color(0)[1] - 0.3).abs() < 1e-6);
+        assert!((splats.rgb_color(0)[2] - 0.4).abs() < 1e-6);
+        assert!((splats.rgb_color(1)[0] - 0.9).abs() < 1e-6);
+        assert!((splats.rgb_color(1)[1] - 0.1).abs() < 1e-6);
+        assert!((splats.rgb_color(1)[2] - 0.2).abs() < 1e-6);
     }
 
     #[cfg(feature = "gpu")]
@@ -234,11 +174,22 @@ mod tests {
 
         let config = GaussianInitConfig::default();
         let splats = initialize_host_splats_from_points(&points, &config, 0).unwrap();
-        let view = splats.as_view();
 
         assert_eq!(splats.len(), 1);
-        assert_eq!(view.positions, &[0.0, 0.0, 1.0]);
-        assert_eq!(view.rotations, &[1.0, 0.0, 0.0, 0.0]);
-        assert!((view.opacity_logits[0] - opacity_to_logit(config.opacity)).abs() < 1e-6);
+        assert_eq!(splats.rotation(0), [1.0, 0.0, 0.0, 0.0]);
+        assert!((splats.opacity(0) - config.opacity).abs() < 1e-6);
+        assert_eq!(splats.rgb_color(0), config.default_color);
+        assert_eq!(splats.scale(0)[0], config.min_scale);
+        assert_eq!(splats.scale(0)[1], config.min_scale);
+        assert_eq!(splats.scale(0)[2], config.min_scale);
+    }
+
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn test_initialize_host_splats_empty_points() {
+        let points: Vec<([f32; 3], Option<[f32; 3]>)> = vec![];
+        let config = GaussianInitConfig::default();
+        let splats = initialize_host_splats_from_points(&points, &config, 0).unwrap();
+        assert!(splats.is_empty());
     }
 }

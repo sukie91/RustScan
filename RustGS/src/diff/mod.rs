@@ -6,7 +6,8 @@
 pub mod analytical_backward;
 
 #[cfg(feature = "gpu")]
-pub mod diff_renderer;
+#[allow(dead_code)]
+mod diff_renderer;
 
 #[cfg(feature = "gpu")]
 pub mod diff_splat;
@@ -15,9 +16,6 @@ pub mod diff_splat;
 pub use analytical_backward::{
     backward, AnalyticalGradients, ForwardIntermediate, GaussianRenderRecord,
 };
-
-#[cfg(feature = "gpu")]
-pub use diff_renderer::{CameraTensors, DiffGaussianRenderer, GaussianTensors, RenderLoss};
 
 #[cfg(feature = "gpu")]
 pub use diff_splat::{
