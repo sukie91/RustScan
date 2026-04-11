@@ -5,8 +5,8 @@ use objc2_metal::MTLSize;
 
 use crate::diff::diff_splat::Splats;
 
-use super::metal_kernels::MetalKernel;
-use super::metal_runtime::{
+use super::kernels::MetalKernel;
+use super::runtime::{
     MetalBufferSlot, MetalProjectionRecord, MetalRuntime, MetalTileBins, MetalTileDispatchRecord,
     ProjectedGpuBatch, METAL_TILE_SIZE,
 };

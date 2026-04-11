@@ -1,14 +1,14 @@
 use crate::diff::{DiffCamera, Splats};
-use crate::{Gaussian, SceneMetadata, TrainingDataset};
+use crate::{Gaussian, SplatMetadata, TrainingDataset};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::Instant;
 
 #[cfg(feature = "gpu")]
-use super::metal_forward::{self as metal_forward, MetalForwardInputs, MetalForwardSettings};
+use super::metal::forward::{self as metal_forward, MetalForwardInputs, MetalForwardSettings};
 #[cfg(feature = "gpu")]
-use super::metal_runtime::MetalRuntime;
+use super::metal::runtime::MetalRuntime;
 #[cfg(feature = "gpu")]
 use super::splats::HostSplats;
 #[cfg(feature = "gpu")]
@@ -76,14 +76,14 @@ impl FromStr for EvaluationDevice {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct SceneEvaluationConfig {
+pub struct SplatEvaluationConfig {
     pub render_scale: f32,
     pub frame_stride: usize,
     pub max_frames: usize,
     pub worst_frame_count: usize,
 }
 
-impl Default for SceneEvaluationConfig {
+impl Default for SplatEvaluationConfig {
     fn default() -> Self {
         Self {
             render_scale: 0.5,
@@ -93,6 +93,9 @@ impl Default for SceneEvaluationConfig {
         }
     }
 }
+
+#[deprecated(note = "use SplatEvaluationConfig instead")]
+pub type SceneEvaluationConfig = SplatEvaluationConfig;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EvaluationFrameMetric {
@@ -142,7 +145,7 @@ pub struct SplatEvaluationResult {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum SceneEvaluationError {
+pub enum SplatEvaluationError {
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 
@@ -156,6 +159,9 @@ pub enum SceneEvaluationError {
     #[error("invalid evaluation input: {0}")]
     InvalidInput(String),
 }
+
+#[deprecated(note = "use SplatEvaluationError instead")]
+pub type SceneEvaluationError = SplatEvaluationError;
 
 pub fn select_evaluation_frames(
     dataset: &TrainingDataset,
@@ -259,11 +265,11 @@ pub fn scaled_dimensions(width: usize, height: usize, render_scale: f32) -> (usi
 }
 
 #[cfg(feature = "gpu")]
-pub fn evaluation_device(device: EvaluationDevice) -> Result<Device, SceneEvaluationError> {
+pub fn evaluation_device(device: EvaluationDevice) -> Result<Device, SplatEvaluationError> {
     match device {
         EvaluationDevice::Cpu => Ok(Device::Cpu),
         EvaluationDevice::Metal => {
-            crate::try_metal_device().map_err(SceneEvaluationError::InvalidInput)
+            crate::try_metal_device().map_err(SplatEvaluationError::InvalidInput)
         }
     }
 }
@@ -271,13 +277,13 @@ pub fn evaluation_device(device: EvaluationDevice) -> Result<Device, SceneEvalua
 #[cfg(feature = "gpu")]
 pub fn runtime_from_gaussians(
     gaussians: &[Gaussian],
-    metadata: &SceneMetadata,
+    metadata: &SplatMetadata,
     device: &Device,
-) -> Result<Splats, SceneEvaluationError> {
+) -> Result<Splats, SplatEvaluationError> {
     let inferred_degree = infer_sh_degree(gaussians);
     let sh_degree = metadata.sh_degree.max(inferred_degree);
     let splats = HostSplats::from_scene_gaussians(gaussians, sh_degree)
-        .map_err(|err| SceneEvaluationError::InvalidInput(err.to_string()))?;
+        .map_err(|err| SplatEvaluationError::InvalidInput(err.to_string()))?;
     runtime_from_splats(&splats, device)
 }
 
@@ -285,7 +291,7 @@ pub fn runtime_from_gaussians(
 pub fn runtime_from_splats(
     splats: &HostSplats,
     device: &Device,
-) -> Result<Splats, SceneEvaluationError> {
+) -> Result<Splats, SplatEvaluationError> {
     Ok(splats.upload(device)?)
 }
 
@@ -305,7 +311,7 @@ impl SplatEvaluationRenderer {
         render_width: usize,
         render_height: usize,
         device: Device,
-    ) -> Result<Self, SceneEvaluationError> {
+    ) -> Result<Self, SplatEvaluationError> {
         Ok(Self {
             runtime: MetalRuntime::new(render_width, render_height, device.clone())?,
             device,
@@ -331,7 +337,7 @@ impl SplatEvaluationRenderer {
         &mut self,
         trainable: &Splats,
         camera: &DiffCamera,
-    ) -> Result<Vec<f32>, SceneEvaluationError> {
+    ) -> Result<Vec<f32>, SplatEvaluationError> {
         let positions = trainable.positions().detach();
         let render_colors = metal_forward::render_colors_for_camera(
             trainable,
@@ -368,7 +374,7 @@ pub fn render_evaluation_frame(
     device: &Device,
     trainable: &Splats,
     renderer: &mut SplatEvaluationRenderer,
-) -> Result<(Vec<f32>, Vec<f32>), SceneEvaluationError> {
+) -> Result<(Vec<f32>, Vec<f32>), SplatEvaluationError> {
     let target = load_resized_target(
         &pose.image_path,
         dataset.intrinsics.width as usize,
@@ -396,15 +402,15 @@ pub fn render_evaluation_frame(
 pub fn evaluate_gaussians(
     dataset: &TrainingDataset,
     gaussians: &[Gaussian],
-    metadata: &SceneMetadata,
-    config: &SceneEvaluationConfig,
+    metadata: &SplatMetadata,
+    config: &SplatEvaluationConfig,
     device: &Device,
     training_metrics: Option<FinalTrainingMetrics>,
-) -> Result<SplatEvaluationResult, SceneEvaluationError> {
+) -> Result<SplatEvaluationResult, SplatEvaluationError> {
     let inferred_degree = infer_sh_degree(gaussians);
     let sh_degree = metadata.sh_degree.max(inferred_degree);
     let splats = HostSplats::from_scene_gaussians(gaussians, sh_degree)
-        .map_err(|err| SceneEvaluationError::InvalidInput(err.to_string()))?;
+        .map_err(|err| SplatEvaluationError::InvalidInput(err.to_string()))?;
     evaluate_splats(dataset, &splats, metadata, config, device, training_metrics)
 }
 
@@ -412,14 +418,14 @@ pub fn evaluate_gaussians(
 pub fn evaluate_splats(
     dataset: &TrainingDataset,
     splats: &HostSplats,
-    metadata: &SceneMetadata,
-    config: &SceneEvaluationConfig,
+    metadata: &SplatMetadata,
+    config: &SplatEvaluationConfig,
     device: &Device,
     training_metrics: Option<FinalTrainingMetrics>,
-) -> Result<SplatEvaluationResult, SceneEvaluationError> {
+) -> Result<SplatEvaluationResult, SplatEvaluationError> {
     let dataset = select_evaluation_frames(dataset, config.max_frames, config.frame_stride);
     if dataset.poses.is_empty() {
-        return Err(SceneEvaluationError::InvalidInput(
+        return Err(SplatEvaluationError::InvalidInput(
             "evaluation dataset resolved to zero frames".to_string(),
         ));
     }
@@ -527,14 +533,14 @@ fn load_resized_target(
     src_height: usize,
     dst_width: usize,
     dst_height: usize,
-) -> Result<Vec<f32>, SceneEvaluationError> {
+) -> Result<Vec<f32>, SplatEvaluationError> {
     let image = image::ImageReader::open(path)?
         .with_guessed_format()?
         .decode()?;
     let rgb = image.to_rgb8();
     let (actual_width, actual_height) = rgb.dimensions();
     if actual_width as usize != src_width || actual_height as usize != src_height {
-        return Err(SceneEvaluationError::InvalidInput(format!(
+        return Err(SplatEvaluationError::InvalidInput(format!(
             "image {} has size {}x{}, expected {}x{}",
             path.display(),
             actual_width,

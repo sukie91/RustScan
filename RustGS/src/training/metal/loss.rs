@@ -3,8 +3,8 @@ use candle_core::{CpuStorage, CustomOp2, Layout, MetalStorage, Shape, Storage, T
 
 use crate::diff::diff_splat::Splats;
 
-use super::metal_backward::{backward_loss_scales, MetalBackwardLossScales};
-use super::metal_forward::{ProjectedGaussians, RenderedFrame};
+use super::backward::{backward_loss_scales, MetalBackwardLossScales};
+use super::forward::{ProjectedGaussians, RenderedFrame};
 use super::parity_harness::ParityLossTerms;
 
 #[derive(Debug, Clone, Copy)]

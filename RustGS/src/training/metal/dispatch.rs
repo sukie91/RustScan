@@ -2,7 +2,7 @@ use candle_core::Device;
 use candle_metal_kernels::metal::{Buffer, ComputePipeline};
 use objc2_metal::MTLSize;
 
-use super::metal_kernels::MetalKernel;
+use super::kernels::MetalKernel;
 
 pub(crate) fn dispatch_fill_u32(
     device: &Device,

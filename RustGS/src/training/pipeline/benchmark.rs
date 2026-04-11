@@ -1,7 +1,7 @@
 #[cfg(feature = "gpu")]
 use super::data_loading::LoadedTrainingData;
 #[cfg(feature = "gpu")]
-use super::metal_trainer::{MetalStepProfile, MetalTrainer};
+use super::metal::trainer::{MetalStepProfile, MetalTrainer};
 #[cfg(feature = "gpu")]
 use super::splats::splat_color_representation_for_config;
 #[cfg(feature = "gpu")]

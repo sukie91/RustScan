@@ -2,9 +2,9 @@ use candle_core::Device;
 
 use crate::diff::diff_splat::{sh_coeff_count_for_degree, Splats as RuntimeSplats};
 
-use super::splats::{row_slice, sigmoid_scalar};
 #[cfg(test)]
 use super::splats::HostSplats;
+use super::splats::{row_slice, sigmoid_scalar};
 use super::topology::{TopologyMutationPlan, TopologyPlanRow};
 
 #[derive(Debug, Clone, PartialEq)]

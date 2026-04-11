@@ -1,11 +1,17 @@
+use super::events::{
+    emit_training_event, TrainingChunkCompleted, TrainingChunkStarted, TrainingEvent,
+    TrainingEventSink, TrainingRun, TrainingRunReport,
+};
 use super::export::ChunkPersistenceContext;
-use super::metal_trainer::{self, ChunkCapacityEstimate};
+use super::metal::entry as metal_entry;
+use super::metal::memory::{self as metal_memory, ChunkCapacityEstimate};
 use super::splats::HostSplats;
 use super::{
     materialize_chunk_dataset, ChunkBounds, ChunkDisposition, ChunkPlan, MaterializedChunkDataset,
     PlannedChunk, TrainingConfig, MIN_RENDER_SCALE,
 };
 use crate::{TrainingDataset, TrainingError};
+use std::time::Instant;
 
 #[derive(Debug, Clone)]
 pub(crate) struct ChunkTrainingOverridePlan {
@@ -15,11 +21,13 @@ pub(crate) struct ChunkTrainingOverridePlan {
     pub(crate) lowered_render_scale: bool,
 }
 
-pub(crate) fn train_chunked_sequentially(
+pub(crate) fn train_chunked_sequentially_with_report(
     dataset: &TrainingDataset,
     config: &TrainingConfig,
     chunk_plan: &ChunkPlan,
-) -> Result<HostSplats, TrainingError> {
+    sink: &mut TrainingEventSink<'_>,
+) -> Result<TrainingRun, TrainingError> {
+    let start = Instant::now();
     let mut merged_scene = HostSplats::default();
     let total_chunks = chunk_plan.training_chunks().count();
     let mut persistence =
@@ -40,9 +48,21 @@ pub(crate) fn train_chunked_sequentially(
     }
 
     execute_training_chunks_sequentially(dataset, chunk_plan, |chunk, materialized| {
+        let chunk_index = chunk.chunk_id + 1;
+        emit_training_event(
+            sink,
+            TrainingEvent::ChunkStarted(TrainingChunkStarted {
+                chunk_index,
+                total_chunks,
+                chunk_id: chunk.chunk_id,
+                pose_count: materialized.dataset.poses.len(),
+                initial_point_count: materialized.dataset.initial_points.len(),
+                used_frame_based_initialization: materialized.used_frame_based_initialization,
+            }),
+        );
         log::info!(
             "Training chunk {}/{} | chunk_id={} | poses={} | local_points={} | frame_init_fallback={}",
-            chunk.chunk_id + 1,
+            chunk_index,
             total_chunks,
             chunk.chunk_id,
             materialized.dataset.poses.len(),
@@ -67,11 +87,11 @@ pub(crate) fn train_chunked_sequentially(
             override_plan.estimate.estimated_peak_gib(),
         );
 
-        let mut chunk_scene = match metal_trainer::train_splats(
+        let chunk_run = match metal_entry::train_splats_with_report(
             &materialized.dataset,
             &override_plan.effective_config,
         ) {
-            Ok(scene) => scene,
+            Ok(run) => run,
             Err(err) => {
                 persistence.record_failure(
                     chunk,
@@ -82,6 +102,7 @@ pub(crate) fn train_chunked_sequentially(
                 return Err(err);
             }
         };
+        let mut chunk_scene = chunk_run.splats;
         let core_filter_removed = merge_chunk_splats(
             &mut merged_scene,
             &mut chunk_scene,
@@ -100,10 +121,30 @@ pub(crate) fn train_chunked_sequentially(
             chunk.chunk_id,
             merged_scene.len(),
         );
+        emit_training_event(
+            sink,
+            TrainingEvent::ChunkCompleted(TrainingChunkCompleted {
+                chunk_index,
+                total_chunks,
+                chunk_id: chunk.chunk_id,
+                chunk_gaussian_count: chunk_scene.len(),
+                merged_gaussian_count: merged_scene.len(),
+            }),
+        );
         Ok(())
     })?;
 
-    Ok(merged_scene)
+    Ok(TrainingRun {
+        report: TrainingRunReport {
+            elapsed: start.elapsed(),
+            final_loss: None,
+            final_step_loss: None,
+            gaussian_count: merged_scene.len(),
+            sh_degree: merged_scene.sh_degree(),
+            telemetry: None,
+        },
+        splats: merged_scene,
+    })
 }
 
 pub(crate) fn execute_training_chunks_sequentially<F>(
@@ -218,7 +259,7 @@ pub(crate) fn adapt_chunk_training_config(
     base_config: &TrainingConfig,
 ) -> Result<ChunkTrainingOverridePlan, TrainingError> {
     let mut effective_config = base_config.clone();
-    let mut estimate = metal_trainer::estimate_chunk_capacity(dataset, &effective_config)?;
+    let mut estimate = metal_memory::estimate_chunk_capacity(dataset, &effective_config)?;
     let mut lowered_gaussian_cap = false;
     let mut lowered_render_scale = false;
 
@@ -227,7 +268,7 @@ pub(crate) fn adapt_chunk_training_config(
     {
         effective_config.max_initial_gaussians = estimate.affordable_initial_gaussians.max(1);
         lowered_gaussian_cap = true;
-        estimate = metal_trainer::estimate_chunk_capacity(dataset, &effective_config)?;
+        estimate = metal_memory::estimate_chunk_capacity(dataset, &effective_config)?;
     }
 
     while estimate.requires_subdivision_or_degradation()
@@ -239,7 +280,7 @@ pub(crate) fn adapt_chunk_training_config(
         }
         effective_config.metal_render_scale = next_scale;
         lowered_render_scale = true;
-        estimate = metal_trainer::estimate_chunk_capacity(dataset, &effective_config)?;
+        estimate = metal_memory::estimate_chunk_capacity(dataset, &effective_config)?;
     }
 
     if estimate.requires_subdivision_or_degradation() {

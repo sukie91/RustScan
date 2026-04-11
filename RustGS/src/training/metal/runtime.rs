@@ -5,13 +5,13 @@ use candle_metal_kernels::metal::ComputePipeline;
 
 use crate::diff::diff_splat::{DiffCamera, Splats};
 
-use super::metal_dispatch;
-use super::metal_kernels::MetalKernel;
-use super::metal_pipelines::MetalPipelineCache;
-use super::metal_projection;
-use super::metal_raster;
-use super::metal_resources::MetalResources;
-pub(crate) use super::metal_resources::{MetalBufferSlot, MetalGaussianBindings};
+use super::dispatch as metal_dispatch;
+use super::kernels::MetalKernel;
+use super::pipelines::MetalPipelineCache;
+use super::projection as metal_projection;
+use super::raster as metal_raster;
+use super::resources::MetalResources;
+pub(crate) use super::resources::{MetalBufferSlot, MetalGaussianBindings};
 
 pub(crate) const METAL_TILE_SIZE: usize = 16;
 
@@ -754,7 +754,7 @@ impl MetalRuntime {
         self.resources.buffer_handle(slot)
     }
 
-    pub(crate) fn ensure_pipeline(
+    pub(super) fn ensure_pipeline(
         &mut self,
         kernel: MetalKernel,
     ) -> candle_core::Result<&ComputePipeline> {

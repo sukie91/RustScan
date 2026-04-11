@@ -28,7 +28,7 @@
 //! rustgs::save_splats_ply(
 //!     "scene.ply".as_ref(),
 //!     &splats,
-//!     &rustgs::SceneMetadata::default(),
+//!     &rustgs::SplatMetadata::default(),
 //! )?;
 //! ```
 
@@ -68,8 +68,8 @@ pub use crate::training::{
     ParityCheckOutcome, ParityCheckStatus, ParityFixtureKind, ParityFixtureSpec,
     ParityGateEvaluation, ParityGateStatus, ParityHarnessReport, ParityLossCurveSample,
     ParityLossTerms, ParityMetricSnapshot, ParityReferenceComparison, ParityThresholds,
-    ParityTimingMetrics, ParityTopologyMetrics, PsnrSummary, SceneEvaluationConfig,
-    SceneEvaluationError, SplatEvaluationResult, SplatEvaluationSummary, TrainingProfile,
+    ParityTimingMetrics, ParityTopologyMetrics, PsnrSummary, SplatEvaluationConfig,
+    SplatEvaluationError, SplatEvaluationResult, SplatEvaluationSummary, TrainingProfile,
     DEFAULT_CONVERGENCE_FIXTURE_ID, DEFAULT_TINY_FIXTURE_ID,
 };
 pub use crate::training::{
@@ -84,17 +84,23 @@ pub use crate::training::{
     last_metal_training_telemetry, render_evaluation_frame, run_metal_training_benchmark,
     runtime_from_gaussians, runtime_from_splats, ChunkCapacityDisposition, ChunkCapacityEstimate,
     LiteGsOptimizerLrs, LiteGsTrainingTelemetry, MetalTrainingBenchmarkReport,
-    MetalTrainingBenchmarkSpec,
+    MetalTrainingBenchmarkSpec, TrainingChunkCompleted, TrainingChunkStarted, TrainingEvent,
+    TrainingEventRoute, TrainingPlanEstimate, TrainingPlanSelected, TrainingRun,
+    TrainingRunCompleted, TrainingRunReport, TrainingRunStarted,
 };
 #[cfg(feature = "gpu")]
 pub use crate::training::{HostSplats, SplatEvaluationRenderer, SplatView};
+#[allow(deprecated)]
+pub use crate::training::{SceneEvaluationConfig, SceneEvaluationError};
 pub use crate::training::{TrainingBackend, TrainingConfig, TrainingResult};
 
 // Re-export IO types
 pub use crate::io::colmap_dataset::{load_colmap_dataset, ColmapConfig};
+#[allow(deprecated)]
+pub use crate::io::scene_io::SceneMetadata;
 #[cfg(feature = "gpu")]
 pub use crate::io::scene_io::{load_splats_ply, save_splats_ply};
-pub use crate::io::scene_io::{SceneIoError, SceneMetadata};
+pub use crate::io::scene_io::{SceneIoError, SplatMetadata};
 pub use crate::io::tum_dataset::{load_tum_rgbd_dataset, TumRgbdConfig};
 #[cfg(feature = "gpu")]
 pub use crate::io::TrainingCheckpoint;
@@ -221,6 +227,28 @@ pub fn train_splats(
     training::train_splats(dataset, config)
 }
 
+/// Train 3DGS splats and return a structured report for downstream consumers.
+#[cfg(feature = "gpu")]
+pub fn train_splats_with_report(
+    dataset: &TrainingDataset,
+    config: &TrainingConfig,
+) -> Result<TrainingRun, TrainingError> {
+    training::train_splats_with_report(dataset, config)
+}
+
+/// Train 3DGS splats while emitting structured training events.
+#[cfg(feature = "gpu")]
+pub fn train_splats_with_events<F>(
+    dataset: &TrainingDataset,
+    config: &TrainingConfig,
+    on_event: F,
+) -> Result<TrainingRun, TrainingError>
+where
+    F: FnMut(TrainingEvent),
+{
+    training::train_splats_with_events(dataset, config, on_event)
+}
+
 /// Compatibility adapter for path-based dataset loading that returns the host-side splat artifact.
 #[cfg(feature = "gpu")]
 pub fn train_splats_from_path(
@@ -230,6 +258,32 @@ pub fn train_splats_from_path(
 ) -> Result<HostSplats, TrainingError> {
     let dataset = load_training_dataset(input, tum_config)?;
     training::train_splats(&dataset, config)
+}
+
+/// Compatibility adapter for path-based dataset loading that returns training artifacts and report.
+#[cfg(feature = "gpu")]
+pub fn train_splats_from_path_with_report(
+    input: &Path,
+    tum_config: &TumRgbdConfig,
+    config: &TrainingConfig,
+) -> Result<TrainingRun, TrainingError> {
+    let dataset = load_training_dataset(input, tum_config)?;
+    training::train_splats_with_report(&dataset, config)
+}
+
+/// Path-based training entry point with structured event emission.
+#[cfg(feature = "gpu")]
+pub fn train_splats_from_path_with_events<F>(
+    input: &Path,
+    tum_config: &TumRgbdConfig,
+    config: &TrainingConfig,
+    on_event: F,
+) -> Result<TrainingRun, TrainingError>
+where
+    F: FnMut(TrainingEvent),
+{
+    let dataset = load_training_dataset(input, tum_config)?;
+    training::train_splats_with_events(&dataset, config, on_event)
 }
 
 #[cfg(test)]

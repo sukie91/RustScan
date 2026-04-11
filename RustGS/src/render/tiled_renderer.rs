@@ -736,5 +736,4 @@ mod tests {
         assert_eq!(gaussians[1].depth, 2.0);
         assert_eq!(gaussians[2].depth, 3.0);
     }
-
 }

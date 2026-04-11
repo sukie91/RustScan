@@ -19,7 +19,7 @@ fn rgb_to_sh_dc(rgb: f32) -> f32 {
 }
 
 #[derive(Debug, Clone)]
-pub struct SceneMetadata {
+pub struct SplatMetadata {
     pub iterations: usize,
     pub final_loss: f32,
     pub gaussian_count: usize,
@@ -27,7 +27,7 @@ pub struct SceneMetadata {
     pub sh_degree: usize,
 }
 
-impl Default for SceneMetadata {
+impl Default for SplatMetadata {
     fn default() -> Self {
         Self {
             iterations: 0,
@@ -37,6 +37,9 @@ impl Default for SceneMetadata {
         }
     }
 }
+
+#[deprecated(note = "use SplatMetadata instead")]
+pub type SceneMetadata = SplatMetadata;
 
 #[derive(Debug, Error)]
 pub enum SceneIoError {
@@ -59,7 +62,7 @@ pub enum SceneIoError {
 fn write_ply_header<W: Write>(
     writer: &mut W,
     path: &Path,
-    metadata: &SceneMetadata,
+    metadata: &SplatMetadata,
     vertex_count: usize,
 ) -> Result<(), SceneIoError> {
     writeln!(writer, "ply").map_err(|source| SceneIoError::Write {
@@ -97,15 +100,7 @@ fn write_ply_header<W: Write>(
         source,
     })?;
     for property in [
-        "x",
-        "y",
-        "z",
-        "nx",
-        "ny",
-        "nz",
-        "f_dc_0",
-        "f_dc_1",
-        "f_dc_2",
+        "x", "y", "z", "nx", "ny", "nz", "f_dc_0", "f_dc_1", "f_dc_2",
     ] {
         writeln!(writer, "property float {property}").map_err(|source| SceneIoError::Write {
             path: path.display().to_string(),
@@ -118,8 +113,9 @@ fn write_ply_header<W: Write>(
             source,
         })?;
     }
-    for property in ["opacity", "scale_0", "scale_1", "scale_2", "rot_0", "rot_1", "rot_2", "rot_3"]
-    {
+    for property in [
+        "opacity", "scale_0", "scale_1", "scale_2", "rot_0", "rot_1", "rot_2", "rot_3",
+    ] {
         writeln!(writer, "property float {property}").map_err(|source| SceneIoError::Write {
             path: path.display().to_string(),
             source,
@@ -147,7 +143,7 @@ fn opacity_to_logit(opacity: f32) -> f32 {
 pub fn save_splats_ply(
     path: &Path,
     splats: &crate::training::HostSplats,
-    metadata: &SceneMetadata,
+    metadata: &SplatMetadata,
 ) -> Result<(), SceneIoError> {
     splats
         .validate()
@@ -219,14 +215,14 @@ pub fn save_splats_ply(
 #[cfg(feature = "gpu")]
 pub fn load_splats_ply(
     path: &Path,
-) -> Result<(crate::training::HostSplats, SceneMetadata), SceneIoError> {
+) -> Result<(crate::training::HostSplats, SplatMetadata), SceneIoError> {
     let file = File::open(path).map_err(|source| SceneIoError::Read {
         path: path.display().to_string(),
         source,
     })?;
     let reader = BufReader::new(file);
 
-    let mut metadata = SceneMetadata::default();
+    let mut metadata = SplatMetadata::default();
     let mut in_header = true;
     let mut expected_vertices: Option<usize> = None;
 
@@ -351,7 +347,7 @@ mod tests {
     fn test_save_splats_ply_roundtrip() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("splats.ply");
-        let metadata = SceneMetadata {
+        let metadata = SplatMetadata {
             iterations: 12,
             final_loss: 0.25,
             gaussian_count: 1,
@@ -380,7 +376,7 @@ mod tests {
     fn test_save_splats_ply_roundtrip_with_sh_coeffs() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("splats_sh.ply");
-        let metadata = SceneMetadata {
+        let metadata = SplatMetadata {
             iterations: 7,
             final_loss: 0.125,
             gaussian_count: 1,

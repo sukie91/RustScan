@@ -4,7 +4,7 @@ use image::{ImageBuffer, RgbImage};
 use rustgs::{
     evaluate_splats, evaluation_device, load_splats_ply, load_training_dataset,
     render_evaluation_frame, runtime_from_splats, select_evaluation_frames, EvaluationDevice,
-    EvaluationFrameMetric, HostSplats, SceneEvaluationConfig, SplatEvaluationRenderer,
+    EvaluationFrameMetric, HostSplats, SplatEvaluationConfig, SplatEvaluationRenderer,
     SplatEvaluationSummary, TumRgbdConfig,
 };
 
@@ -23,7 +23,7 @@ fn main() -> anyhow::Result<()> {
         &dataset,
         &splats,
         &metadata,
-        &SceneEvaluationConfig {
+        &SplatEvaluationConfig {
             render_scale: args.render_scale,
             frame_stride: args.frame_stride,
             max_frames: args.max_frames,

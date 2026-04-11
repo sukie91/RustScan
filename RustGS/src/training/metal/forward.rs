@@ -6,7 +6,7 @@ use glam::{Mat3, Quat, Vec3};
 
 use crate::diff::diff_splat::{DiffCamera, Splats};
 
-use super::metal_runtime::{
+use super::runtime::{
     ChunkPixelWindow, MetalBufferSlot, MetalProjectionRecord, MetalRuntime, MetalTileBins,
     NativeForwardProfile,
 };
@@ -60,7 +60,7 @@ pub(super) struct NativeParityProfile {
 }
 
 #[derive(Debug, Default, Clone, Copy)]
-pub(super) struct MetalRenderProfile {
+pub(crate) struct MetalRenderProfile {
     pub(super) projection: Duration,
     pub(super) sorting: Duration,
     pub(super) rasterization: Duration,
@@ -72,7 +72,7 @@ pub(super) struct MetalRenderProfile {
     pub(super) max_gaussians_per_tile: usize,
 }
 
-pub(super) struct ProjectedGaussians {
+pub(crate) struct ProjectedGaussians {
     pub(super) source_indices: Tensor,
     pub(super) u: Tensor,
     pub(super) v: Tensor,
@@ -126,10 +126,10 @@ impl ProjectedGaussians {
     }
 }
 
-pub(super) struct RenderedFrame {
-    pub(super) color: Tensor,
-    pub(super) depth: Tensor,
-    pub(super) alpha: Tensor,
+pub(crate) struct RenderedFrame {
+    pub(crate) color: Tensor,
+    pub(crate) depth: Tensor,
+    pub(crate) alpha: Tensor,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,7 +149,7 @@ impl ProjectedTileRecord {
 }
 
 #[derive(Debug, Clone, Default)]
-pub(super) struct ProjectedTileBins {
+pub(crate) struct ProjectedTileBins {
     runtime: MetalTileBins,
 }
 
@@ -198,24 +198,24 @@ impl ProjectedTileBins {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(super) struct MetalForwardSettings {
-    pub(super) pixel_count: usize,
-    pub(super) render_width: usize,
-    pub(super) render_height: usize,
-    pub(super) chunk_size: usize,
-    pub(super) use_native_forward: bool,
-    pub(super) litegs_mode: bool,
+pub(crate) struct MetalForwardSettings {
+    pub(crate) pixel_count: usize,
+    pub(crate) render_width: usize,
+    pub(crate) render_height: usize,
+    pub(crate) chunk_size: usize,
+    pub(crate) use_native_forward: bool,
+    pub(crate) litegs_mode: bool,
 }
 
 #[derive(Clone, Copy)]
-pub(super) struct MetalForwardInputs<'a> {
-    pub(super) gaussians: &'a Splats,
-    pub(super) positions: &'a Tensor,
-    pub(super) colors: &'a Tensor,
-    pub(super) camera: &'a DiffCamera,
-    pub(super) should_profile: bool,
-    pub(super) collect_visible_indices: bool,
-    pub(super) cluster_visible_mask: Option<&'a [bool]>,
+pub(crate) struct MetalForwardInputs<'a> {
+    pub(crate) gaussians: &'a Splats,
+    pub(crate) positions: &'a Tensor,
+    pub(crate) colors: &'a Tensor,
+    pub(crate) camera: &'a DiffCamera,
+    pub(crate) should_profile: bool,
+    pub(crate) collect_visible_indices: bool,
+    pub(crate) cluster_visible_mask: Option<&'a [bool]>,
 }
 
 pub(super) struct MetalForwardContext<'a> {
@@ -756,7 +756,7 @@ pub(super) fn execute_forward_pass(
     Ok((rendered, projected, profile))
 }
 
-pub(super) fn execute_forward_pass_on_runtime(
+pub(crate) fn execute_forward_pass_on_runtime(
     runtime: &mut MetalRuntime,
     device: &Device,
     settings: MetalForwardSettings,

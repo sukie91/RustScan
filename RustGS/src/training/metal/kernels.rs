@@ -1,10 +1,10 @@
-pub(super) const FILL_U32_SHADER: &str = include_str!("shaders/fill_u32.metal");
-pub(super) const FORWARD_RASTER_SHADER: &str = include_str!("shaders/forward_raster.metal");
-pub(super) const BACKWARD_RASTER_SHADER: &str = include_str!("shaders/backward_raster.metal");
-pub(super) const PROJECTION_SHADER: &str = include_str!("shaders/projection.metal");
-pub(super) const TILE_BINNING_SHADER: &str = include_str!("shaders/tile_binning.metal");
-pub(super) const GRADIENTS_SHADER: &str = include_str!("shaders/gradients.metal");
-pub(super) const ADAM_SHADER: &str = include_str!("shaders/adam.metal");
+pub(super) const FILL_U32_SHADER: &str = include_str!("../shaders/fill_u32.metal");
+pub(super) const FORWARD_RASTER_SHADER: &str = include_str!("../shaders/forward_raster.metal");
+pub(super) const BACKWARD_RASTER_SHADER: &str = include_str!("../shaders/backward_raster.metal");
+pub(super) const PROJECTION_SHADER: &str = include_str!("../shaders/projection.metal");
+pub(super) const TILE_BINNING_SHADER: &str = include_str!("../shaders/tile_binning.metal");
+pub(super) const GRADIENTS_SHADER: &str = include_str!("../shaders/gradients.metal");
+pub(super) const ADAM_SHADER: &str = include_str!("../shaders/adam.metal");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) enum MetalKernel {

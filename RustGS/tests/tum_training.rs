@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use rustgs::{
     evaluate_splats, evaluation_device, load_training_dataset, select_evaluation_frames,
-    EvaluationDevice, SceneEvaluationConfig, SceneMetadata, TrainingConfig, TumRgbdConfig,
+    EvaluationDevice, SplatEvaluationConfig, SplatMetadata, TrainingConfig, TumRgbdConfig,
 };
 
 fn tum_root() -> PathBuf {
@@ -121,7 +121,7 @@ fn tum_training_smoke_produces_post_train_evaluation_summary() {
     config.max_initial_gaussians = 2_000;
 
     let splats = rustgs::train_splats_from_path(&root, &tum_config, &config).unwrap();
-    let metadata = SceneMetadata {
+    let metadata = SplatMetadata {
         iterations: config.iterations,
         final_loss: 0.0,
         gaussian_count: splats.len(),
@@ -132,7 +132,7 @@ fn tum_training_smoke_produces_post_train_evaluation_summary() {
         &dataset,
         &splats,
         &metadata,
-        &SceneEvaluationConfig {
+        &SplatEvaluationConfig {
             render_scale: 0.25,
             frame_stride: 30,
             max_frames: 90,

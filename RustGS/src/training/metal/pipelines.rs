@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use candle_core::Device;
 use candle_metal_kernels::metal::ComputePipeline;
 
-use super::metal_kernels::MetalKernel;
+use super::kernels::MetalKernel;
 
 #[derive(Default)]
 pub(super) struct MetalPipelineCache {

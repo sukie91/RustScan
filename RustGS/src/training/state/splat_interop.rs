@@ -71,13 +71,18 @@ impl HostSplats {
         Ok(gaussians)
     }
 
-    pub fn to_scene_metadata(&self, iterations: usize, final_loss: f32) -> crate::SceneMetadata {
-        crate::SceneMetadata {
+    pub fn to_splat_metadata(&self, iterations: usize, final_loss: f32) -> crate::SplatMetadata {
+        crate::SplatMetadata {
             iterations,
             final_loss,
             gaussian_count: self.len(),
             sh_degree: self.sh_degree(),
         }
+    }
+
+    #[deprecated(note = "use to_splat_metadata instead")]
+    pub fn to_scene_metadata(&self, iterations: usize, final_loss: f32) -> crate::SplatMetadata {
+        self.to_splat_metadata(iterations, final_loss)
     }
 }
 

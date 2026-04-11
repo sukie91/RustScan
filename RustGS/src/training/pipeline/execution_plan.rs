@@ -1,4 +1,4 @@
-use super::metal_trainer::{self, ChunkCapacityEstimate};
+use super::metal::memory::{self as metal_memory, ChunkCapacityEstimate};
 use super::{plan_spatial_chunks, ChunkPlan, TrainingConfig};
 use crate::{TrainingDataset, TrainingError};
 
@@ -28,7 +28,7 @@ pub(crate) fn select_training_execution_plan(
         });
     }
 
-    let estimate = metal_trainer::estimate_chunk_capacity(dataset, config)?;
+    let estimate = metal_memory::estimate_chunk_capacity(dataset, config)?;
     if estimate.requires_subdivision_or_degradation() {
         let chunk_plan =
             plan_spatial_chunks(dataset, config, Some(estimate.affordable_initial_gaussians))?;

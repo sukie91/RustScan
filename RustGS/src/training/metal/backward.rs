@@ -2,12 +2,12 @@ use candle_core::{DType, Device, Tensor};
 
 use crate::diff::diff_splat::{DiffCamera, Splats, SH_C0};
 
-use super::metal_forward::{
-    finite_difference_sigma_wrt_rotation_component, projected_axis_covariance_terms,
-    projected_rows_to_cpu, row_to_quaternion, row_to_vec3, CpuProjectedGaussian,
-    ProjectedGaussians, ProjectedTileBins, RenderedFrame,
+use super::forward::{
+    self as metal_forward, finite_difference_sigma_wrt_rotation_component,
+    projected_axis_covariance_terms, projected_rows_to_cpu, row_to_quaternion, row_to_vec3,
+    CpuProjectedGaussian, ProjectedGaussians, ProjectedTileBins, RenderedFrame,
 };
-use super::metal_runtime::{MetalRuntime, METAL_TILE_SIZE};
+use super::runtime::{MetalRuntime, METAL_TILE_SIZE};
 
 const SH_C1: f32 = 0.488_602_52;
 const SH_C2: [f32; 5] = [
@@ -647,7 +647,7 @@ fn projected_clamped_sigmas(
     rotation: [f32; 4],
     camera: &DiffCamera,
 ) -> (f32, f32) {
-    let (sigma_x, sigma_y) = super::metal_forward::projected_axis_aligned_sigmas(
+    let (sigma_x, sigma_y) = metal_forward::projected_axis_aligned_sigmas(
         x,
         y,
         z,

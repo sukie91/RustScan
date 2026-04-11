@@ -2,8 +2,8 @@ use candle_core::{Device, Tensor, Var};
 
 use crate::diff::diff_splat::Splats;
 
-use super::metal_backward::MetalParameterGrads;
-use super::metal_runtime::{MetalBufferSlot, MetalRuntime};
+use super::backward::MetalParameterGrads;
+use super::runtime::{MetalBufferSlot, MetalRuntime};
 use super::topology::TopologyMutationPlan;
 
 pub(crate) struct MetalAdamState {

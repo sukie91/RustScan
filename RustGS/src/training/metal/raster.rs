@@ -4,8 +4,8 @@ use candle_core::DType;
 use candle_metal_kernels::metal::ComputePipeline;
 use objc2_metal::MTLSize;
 
-use super::metal_kernels::MetalKernel;
-use super::metal_runtime::{
+use super::kernels::MetalKernel;
+use super::runtime::{
     MetalBufferSlot, MetalProjectedGaussian, MetalRuntime, MetalTileBins, MetalTileDispatchRecord,
     NativeBackwardFrame, NativeForwardFrame, NativeForwardProfile, METAL_TILE_SIZE,
 };

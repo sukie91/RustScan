@@ -1,4 +1,4 @@
-use super::parity_harness::{ParityLossTerms, ParityTopologyMetrics};
+use super::parity_harness::{ParityLossCurveSample, ParityLossTerms, ParityTopologyMetrics};
 use std::sync::{Mutex, OnceLock};
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -14,30 +14,19 @@ pub struct LiteGsOptimizerLrs {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct LiteGsTrainingTelemetry {
     pub loss_terms: ParityLossTerms,
+    pub loss_curve_samples: Vec<ParityLossCurveSample>,
     pub topology: ParityTopologyMetrics,
     pub active_sh_degree: Option<usize>,
+    pub final_loss: Option<f32>,
+    pub final_step_loss: Option<f32>,
+    pub depth_valid_pixels: Option<usize>,
+    pub depth_grad_scale: Option<f32>,
     pub rotation_frozen: bool,
     pub learning_rates: LiteGsOptimizerLrs,
 }
 
 static LAST_METAL_TRAINING_TELEMETRY: OnceLock<Mutex<Option<LiteGsTrainingTelemetry>>> =
     OnceLock::new();
-
-pub(super) fn assemble_training_telemetry(
-    loss_terms: ParityLossTerms,
-    topology: ParityTopologyMetrics,
-    active_sh_degree: Option<usize>,
-    rotation_frozen: bool,
-    learning_rates: LiteGsOptimizerLrs,
-) -> LiteGsTrainingTelemetry {
-    LiteGsTrainingTelemetry {
-        loss_terms,
-        topology,
-        active_sh_degree,
-        rotation_frozen,
-        learning_rates,
-    }
-}
 
 pub(super) fn store_last_metal_training_telemetry(telemetry: Option<LiteGsTrainingTelemetry>) {
     let slot = LAST_METAL_TRAINING_TELEMETRY.get_or_init(|| Mutex::new(None));
@@ -55,21 +44,26 @@ pub fn last_metal_training_telemetry() -> Option<LiteGsTrainingTelemetry> {
 #[cfg(test)]
 mod tests {
     use super::{
-        assemble_training_telemetry, last_metal_training_telemetry,
-        store_last_metal_training_telemetry, LiteGsOptimizerLrs,
+        last_metal_training_telemetry, store_last_metal_training_telemetry, LiteGsOptimizerLrs,
+        LiteGsTrainingTelemetry,
     };
     use crate::training::parity_harness::{ParityLossTerms, ParityTopologyMetrics};
 
     #[test]
     fn telemetry_store_round_trips_latest_snapshot() {
         store_last_metal_training_telemetry(None);
-        let snapshot = assemble_training_telemetry(
-            ParityLossTerms::default(),
-            ParityTopologyMetrics::default(),
-            Some(3),
-            true,
-            LiteGsOptimizerLrs::default(),
-        );
+        let snapshot = LiteGsTrainingTelemetry {
+            loss_terms: ParityLossTerms::default(),
+            loss_curve_samples: Vec::new(),
+            topology: ParityTopologyMetrics::default(),
+            active_sh_degree: Some(3),
+            final_loss: Some(0.25),
+            final_step_loss: Some(0.2),
+            depth_valid_pixels: Some(128),
+            depth_grad_scale: Some(0.5),
+            rotation_frozen: true,
+            learning_rates: LiteGsOptimizerLrs::default(),
+        };
         store_last_metal_training_telemetry(Some(snapshot.clone()));
 
         assert_eq!(last_metal_training_telemetry(), Some(snapshot));

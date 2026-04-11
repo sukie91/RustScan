@@ -201,7 +201,7 @@ pub(super) fn persist_host_splats_scene(
     splats: &HostSplats,
     iterations: usize,
 ) -> Result<(), TrainingError> {
-    let metadata = splats.to_scene_metadata(iterations, 0.0);
+    let metadata = splats.to_splat_metadata(iterations, 0.0);
     crate::save_splats_ply(path, splats, &metadata).map_err(|err| {
         TrainingError::TrainingFailed(format!("failed to persist {}: {}", path.display(), err))
     })
@@ -211,7 +211,7 @@ pub(super) fn persist_host_splats_scene(
 mod tests {
     use super::{persist_host_splats_scene, ChunkPersistenceContext};
     use crate::diff::diff_splat::rgb_to_sh0_value;
-    use crate::training::chunk_training::ChunkTrainingOverridePlan;
+    use crate::training::pipeline::chunk_training::ChunkTrainingOverridePlan;
     use crate::training::splats::HostSplats;
     use crate::training::{PlannedChunk, TrainingConfig};
     use crate::{

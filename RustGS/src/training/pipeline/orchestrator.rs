@@ -2,15 +2,23 @@ use super::{LiteGsConfig, TrainingConfig, TrainingProfile};
 use crate::TrainingError;
 
 #[cfg(feature = "gpu")]
-use super::chunk_training::train_chunked_sequentially;
+use super::chunk_training::train_chunked_sequentially_with_report;
+#[cfg(feature = "gpu")]
+use super::events::{
+    emit_training_event, TrainingEvent, TrainingEventRoute, TrainingEventSink,
+    TrainingPlanEstimate, TrainingPlanSelected, TrainingRun, TrainingRunCompleted,
+    TrainingRunStarted,
+};
 #[cfg(feature = "gpu")]
 use super::execution_plan::{
     select_training_execution_plan, TrainingExecutionPlan, TrainingExecutionRoute,
 };
 #[cfg(feature = "gpu")]
-use super::metal_trainer;
+use super::metal::entry as metal_entry;
 #[cfg(feature = "gpu")]
 use super::splats::HostSplats;
+#[cfg(feature = "gpu")]
+use super::telemetry::store_last_metal_training_telemetry;
 #[cfg(feature = "gpu")]
 use crate::TrainingDataset;
 
@@ -19,31 +27,70 @@ pub fn train_splats(
     dataset: &TrainingDataset,
     config: &TrainingConfig,
 ) -> Result<HostSplats, TrainingError> {
-    match config.training_profile {
-        TrainingProfile::LegacyMetal => train_legacy_metal(dataset, config),
-        TrainingProfile::LiteGsMacV1 => train_litegs_mac_v1(dataset, config),
-    }
+    train_splats_with_report(dataset, config).map(TrainingRun::into_splats)
+}
+
+#[cfg(feature = "gpu")]
+pub fn train_splats_with_report(
+    dataset: &TrainingDataset,
+    config: &TrainingConfig,
+) -> Result<TrainingRun, TrainingError> {
+    let mut sink = |_event| {};
+    train_splats_with_events(dataset, config, &mut sink)
+}
+
+#[cfg(feature = "gpu")]
+pub fn train_splats_with_events<F>(
+    dataset: &TrainingDataset,
+    config: &TrainingConfig,
+    mut on_event: F,
+) -> Result<TrainingRun, TrainingError>
+where
+    F: FnMut(TrainingEvent),
+{
+    store_last_metal_training_telemetry(None);
+    emit_training_event(
+        &mut on_event,
+        TrainingEvent::RunStarted(TrainingRunStarted {
+            profile: config.training_profile,
+            iterations: config.iterations,
+            frame_count: dataset.poses.len(),
+            input_point_count: dataset.initial_points.len(),
+            chunked: config.chunked_training,
+        }),
+    );
+
+    let run = match config.training_profile {
+        TrainingProfile::LegacyMetal => train_legacy_metal(dataset, config, &mut on_event),
+        TrainingProfile::LiteGsMacV1 => train_litegs_mac_v1(dataset, config, &mut on_event),
+    }?;
+
+    store_last_metal_training_telemetry(run.report.telemetry.clone());
+    emit_training_event(
+        &mut on_event,
+        TrainingEvent::RunCompleted(TrainingRunCompleted {
+            report: run.report.clone(),
+        }),
+    );
+    Ok(run)
 }
 
 #[cfg(feature = "gpu")]
 fn train_legacy_metal(
     dataset: &TrainingDataset,
     config: &TrainingConfig,
-) -> Result<HostSplats, TrainingError> {
-    match config.training_profile {
-        TrainingProfile::LegacyMetal => {
-            let plan = select_training_execution_plan(dataset, config)?;
-            execute_training_plan(dataset, config, plan)
-        }
-        TrainingProfile::LiteGsMacV1 => unreachable!("validated by caller"),
-    }
+    sink: &mut TrainingEventSink<'_>,
+) -> Result<TrainingRun, TrainingError> {
+    let plan = select_training_execution_plan(dataset, config)?;
+    execute_training_plan(dataset, config, plan, sink)
 }
 
 #[cfg(feature = "gpu")]
 fn train_litegs_mac_v1(
     dataset: &TrainingDataset,
     config: &TrainingConfig,
-) -> Result<HostSplats, TrainingError> {
+    sink: &mut TrainingEventSink<'_>,
+) -> Result<TrainingRun, TrainingError> {
     validate_litegs_mac_v1_config(config)?;
     log::info!(
         "Training with LiteGS Mac V1 profile | sh_degree={} | cluster_size={} | tile_size={} | sparse_grad={} | reg_weight={:.4} | enable_transmittance={} | enable_depth={} | learnable_viewproj={} | lr_pose={:.6}",
@@ -59,7 +106,7 @@ fn train_litegs_mac_v1(
     );
 
     let plan = select_training_execution_plan(dataset, config)?;
-    execute_training_plan(dataset, config, plan)
+    execute_training_plan(dataset, config, plan, sink)
 }
 
 #[cfg(feature = "gpu")]
@@ -67,9 +114,29 @@ fn execute_training_plan(
     dataset: &TrainingDataset,
     config: &TrainingConfig,
     plan: TrainingExecutionPlan,
-) -> Result<HostSplats, TrainingError> {
+    sink: &mut TrainingEventSink<'_>,
+) -> Result<TrainingRun, TrainingError> {
+    emit_training_event(
+        sink,
+        TrainingEvent::PlanSelected(TrainingPlanSelected {
+            route: public_training_route(plan.route),
+            training_chunks: plan
+                .chunk_plan
+                .as_ref()
+                .map(|chunk_plan| chunk_plan.training_chunks().count()),
+            estimate: plan
+                .chunk_estimate
+                .as_ref()
+                .map(|estimate| TrainingPlanEstimate {
+                    requested_initial_gaussians: estimate.requested_initial_gaussians,
+                    affordable_initial_gaussians: estimate.affordable_initial_gaussians,
+                    estimated_peak_gib: estimate.estimated_peak_gib(),
+                    effective_budget_gib: estimate.effective_budget_gib(),
+                }),
+        }),
+    );
     match plan.route {
-        TrainingExecutionRoute::Standard => metal_trainer::train_splats(dataset, config),
+        TrainingExecutionRoute::Standard => metal_entry::train_splats_with_report(dataset, config),
         TrainingExecutionRoute::ChunkedSingleChunk => {
             if let Some(estimate) = plan.chunk_estimate.as_ref() {
                 log::info!(
@@ -80,7 +147,7 @@ fn execute_training_plan(
                     estimate.effective_budget_gib(),
                 );
             }
-            metal_trainer::train_splats(dataset, config)
+            metal_entry::train_splats_with_report(dataset, config)
         }
         TrainingExecutionRoute::ChunkedSequential => {
             let chunk_plan = plan
@@ -96,8 +163,17 @@ fn execute_training_plan(
                     chunk_plan.training_chunks().count(),
                 );
             }
-            train_chunked_sequentially(dataset, config, chunk_plan)
+            train_chunked_sequentially_with_report(dataset, config, chunk_plan, sink)
         }
+    }
+}
+
+#[cfg(feature = "gpu")]
+fn public_training_route(route: TrainingExecutionRoute) -> TrainingEventRoute {
+    match route {
+        TrainingExecutionRoute::Standard => TrainingEventRoute::Standard,
+        TrainingExecutionRoute::ChunkedSingleChunk => TrainingEventRoute::ChunkedSingleChunk,
+        TrainingExecutionRoute::ChunkedSequential => TrainingEventRoute::ChunkedSequential,
     }
 }
 
