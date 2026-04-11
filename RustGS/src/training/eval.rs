@@ -1,4 +1,5 @@
 use crate::diff::{DiffCamera, Splats};
+use crate::training::pose_utils::se3_rotation_row_major;
 use crate::{SplatMetadata, TrainingDataset};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -486,7 +487,7 @@ fn scaled_camera_for_pose(
         cy * sy,
         dst_width,
         dst_height,
-        &view_pose.rotation(),
+        &se3_rotation_row_major(&view_pose),
         &view_pose.translation(),
         device,
     )

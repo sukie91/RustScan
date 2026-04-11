@@ -3,8 +3,8 @@ use crate::TrainingError;
 
 #[cfg(feature = "gpu")]
 use super::events::{
-    emit_training_event, TrainingEvent, TrainingEventRoute, TrainingEventSink, TrainingPlanSelected,
-    TrainingRun, TrainingRunCompleted, TrainingRunStarted,
+    emit_training_event, TrainingEvent, TrainingEventRoute, TrainingEventSink,
+    TrainingPlanSelected, TrainingRun, TrainingRunCompleted, TrainingRunStarted,
 };
 #[cfg(feature = "gpu")]
 use super::metal::entry as metal_entry;

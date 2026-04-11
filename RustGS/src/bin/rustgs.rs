@@ -1,7 +1,7 @@
 //! RustGS CLI - 3D Gaussian Splatting Training
 //!
 //! Usage:
-//!   rustgs train --input <training_dataset.json|tum_dataset_dir|colmap_dir> --output <scene.ply>
+//!   rustgs train --input <training_dataset_with_initial_points.json|colmap_dir> --output <scene.ply>
 //!   rustgs render --input <scene.ply> --camera <pose.json> --output <image.png>
 
 #[cfg(not(feature = "gpu"))]
@@ -21,7 +21,7 @@ struct Cli {
 
 #[derive(Debug, Clone, clap::Args)]
 struct TrainArgs {
-    /// Path to TrainingDataset JSON, TUM RGB-D directory, or COLMAP directory
+    /// Path to a COLMAP directory or a TrainingDataset JSON that already contains initial_points
     #[arg(short, long)]
     input: PathBuf,
 
@@ -37,7 +37,7 @@ struct TrainArgs {
     #[arg(long, default_value = "100000")]
     max_initial_gaussians: usize,
 
-    /// Pixel sampling step for initialization (0 = auto)
+    /// Deprecated: frame/depth initialization is disabled, so this flag is ignored
     #[arg(long, default_value = "0")]
     sampling_step: usize,
 
@@ -305,8 +305,9 @@ fn run_render_command(_args: RenderArgs) -> anyhow::Result<()> {
 mod tests {
     use super::{
         train_command::{
-            build_training_config, evaluation_dataset_load_params, load_training_dataset_for_training,
-            maybe_write_litegs_parity_report, maybe_write_litegs_parity_report_with_manifest_dir,
+            build_training_config, evaluation_dataset_load_params,
+            load_training_dataset_for_training, maybe_write_litegs_parity_report,
+            maybe_write_litegs_parity_report_with_manifest_dir,
         },
         Cli, Commands, TrainArgs,
     };
@@ -1006,12 +1007,19 @@ mod tests {
         };
         let output_dir = tempdir().unwrap();
         let output = output_dir.path().join("fixture-scene.ply");
-        let dataset = load_training_dataset_for_training(
+        let (dataset, source) = load_training_dataset_for_training(
             &input,
             tum_config.max_frames,
             tum_config.frame_stride,
         )
         .unwrap();
+        if dataset.initial_points.is_empty() {
+            eprintln!(
+                "skipping test: resolved {:?} as {} without sparse points; training now requires COLMAP sparse initialization",
+                input, source
+            );
+            return;
+        }
 
         let training_run =
             rustgs::train_splats_from_path_with_report(&input, &tum_config, &config).unwrap();
@@ -1067,12 +1075,9 @@ mod tests {
         assert!(!report.metrics.had_oom);
         assert!(report.metrics.export_roundtrip_ok);
         assert!(report.timing.training_ms.unwrap_or(0) > 0);
-        assert!(
-            report
-                .notes
-                .iter()
-                .any(|note| note.contains("frame-based fallback")),
-            "bootstrap TUM fixture should note approximate initialization parity"
-        );
+        assert!(report
+            .notes
+            .iter()
+            .all(|note| !note.contains("frame-based fallback")));
     }
 }

@@ -1297,7 +1297,7 @@ fn tum_frame_initialized_backward_probe_on_metal() {
             before_position
                 .iter()
                 .zip(after_position.iter())
-                .map(|(lhs, rhs)| (lhs - rhs).abs())
+                .map(|(lhs, rhs)| (*lhs - *rhs).abs())
                 .fold(0.0f32, f32::max),
         );
         let before_scale = loaded.initial_splats.scale(idx);
@@ -1306,12 +1306,11 @@ fn tum_frame_initialized_backward_probe_on_metal() {
             before_scale
                 .iter()
                 .zip(after_scale.iter())
-                .map(|(lhs, rhs)| (lhs - rhs).abs())
+                .map(|(lhs, rhs)| (*lhs - *rhs).abs())
                 .fold(0.0f32, f32::max),
         );
-        map_opacity_delta = map_opacity_delta.max(
-            (loaded.initial_splats.opacity(idx) - trained_splats.opacity(idx)).abs(),
-        );
+        map_opacity_delta = map_opacity_delta
+            .max((loaded.initial_splats.opacity(idx) - trained_splats.opacity(idx)).abs());
         let before_color = loaded.initial_splats.rgb_color(idx);
         let after_color = trained_splats.rgb_color(idx);
         for channel in 0..3 {

@@ -14,6 +14,7 @@ pub mod morton;
 pub mod parity_harness;
 #[path = "state/pose_embedding.rs"]
 pub mod pose_embedding;
+mod pose_utils;
 
 #[cfg(feature = "gpu")]
 mod data;
@@ -48,9 +49,7 @@ pub use eval::{
     SplatEvaluationResult, SplatEvaluationSummary,
 };
 #[cfg(feature = "gpu")]
-pub use eval::{
-    evaluate_splats, evaluation_device, render_evaluation_frame, runtime_from_splats,
-};
+pub use eval::{evaluate_splats, evaluation_device, render_evaluation_frame, runtime_from_splats};
 pub use parity_harness::{
     compare_loss_curve_samples, default_litegs_parity_fixtures, default_parity_report_path,
     parity_fixture_id_for_input_path, resolve_litegs_parity_fixture_input_path,
@@ -66,8 +65,8 @@ pub use pipeline::benchmark::{
 };
 #[cfg(feature = "gpu")]
 pub use pipeline::events::{
-    TrainingEvent, TrainingEventRoute, TrainingPlanSelected, TrainingRun,
-    TrainingRunCompleted, TrainingRunReport, TrainingRunStarted,
+    TrainingEvent, TrainingEventRoute, TrainingPlanSelected, TrainingRun, TrainingRunCompleted,
+    TrainingRunReport, TrainingRunStarted,
 };
 #[cfg(feature = "gpu")]
 pub use splats::{HostSplats, SplatView};

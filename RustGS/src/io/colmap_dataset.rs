@@ -205,7 +205,7 @@ pub fn load_colmap_dataset(
     // Parse images
     let images = parse_colmap_images(&sparse_dir)?;
 
-    // Parse 3D points (optional)
+    // Parse 3D points required for sparse-point initialization
     let points = parse_colmap_points3d(&sparse_dir)?;
 
     if cameras.is_empty() {
@@ -217,6 +217,12 @@ pub fn load_colmap_dataset(
         return Err(TrainingError::InvalidInput(
             "no images found in COLMAP dataset".to_string(),
         ));
+    }
+    if points.is_empty() {
+        return Err(TrainingError::InvalidInput(format!(
+            "no sparse points found in {} (expected points3D.bin or points3D.txt with at least one point)",
+            sparse_dir.display(),
+        )));
     }
 
     // Use first camera for intrinsics (COLMAP datasets typically have one camera)
@@ -643,8 +649,10 @@ fn parse_colmap_points3d(dir: &Path) -> Result<Vec<ColmapPoint3D>, TrainingError
     } else if txt_path.exists() {
         parse_points3d_text(&txt_path)
     } else {
-        // Points3D is optional - return empty if not found
-        Ok(Vec::new())
+        Err(TrainingError::InvalidInput(format!(
+            "missing COLMAP sparse points in {} (expected points3D.bin or points3D.txt)",
+            dir.display(),
+        )))
     }
 }
 
@@ -804,6 +812,19 @@ mod tests {
         assert!((dataset.intrinsics.fx - 1500.0).abs() < 1e-3);
         assert_eq!(dataset.poses[0].pose.translation(), [0.0, 0.0, -1.0]);
         assert_eq!(dataset.poses[1].pose.translation(), [-1.0, 0.0, -2.0]);
+    }
+
+    #[test]
+    fn test_load_colmap_dataset_requires_sparse_points() {
+        let temp = tempdir().unwrap();
+        write_colmap_test_dataset(temp.path());
+        std::fs::remove_file(temp.path().join("sparse").join("0").join("points3D.txt")).unwrap();
+
+        let err = load_colmap_dataset(temp.path(), &ColmapConfig::default()).unwrap_err();
+        assert!(
+            err.to_string().contains("missing COLMAP sparse points"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

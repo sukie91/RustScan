@@ -1,6 +1,6 @@
 use super::eval::scaled_dimensions;
 use super::splats;
-use super::{TrainingConfig, TrainingProfile};
+use super::TrainingConfig;
 
 #[cfg(feature = "gpu")]
 pub(crate) mod data_loading;

@@ -51,7 +51,9 @@ pub use rustscan_types::{Intrinsics, MapPointData, ScenePose, TrainingDataset, S
 pub use crate::core::GaussianCamera;
 
 // Re-export render types
-pub use crate::render::{GaussianRenderer, ProjectedGaussian, RenderBuffer, RenderOutput, TiledRenderer};
+pub use crate::render::{
+    GaussianRenderer, ProjectedGaussian, RenderBuffer, RenderOutput, TiledRenderer,
+};
 
 // Re-export training types
 #[cfg(feature = "gpu")]
@@ -75,10 +77,9 @@ pub use crate::training::{
 #[cfg(feature = "gpu")]
 pub use crate::training::{
     evaluate_splats, evaluation_device, last_metal_training_telemetry, render_evaluation_frame,
-    run_metal_training_benchmark, runtime_from_splats, LiteGsOptimizerLrs,
-    LiteGsTrainingTelemetry, MetalTrainingBenchmarkReport, MetalTrainingBenchmarkSpec,
-    TrainingEvent, TrainingEventRoute, TrainingPlanSelected, TrainingRun,
-    TrainingRunCompleted, TrainingRunReport, TrainingRunStarted,
+    run_metal_training_benchmark, runtime_from_splats, LiteGsOptimizerLrs, LiteGsTrainingTelemetry,
+    MetalTrainingBenchmarkReport, MetalTrainingBenchmarkSpec, TrainingEvent, TrainingEventRoute,
+    TrainingPlanSelected, TrainingRun, TrainingRunCompleted, TrainingRunReport, TrainingRunStarted,
 };
 #[cfg(feature = "gpu")]
 pub use crate::training::{HostSplats, SplatEvaluationRenderer, SplatView};

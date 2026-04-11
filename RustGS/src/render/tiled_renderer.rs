@@ -415,9 +415,7 @@ mod tests {
             scale.map(f32::ln).into(),
             rotation.into(),
             vec![opacity_to_logit(opacity)],
-            color
-                .map(crate::diff::diff_splat::rgb_to_sh0_value)
-                .into(),
+            color.map(crate::diff::diff_splat::rgb_to_sh0_value).into(),
             0,
         )
         .unwrap()

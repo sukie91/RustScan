@@ -34,10 +34,11 @@ import shutil
 import struct
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, TypeVar
 
 
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+T = TypeVar("T")
 
 
 @dataclass(frozen=True)
@@ -198,7 +199,9 @@ def normalize_quaternion(
     return (x / norm, y / norm, z / norm, w / norm)
 
 
-def closest_entry[T](entries: Iterable[T], timestamp: float, tolerance: float, key) -> T | None:
+def closest_entry(
+    entries: Iterable[T], timestamp: float, tolerance: float, key
+) -> T | None:
     best = None
     best_diff = None
     for entry in entries:

@@ -3,26 +3,17 @@ use super::frame_loader::{ordered_frame_indices, FrameLoaderOptions, PrefetchFra
 #[cfg(feature = "gpu")]
 use super::frame_targets::{resize_depth, resize_rgb_u8_to_f32};
 #[cfg(feature = "gpu")]
-use super::init_map::{
-    accumulate_frame_into_initial_splats, build_initial_splats, finalize_initial_splats,
-    initial_frame_sampling_step,
-};
+use super::init_map::build_initial_splats;
 #[cfg(feature = "gpu")]
 use super::splats::HostSplats;
 #[cfg(feature = "gpu")]
 use crate::diff::diff_splat::DiffCamera;
 #[cfg(feature = "gpu")]
+use crate::training::pose_utils::se3_rotation_row_major;
+#[cfg(feature = "gpu")]
 use crate::{TrainingDataset, TrainingError, SE3};
 #[cfg(feature = "gpu")]
 use candle_core::Device;
-
-#[cfg(feature = "gpu")]
-pub(super) struct FrameSample {
-    pub(super) color_u8: Vec<u8>,
-    pub(super) depth: Vec<f32>,
-    pub(super) rotation: [[f32; 3]; 3],
-    pub(super) translation: [f32; 3],
-}
 
 #[cfg(feature = "gpu")]
 pub(crate) struct LoadedTrainingData {
@@ -62,17 +53,6 @@ pub(crate) fn load_training_data(
     let mut cameras = Vec::with_capacity(dataset.poses.len());
     let mut colors = Vec::with_capacity(dataset.poses.len());
     let mut depths = Vec::with_capacity(dataset.poses.len());
-    let mut initial_splats = if dataset.initial_points.is_empty() {
-        Some((
-            HostSplats::with_sh_degree_capacity(
-                super::splats::splat_color_representation_for_config(config).sh_degree(),
-                config.max_initial_gaussians.max(1),
-            ),
-            initial_frame_sampling_step(dataset, dataset.poses.len(), config),
-        ))
-    } else {
-        None
-    };
     let frame_order = ordered_frame_indices(dataset.poses.len(), 1, config.frame_shuffle_seed);
     let mut real_depth_frames = 0usize;
     for (cursor, &pose_idx) in frame_order.iter().enumerate() {
@@ -81,8 +61,6 @@ pub(crate) fn load_training_data(
         let decoded = loader.get(pose_idx)?;
         real_depth_frames += usize::from(decoded.used_real_depth);
 
-        let rotation = pose.pose.rotation();
-        let translation = pose.pose.translation();
         let camera = diff_camera_from_scene_pose(
             &pose.pose,
             dataset.intrinsics.fx,
@@ -93,19 +71,6 @@ pub(crate) fn load_training_data(
             height,
             device,
         )?;
-
-        if let Some((splats, sampling_step)) = initial_splats.as_mut() {
-            accumulate_frame_into_initial_splats(
-                splats,
-                dataset,
-                &rotation,
-                &translation,
-                &decoded.color_u8,
-                &decoded.depth,
-                *sampling_step,
-                config,
-            );
-        }
 
         cameras.push(camera);
         colors.push(resize_rgb_u8_to_f32(
@@ -124,24 +89,13 @@ pub(crate) fn load_training_data(
         ));
     }
 
-    let initial_splats = if let Some((mut splats, sampling_step)) = initial_splats {
-        log::info!(
-            "Initializing gaussians from {} frames | resolution={}x{} | frame_budget={} | sampling_step={}",
-            dataset.poses.len(),
-            width,
-            height,
-            config
-                .max_initial_gaussians
-                .checked_div(dataset.poses.len().max(1))
-                .unwrap_or(1)
-                .max(1),
-            sampling_step
-        );
-        finalize_initial_splats(&mut splats, sampling_step, config)?;
-        splats
-    } else {
-        build_initial_splats(dataset, &[], config)?
-    };
+    log::info!(
+        "Initializing gaussians from dataset sparse points | poses={} | sparse_points={} | max_initial_gaussians={}",
+        dataset.poses.len(),
+        dataset.initial_points.len(),
+        config.max_initial_gaussians,
+    );
+    let initial_splats = build_initial_splats(dataset, config)?;
 
     if real_depth_frames == 0 && !config.use_synthetic_depth {
         log::info!(
@@ -174,7 +128,7 @@ fn diff_camera_from_scene_pose(
     // backprojection during Gaussian initialization. The differentiable
     // renderer, however, expects world-to-camera extrinsics.
     let view_pose = pose.inverse();
-    let rotation = view_pose.rotation();
+    let rotation = se3_rotation_row_major(&view_pose);
     let translation = view_pose.translation();
 
     DiffCamera::new(
@@ -195,6 +149,7 @@ mod tests {
     use super::*;
     use crate::diff::diff_splat::{rgb_to_sh0_value, Splats};
     use crate::training::splats::HostSplats;
+    use crate::{TrainingConfig, TrainingProfile};
 
     fn test_opacity_to_logit(opacity: f32) -> f32 {
         let clamped = opacity.clamp(1e-6, 1.0 - 1e-6);
@@ -220,11 +175,34 @@ mod tests {
     }
 
     #[test]
+    fn test_diff_camera_keeps_world_to_camera_rotation_row_major() {
+        let device = Device::Cpu;
+        let pose =
+            crate::SE3::from_axis_angle(&[0.0, 0.0, std::f32::consts::FRAC_PI_2], &[0.0, 0.0, 0.0]);
+
+        let camera =
+            diff_camera_from_scene_pose(&pose, 500.0, 510.0, 320.0, 240.0, 640, 480, &device)
+                .unwrap();
+
+        let expected = [[0.0, 1.0, 0.0], [-1.0, 0.0, 0.0], [0.0, 0.0, 1.0]];
+        for row in 0..3 {
+            for col in 0..3 {
+                assert!(
+                    (camera.rotation[row][col] - expected[row][col]).abs() < 1e-6,
+                    "row={row} col={col} actual={} expected={}",
+                    camera.rotation[row][col],
+                    expected[row][col]
+                );
+            }
+        }
+    }
+
+    #[test]
     fn litegs_profile_initializes_trainable_gaussians_with_sh_dc() {
         let device = Device::Cpu;
-        let config = super::super::TrainingConfig {
-            training_profile: super::super::TrainingProfile::LiteGsMacV1,
-            ..super::super::TrainingConfig::default()
+        let config = TrainingConfig {
+            training_profile: TrainingProfile::LiteGsMacV1,
+            ..TrainingConfig::default()
         };
         let mut splats = HostSplats::with_sh_degree_capacity(
             super::super::splats::splat_color_representation_for_config(&config).sh_degree(),

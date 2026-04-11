@@ -311,9 +311,7 @@ mod tests {
             scale.map(f32::ln).into(),
             vec![1.0, 0.0, 0.0, 0.0],
             vec![0.0],
-            color
-                .map(crate::diff::diff_splat::rgb_to_sh0_value)
-                .into(),
+            color.map(crate::diff::diff_splat::rgb_to_sh0_value).into(),
             0,
         )
         .unwrap()
@@ -371,7 +369,9 @@ mod tests {
         let intrinsics = Intrinsics::from_focal(500.0, 64, 64);
         let camera = GaussianCamera::new(intrinsics, SE3::identity());
 
-        let (depth, color) = renderer.render_depth_and_color_splats(&splats, &camera).unwrap();
+        let (depth, color) = renderer
+            .render_depth_and_color_splats(&splats, &camera)
+            .unwrap();
 
         // Should have some depth values
         assert!(depth.iter().any(|&d| d > 0.0));
@@ -393,6 +393,9 @@ mod tests {
 
         let output = renderer.render_splats(&splats, &camera).unwrap();
         assert!(output.depth.iter().any(|&d| d > 0.0));
-        assert!(output.color.iter().any(|&channel| channel != 25 && channel != 51 && channel != 76));
+        assert!(output
+            .color
+            .iter()
+            .any(|&channel| channel != 25 && channel != 51 && channel != 76));
     }
 }

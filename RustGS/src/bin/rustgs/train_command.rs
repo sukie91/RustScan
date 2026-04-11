@@ -14,14 +14,21 @@ pub(super) fn run_train_command(args: TrainArgs) -> anyhow::Result<()> {
     log::info!("Iterations: {}", args.iterations);
     log::info!("Backend: metal");
     log::info!("Training profile: {}", args.training_profile);
+    if args.sampling_step != 0 {
+        log::warn!(
+            "--sampling-step={} is ignored because training now initializes strictly from dataset sparse points",
+            args.sampling_step
+        );
+    }
 
-    let dataset =
+    let (dataset, source) =
         load_training_dataset_for_training(&args.input, args.max_frames, args.frame_stride)?;
     log::info!(
         "Loaded {} poses, {} initialization points",
         dataset.poses.len(),
         dataset.initial_points.len()
     );
+    ensure_sparse_initialization_points(&dataset, source, &args.input)?;
 
     let config = build_training_config(&args)?;
     log_litegs_training_config(&config);
@@ -81,7 +88,7 @@ pub(super) fn load_training_dataset_for_training(
     input: &Path,
     max_frames: usize,
     frame_stride: usize,
-) -> anyhow::Result<rustscan_types::TrainingDataset> {
+) -> anyhow::Result<(rustscan_types::TrainingDataset, rustgs::TrainingInputKind)> {
     if !input.is_dir() && (max_frames > 0 || frame_stride > 1) {
         log::warn!(
             "--max-frames and --frame-stride only apply to dataset directories; ignoring them for {:?}",
@@ -110,7 +117,7 @@ pub(super) fn load_training_dataset_for_training(
         dataset.poses.len(),
     );
 
-    Ok(dataset)
+    Ok((dataset, source))
 }
 
 #[cfg(feature = "gpu")]
@@ -326,6 +333,35 @@ fn log_litegs_training_config(config: &rustgs::TrainingConfig) {
     );
 }
 
+fn ensure_sparse_initialization_points(
+    dataset: &rustscan_types::TrainingDataset,
+    source: rustgs::TrainingInputKind,
+    input: &Path,
+) -> anyhow::Result<()> {
+    if !dataset.initial_points.is_empty() {
+        return Ok(());
+    }
+
+    let source_hint = match source {
+        rustgs::TrainingInputKind::TumRgbd => {
+            "raw TUM RGB-D input does not carry COLMAP sparse points; convert it to a COLMAP reconstruction first"
+        }
+        rustgs::TrainingInputKind::Colmap => {
+            "the COLMAP input is missing sparse points3D output; make sure points3D.bin or points3D.txt exists"
+        }
+        rustgs::TrainingInputKind::TrainingDatasetJson => {
+            "the TrainingDataset JSON did not contain any initial_points; export it from a COLMAP sparse reconstruction first"
+        }
+    };
+
+    bail!(
+        "training initialization now requires COLMAP sparse points, but {:?} ({}) provided none: {}",
+        input,
+        source,
+        source_hint
+    );
+}
+
 pub(super) fn maybe_write_litegs_parity_report(
     input: &Path,
     output: &Path,
@@ -409,11 +445,6 @@ pub(super) fn maybe_write_litegs_parity_report_with_manifest_dir(
     report.timing.training_ms = Some(training_elapsed.as_millis() as u64);
     report.timing.total_wall_clock_ms = Some(training_elapsed.as_millis() as u64);
 
-    if dataset.initial_points.is_empty() {
-        report.notes.push(
-            "Sparse COLMAP-style points were unavailable, so initialization-count parity is approximate and frame-based fallback was used.".to_string(),
-        );
-    }
     report.notes.push(
         "LiteGsMacV1 now evaluates the active SH degree for view-dependent color during Metal training and can apply rotation-aware projection gradients when rotation learning is enabled."
             .to_string(),
@@ -520,7 +551,7 @@ fn splats_have_non_finite(splats: &rustgs::HostSplats) -> bool {
 
 #[cfg(all(test, feature = "gpu"))]
 mod tests {
-    use super::run_train_command;
+    use super::{ensure_sparse_initialization_points, run_train_command};
     use crate::TrainArgs;
     use std::path::PathBuf;
 
@@ -587,5 +618,23 @@ mod tests {
 
         let err = run_train_command(args).expect_err("missing input should fail");
         assert!(err.to_string().contains("failed to load"));
+    }
+
+    #[test]
+    fn training_requires_sparse_initialization_points() {
+        let dataset =
+            rustscan_types::TrainingDataset::new(rustgs::Intrinsics::new(1.0, 1.0, 0.0, 0.0, 1, 1));
+        let err = ensure_sparse_initialization_points(
+            &dataset,
+            rustgs::TrainingInputKind::TumRgbd,
+            PathBuf::from("test_data/tum").as_path(),
+        )
+        .expect_err("dataset without sparse points should fail");
+
+        assert!(
+            err.to_string()
+                .contains("training initialization now requires COLMAP sparse points"),
+            "unexpected error: {err}"
+        );
     }
 }

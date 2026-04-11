@@ -7,6 +7,7 @@
 use candle_core::{DType, Device, Tensor, Var};
 
 use crate::diff::diff_splat::DiffCamera;
+use crate::training::pose_utils::se3_rotation_row_major;
 use crate::SE3;
 
 /// Learnable pose parameters for a single frame.
@@ -121,7 +122,7 @@ impl PoseEmbedding {
         // Invert to get world-to-camera
         let view_pose = pose.inverse();
 
-        let rotation = view_pose.rotation();
+        let rotation = se3_rotation_row_major(&view_pose);
         let translation = view_pose.translation();
 
         DiffCamera::new(
