@@ -11,6 +11,7 @@ use candle_core::DType;
 #[cfg(test)]
 use candle_core::Var;
 use candle_core::{Device, Tensor};
+use rand::Rng;
 
 #[cfg(test)]
 use crate::diff::diff_splat::SH_C0;
@@ -88,12 +89,12 @@ use super::runtime::ScreenRect;
 
 const LITEGS_LAMBDA_DSSIM: f32 = 0.2;
 const LITEGS_DEPTH_LOSS_WEIGHT: f32 = 0.1;
-const LITEGS_SH_ACTIVATION_EPOCH_INTERVAL: usize = 5;
 const LITEGS_OPACITY_THRESHOLD: f32 = 0.005;
 const LITEGS_OPACITY_DECAY_RATE: f32 = 0.5;
 const LITEGS_OPACITY_DECAY_MIN: f32 = 1.0 / 128.0;
 const LITEGS_REFINE_OPACITY_DECAY: f32 = 0.004;
 const LITEGS_REFINE_SCALE_DECAY: f32 = 0.002;
+const LITEGS_MEAN_NOISE_WEIGHT: f32 = 50.0;
 
 pub struct MetalTrainer {
     training_profile: TrainingProfile,
@@ -348,7 +349,11 @@ impl MetalTrainer {
             beta2: 0.999,
             eps: 1e-8,
             rotation_frozen: config.lr_rotation == 0.0,
-            active_sh_degree: 0,
+            active_sh_degree: if config.training_profile == TrainingProfile::LiteGsMacV1 {
+                config.litegs.sh_degree
+            } else {
+                0
+            },
             last_loss_terms: ParityLossTerms::default(),
             topology_metrics: ParityTopologyMetrics::default(),
             last_learning_rates: LiteGsOptimizerLrs::default(),

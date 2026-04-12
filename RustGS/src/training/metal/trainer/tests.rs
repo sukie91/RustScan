@@ -1,5 +1,7 @@
 use super::super::backward as metal_backward;
+use super::step::litegs_mean_noise_deltas;
 use super::*;
+use rand::{rngs::StdRng, SeedableRng};
 
 fn max_slice_delta(lhs: &[f32], rhs: &[f32]) -> f32 {
     lhs.iter()
@@ -79,6 +81,17 @@ fn update_gaussian_stats_uses_projected_grad_magnitudes_for_litegs() {
     assert_eq!(trainer.gaussian_stats[1].consecutive_invisible_epochs, 0);
     assert!((trainer.gaussian_stats[1].fragment_weight.mean - 1.0).abs() < 1e-6);
     assert!((trainer.gaussian_stats[1].fragment_err.mean - expected).abs() < 1e-6);
+}
+
+#[test]
+fn litegs_mean_noise_only_offsets_visible_low_opacity_gaussians() {
+    let mut rng = StdRng::seed_from_u64(7);
+    let deltas = litegs_mean_noise_deltas(&[0.01, 0.95], &[0, 2], 3, 1e-4, 1.0, &mut rng);
+
+    assert_eq!(deltas.len(), 9);
+    assert!(deltas[0].abs() > 0.0 || deltas[1].abs() > 0.0 || deltas[2].abs() > 0.0);
+    assert_eq!(&deltas[3..6], &[0.0, 0.0, 0.0]);
+    assert_eq!(&deltas[6..9], &[0.0, 0.0, 0.0]);
 }
 
 #[test]
@@ -253,9 +266,32 @@ fn litegs_short_run_topology_window_compresses_to_single_epoch() {
     .unwrap();
 
     assert_eq!(trainer.litegs_total_epochs(638), 1);
-    assert_eq!(trainer.litegs_effective_densify_from_epoch(638), 0);
+    assert_eq!(trainer.litegs_effective_densify_from_epoch(638), 1);
     assert_eq!(trainer.litegs_densify_until_epoch(638), 1);
     assert_eq!(trainer.litegs_late_stage_start_epoch(638), 0);
+}
+
+#[test]
+fn litegs_uses_full_sh_degree_from_first_iteration() {
+    let mut trainer = MetalTrainer::new(
+        32,
+        16,
+        &TrainingConfig {
+            training_profile: TrainingProfile::LiteGsMacV1,
+            litegs: LiteGsConfig {
+                sh_degree: 3,
+                ..LiteGsConfig::default()
+            },
+            ..TrainingConfig::default()
+        },
+        Device::Cpu,
+    )
+    .unwrap();
+
+    trainer.iteration = 1;
+    assert_eq!(trainer.litegs_active_sh_degree_for_iteration(798), 3);
+    trainer.iteration = 500;
+    assert_eq!(trainer.litegs_active_sh_degree_for_iteration(798), 3);
 }
 
 #[test]
@@ -263,7 +299,7 @@ fn litegs_topology_metrics_capture_late_stage_activity() {
     let device = Device::Cpu;
     let trainer_config = TrainingConfig {
         training_profile: TrainingProfile::LiteGsMacV1,
-        iterations: 3,
+        iterations: 4,
         topology_warmup: 0,
         max_initial_gaussians: 4,
         litegs: LiteGsConfig {
@@ -306,6 +342,7 @@ fn litegs_topology_metrics_capture_late_stage_activity() {
                 m2: 0.0,
                 count: 1,
             },
+            refine_weight_max: 1.0,
             visible_count: 1,
             age: 1,
             ..Default::default()
@@ -320,7 +357,7 @@ fn litegs_topology_metrics_capture_late_stage_activity() {
         .maybe_apply_topology_updates(&mut gaussians, 0, 1)
         .unwrap();
 
-    assert_eq!(trainer.topology_metrics.total_epochs, Some(3));
+    assert_eq!(trainer.topology_metrics.total_epochs, Some(4));
     assert_eq!(trainer.topology_metrics.densify_until_epoch, Some(3));
     assert_eq!(trainer.topology_metrics.late_stage_start_epoch, Some(2));
     assert_eq!(trainer.topology_metrics.first_densify_epoch, Some(2));
@@ -331,9 +368,9 @@ fn litegs_topology_metrics_capture_late_stage_activity() {
     assert_eq!(trainer.topology_metrics.last_prune_epoch, Some(2));
     assert_eq!(trainer.topology_metrics.late_stage_prune_events, 1);
     assert_eq!(trainer.topology_metrics.late_stage_prune_removed, 1);
-    assert_eq!(trainer.topology_metrics.first_opacity_reset_epoch, Some(2));
-    assert_eq!(trainer.topology_metrics.last_opacity_reset_epoch, Some(2));
-    assert_eq!(trainer.topology_metrics.late_stage_opacity_reset_events, 1);
+    assert_eq!(trainer.topology_metrics.first_opacity_reset_epoch, None);
+    assert_eq!(trainer.topology_metrics.last_opacity_reset_epoch, None);
+    assert_eq!(trainer.topology_metrics.late_stage_opacity_reset_events, 0);
 }
 
 #[test]
@@ -1145,13 +1182,13 @@ fn tum_frame_initialized_backward_probe_on_metal() {
     let dataset_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
-        .join("test_data/tum/rgbd_dataset_freiburg1_xyz");
-    let dataset = crate::load_tum_rgbd_dataset(
+        .join("test_data/tum_freiburg1_xyz_colmap");
+    let dataset = crate::load_colmap_dataset(
         &dataset_path,
-        &crate::TumRgbdConfig {
+        &crate::ColmapConfig {
             max_frames: 10,
             frame_stride: 30,
-            ..crate::TumRgbdConfig::default()
+            ..crate::ColmapConfig::default()
         },
     )
     .unwrap();
@@ -1366,13 +1403,13 @@ fn tum_frame_initialized_train_loop_updates_params_on_metal() {
     let dataset_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
-        .join("test_data/tum/rgbd_dataset_freiburg1_xyz");
-    let dataset = crate::load_tum_rgbd_dataset(
+        .join("test_data/tum_freiburg1_xyz_colmap");
+    let dataset = crate::load_colmap_dataset(
         &dataset_path,
-        &crate::TumRgbdConfig {
+        &crate::ColmapConfig {
             max_frames: 10,
             frame_stride: 30,
-            ..crate::TumRgbdConfig::default()
+            ..crate::ColmapConfig::default()
         },
     )
     .unwrap();

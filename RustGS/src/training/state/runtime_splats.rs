@@ -1,4 +1,5 @@
 use candle_core::Device;
+use glam::{Quat, Vec3};
 
 use crate::diff::diff_splat::{sh_coeff_count_for_degree, Splats as RuntimeSplats};
 
@@ -11,6 +12,7 @@ use super::topology::{TopologyMutationPlan, TopologyPlanRow};
 pub(super) struct TopologySplatMetrics {
     positions: Vec<f32>,
     log_scales: Vec<f32>,
+    rotations: Vec<f32>,
     opacity_logits: Vec<f32>,
     retainable: Vec<bool>,
 }
@@ -21,6 +23,7 @@ impl TopologySplatMetrics {
         Self {
             positions: splats.positions.clone(),
             log_scales: splats.log_scales.clone(),
+            rotations: splats.rotations.clone(),
             opacity_logits: splats.opacity_logits.clone(),
             retainable: (0..splats.len())
                 .map(|idx| {
@@ -81,6 +84,7 @@ impl TopologySplatMetrics {
         Ok(Self {
             positions,
             log_scales: flatten_rows(log_scales),
+            rotations: flatten_rows(rotations),
             opacity_logits: gaussians.opacities.as_tensor().to_vec1::<f32>()?,
             retainable,
         })
@@ -113,22 +117,19 @@ impl TopologySplatMetrics {
         [log[0].exp(), log[1].exp(), log[2].exp()]
     }
 
+    pub(super) fn rotation(&self, idx: usize) -> [f32; 4] {
+        let base = idx * 4;
+        [
+            self.rotations.get(base).copied().unwrap_or(1.0),
+            self.rotations.get(base + 1).copied().unwrap_or_default(),
+            self.rotations.get(base + 2).copied().unwrap_or_default(),
+            self.rotations.get(base + 3).copied().unwrap_or_default(),
+        ]
+    }
+
     pub(super) fn max_scale(&self, idx: usize) -> f32 {
         let scale = self.scale(idx);
         scale[0].max(scale[1]).max(scale[2])
-    }
-
-    pub(super) fn max_scale_axis(&self, idx: usize) -> usize {
-        let scale = self.scale(idx);
-        let mut max_axis = 0usize;
-        let mut max_value = scale[0];
-        for (axis, value) in scale.into_iter().enumerate().skip(1) {
-            if value > max_value {
-                max_axis = axis;
-                max_value = value;
-            }
-        }
-        max_axis
     }
 
     pub(super) fn opacity(&self, idx: usize) -> f32 {
@@ -141,6 +142,32 @@ impl TopologySplatMetrics {
 
     pub(super) fn retainable(&self, idx: usize) -> bool {
         self.retainable.get(idx).copied().unwrap_or(false)
+    }
+
+    pub(super) fn brush_bounds_center_extent(&self) -> ([f32; 3], f32) {
+        if self.len() == 0 {
+            return ([0.0, 0.0, 0.0], 1.0);
+        }
+        let mut center = [0.0f32; 3];
+        for idx in 0..self.len() {
+            let position = self.position(idx);
+            center[0] += position[0];
+            center[1] += position[1];
+            center[2] += position[2];
+        }
+        let inv = 1.0 / self.len() as f32;
+        center[0] *= inv;
+        center[1] *= inv;
+        center[2] *= inv;
+
+        let mut extent = 0.0f32;
+        for idx in 0..self.len() {
+            let position = self.position(idx);
+            extent = extent.max((position[0] - center[0]).abs());
+            extent = extent.max((position[1] - center[1]).abs());
+            extent = extent.max((position[2] - center[2]).abs());
+        }
+        (center, extent.max(1e-6))
     }
 }
 
@@ -170,12 +197,12 @@ pub(super) fn apply_topology_plan(
         let mut position = vec3_from_row(row_slice(&positions, 3, source_idx));
         let mut log_scale = vec3_from_row(row_slice(&log_scales, 3, source_idx));
         let rotation = vec4_from_row(row_slice(&rotations, 4, source_idx));
-        let opacity_logit = opacity_logits.get(source_idx).copied().unwrap_or_default();
+        let mut opacity_logit = opacity_logits.get(source_idx).copied().unwrap_or_default();
         let color = vec3_from_row(row_slice(&base_colors, 3, source_idx));
         let sh_rest_row = row_slice(&sh_rest, sh_rest_row_width, source_idx);
 
         match *row {
-            TopologyPlanRow::Existing { .. } | TopologyPlanRow::LiteClone { .. } => {}
+            TopologyPlanRow::Existing { .. } => {}
             TopologyPlanRow::LegacyOffsetClone { axis, .. } => {
                 if axis < 3 {
                     position[axis] += log_scale[axis].exp().max(0.01) * 0.5;
@@ -187,12 +214,23 @@ pub(super) fn apply_topology_plan(
                 position[0] += (direction as f32) * max_scale * 0.1;
                 log_scale[0] = (max_scale * 0.5).max(1e-6).ln();
             }
-            TopologyPlanRow::LiteSplit { axis, .. } => {
-                if axis < 3 {
-                    let axis_scale = log_scale[axis].exp();
-                    position[axis] += axis_scale * 0.5;
-                    log_scale[axis] = (axis_scale / 1.6).max(1e-6).ln();
-                }
+            TopologyPlanRow::BrushRefineExisting { sample_scalar, .. } => {
+                let refined_scale = brush_refine_scale(log_scale.map(f32::exp));
+                let offset = brush_refine_offset(rotation, log_scale.map(f32::exp), sample_scalar);
+                position[0] -= offset[0];
+                position[1] -= offset[1];
+                position[2] -= offset[2];
+                log_scale = refined_scale.map(|value| value.max(1e-6).ln());
+                opacity_logit = brush_refine_opacity_logit(opacity_logit);
+            }
+            TopologyPlanRow::BrushRefineNew { sample_scalar, .. } => {
+                let refined_scale = brush_refine_scale(log_scale.map(f32::exp));
+                let offset = brush_refine_offset(rotation, log_scale.map(f32::exp), sample_scalar);
+                position[0] += offset[0];
+                position[1] += offset[1];
+                position[2] += offset[2];
+                log_scale = refined_scale.map(|value| value.max(1e-6).ln());
+                opacity_logit = brush_refine_opacity_logit(opacity_logit);
             }
         }
 
@@ -251,4 +289,36 @@ fn vec4_from_row(row: &[f32]) -> [f32; 4] {
         row.get(2).copied().unwrap_or_default(),
         row.get(3).copied().unwrap_or_default(),
     ]
+}
+
+fn quat_from_wxyz(rotation: [f32; 4]) -> Quat {
+    let quat = Quat::from_xyzw(rotation[1], rotation[2], rotation[3], rotation[0]);
+    if quat.length_squared() > 0.0 {
+        quat.normalize()
+    } else {
+        Quat::IDENTITY
+    }
+}
+
+fn brush_refine_offset(rotation: [f32; 4], scale: [f32; 3], sample_scalar: f32) -> [f32; 3] {
+    let rotated = quat_from_wxyz(rotation) * (Vec3::from_array(scale) * sample_scalar);
+    rotated.to_array()
+}
+
+fn brush_refine_scale(scale: [f32; 3]) -> [f32; 3] {
+    let mut refined = scale;
+    let mut max_axis = 0usize;
+    for axis in 1..3 {
+        if refined[axis] > refined[max_axis] {
+            max_axis = axis;
+        }
+    }
+    refined[max_axis] *= 0.5;
+    refined
+}
+
+fn brush_refine_opacity_logit(opacity_logit: f32) -> f32 {
+    let opacity = sigmoid_scalar(opacity_logit).clamp(1.0 / 255.0, 1.0 - 1.0 / 255.0);
+    let refined = (1.0 - (1.0 - opacity).sqrt()).clamp(1.0 / 255.0, 1.0 - 1.0 / 255.0);
+    (refined / (1.0 - refined)).ln()
 }

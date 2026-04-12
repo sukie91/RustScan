@@ -255,6 +255,7 @@ impl MetalTrainer {
             frame_idx,
             pose_parameter_grads,
         )?;
+        self.apply_litegs_mean_noise(gaussians, &projected, effective_lr_pos)?;
 
         self.update_gaussian_stats(
             &backward.grad_magnitudes,
@@ -288,6 +289,41 @@ impl MetalTrainer {
             return lr0;
         }
         lr0 * (lr_end / lr0).powf(t / total)
+    }
+
+    pub(super) fn apply_litegs_mean_noise(
+        &self,
+        gaussians: &mut Splats,
+        projected: &ProjectedGaussians,
+        effective_lr_pos: f32,
+    ) -> candle_core::Result<()> {
+        if !self.is_litegs_mode() || gaussians.len() == 0 || effective_lr_pos <= 0.0 {
+            return Ok(());
+        }
+
+        let visible_sources = projected.visible_source_indices();
+        if visible_sources.is_empty() {
+            return Ok(());
+        }
+
+        let visible_opacity = projected.opacity.to_vec1::<f32>()?;
+        let mut rng = rand::thread_rng();
+        let deltas = litegs_mean_noise_deltas(
+            &visible_opacity,
+            visible_sources,
+            gaussians.len(),
+            effective_lr_pos,
+            self.scene_extent,
+            &mut rng,
+        );
+        if !deltas.iter().any(|delta| *delta != 0.0) {
+            return Ok(());
+        }
+
+        let delta_tensor = Tensor::from_slice(&deltas, (gaussians.len(), 3), &self.device)?;
+        let updated_positions = gaussians.positions().broadcast_add(&delta_tensor)?;
+        gaussians.positions.set(&updated_positions)?;
+        Ok(())
     }
 
     pub(super) fn render_colors_for_camera(
@@ -558,4 +594,57 @@ impl MetalTrainer {
         }
         Ok(())
     }
+}
+
+pub(super) fn litegs_mean_noise_deltas<R: Rng + ?Sized>(
+    visible_opacity: &[f32],
+    visible_source_indices: &[u32],
+    gaussian_count: usize,
+    effective_lr_pos: f32,
+    scene_extent: f32,
+    rng: &mut R,
+) -> Vec<f32> {
+    let mut deltas = vec![0.0f32; gaussian_count.saturating_mul(3)];
+    let weight_scale = effective_lr_pos.max(0.0) * LITEGS_MEAN_NOISE_WEIGHT;
+    if gaussian_count == 0 || weight_scale <= 0.0 {
+        return deltas;
+    }
+
+    let max_noise = scene_extent.max(1e-3);
+    for (visible_idx, &source_idx) in visible_source_indices.iter().enumerate() {
+        let source_idx = source_idx as usize;
+        if source_idx >= gaussian_count {
+            continue;
+        }
+
+        let opacity = visible_opacity
+            .get(visible_idx)
+            .copied()
+            .unwrap_or_default()
+            .clamp(0.0, 1.0);
+        let noise_weight = litegs_mean_noise_weight(opacity, weight_scale);
+        if noise_weight <= 0.0 {
+            continue;
+        }
+
+        let base = source_idx * 3;
+        deltas[base] = (sample_standard_normal(rng) * noise_weight).clamp(-max_noise, max_noise);
+        deltas[base + 1] =
+            (sample_standard_normal(rng) * noise_weight).clamp(-max_noise, max_noise);
+        deltas[base + 2] =
+            (sample_standard_normal(rng) * noise_weight).clamp(-max_noise, max_noise);
+    }
+
+    deltas
+}
+
+fn litegs_mean_noise_weight(opacity: f32, weight_scale: f32) -> f32 {
+    let inv_opacity = (1.0 - opacity.clamp(0.0, 1.0)).max(0.0);
+    inv_opacity.powi(150) * weight_scale
+}
+
+fn sample_standard_normal<R: Rng + ?Sized>(rng: &mut R) -> f32 {
+    let u1 = rng.gen::<f32>().clamp(1e-6, 1.0 - 1e-6);
+    let u2 = rng.gen::<f32>();
+    (-2.0 * u1.ln()).sqrt() * (std::f32::consts::TAU * u2).cos()
 }

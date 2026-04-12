@@ -354,34 +354,31 @@ impl DiffCamera {
             glam::Vec4::new(t[0], t[1], t[2], 1.0),
         );
 
-        // Build projection matrix for perspective projection
-        // Using OpenGL-style clip space: near=0.01, far=100.0
+        // Build a +Z-forward perspective projection that matches the renderer's
+        // camera-space convention:
+        //   u = fx * x / z + cx
+        //   v = fy * y / z + cy
+        // Cluster culling only uses this matrix for frustum tests, so the
+        // projection should preserve the same visibility rules as the rasterizer.
         let near = 0.01f32;
         let far = 100.0f32;
-
         let w = self.width as f32;
         let h = self.height as f32;
-        let fx = self.fx;
-        let fy = self.fy;
+        let proj_x = 2.0 * self.fx / w.max(1.0);
+        let proj_y = 2.0 * self.fy / h.max(1.0);
+        let proj_cx = 2.0 * self.cx / w.max(1.0) - 1.0;
+        let proj_cy = 2.0 * self.cy / h.max(1.0) - 1.0;
+        let proj_z = far / (far - near);
+        let proj_w = -near * far / (far - near);
 
-        // Perspective projection matrix:
-        // [fx/w, 0,     cx/w - 0.5,                    0]
-        // [0,    fy/h,  cy/h - 0.5,                    0]
-        // [0,    0,     -(far+near)/(far-near),       -2*far*near/(far-near)]
-        // [0,    0,     -1,                            0]
         let proj = Mat4::from_cols(
-            glam::Vec4::new(fx / w, 0.0, 0.0, 0.0),
-            glam::Vec4::new(0.0, fy / h, 0.0, 0.0),
-            glam::Vec4::new(
-                self.cx / w - 0.5,
-                self.cy / h - 0.5,
-                -(far + near) / (far - near),
-                -1.0,
-            ),
-            glam::Vec4::new(0.0, 0.0, -2.0 * far * near / (far - near), 0.0),
+            glam::Vec4::new(proj_x, 0.0, 0.0, 0.0),
+            glam::Vec4::new(0.0, proj_y, 0.0, 0.0),
+            glam::Vec4::new(proj_cx, proj_cy, proj_z, 1.0),
+            glam::Vec4::new(0.0, 0.0, proj_w, 0.0),
         );
 
-        view * proj
+        proj * view
     }
 }
 

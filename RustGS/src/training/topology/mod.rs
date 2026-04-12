@@ -1,5 +1,9 @@
 use std::cmp::Ordering;
 
+use glam::{Quat, Vec3};
+use rand::distributions::{Distribution, WeightedIndex};
+use rand::{rngs::StdRng, Rng, SeedableRng};
+
 use super::density_controller::{
     DensityController, DensityControllerConfig, OpacityResetMode, PruneMode,
 };
@@ -16,6 +20,9 @@ use super::TrainingConfig;
 
 const LITEGS_OPACITY_THRESHOLD: f32 = 0.005;
 const LITEGS_PERCENT_DENSE: f32 = 0.01;
+const BRUSH_MIN_OPACITY: f32 = 1.0 / 255.0;
+const BRUSH_MIN_SCALE: f32 = 1e-10;
+const BRUSH_REFINE_PROGRESS_LIMIT: f32 = 0.95;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub(super) struct RunningMoments {
@@ -43,6 +50,7 @@ pub(super) struct MetalGaussianStats {
     pub(super) mean2d_grad: RunningMoments,
     pub(super) fragment_weight: RunningMoments,
     pub(super) fragment_err: RunningMoments,
+    pub(super) refine_weight_max: f32,
     pub(super) visible_count: usize,
     pub(super) age: usize,
     pub(super) consecutive_invisible_epochs: usize,
@@ -54,8 +62,6 @@ pub(super) struct TopologyCandidateInfo {
     pub(super) opacity: f32,
     pub(super) mean2d_grad: f32,
     pub(super) visible_count: usize,
-    pub(super) age_eligible: bool,
-    pub(super) invisible: bool,
     pub(super) prune_candidate: bool,
     pub(super) growth_candidate: bool,
 }
@@ -381,28 +387,27 @@ pub(super) fn schedule_topology(
             return TopologySchedule::default();
         };
         let passed_warmup = step.iteration > policy.topology_warmup;
-        let densify_until = policy.litegs_densify_until_epoch(step.frame_count);
-        let densify_from = policy.litegs_effective_densify_from_epoch(step.frame_count);
-        let active_window = epoch >= densify_from && epoch < densify_until;
         let frozen = policy
             .litegs
             .topology_freeze_after_epoch
             .map(|freeze_epoch| epoch >= freeze_epoch)
             .unwrap_or(false);
         let refine_every = policy.litegs.refine_every.max(1);
-        let refine =
-            passed_warmup && !frozen && active_window && step.iteration % refine_every == 0;
-        let opacity_reset_period =
-            refine_every.saturating_mul(policy.litegs.opacity_reset_interval.max(1));
-        let reset_opacity = passed_warmup
+        let progress = if policy.max_iterations == 0 {
+            1.0
+        } else {
+            step.iteration as f32 / policy.max_iterations as f32
+        };
+        let refine = step.iteration > 0
+            && passed_warmup
             && !frozen
-            && active_window
-            && step.iteration % opacity_reset_period.max(1) == 0;
+            && progress <= BRUSH_REFINE_PROGRESS_LIMIT
+            && step.iteration % refine_every == 0;
         return TopologySchedule {
             completed_epoch: Some(epoch),
             densify: refine,
             prune: refine,
-            reset_opacity,
+            reset_opacity: false,
             allow_extra_growth: refine && step.iteration < policy.litegs.growth_stop_iter,
         };
     }
@@ -445,23 +450,14 @@ pub(super) fn plan_topology_execution(
         disposition: TopologyExecutionDisposition::Apply,
     };
 
-    if policy.is_litegs_mode()
-        && (plan.should_densify || plan.should_prune || plan.should_reset_opacity)
-        && litegs_selection.selected_indices.is_empty()
-        && analysis.prune_candidates > 0
-    {
-        plan.should_densify = false;
-        plan.should_prune = false;
-        plan.should_reset_opacity = false;
-        plan.disposition = TopologyExecutionDisposition::SkipDestructiveLiteGs;
-        return plan;
-    }
-
-    if analysis.clone_candidates == 0
-        && analysis.split_candidates == 0
-        && analysis.prune_candidates == 0
-        && !plan.should_reset_opacity
-    {
+    let has_candidates = if policy.is_litegs_mode() {
+        !litegs_selection.selected_indices.is_empty() || analysis.prune_candidates > 0
+    } else {
+        analysis.clone_candidates > 0
+            || analysis.split_candidates > 0
+            || analysis.prune_candidates > 0
+    };
+    if !has_candidates && !plan.should_reset_opacity {
         plan.disposition = TopologyExecutionDisposition::SkipNoEligibleCandidates;
     }
 
@@ -483,22 +479,21 @@ pub(super) fn analyze_topology_candidates(
     } else {
         policy.legacy_clone_scale_threshold
     };
+    let (brush_center, brush_extent) = splats.brush_bounds_center_extent();
+    let brush_max_allowed_bounds = brush_extent.max(policy.scene_extent.max(1e-6)) * 100.0;
 
     for idx in 0..splats.len() {
+        let position = splats.position(idx);
+        let scale = splats.scale(idx);
         let max_scale = splats.max_scale(idx);
         let opacity = splats.opacity(idx);
         let gaussian_stats = stats.get(idx).copied().unwrap_or_default();
-        let mean2d_grad = gaussian_stats.mean2d_grad.mean;
-
-        let (invisible_for_prune, age_eligible) = if policy.is_litegs_mode() {
-            let min_age = policy.litegs.prune_min_age.max(1);
-            let min_invisible = policy.litegs.prune_invisible_epochs.max(1);
-            let age_ok = gaussian_stats.age >= min_age;
-            let invisible_long_enough =
-                gaussian_stats.consecutive_invisible_epochs >= min_invisible;
-            (age_ok && invisible_long_enough, age_ok)
+        let mean2d_grad = if policy.is_litegs_mode() {
+            gaussian_stats
+                .refine_weight_max
+                .max(gaussian_stats.mean2d_grad.mean)
         } else {
-            (gaussian_stats.visible_count == 0, true)
+            gaussian_stats.mean2d_grad.mean
         };
 
         let growth_threshold = if policy.is_litegs_mode() {
@@ -508,19 +503,25 @@ pub(super) fn analyze_topology_candidates(
         };
         let growth_candidate = mean2d_grad.is_finite()
             && mean2d_grad >= growth_threshold
-            && opacity > LITEGS_OPACITY_THRESHOLD;
+            && gaussian_stats.visible_count > 0;
         let candidate_info = TopologyCandidateInfo {
             max_scale,
             opacity,
             mean2d_grad,
             visible_count: gaussian_stats.visible_count,
-            age_eligible,
-            invisible: invisible_for_prune,
             prune_candidate: false,
             growth_candidate,
         };
         let prune_candidate = if policy.is_litegs_mode() {
-            litegs_should_prune_candidate(policy, &candidate_info)
+            litegs_should_prune_candidate(
+                policy,
+                &candidate_info,
+                position,
+                scale,
+                brush_center,
+                brush_max_allowed_bounds,
+                splats.retainable(idx),
+            )
         } else {
             false
         };
@@ -588,10 +589,7 @@ pub(super) fn litegs_requested_additions(
         return prune_candidates;
     }
 
-    let threshold_count = infos
-        .iter()
-        .filter(|info| !info.prune_candidate && info.growth_candidate)
-        .count();
+    let threshold_count = infos.iter().filter(|info| info.growth_candidate).count();
     let grow_count = (threshold_count as f32 * growth_select_fraction).round() as usize;
 
     prune_candidates.saturating_add(grow_count.saturating_sub(prune_candidates))
@@ -602,36 +600,41 @@ pub(super) fn litegs_select_densify_candidates(
     max_new: usize,
     growth_select_fraction: f32,
     allow_extra_growth: bool,
+    rng_seed: u64,
 ) -> LiteGsDensifySelection {
     if max_new == 0 || infos.is_empty() {
         return LiteGsDensifySelection::default();
     }
 
     let prune_candidates = infos.iter().filter(|info| info.prune_candidate).count();
-    let mut replacement_sources: Vec<(usize, f32)> = infos
+    let replacement_sources: Vec<usize> = infos
         .iter()
         .enumerate()
         .filter_map(|(idx, info)| {
             (!info.prune_candidate
                 && info.visible_count > 0
                 && info.opacity.is_finite()
-                && info.opacity > LITEGS_OPACITY_THRESHOLD)
-                .then_some((idx, info.opacity))
+                && info.opacity > 0.0)
+                .then_some(idx)
         })
         .collect();
-    replacement_sources.sort_by(|lhs, rhs| rhs.1.partial_cmp(&lhs.1).unwrap_or(Ordering::Equal));
+    let replacement_weights: Vec<f32> = replacement_sources
+        .iter()
+        .map(|&idx| infos[idx].opacity.max(0.0))
+        .collect();
 
-    let replacement_count = prune_candidates.min(max_new);
+    let replacement_count = prune_candidates.min(max_new).min(replacement_sources.len());
     let mut selection = LiteGsDensifySelection {
         selected_indices: Vec::with_capacity(max_new.min(infos.len())),
         replacement_count: 0,
         extra_growth_count: 0,
     };
     let mut used_sources = vec![false; infos.len()];
+    let mut rng = StdRng::seed_from_u64(rng_seed);
 
-    if !replacement_sources.is_empty() && replacement_count > 0 {
-        for offset in 0..replacement_count {
-            let source_idx = replacement_sources[offset % replacement_sources.len()].0;
+    if replacement_count > 0 {
+        for sampled in sample_weighted_indices(&replacement_weights, replacement_count, &mut rng) {
+            let source_idx = replacement_sources[sampled];
             selection.selected_indices.push(source_idx);
             selection.replacement_count += 1;
             used_sources[source_idx] = true;
@@ -639,32 +642,31 @@ pub(super) fn litegs_select_densify_candidates(
     }
 
     if allow_extra_growth && selection.selected_indices.len() < max_new {
-        let threshold_count = infos
-            .iter()
-            .filter(|info| !info.prune_candidate && info.growth_candidate)
-            .count();
+        let threshold_count = infos.iter().filter(|info| info.growth_candidate).count();
         let grow_count = (threshold_count as f32 * growth_select_fraction).round() as usize;
         let extra_growth_limit = grow_count
             .saturating_sub(selection.replacement_count)
             .min(max_new.saturating_sub(selection.selected_indices.len()));
 
         if extra_growth_limit > 0 {
-            let mut growth_sources: Vec<(usize, f32, f32)> = infos
+            let growth_sources: Vec<usize> = infos
                 .iter()
                 .enumerate()
                 .filter_map(|(idx, info)| {
                     (!info.prune_candidate && info.growth_candidate && !used_sources[idx])
-                        .then_some((idx, info.mean2d_grad, info.opacity))
+                        .then_some(idx)
                 })
                 .collect();
-            growth_sources.sort_by(|lhs, rhs| {
-                rhs.1
-                    .partial_cmp(&lhs.1)
-                    .unwrap_or(Ordering::Equal)
-                    .then_with(|| rhs.2.partial_cmp(&lhs.2).unwrap_or(Ordering::Equal))
-            });
-
-            for (source_idx, _, _) in growth_sources.into_iter().take(extra_growth_limit) {
+            let growth_weights: Vec<f32> = growth_sources
+                .iter()
+                .map(|&idx| infos[idx].mean2d_grad.max(0.0))
+                .collect();
+            for sampled in sample_weighted_indices(
+                &growth_weights,
+                extra_growth_limit.min(growth_sources.len()),
+                &mut rng,
+            ) {
+                let source_idx = growth_sources[sampled];
                 selection.selected_indices.push(source_idx);
                 selection.extra_growth_count += 1;
             }
@@ -688,129 +690,6 @@ pub(super) fn requested_gaussian_cap(
             .max_gaussian_budget
             .max(current_len.saturating_add(policy.legacy_max_densify_per_update))
     }
-}
-
-#[cfg(test)]
-pub(super) fn densify_snapshot(
-    policy: &TopologyPolicy,
-    snapshot: &mut Splats,
-    stats: &mut Vec<MetalGaussianStats>,
-    origins: &mut Vec<Option<usize>>,
-    infos: &[TopologyCandidateInfo],
-    max_gaussians: usize,
-) -> usize {
-    if snapshot.len() >= max_gaussians {
-        return 0;
-    }
-
-    let clone_opacity_threshold = policy.prune_threshold;
-    let original_len = snapshot.len();
-    let mut added = 0usize;
-    let mut clone_candidates = Vec::new();
-    let mut split_candidates = Vec::new();
-
-    for idx in 0..original_len {
-        let info = infos.get(idx).copied().unwrap_or(TopologyCandidateInfo {
-            max_scale: 0.0,
-            opacity: 0.0,
-            mean2d_grad: 0.0,
-            visible_count: 0,
-            age_eligible: false,
-            invisible: true,
-            prune_candidate: false,
-            growth_candidate: false,
-        });
-        let opacity = info.opacity;
-        let max_scale = info.max_scale;
-        let grad_accum = info.mean2d_grad;
-        if !grad_accum.is_finite() || !opacity.is_finite() {
-            continue;
-        }
-        if grad_accum <= policy.legacy_densify_grad_threshold {
-            continue;
-        }
-        if max_scale < policy.legacy_clone_scale_threshold && opacity > clone_opacity_threshold {
-            clone_candidates.push((idx, grad_accum));
-        }
-        if max_scale > policy.legacy_split_scale_threshold && opacity > policy.prune_threshold {
-            split_candidates.push((idx, grad_accum * max_scale));
-        }
-    }
-
-    clone_candidates.sort_by(|lhs, rhs| rhs.1.partial_cmp(&lhs.1).unwrap_or(Ordering::Equal));
-    split_candidates.sort_by(|lhs, rhs| rhs.1.partial_cmp(&lhs.1).unwrap_or(Ordering::Equal));
-
-    let mut available = max_gaussians.saturating_sub(snapshot.len());
-    let per_pass_limit = policy
-        .legacy_max_densify_per_update
-        .min(available)
-        .min((original_len / 32).max(32));
-    let clone_limit = clone_candidates.len().min(per_pass_limit);
-    for (rank, (idx, score)) in clone_candidates.into_iter().take(clone_limit).enumerate() {
-        if score <= 0.0 {
-            continue;
-        }
-        let position = snapshot.position(idx);
-        let scale = snapshot.scale(idx);
-        let log_scale = snapshot.log_scale(idx);
-        let rotation = snapshot.rotation(idx);
-        let sh_coeffs = snapshot.sh_coeffs_row(idx).to_vec();
-        let opacity_logit = snapshot.opacity_logits[idx];
-        let axis = rank % 3;
-        let mut cloned_position = position;
-        cloned_position[axis] += scale[axis].max(0.01) * 0.5;
-        snapshot.push(
-            cloned_position,
-            log_scale,
-            rotation,
-            opacity_logit,
-            &sh_coeffs,
-        );
-        stats.push(MetalGaussianStats::default());
-        origins.push(None);
-        added += 1;
-        available = available.saturating_sub(1);
-        if available == 0 {
-            return added;
-        }
-    }
-
-    let split_limit = split_candidates
-        .len()
-        .min((per_pass_limit / 4).max(1))
-        .min(available / 2);
-    for (idx, score) in split_candidates.into_iter().take(split_limit) {
-        if score <= policy.legacy_densify_grad_threshold {
-            continue;
-        }
-        let position = snapshot.position(idx);
-        let max_scale = snapshot.scale(idx).into_iter().fold(0.0f32, f32::max);
-        let mut split_scale = snapshot.log_scale(idx);
-        split_scale[0] = (max_scale * 0.5).max(1e-6).ln();
-        let rotation = snapshot.rotation(idx);
-        let sh_coeffs = snapshot.sh_coeffs_row(idx).to_vec();
-        let opacity_logit = snapshot.opacity_logits[idx];
-        for direction in [1.0f32, -1.0] {
-            if available == 0 {
-                break;
-            }
-            let mut split_position = position;
-            split_position[0] += direction * max_scale * 0.1;
-            snapshot.push(
-                split_position,
-                split_scale,
-                rotation,
-                opacity_logit,
-                &sh_coeffs,
-            );
-            stats.push(MetalGaussianStats::default());
-            origins.push(None);
-            added += 1;
-            available = available.saturating_sub(1);
-        }
-    }
-
-    added
 }
 
 #[cfg(test)]
@@ -840,8 +719,6 @@ pub(super) fn prune_snapshot(
                 opacity: sigmoid_scalar(snapshot.opacity_logits[idx]),
                 mean2d_grad: stats.get(idx).copied().unwrap_or_default().mean2d_grad.mean,
                 visible_count: 0,
-                age_eligible: false,
-                invisible: true,
                 prune_candidate: false,
                 growth_candidate: false,
             }
@@ -1007,6 +884,7 @@ impl Default for TopologyMutationAftermath {
 
 pub(super) struct TopologyMutationRequest<'a> {
     pub(super) policy: &'a TopologyPolicy,
+    pub(super) iteration: usize,
     pub(super) should_densify: bool,
     pub(super) should_prune: bool,
     pub(super) should_reset_opacity: bool,
@@ -1015,16 +893,29 @@ pub(super) struct TopologyMutationRequest<'a> {
     pub(super) max_gaussians: usize,
     pub(super) infos: &'a [TopologyCandidateInfo],
     pub(super) litegs_selection: &'a LiteGsDensifySelection,
-    pub(super) morton_sort_on_densify: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) enum TopologyPlanRow {
-    Existing { source_idx: usize },
-    LegacyOffsetClone { source_idx: usize, axis: usize },
-    LegacySplit { source_idx: usize, direction: i8 },
-    LiteClone { source_idx: usize },
-    LiteSplit { source_idx: usize, axis: usize },
+    Existing {
+        source_idx: usize,
+    },
+    LegacyOffsetClone {
+        source_idx: usize,
+        axis: usize,
+    },
+    LegacySplit {
+        source_idx: usize,
+        direction: i8,
+    },
+    BrushRefineExisting {
+        source_idx: usize,
+        sample_scalar: f32,
+    },
+    BrushRefineNew {
+        source_idx: usize,
+        sample_scalar: f32,
+    },
 }
 
 impl TopologyPlanRow {
@@ -1033,20 +924,23 @@ impl TopologyPlanRow {
             Self::Existing { source_idx }
             | Self::LegacyOffsetClone { source_idx, .. }
             | Self::LegacySplit { source_idx, .. }
-            | Self::LiteClone { source_idx }
-            | Self::LiteSplit { source_idx, .. } => source_idx,
+            | Self::BrushRefineExisting { source_idx, .. }
+            | Self::BrushRefineNew { source_idx, .. } => source_idx,
         }
     }
 
     pub(super) fn is_existing(&self) -> bool {
-        matches!(self, Self::Existing { .. })
+        matches!(
+            self,
+            Self::Existing { .. } | Self::BrushRefineExisting { .. }
+        )
     }
 
     fn position(&self, metrics: &TopologySplatMetrics) -> [f32; 3] {
         let source_idx = self.source_idx();
         let mut position = metrics.position(source_idx);
         match *self {
-            Self::Existing { .. } | Self::LiteClone { .. } => position,
+            Self::Existing { .. } => position,
             Self::LegacyOffsetClone { axis, .. } => {
                 let scale = metrics.scale(source_idx);
                 if axis < 3 {
@@ -1058,11 +952,18 @@ impl TopologyPlanRow {
                 position[0] += (direction as f32) * metrics.max_scale(source_idx) * 0.1;
                 position
             }
-            Self::LiteSplit { axis, .. } => {
-                let scale = metrics.scale(source_idx);
-                if axis < 3 {
-                    position[axis] += scale[axis] * 0.5;
-                }
+            Self::BrushRefineExisting { sample_scalar, .. } => {
+                let offset = brush_refine_offset(metrics, source_idx, sample_scalar);
+                position[0] -= offset[0];
+                position[1] -= offset[1];
+                position[2] -= offset[2];
+                position
+            }
+            Self::BrushRefineNew { sample_scalar, .. } => {
+                let offset = brush_refine_offset(metrics, source_idx, sample_scalar);
+                position[0] += offset[0];
+                position[1] += offset[1];
+                position[2] += offset[2];
                 position
             }
         }
@@ -1072,17 +973,13 @@ impl TopologyPlanRow {
         let source_idx = self.source_idx();
         let mut scale = metrics.scale(source_idx);
         match *self {
-            Self::Existing { .. } | Self::LegacyOffsetClone { .. } | Self::LiteClone { .. } => {
-                scale
-            }
+            Self::Existing { .. } | Self::LegacyOffsetClone { .. } => scale,
             Self::LegacySplit { .. } => {
                 scale[0] = (metrics.max_scale(source_idx) * 0.5).max(1e-6);
                 scale
             }
-            Self::LiteSplit { axis, .. } => {
-                if axis < 3 {
-                    scale[axis] = (scale[axis] / 1.6).max(1e-6);
-                }
+            Self::BrushRefineExisting { .. } | Self::BrushRefineNew { .. } => {
+                scale = brush_refine_scale(scale);
                 scale
             }
         }
@@ -1094,7 +991,12 @@ impl TopologyPlanRow {
     }
 
     fn opacity(&self, metrics: &TopologySplatMetrics) -> f32 {
-        metrics.opacity(self.source_idx())
+        match *self {
+            Self::BrushRefineExisting { .. } | Self::BrushRefineNew { .. } => {
+                brush_refine_opacity(metrics.opacity(self.source_idx()))
+            }
+            _ => metrics.opacity(self.source_idx()),
+        }
     }
 
     fn retainable(&self, metrics: &TopologySplatMetrics) -> bool {
@@ -1117,7 +1019,7 @@ impl TopologyPlanRow {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub(super) struct TopologyMutationPlan {
     pub(super) rows: Vec<TopologyPlanRow>,
     pub(super) added: usize,
@@ -1152,25 +1054,20 @@ pub(super) fn plan_topology_mutation(
     metrics: &TopologySplatMetrics,
     request: TopologyMutationRequest<'_>,
 ) -> TopologyMutationPlan {
+    if request.policy.is_litegs_mode() {
+        return plan_brush_refine_mutation(metrics, request);
+    }
+
     let mut rows: Vec<TopologyPlanRow> = (0..metrics.len())
         .map(|source_idx| TopologyPlanRow::Existing { source_idx })
         .collect();
     let additions = if request.should_densify {
-        if request.policy.is_litegs_mode() {
-            plan_litegs_densify_rows(
-                request.policy,
-                metrics,
-                request.max_gaussians,
-                &request.litegs_selection.selected_indices,
-            )
-        } else {
-            plan_legacy_densify_rows(
-                request.policy,
-                metrics,
-                request.infos,
-                request.max_gaussians,
-            )
-        }
+        plan_legacy_densify_rows(
+            request.policy,
+            metrics,
+            request.infos,
+            request.max_gaussians,
+        )
     } else {
         Vec::new()
     };
@@ -1179,19 +1076,10 @@ pub(super) fn plan_topology_mutation(
 
     let mut pruned = 0usize;
     if request.should_prune && rows.len() > 1 {
-        let mut keep_mask = if request.policy.is_litegs_mode() {
-            let mut keep_mask = vec![true; rows.len()];
-            for (idx, info) in request.infos.iter().enumerate() {
-                if info.prune_candidate {
-                    keep_mask[idx] = false;
-                }
-            }
-            keep_mask
-        } else {
-            rows.iter()
-                .map(|row| row.keep_for_legacy_prune(metrics, request.policy))
-                .collect::<Vec<_>>()
-        };
+        let mut keep_mask = rows
+            .iter()
+            .map(|row| row.keep_for_legacy_prune(metrics, request.policy))
+            .collect::<Vec<_>>();
 
         if !keep_mask.iter().any(|keep| *keep) {
             if let Some((best_idx, _)) = rows.iter().enumerate().max_by(|lhs, rhs| {
@@ -1214,26 +1102,7 @@ pub(super) fn plan_topology_mutation(
         }
     }
 
-    let morton_sorted = if request.policy.is_litegs_mode()
-        && request.morton_sort_on_densify
-        && added > 0
-        && rows.len() > 1
-    {
-        let mut positions = Vec::with_capacity(rows.len() * 3);
-        for row in &rows {
-            positions.extend_from_slice(&row.position(metrics));
-        }
-        let permutation =
-            super::morton::morton_sort_permutation(&positions, super::morton::DEFAULT_MORTON_BITS);
-        if permutation.len() == rows.len() {
-            rows = permutation.into_iter().map(|idx| rows[idx]).collect();
-            true
-        } else {
-            false
-        }
-    } else {
-        false
-    };
+    let morton_sorted = false;
 
     let aftermath = topology_mutation_aftermath(&request, rows.len(), added, pruned);
     TopologyMutationPlan {
@@ -1266,8 +1135,6 @@ fn plan_legacy_densify_rows(
             opacity: 0.0,
             mean2d_grad: 0.0,
             visible_count: 0,
-            age_eligible: false,
-            invisible: true,
             prune_candidate: false,
             growth_candidate: false,
         });
@@ -1335,33 +1202,57 @@ fn plan_legacy_densify_rows(
     rows
 }
 
-fn plan_litegs_densify_rows(
-    policy: &TopologyPolicy,
+fn plan_brush_refine_mutation(
     metrics: &TopologySplatMetrics,
-    max_gaussians: usize,
-    selected_indices: &[usize],
-) -> Vec<TopologyPlanRow> {
-    if metrics.len() >= max_gaussians || selected_indices.is_empty() {
-        return Vec::new();
+    request: TopologyMutationRequest<'_>,
+) -> TopologyMutationPlan {
+    let mut surviving_indices: Vec<usize> = (0..metrics.len())
+        .filter(|&idx| {
+            !request
+                .infos
+                .get(idx)
+                .map(|info| info.prune_candidate)
+                .unwrap_or(false)
+        })
+        .collect();
+    if surviving_indices.is_empty() {
+        surviving_indices = (0..metrics.len()).collect();
     }
 
-    let clone_scale_threshold = policy.litegs_clone_scale_threshold();
-    let mut rows = Vec::new();
-    for &idx in selected_indices
+    let mut rows: Vec<TopologyPlanRow> = surviving_indices
         .iter()
-        .take(max_gaussians.saturating_sub(metrics.len()))
-    {
-        let max_scale = metrics.max_scale(idx);
-        if max_scale <= clone_scale_threshold {
-            rows.push(TopologyPlanRow::LiteClone { source_idx: idx });
-        } else {
-            rows.push(TopologyPlanRow::LiteSplit {
-                source_idx: idx,
-                axis: metrics.max_scale_axis(idx),
+        .copied()
+        .map(|source_idx| TopologyPlanRow::Existing { source_idx })
+        .collect();
+    let pruned = metrics.len().saturating_sub(surviving_indices.len());
+
+    let mut added = 0usize;
+    if request.should_densify && !request.litegs_selection.selected_indices.is_empty() {
+        for &source_idx in &request.litegs_selection.selected_indices {
+            let Some(row_idx) = surviving_indices.iter().position(|&idx| idx == source_idx) else {
+                continue;
+            };
+            let sample_scalar = brush_refine_sample_scalar(request.iteration, source_idx);
+            rows[row_idx] = TopologyPlanRow::BrushRefineExisting {
+                source_idx,
+                sample_scalar,
+            };
+            rows.push(TopologyPlanRow::BrushRefineNew {
+                source_idx,
+                sample_scalar,
             });
+            added = added.saturating_add(1);
         }
     }
-    rows
+
+    let aftermath = topology_mutation_aftermath(&request, rows.len(), added, pruned);
+    TopologyMutationPlan {
+        rows,
+        added,
+        pruned,
+        morton_sorted: false,
+        aftermath,
+    }
 }
 
 #[cfg(test)]
@@ -1371,55 +1262,19 @@ pub(super) fn apply_snapshot_mutations(
     origins: &mut Vec<Option<usize>>,
     request: TopologyMutationRequest<'_>,
 ) -> TopologyMutationResult {
-    let added = if request.should_densify {
-        if request.policy.is_litegs_mode() {
-            densify_snapshot_litegs(
-                request.policy,
-                snapshot,
-                stats,
-                origins,
-                request.max_gaussians,
-                &request.litegs_selection.selected_indices,
-            )
-        } else {
-            densify_snapshot(
-                request.policy,
-                snapshot,
-                stats,
-                origins,
-                request.infos,
-                request.max_gaussians,
-            )
-        }
-    } else {
-        0
-    };
-
-    let pruned = if request.should_prune {
-        if request.policy.is_litegs_mode() {
-            prune_snapshot_litegs(snapshot, stats, origins, request.infos)
-        } else {
-            prune_snapshot(request.policy, snapshot, stats, origins, request.infos)
-        }
-    } else {
-        0
-    };
-
-    let morton_sorted = if request.policy.is_litegs_mode()
-        && request.morton_sort_on_densify
-        && added > 0
-        && snapshot.len() > 1
-    {
-        apply_morton_sort(snapshot, stats, origins)
-    } else {
-        false
-    };
+    let metrics = TopologySplatMetrics::from_snapshot(snapshot);
+    let plan = plan_topology_mutation(&metrics, request);
+    if plan.added > 0 || plan.pruned > 0 || plan.rows.len() != snapshot.len() {
+        *snapshot = rebuild_snapshot_from_plan(snapshot, &metrics, &plan);
+        *stats = plan.remap_stats(stats);
+        *origins = plan.origins();
+    }
 
     TopologyMutationResult {
-        added,
-        pruned,
-        morton_sorted,
-        aftermath: topology_mutation_aftermath(&request, snapshot.len(), added, pruned),
+        added: plan.added,
+        pruned: plan.pruned,
+        morton_sorted: plan.morton_sorted,
+        aftermath: plan.aftermath,
     }
 }
 
@@ -1523,6 +1378,71 @@ fn density_controller_taming_mode(policy: &TopologyPolicy) -> bool {
     policy.is_litegs_mode() && matches!(policy.litegs.prune_mode, LiteGsPruneMode::Weight)
 }
 
+fn sample_weighted_indices(weights: &[f32], count: usize, rng: &mut StdRng) -> Vec<usize> {
+    if count == 0 || weights.is_empty() {
+        return Vec::new();
+    }
+
+    let mut remaining: Vec<(usize, f32)> = weights
+        .iter()
+        .copied()
+        .enumerate()
+        .filter(|(_, weight)| weight.is_finite() && *weight > 0.0)
+        .collect();
+    let mut sampled = Vec::with_capacity(count.min(remaining.len()));
+    while sampled.len() < count && !remaining.is_empty() {
+        let dist = match WeightedIndex::new(remaining.iter().map(|(_, weight)| *weight)) {
+            Ok(dist) => dist,
+            Err(_) => break,
+        };
+        let selected = dist.sample(rng);
+        let (source_idx, _) = remaining.swap_remove(selected);
+        sampled.push(source_idx);
+    }
+    sampled
+}
+
+fn brush_refine_sample_scalar(iteration: usize, source_idx: usize) -> f32 {
+    let seed = ((iteration as u64) << 32) ^ source_idx as u64 ^ 0x9E37_79B9_7F4A_7C15;
+    let mut rng = StdRng::seed_from_u64(seed);
+    let u1 = rng.gen::<f32>().clamp(1e-6, 1.0 - 1e-6);
+    let u2 = rng.gen::<f32>();
+    (-2.0 * u1.ln()).sqrt() * (std::f32::consts::TAU * u2).cos()
+}
+
+fn brush_refine_scale(scale: [f32; 3]) -> [f32; 3] {
+    let mut refined = scale;
+    let mut max_axis = 0usize;
+    for axis in 1..3 {
+        if refined[axis] > refined[max_axis] {
+            max_axis = axis;
+        }
+    }
+    refined[max_axis] *= 0.5;
+    refined
+}
+
+fn brush_refine_opacity(opacity: f32) -> f32 {
+    let clamped = opacity.clamp(BRUSH_MIN_OPACITY, 1.0 - BRUSH_MIN_OPACITY);
+    let inverted = (1.0 - clamped).max(0.0);
+    (1.0 - inverted.sqrt()).clamp(BRUSH_MIN_OPACITY, 1.0 - BRUSH_MIN_OPACITY)
+}
+
+fn brush_refine_offset(
+    metrics: &TopologySplatMetrics,
+    source_idx: usize,
+    sample_scalar: f32,
+) -> [f32; 3] {
+    let rotation = metrics.rotation(source_idx);
+    let quat = Quat::from_xyzw(rotation[1], rotation[2], rotation[3], rotation[0]);
+    let quat = if quat.length_squared() > 0.0 {
+        quat.normalize()
+    } else {
+        Quat::IDENTITY
+    };
+    (quat * (Vec3::from_array(metrics.scale(source_idx)) * sample_scalar)).to_array()
+}
+
 fn record_topology_epoch(
     first: &mut Option<usize>,
     last: &mut Option<usize>,
@@ -1535,50 +1455,27 @@ fn record_topology_epoch(
     *last = Some(last.map_or(epoch, |current| current.max(epoch)));
 }
 
-#[cfg(test)]
-pub(super) fn prune_snapshot_litegs(
-    snapshot: &mut Splats,
-    stats: &mut Vec<MetalGaussianStats>,
-    origins: &mut Vec<Option<usize>>,
-    infos: &[TopologyCandidateInfo],
-) -> usize {
-    if snapshot.len() <= 1 {
-        return 0;
-    }
-
-    let mut keep_mask = vec![true; snapshot.len()];
-    for (idx, info) in infos.iter().enumerate() {
-        if info.prune_candidate {
-            keep_mask[idx] = false;
-        }
-    }
-
-    if !keep_mask.iter().any(|keep| *keep) {
-        if let Some((best_idx, _)) = infos.iter().enumerate().max_by(|lhs, rhs| {
-            lhs.1
-                .opacity
-                .partial_cmp(&rhs.1.opacity)
-                .unwrap_or(Ordering::Equal)
-        }) {
-            keep_mask[best_idx] = true;
-        }
-    }
-
-    filter_snapshot(snapshot, stats, origins, &keep_mask)
-}
-
-fn litegs_should_prune_candidate(policy: &TopologyPolicy, info: &TopologyCandidateInfo) -> bool {
-    let prune_opacity = match policy.litegs.prune_mode {
-        LiteGsPruneMode::Weight => info.age_eligible && info.visible_count == 0,
-        LiteGsPruneMode::Threshold => {
-            (info.age_eligible && info.opacity < LITEGS_OPACITY_THRESHOLD) || info.invisible
-        }
-    };
-
-    let prune_scale = policy.litegs.prune_scale_threshold > 0.0
-        && info.max_scale > policy.litegs.prune_scale_threshold;
-
-    prune_opacity || prune_scale
+fn litegs_should_prune_candidate(
+    _policy: &TopologyPolicy,
+    info: &TopologyCandidateInfo,
+    position: [f32; 3],
+    scale: [f32; 3],
+    center: [f32; 3],
+    max_allowed_bounds: f32,
+    retainable: bool,
+) -> bool {
+    let opacity_prune = !info.opacity.is_finite() || info.opacity < BRUSH_MIN_OPACITY;
+    let scale_small = scale
+        .iter()
+        .any(|value| !value.is_finite() || *value < BRUSH_MIN_SCALE);
+    let scale_large = scale
+        .iter()
+        .any(|value| value.is_finite() && *value > max_allowed_bounds);
+    let out_of_bounds = position
+        .iter()
+        .zip(center.iter())
+        .any(|(position, center)| (*position - *center).abs() > max_allowed_bounds);
+    opacity_prune || scale_small || scale_large || out_of_bounds || !retainable
 }
 
 fn should_densify_at(densify_interval: usize, topology_warmup: usize, iteration: usize) -> bool {
@@ -1633,46 +1530,29 @@ fn filter_snapshot(
 }
 
 #[cfg(test)]
-fn apply_morton_sort(
-    snapshot: &mut Splats,
-    stats: &mut Vec<MetalGaussianStats>,
-    origins: &mut Vec<Option<usize>>,
-) -> bool {
-    let morton_perm = super::morton::morton_sort_permutation(
-        &snapshot.positions,
-        super::morton::DEFAULT_MORTON_BITS,
-    );
-    if morton_perm.len() != snapshot.len() {
-        return false;
-    }
-
-    snapshot.positions = super::morton::permute_vec3(&snapshot.positions, &morton_perm);
-    snapshot.log_scales = super::morton::permute_vec3(&snapshot.log_scales, &morton_perm);
-    snapshot.rotations = super::morton::permute_vec4(&snapshot.rotations, &morton_perm);
-    snapshot.opacity_logits = super::morton::permute_scalar(&snapshot.opacity_logits, &morton_perm);
-    snapshot.sh_coeffs = super::morton::permute_rows(
-        &snapshot.sh_coeffs,
-        snapshot.sh_coeffs_row_width(),
-        &morton_perm,
-    );
-
-    if snapshot.sh_degree() > 0 {
-        let sh_rest_row_width = snapshot.sh_rest_row_width();
-        debug_assert_eq!(
-            snapshot.sh_coeffs_row_width(),
-            sh_rest_row_width.saturating_add(3)
+fn rebuild_snapshot_from_plan(
+    snapshot: &Splats,
+    metrics: &TopologySplatMetrics,
+    plan: &TopologyMutationPlan,
+) -> Splats {
+    let mut rebuilt = snapshot.retained_view(plan.rows.len());
+    for row in &plan.rows {
+        let source_idx = row.source_idx();
+        let position = row.position(metrics);
+        let scale = row.scale(metrics);
+        let log_scale = scale.map(|value| value.max(1e-6).ln());
+        let rotation = snapshot.rotation(source_idx);
+        let opacity = row.opacity(metrics).clamp(1e-6, 1.0 - 1e-6);
+        let opacity_logit = (opacity / (1.0 - opacity)).ln();
+        rebuilt.push(
+            position,
+            log_scale,
+            rotation,
+            opacity_logit,
+            snapshot.sh_coeffs_row(source_idx),
         );
     }
-
-    let mut new_stats = vec![MetalGaussianStats::default(); morton_perm.len()];
-    let mut new_origins = vec![None; morton_perm.len()];
-    for (new_idx, &old_idx) in morton_perm.iter().enumerate() {
-        new_stats[new_idx] = stats[old_idx];
-        new_origins[new_idx] = origins[old_idx];
-    }
-    *stats = new_stats;
-    *origins = new_origins;
-    true
+    rebuilt
 }
 
 #[cfg(test)]
@@ -1880,14 +1760,16 @@ mod tests {
         assert!(!early.prune);
 
         assert_eq!(first_refine.completed_epoch, Some(0));
-        assert!(!first_refine.densify);
-        assert!(!first_refine.prune);
-        assert!(!first_refine.allow_extra_growth);
+        assert!(first_refine.densify);
+        assert!(first_refine.prune);
+        assert!(first_refine.allow_extra_growth);
+        assert!(!first_refine.reset_opacity);
 
         assert_eq!(second_refine.completed_epoch, Some(0));
-        assert!(!second_refine.densify);
-        assert!(!second_refine.prune);
-        assert!(!second_refine.allow_extra_growth);
+        assert!(second_refine.densify);
+        assert!(second_refine.prune);
+        assert!(second_refine.allow_extra_growth);
+        assert!(!second_refine.reset_opacity);
     }
 
     #[test]
@@ -1913,12 +1795,12 @@ mod tests {
             candidate(false, true, 1, 0.7, 1.0),
         ];
 
-        let selection = litegs_select_densify_candidates(&infos, 3, 1.0, true);
+        let selection = litegs_select_densify_candidates(&infos, 3, 1.0, true, 7);
 
         assert_eq!(selection.replacement_count, 1);
         assert_eq!(selection.extra_growth_count, 2);
-        assert_eq!(selection.selected_indices[0], 1);
         assert_eq!(selection.selected_indices.len(), 3);
+        assert!(selection.selected_indices.iter().all(|idx| *idx > 0));
     }
 
     #[test]
@@ -2010,6 +1892,7 @@ mod tests {
                     m2: 0.0,
                     count: 1,
                 },
+                refine_weight_max: 1.0,
                 visible_count: 1,
                 age: 1,
                 ..Default::default()
@@ -2249,6 +2132,7 @@ mod tests {
             &mut origins,
             TopologyMutationRequest {
                 policy: &policy,
+                iteration: 2,
                 should_densify: true,
                 should_prune: true,
                 should_reset_opacity: false,
@@ -2257,7 +2141,6 @@ mod tests {
                 max_gaussians: 4,
                 infos: &infos,
                 litegs_selection: &LiteGsDensifySelection::default(),
-                morton_sort_on_densify: false,
             },
         );
 
@@ -2313,6 +2196,7 @@ mod tests {
             &mut origins,
             TopologyMutationRequest {
                 policy: &policy,
+                iteration: 3,
                 should_densify: false,
                 should_prune: false,
                 should_reset_opacity: true,
@@ -2321,7 +2205,6 @@ mod tests {
                 max_gaussians: 1,
                 infos: &infos,
                 litegs_selection: &LiteGsDensifySelection::default(),
-                morton_sort_on_densify: false,
             },
         );
 
@@ -2355,8 +2238,6 @@ mod tests {
             opacity,
             mean2d_grad,
             visible_count,
-            age_eligible: true,
-            invisible: false,
             prune_candidate,
             growth_candidate,
         }

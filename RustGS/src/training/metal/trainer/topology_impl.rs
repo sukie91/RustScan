@@ -66,12 +66,8 @@ impl MetalTrainer {
         if !self.is_litegs_mode() || self.litegs.sh_degree == 0 {
             return self.litegs.sh_degree;
         }
-        let epoch = if frame_count == 0 {
-            0
-        } else {
-            self.iteration.saturating_sub(1) / frame_count
-        };
-        (epoch / LITEGS_SH_ACTIVATION_EPOCH_INTERVAL).min(self.litegs.sh_degree)
+        let _ = frame_count;
+        self.litegs.sh_degree
     }
 
     pub(super) fn reset_gaussian_stats(&mut self, gaussian_count: usize) {
@@ -87,6 +83,7 @@ impl MetalTrainer {
             stats.mean2d_grad = RunningMoments::default();
             stats.fragment_weight = RunningMoments::default();
             stats.fragment_err = RunningMoments::default();
+            stats.refine_weight_max = 0.0;
             stats.visible_count = 0;
         }
     }
@@ -164,6 +161,7 @@ impl MetalTrainer {
             stats.mean2d_grad.update(grad_mag);
             stats.fragment_weight.update(fragment_weight);
             stats.fragment_err.update(fragment_err);
+            stats.refine_weight_max = stats.refine_weight_max.max(grad_mag);
             stats.visible_count = stats.visible_count.saturating_add(1);
         }
 
@@ -541,6 +539,7 @@ impl MetalTrainer {
                 max_gaussians.saturating_sub(old_len),
                 self.litegs.growth_select_fraction,
                 allow_extra_growth,
+                self.iteration as u64,
             )
         } else {
             topology::LiteGsDensifySelection::default()
@@ -594,6 +593,7 @@ impl MetalTrainer {
                 );
             }
             if self.is_litegs_mode() {
+                self.apply_litegs_refine_decay(gaussians)?;
                 self.reset_litegs_refine_window_stats();
             }
             return Ok(());
@@ -607,6 +607,7 @@ impl MetalTrainer {
             &topology_splats,
             TopologyMutationRequest {
                 policy: &policy,
+                iteration: self.iteration,
                 should_densify,
                 should_prune,
                 should_reset_opacity,
@@ -615,7 +616,6 @@ impl MetalTrainer {
                 max_gaussians,
                 infos: &analysis.infos,
                 litegs_selection: &litegs_selection,
-                morton_sort_on_densify: self.litegs.morton_sort_on_densify,
             },
         );
         let added = mutation.added;
