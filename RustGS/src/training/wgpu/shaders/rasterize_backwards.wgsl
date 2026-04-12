@@ -18,18 +18,6 @@ var<workgroup> range_uniform: vec2<u32>;
 var<workgroup> local_batch: array<helpers::ProjectedSplat, helpers::TILE_SIZE>;
 var<workgroup> local_gid: array<u32, helpers::TILE_SIZE>;
 
-fn atomic_add_float(ptr: ptr<storage, atomic<u32>, read_write>, val: f32) {
-    var old = atomicLoad(ptr);
-    loop {
-        let new_val = bitcast<u32>(bitcast<f32>(old) + val);
-        let result = atomicCompareExchangeWeak(ptr, old, new_val);
-        if result.exchanged {
-            break;
-        }
-        old = result.old_value;
-    }
-}
-
 @compute @workgroup_size(helpers::TILE_SIZE, 1, 1)
 fn main(
     @builtin(workgroup_id) wg_id: vec3<u32>,
@@ -142,15 +130,87 @@ fn main(
             let v_color_a = gaussian * v_alpha;
 
             let base = compact_gid * 10u;
-            atomic_add_float(&v_splats[base + 0u], v_xy.x);
-            atomic_add_float(&v_splats[base + 1u], v_xy.y);
-            atomic_add_float(&v_splats[base + 2u], v_conic.x);
-            atomic_add_float(&v_splats[base + 3u], v_conic.y);
-            atomic_add_float(&v_splats[base + 4u], v_conic.z);
-            atomic_add_float(&v_splats[base + 5u], v_rgb_local.x);
-            atomic_add_float(&v_splats[base + 6u], v_rgb_local.y);
-            atomic_add_float(&v_splats[base + 7u], v_rgb_local.z);
-            atomic_add_float(&v_splats[base + 8u], v_color_a);
+
+            // Atomic add for v_xy.x
+            var old_0 = atomicLoad(&v_splats[base + 0u]);
+            loop {
+                let new_0 = bitcast<u32>(bitcast<f32>(old_0) + v_xy.x);
+                let cas_0 = atomicCompareExchangeWeak(&v_splats[base + 0u], old_0, new_0);
+                if cas_0.exchanged { break; }
+                old_0 = cas_0.old_value;
+            }
+
+            // Atomic add for v_xy.y
+            var old_1 = atomicLoad(&v_splats[base + 1u]);
+            loop {
+                let new_1 = bitcast<u32>(bitcast<f32>(old_1) + v_xy.y);
+                let cas_1 = atomicCompareExchangeWeak(&v_splats[base + 1u], old_1, new_1);
+                if cas_1.exchanged { break; }
+                old_1 = cas_1.old_value;
+            }
+
+            // Atomic add for v_conic.x
+            var old_2 = atomicLoad(&v_splats[base + 2u]);
+            loop {
+                let new_2 = bitcast<u32>(bitcast<f32>(old_2) + v_conic.x);
+                let cas_2 = atomicCompareExchangeWeak(&v_splats[base + 2u], old_2, new_2);
+                if cas_2.exchanged { break; }
+                old_2 = cas_2.old_value;
+            }
+
+            // Atomic add for v_conic.y
+            var old_3 = atomicLoad(&v_splats[base + 3u]);
+            loop {
+                let new_3 = bitcast<u32>(bitcast<f32>(old_3) + v_conic.y);
+                let cas_3 = atomicCompareExchangeWeak(&v_splats[base + 3u], old_3, new_3);
+                if cas_3.exchanged { break; }
+                old_3 = cas_3.old_value;
+            }
+
+            // Atomic add for v_conic.z
+            var old_4 = atomicLoad(&v_splats[base + 4u]);
+            loop {
+                let new_4 = bitcast<u32>(bitcast<f32>(old_4) + v_conic.z);
+                let cas_4 = atomicCompareExchangeWeak(&v_splats[base + 4u], old_4, new_4);
+                if cas_4.exchanged { break; }
+                old_4 = cas_4.old_value;
+            }
+
+            // Atomic add for v_rgb_local.x
+            var old_5 = atomicLoad(&v_splats[base + 5u]);
+            loop {
+                let new_5 = bitcast<u32>(bitcast<f32>(old_5) + v_rgb_local.x);
+                let cas_5 = atomicCompareExchangeWeak(&v_splats[base + 5u], old_5, new_5);
+                if cas_5.exchanged { break; }
+                old_5 = cas_5.old_value;
+            }
+
+            // Atomic add for v_rgb_local.y
+            var old_6 = atomicLoad(&v_splats[base + 6u]);
+            loop {
+                let new_6 = bitcast<u32>(bitcast<f32>(old_6) + v_rgb_local.y);
+                let cas_6 = atomicCompareExchangeWeak(&v_splats[base + 6u], old_6, new_6);
+                if cas_6.exchanged { break; }
+                old_6 = cas_6.old_value;
+            }
+
+            // Atomic add for v_rgb_local.z
+            var old_7 = atomicLoad(&v_splats[base + 7u]);
+            loop {
+                let new_7 = bitcast<u32>(bitcast<f32>(old_7) + v_rgb_local.z);
+                let cas_7 = atomicCompareExchangeWeak(&v_splats[base + 7u], old_7, new_7);
+                if cas_7.exchanged { break; }
+                old_7 = cas_7.old_value;
+            }
+
+            // Atomic add for v_color_a
+            var old_8 = atomicLoad(&v_splats[base + 8u]);
+            loop {
+                let new_8 = bitcast<u32>(bitcast<f32>(old_8) + v_color_a);
+                let cas_8 = atomicCompareExchangeWeak(&v_splats[base + 8u], old_8, new_8);
+                if cas_8.exchanged { break; }
+                old_8 = cas_8.old_value;
+            }
 
             rgb_accum = next_rgb_accum;
             t_accum *= 1.0 - alpha;
