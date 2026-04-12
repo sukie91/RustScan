@@ -2,4 +2,4 @@
 
 mod camera;
 
-pub use camera::GaussianCamera;
+pub use camera::{viewmat_from_pose, GaussianCamera};

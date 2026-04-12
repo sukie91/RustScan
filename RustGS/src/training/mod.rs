@@ -1,7 +1,7 @@
 //! Training module for 3D Gaussian Splatting.
 //!
 //! Primary runtime path:
-//! - `metal` - Metal-native backend used by the top-level API.
+//! - `wgpu` - Burn + wgpu backend used by the top-level API.
 
 #[path = "spatial/clustering.rs"]
 pub mod clustering;
@@ -12,15 +12,10 @@ pub mod eval;
 #[path = "spatial/morton.rs"]
 pub mod morton;
 pub mod parity_harness;
-#[path = "state/pose_embedding.rs"]
-pub mod pose_embedding;
 mod pose_utils;
 
 #[cfg(feature = "gpu")]
 mod data;
-
-#[cfg(feature = "gpu")]
-mod metal;
 
 #[cfg(feature = "gpu")]
 mod pipeline;
@@ -38,6 +33,9 @@ mod telemetry;
 
 #[cfg(feature = "gpu")]
 mod topology;
+
+#[cfg(feature = "gpu")]
+pub mod wgpu;
 
 #[cfg(feature = "gpu")]
 pub use eval::SplatEvaluationRenderer;
@@ -60,10 +58,6 @@ pub use parity_harness::{
     DEFAULT_CONVERGENCE_FIXTURE_ID, DEFAULT_TINY_FIXTURE_ID,
 };
 #[cfg(feature = "gpu")]
-pub use pipeline::benchmark::{
-    run_metal_training_benchmark, MetalTrainingBenchmarkReport, MetalTrainingBenchmarkSpec,
-};
-#[cfg(feature = "gpu")]
 pub use pipeline::events::{
     TrainingEvent, TrainingEventRoute, TrainingPlanSelected, TrainingRun, TrainingRunCompleted,
     TrainingRunReport, TrainingRunStarted,
@@ -76,9 +70,7 @@ pub use config::{
     TrainingConfig, TrainingProfile, TrainingResult,
 };
 #[cfg(feature = "gpu")]
-pub use metal::trainer::MetalTrainer;
-#[cfg(feature = "gpu")]
-pub use telemetry::{last_metal_training_telemetry, LiteGsOptimizerLrs, LiteGsTrainingTelemetry};
+pub use telemetry::{last_training_telemetry, LiteGsOptimizerLrs, LiteGsTrainingTelemetry};
 
 #[cfg(feature = "gpu")]
 pub use pipeline::orchestrator::{

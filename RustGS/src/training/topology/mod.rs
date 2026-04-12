@@ -12,11 +12,8 @@ use super::runtime_splats::TopologySplatMetrics;
 #[cfg(test)]
 use super::splats::sigmoid_scalar;
 #[cfg(test)]
-use super::splats::Splats;
-use super::{LiteGsConfig, LiteGsOpacityResetMode, LiteGsPruneMode, TrainingProfile};
-
-#[cfg(test)]
-use super::TrainingConfig;
+use super::splats::HostSplats as Splats;
+use super::{LiteGsConfig, LiteGsOpacityResetMode, LiteGsPruneMode, TrainingConfig, TrainingProfile};
 
 const LITEGS_OPACITY_THRESHOLD: f32 = 0.005;
 const LITEGS_PERCENT_DENSE: f32 = 0.01;
@@ -107,8 +104,7 @@ pub(super) struct TopologyPolicy {
 }
 
 impl TopologyPolicy {
-    #[cfg(test)]
-    pub(super) fn from_training_config(config: &TrainingConfig, scene_extent: f32) -> Self {
+    pub(crate) fn from_training_config(config: &TrainingConfig, scene_extent: f32) -> Self {
         Self {
             training_profile: config.training_profile,
             litegs: config.litegs.clone(),
@@ -435,6 +431,71 @@ pub(super) fn should_collect_visible_indices(
     policy.is_litegs_mode() || schedule.densify || schedule.prune
 }
 
+pub(crate) fn plan_topology_from_host_snapshot(
+    config: &TrainingConfig,
+    splats: &super::splats::HostSplats,
+    grad_2d_accum: &[f32],
+    grad_color_accum: &[f32],
+    num_observations: &[u32],
+    iteration: usize,
+    frame_count: usize,
+) -> TopologyMutationPlan {
+    let metrics = TopologySplatMetrics::from_snapshot(splats);
+    let policy = TopologyPolicy::from_training_config(config, splats.scene_extent());
+    let schedule = schedule_topology(
+        &policy,
+        TopologyStepContext {
+            iteration,
+            frame_count,
+        },
+    );
+
+    let stats = build_host_snapshot_stats(
+        metrics.len(),
+        grad_2d_accum,
+        grad_color_accum,
+        num_observations,
+    );
+    let analysis = analyze_topology_candidates(&policy, &metrics, &stats);
+
+    let requested_additions = if policy.is_litegs_mode() {
+        litegs_requested_additions(
+            &analysis.infos,
+            policy.litegs.growth_select_fraction,
+            schedule.allow_extra_growth,
+        )
+    } else {
+        policy.legacy_max_densify_per_update
+    };
+    let max_gaussians = requested_gaussian_cap(&policy, metrics.len(), requested_additions);
+    let max_new = max_gaussians.saturating_sub(metrics.len());
+    let litegs_selection = if policy.is_litegs_mode() {
+        litegs_select_densify_candidates(
+            &analysis.infos,
+            max_new,
+            policy.litegs.growth_select_fraction,
+            schedule.allow_extra_growth,
+        )
+    } else {
+        LiteGsDensifySelection::default()
+    };
+
+    let execution = plan_topology_execution(&policy, schedule, &analysis, &litegs_selection);
+    let request = TopologyMutationRequest {
+        policy: &policy,
+        should_densify: execution.should_densify,
+        should_prune: execution.should_prune,
+        should_reset_opacity: execution.should_reset_opacity,
+        completed_epoch: execution.completed_epoch,
+        late_stage: iteration >= config.iterations.saturating_mul(9) / 10,
+        max_gaussians,
+        infos: &analysis.infos,
+        litegs_selection: &litegs_selection,
+    };
+
+    plan_topology_mutation(&metrics, request)
+}
+
 pub(super) fn plan_topology_execution(
     policy: &TopologyPolicy,
     schedule: TopologySchedule,
@@ -657,8 +718,8 @@ fn litegs_select_densify_candidates_with_rng<R: Rng + ?Sized>(
         let threshold_count = infos.iter().filter(|info| info.growth_candidate).count();
         let grow_count = (threshold_count as f32 * growth_select_fraction).round() as usize;
         let sample_high_grad = grow_count.saturating_sub(prune_candidates);
-        let extra_growth_limit = sample_high_grad
-            .min(max_new.saturating_sub(selection.selected_indices.len()));
+        let extra_growth_limit =
+            sample_high_grad.min(max_new.saturating_sub(selection.selected_indices.len()));
 
         if extra_growth_limit > 0 {
             let growth_sources: Vec<usize> = infos
@@ -907,7 +968,7 @@ pub(super) struct TopologyMutationRequest<'a> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(super) enum TopologyPlanRow {
+pub(crate) enum TopologyPlanRow {
     Existing {
         source_idx: usize,
     },
@@ -930,7 +991,7 @@ pub(super) enum TopologyPlanRow {
 }
 
 impl TopologyPlanRow {
-    pub(super) fn source_idx(&self) -> usize {
+    pub(crate) fn source_idx(&self) -> usize {
         match *self {
             Self::Existing { source_idx }
             | Self::LegacyOffsetClone { source_idx, .. }
@@ -940,7 +1001,7 @@ impl TopologyPlanRow {
         }
     }
 
-    pub(super) fn is_existing(&self) -> bool {
+    pub(crate) fn is_existing(&self) -> bool {
         matches!(
             self,
             Self::Existing { .. } | Self::BrushRefineExisting { .. }
@@ -1031,16 +1092,16 @@ impl TopologyPlanRow {
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
-pub(super) struct TopologyMutationPlan {
-    pub(super) rows: Vec<TopologyPlanRow>,
-    pub(super) added: usize,
-    pub(super) pruned: usize,
-    pub(super) morton_sorted: bool,
+pub(crate) struct TopologyMutationPlan {
+    pub(crate) rows: Vec<TopologyPlanRow>,
+    pub(crate) added: usize,
+    pub(crate) pruned: usize,
+    pub(crate) morton_sorted: bool,
     pub(super) aftermath: TopologyMutationAftermath,
 }
 
 impl TopologyMutationPlan {
-    pub(super) fn origins(&self) -> Vec<Option<usize>> {
+    pub(crate) fn origins(&self) -> Vec<Option<usize>> {
         self.rows
             .iter()
             .map(|row| row.is_existing().then_some(row.source_idx()))
@@ -1061,7 +1122,7 @@ impl TopologyMutationPlan {
     }
 }
 
-pub(super) fn plan_topology_mutation(
+pub(crate) fn plan_topology_mutation(
     metrics: &TopologySplatMetrics,
     request: TopologyMutationRequest<'_>,
 ) -> TopologyMutationPlan {
@@ -1409,9 +1470,14 @@ fn sample_weighted_indices<R: Rng + ?Sized>(
             }
         })
         .collect();
-    sample_weighted(rng, sanitized.len(), |idx| sanitized[idx], count.min(sanitized.len()))
-        .map(|sample| sample.into_iter().collect())
-        .unwrap_or_default()
+    sample_weighted(
+        rng,
+        sanitized.len(),
+        |idx| sanitized[idx],
+        count.min(sanitized.len()),
+    )
+    .map(|sample| sample.into_iter().collect())
+    .unwrap_or_default()
 }
 
 fn brush_refine_sample_scalar<R: Rng + ?Sized>(rng: &mut R) -> f32 {
@@ -1503,6 +1569,38 @@ fn litegs_current_epoch(iteration: usize, frame_count: usize) -> Option<usize> {
     Some(iteration.saturating_sub(1) / frame_count)
 }
 
+fn build_host_snapshot_stats(
+    len: usize,
+    grad_2d_accum: &[f32],
+    grad_color_accum: &[f32],
+    num_observations: &[u32],
+) -> Vec<MetalGaussianStats> {
+    (0..len)
+        .map(|idx| {
+            let observations = num_observations.get(idx).copied().unwrap_or_default() as usize;
+            let denom = observations.max(1) as f32;
+            let grad_2d = grad_2d_accum.get(idx).copied().unwrap_or_default();
+            let grad_color = grad_color_accum.get(idx).copied().unwrap_or_default();
+
+            MetalGaussianStats {
+                mean2d_grad: RunningMoments {
+                    mean: grad_2d / denom,
+                    m2: 0.0,
+                    count: observations,
+                },
+                fragment_weight: RunningMoments {
+                    mean: grad_color / denom,
+                    m2: 0.0,
+                    count: observations,
+                },
+                refine_weight_max: grad_2d / denom,
+                visible_count: observations,
+                ..MetalGaussianStats::default()
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 fn filter_snapshot(
     snapshot: &mut Splats,
@@ -1575,12 +1673,10 @@ mod tests {
         TopologyAnalysis, TopologyMutationRequest, TopologyPolicy, TopologySchedule,
         TopologyStatsAction, TopologyStepContext,
     };
-    use crate::diff::diff_splat::{
-        rgb_to_sh0_value, sh_coeff_count_for_degree, SplatColorRepresentation,
-    };
+    use crate::sh::{rgb_to_sh0_value, sh_coeff_count_for_degree, SplatColorRepresentation};
     use crate::training::parity_harness::ParityTopologyMetrics;
     use crate::training::runtime_splats::TopologySplatMetrics;
-    use crate::training::splats::Splats;
+    use crate::training::splats::HostSplats as Splats;
     use crate::training::{LiteGsConfig, TrainingConfig, TrainingProfile};
 
     fn legacy_policy() -> TopologyPolicy {

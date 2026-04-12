@@ -10,7 +10,9 @@
 //! 4. Alpha blending
 
 #[cfg(feature = "gpu")]
-use crate::diff::diff_splat::sh0_to_rgb_value;
+use crate::sh::sh0_to_rgb_value;
+#[cfg(all(test, feature = "gpu"))]
+use crate::sh::rgb_to_sh0_value;
 #[cfg(feature = "gpu")]
 use crate::training::SplatView;
 
@@ -415,7 +417,7 @@ mod tests {
             scale.map(f32::ln).into(),
             rotation.into(),
             vec![opacity_to_logit(opacity)],
-            color.map(crate::diff::diff_splat::rgb_to_sh0_value).into(),
+            color.map(rgb_to_sh0_value).into(),
             0,
         )
         .unwrap()

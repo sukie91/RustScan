@@ -1,10 +1,70 @@
-use rustgs::{run_metal_training_benchmark, MetalTrainingBenchmarkSpec, TrainingProfile};
+use rustgs::{gpu_available, TrainingProfile};
+
+#[derive(Debug, Clone)]
+struct BenchmarkArgs {
+    width: usize,
+    height: usize,
+    frame_count: usize,
+    gaussian_count: usize,
+    warmup_steps: usize,
+    measured_steps: usize,
+    smoke_iterations: usize,
+    training_profile: TrainingProfile,
+    json: bool,
+}
+
+impl Default for BenchmarkArgs {
+    fn default() -> Self {
+        Self {
+            width: 64,
+            height: 64,
+            frame_count: 3,
+            gaussian_count: 128,
+            warmup_steps: 2,
+            measured_steps: 5,
+            smoke_iterations: 8,
+            training_profile: TrainingProfile::LegacyMetal,
+            json: false,
+        }
+    }
+}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut spec = MetalTrainingBenchmarkSpec::default();
-    let mut json = false;
+    let args = parse_args()?;
 
+    if !gpu_available() {
+        eprintln!("GPU unavailable in current environment; benchmark skipped.");
+        return Ok(());
+    }
+
+    if args.json {
+        println!(
+            "{{\"status\":\"unavailable\",\"reason\":\"legacy metal benchmark removed during wgpu migration\"}}"
+        );
+    } else {
+        println!(
+            "training benchmark example is not implemented for the post-migration wgpu path"
+        );
+        println!(
+            "requested profile={} fixture={}x{} frames={} gaussians={} warmup={} measure={} smoke_iters={}",
+            args.training_profile,
+            args.width,
+            args.height,
+            args.frame_count,
+            args.gaussian_count,
+            args.warmup_steps,
+            args.measured_steps,
+            args.smoke_iterations
+        );
+    }
+
+    Ok(())
+}
+
+fn parse_args() -> Result<BenchmarkArgs, Box<dyn std::error::Error>> {
+    let mut spec = BenchmarkArgs::default();
     let mut args = std::env::args().skip(1);
+
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--width" => spec.width = parse_next(&mut args, "--width")?,
@@ -17,13 +77,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--profile" => {
                 let value = args
                     .next()
-                    .ok_or_else(|| format!("missing value for --profile"))?;
+                    .ok_or_else(|| "missing value for --profile".to_string())?;
                 spec.training_profile = value.parse::<TrainingProfile>()?;
             }
-            "--json" => json = true,
+            "--json" => spec.json = true,
             "--help" | "-h" => {
                 print_help();
-                return Ok(());
+                std::process::exit(0);
             }
             other => {
                 return Err(format!("unsupported argument '{other}'").into());
@@ -31,45 +91,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    if !rustgs::metal_available() {
-        eprintln!("Metal unavailable in current environment; benchmark skipped.");
-        return Ok(());
-    }
-
-    let report = run_metal_training_benchmark(&spec)?;
-    if json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
-    } else {
-        println!(
-            "profile={} fixture={}x{} frames={} gaussians={}",
-            report.spec.training_profile,
-            report.spec.width,
-            report.spec.height,
-            report.spec.frame_count,
-            report.spec.gaussian_count
-        );
-        println!(
-            "avg step: {:.3} ms | forward: {:.3} ms | loss: {:.3} ms | backward: {:.3} ms | optimizer: {:.3} ms",
-            report.average_step_ms,
-            report.average_forward_ms,
-            report.average_loss_ms,
-            report.average_backward_ms,
-            report.average_optimizer_ms
-        );
-        println!(
-            "avg visible gaussians: {:.1} | avg active tiles: {:.1}",
-            report.average_visible_gaussians, report.average_active_tiles
-        );
-        println!(
-            "smoke training: {:.3} ms | final_loss: {:.6} | final_gaussians: {} | active_sh_degree: {:?}",
-            report.smoke_training_ms,
-            report.final_loss,
-            report.final_gaussians,
-            report.active_sh_degree
-        );
-    }
-
-    Ok(())
+    Ok(spec)
 }
 
 fn parse_next<T: std::str::FromStr>(

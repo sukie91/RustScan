@@ -25,17 +25,16 @@ pub struct LiteGsTrainingTelemetry {
     pub learning_rates: LiteGsOptimizerLrs,
 }
 
-static LAST_METAL_TRAINING_TELEMETRY: OnceLock<Mutex<Option<LiteGsTrainingTelemetry>>> =
-    OnceLock::new();
+static LAST_TRAINING_TELEMETRY: OnceLock<Mutex<Option<LiteGsTrainingTelemetry>>> = OnceLock::new();
 
-pub(super) fn store_last_metal_training_telemetry(telemetry: Option<LiteGsTrainingTelemetry>) {
-    let slot = LAST_METAL_TRAINING_TELEMETRY.get_or_init(|| Mutex::new(None));
+pub(super) fn store_last_training_telemetry(telemetry: Option<LiteGsTrainingTelemetry>) {
+    let slot = LAST_TRAINING_TELEMETRY.get_or_init(|| Mutex::new(None));
     let mut guard = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     *guard = telemetry;
 }
 
-pub fn last_metal_training_telemetry() -> Option<LiteGsTrainingTelemetry> {
-    let slot = LAST_METAL_TRAINING_TELEMETRY.get_or_init(|| Mutex::new(None));
+pub fn last_training_telemetry() -> Option<LiteGsTrainingTelemetry> {
+    let slot = LAST_TRAINING_TELEMETRY.get_or_init(|| Mutex::new(None));
     slot.lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .clone()
@@ -44,14 +43,14 @@ pub fn last_metal_training_telemetry() -> Option<LiteGsTrainingTelemetry> {
 #[cfg(test)]
 mod tests {
     use super::{
-        last_metal_training_telemetry, store_last_metal_training_telemetry, LiteGsOptimizerLrs,
+        last_training_telemetry, store_last_training_telemetry, LiteGsOptimizerLrs,
         LiteGsTrainingTelemetry,
     };
     use crate::training::parity_harness::{ParityLossTerms, ParityTopologyMetrics};
 
     #[test]
     fn telemetry_store_round_trips_latest_snapshot() {
-        store_last_metal_training_telemetry(None);
+        store_last_training_telemetry(None);
         let snapshot = LiteGsTrainingTelemetry {
             loss_terms: ParityLossTerms::default(),
             loss_curve_samples: Vec::new(),
@@ -64,8 +63,8 @@ mod tests {
             rotation_frozen: true,
             learning_rates: LiteGsOptimizerLrs::default(),
         };
-        store_last_metal_training_telemetry(Some(snapshot.clone()));
+        store_last_training_telemetry(Some(snapshot.clone()));
 
-        assert_eq!(last_metal_training_telemetry(), Some(snapshot));
+        assert_eq!(last_training_telemetry(), Some(snapshot));
     }
 }

@@ -1,10 +1,10 @@
-use super::splats::{splat_color_representation_for_config, HostSplats};
+use super::super::splats::{splat_color_representation_for_config, HostSplats};
 use crate::init::{initialize_host_splats_from_points, GaussianInitConfig};
-use crate::{TrainingDataset, TrainingError};
+use crate::{TrainingConfig, TrainingDataset, TrainingError};
 
-pub(super) fn build_initial_splats(
+pub(crate) fn build_initial_splats(
     dataset: &TrainingDataset,
-    config: &super::TrainingConfig,
+    config: &TrainingConfig,
 ) -> Result<HostSplats, TrainingError> {
     if dataset.initial_points.is_empty() {
         return Err(TrainingError::InvalidInput(

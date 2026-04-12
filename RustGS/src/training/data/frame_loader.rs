@@ -7,20 +7,20 @@ use std::thread::{self, JoinHandle};
 
 use image::{DynamicImage, GenericImageView, ImageReader};
 
-use super::TrainingConfig;
 use crate::{TrainingDataset, TrainingError};
+use crate::TrainingConfig;
 
 #[derive(Debug, Clone, PartialEq)]
-pub(super) struct DecodedFrame {
-    pub(super) color_u8: Vec<u8>,
-    pub(super) depth: Vec<f32>,
-    pub(super) used_real_depth: bool,
+pub(crate) struct DecodedFrame {
+    pub(crate) color_u8: Vec<u8>,
+    pub(crate) depth: Vec<f32>,
+    pub(crate) used_real_depth: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct FrameLoaderOptions {
-    pub(super) cache_capacity: usize,
-    pub(super) prefetch_ahead: usize,
+pub(crate) struct FrameLoaderOptions {
+    pub(crate) cache_capacity: usize,
+    pub(crate) prefetch_ahead: usize,
 }
 
 impl Default for FrameLoaderOptions {
@@ -38,7 +38,7 @@ struct FrameLoadSpec {
     depth_path: Option<PathBuf>,
 }
 
-pub(super) struct PrefetchFrameLoader {
+pub(crate) struct PrefetchFrameLoader {
     specs: Arc<Vec<FrameLoadSpec>>,
     options: FrameLoaderOptions,
     cache: HashMap<usize, Arc<DecodedFrame>>,
@@ -75,7 +75,7 @@ impl DeterministicFrameBatchIter {
     }
 }
 
-pub(super) fn ordered_frame_indices(
+pub(crate) fn ordered_frame_indices(
     frame_count: usize,
     batch_size: usize,
     seed: u64,
@@ -101,7 +101,7 @@ impl Iterator for DeterministicFrameBatchIter {
 }
 
 impl PrefetchFrameLoader {
-    pub(super) fn new(
+    pub(crate) fn new(
         dataset: &TrainingDataset,
         config: &TrainingConfig,
         options: FrameLoaderOptions,
@@ -175,7 +175,7 @@ impl PrefetchFrameLoader {
         })
     }
 
-    pub(super) fn prefetch_order_window(
+    pub(crate) fn prefetch_order_window(
         &mut self,
         order: &[usize],
         cursor: usize,
@@ -188,7 +188,7 @@ impl PrefetchFrameLoader {
         Ok(())
     }
 
-    pub(super) fn get(&mut self, frame_idx: usize) -> Result<Arc<DecodedFrame>, TrainingError> {
+    pub(crate) fn get(&mut self, frame_idx: usize) -> Result<Arc<DecodedFrame>, TrainingError> {
         self.drain_ready()?;
         if let Some(frame) = self.cache.get(&frame_idx).cloned() {
             self.touch(frame_idx);

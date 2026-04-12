@@ -8,9 +8,13 @@
 #[cfg(feature = "gpu")]
 use crate::core::GaussianCamera;
 #[cfg(feature = "gpu")]
-use crate::diff::diff_splat::sh0_to_rgb_value;
+use crate::sh::sh0_to_rgb_value;
+#[cfg(all(test, feature = "gpu"))]
+use crate::sh::rgb_to_sh0_value;
 #[cfg(feature = "gpu")]
 use crate::training::{HostSplats, SplatView};
+#[cfg(feature = "gpu")]
+use crate::TrainingError;
 #[cfg(feature = "gpu")]
 use glam::{Mat3, Vec3};
 
@@ -60,7 +64,7 @@ impl GaussianRenderer {
         &self,
         splats: &HostSplats,
         camera: &GaussianCamera,
-    ) -> candle_core::Result<RenderOutput> {
+    ) -> Result<RenderOutput, TrainingError> {
         let mut color = self.background_rgb_buffer();
         let mut depth = vec![0.0f32; self.width * self.height];
         let mut projected_splats = self.project_visible_splats(splats.as_view(), camera);
@@ -128,7 +132,7 @@ impl GaussianRenderer {
         &self,
         splats: &HostSplats,
         camera: &GaussianCamera,
-    ) -> candle_core::Result<Vec<f32>> {
+    ) -> Result<Vec<f32>, TrainingError> {
         let mut depth = vec![0.0f32; self.width * self.height];
         let mut projected_splats = self.project_visible_splats(splats.as_view(), camera);
 
@@ -147,7 +151,7 @@ impl GaussianRenderer {
         &self,
         splats: &HostSplats,
         camera: &GaussianCamera,
-    ) -> candle_core::Result<(Vec<f32>, Vec<[u8; 3]>)> {
+    ) -> Result<(Vec<f32>, Vec<[u8; 3]>), TrainingError> {
         let mut depth = vec![0.0f32; self.width * self.height];
         let mut color = self.background_color_buffer();
         let mut projected_splats = self.project_visible_splats(splats.as_view(), camera);
@@ -311,7 +315,7 @@ mod tests {
             scale.map(f32::ln).into(),
             vec![1.0, 0.0, 0.0, 0.0],
             vec![0.0],
-            color.map(crate::diff::diff_splat::rgb_to_sh0_value).into(),
+            color.map(rgb_to_sh0_value).into(),
             0,
         )
         .unwrap()

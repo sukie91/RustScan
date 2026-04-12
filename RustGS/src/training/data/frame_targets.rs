@@ -41,7 +41,7 @@ pub(in crate::training) fn resize_rgb(
     dst
 }
 
-pub(super) fn resize_rgb_u8_to_f32(
+pub(crate) fn resize_rgb_u8_to_f32(
     src: &[u8],
     src_width: usize,
     src_height: usize,

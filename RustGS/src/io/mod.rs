@@ -68,7 +68,7 @@ impl TrainingCheckpoint {
 #[cfg(test)]
 mod tests {
     use super::TrainingCheckpoint;
-    use crate::diff::diff_splat::rgb_to_sh0_value;
+    use crate::sh::rgb_to_sh0_value;
     use tempfile::tempdir;
 
     #[test]

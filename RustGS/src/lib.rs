@@ -6,16 +6,19 @@
 //! # Architecture
 //!
 //! - `core`: shared training-neutral types such as cameras
-//! - `render`: Rendering (forward and differentiable)
-//! - `diff`: Differentiable rendering with Candle
+//! - `render`: Rendering
 //! - `training`: Training loops and optimizers
 //! - `io`: Scene file I/O (PLY, checkpoints)
 //! - `init`: Splat initialization from point clouds
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
 //! use rustgs::{train_splats, TrainingConfig, TrainingDataset};
+//! use std::path::PathBuf;
+//!
+//! fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let path = PathBuf::from("dataset.json");
 //!
 //! // Load a prepared training dataset artifact.
 //! let dataset = TrainingDataset::load(&path)?;
@@ -30,20 +33,18 @@
 //!     &splats,
 //!     &rustgs::SplatMetadata::default(),
 //! )?;
+//! # Ok(())
+//! # }
 //! ```
 
 pub mod core;
-pub mod diff;
 pub mod init;
 pub mod io;
 pub mod render;
+mod sh;
 pub mod training;
 
-#[cfg(feature = "gpu")]
-use candle_core::Device;
 use std::path::Path;
-#[cfg(feature = "gpu")]
-use std::sync::{Mutex, OnceLock};
 
 pub use rustscan_types::{Intrinsics, MapPointData, ScenePose, TrainingDataset, SE3};
 
@@ -56,8 +57,6 @@ pub use crate::render::{
 };
 
 // Re-export training types
-#[cfg(feature = "gpu")]
-pub use crate::diff::Splats;
 pub use crate::training::{
     compare_loss_curve_samples, default_litegs_parity_fixtures, default_parity_report_path,
     parity_fixture_id_for_input_path, resolve_litegs_parity_fixture_input_path,
@@ -76,10 +75,10 @@ pub use crate::training::{
 };
 #[cfg(feature = "gpu")]
 pub use crate::training::{
-    evaluate_splats, evaluation_device, last_metal_training_telemetry, render_evaluation_frame,
-    run_metal_training_benchmark, runtime_from_splats, LiteGsOptimizerLrs, LiteGsTrainingTelemetry,
-    MetalTrainingBenchmarkReport, MetalTrainingBenchmarkSpec, TrainingEvent, TrainingEventRoute,
-    TrainingPlanSelected, TrainingRun, TrainingRunCompleted, TrainingRunReport, TrainingRunStarted,
+    evaluate_splats, evaluation_device, last_training_telemetry, render_evaluation_frame,
+    runtime_from_splats, LiteGsOptimizerLrs, LiteGsTrainingTelemetry, TrainingEvent,
+    TrainingEventRoute, TrainingPlanSelected, TrainingRun, TrainingRunCompleted,
+    TrainingRunReport, TrainingRunStarted,
 };
 #[cfg(feature = "gpu")]
 pub use crate::training::{HostSplats, SplatEvaluationRenderer, SplatView};
@@ -97,52 +96,16 @@ pub use crate::io::TrainingCheckpoint;
 // Re-export initialization types
 pub use crate::init::GaussianInitConfig;
 #[cfg(feature = "gpu")]
-pub use crate::init::{initialize_host_splats_from_points, initialize_runtime_splats_from_points};
-
-#[cfg(feature = "gpu")]
-pub(crate) fn preferred_device() -> Device {
-    match try_metal_device() {
-        Ok(device) => device,
-        Err(err) => {
-            log::warn!("{err}; falling back to CPU");
-            Device::Cpu
-        }
-    }
-}
-
-#[cfg(feature = "gpu")]
-pub fn metal_available() -> bool {
-    try_metal_device().is_ok()
-}
+pub use crate::init::initialize_host_splats_from_points;
 
 #[cfg(not(feature = "gpu"))]
-pub fn metal_available() -> bool {
+pub fn gpu_available() -> bool {
     false
 }
 
 #[cfg(feature = "gpu")]
-pub(crate) fn require_metal_device() -> Result<Device, TrainingError> {
-    try_metal_device().map_err(TrainingError::Gpu)
-}
-
-#[cfg(feature = "gpu")]
-pub(crate) fn try_metal_device() -> Result<Device, String> {
-    static PANIC_HOOK_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    let hook_lock = PANIC_HOOK_LOCK.get_or_init(|| Mutex::new(()));
-    let _guard = hook_lock
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-
-    let previous_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(|_| {}));
-    let result = std::panic::catch_unwind(|| Device::new_metal(0));
-    std::panic::set_hook(previous_hook);
-
-    match result {
-        Ok(Ok(device)) => Ok(device),
-        Ok(Err(err)) => Err(format!("Metal unavailable: {err}")),
-        Err(_) => Err("Metal initialization panicked".to_string()),
-    }
+pub fn gpu_available() -> bool {
+    true
 }
 
 /// Load a training dataset from a TUM RGB-D directory, a COLMAP directory,
@@ -335,11 +298,4 @@ pub enum TrainingError {
 
     #[error("Training failed: {0}")]
     TrainingFailed(String),
-}
-
-#[cfg(feature = "gpu")]
-impl From<candle_core::Error> for TrainingError {
-    fn from(e: candle_core::Error) -> Self {
-        TrainingError::Gpu(e.to_string())
-    }
 }

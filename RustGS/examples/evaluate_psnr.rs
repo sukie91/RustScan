@@ -152,7 +152,7 @@ fn print_help() {
   [--render-scale 0.5] \
   [--frame-stride 1] \
   [--max-frames 0] \
-  [--device cpu|metal] \
+  [--device cpu] \
   [--json] \
   [--export-worst-k 5] \
   [--export-dir output/psnr_review]"
@@ -229,7 +229,7 @@ fn export_worst_frames(
     splats: &HostSplats,
     frame_metrics: &[EvaluationFrameMetric],
     export_worst_k: usize,
-    device: &candle_core::Device,
+    device: &EvaluationDevice,
     export_dir: &std::path::Path,
     render_scale: f32,
 ) -> anyhow::Result<()> {
@@ -241,7 +241,7 @@ fn export_worst_frames(
         render_scale,
     );
     let trainable = runtime_from_splats(splats, device)?;
-    let mut renderer = SplatEvaluationRenderer::new(render_width, render_height, device.clone())?;
+    let mut renderer = SplatEvaluationRenderer::new(render_width, render_height, *device)?;
     let worst = rustgs::worst_frame_metrics(frame_metrics, export_worst_k);
 
     let mut summary = String::from("rank\tdataset_index\tframe_id\tpsnr_db\timage_path\n");

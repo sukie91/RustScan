@@ -5,7 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 #[cfg(feature = "gpu")]
-use crate::diff::diff_splat::{sh0_to_rgb_value, sh_coeff_count_for_degree};
+use crate::sh::{sh0_to_rgb_value, sh_coeff_count_for_degree};
 
 #[derive(Debug, Deserialize)]
 struct NerfstudioScene {

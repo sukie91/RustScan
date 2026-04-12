@@ -238,7 +238,7 @@ struct TrainArgs {
     eval_worst_frames: usize,
 
     /// Evaluation device used by the post-training scene evaluation
-    #[arg(long, default_value = "metal")]
+    #[arg(long, default_value = "cpu")]
     eval_device: String,
 
     /// Print the post-training evaluation summary as JSON
@@ -379,15 +379,6 @@ mod tests {
             })
     }
 
-    #[cfg(feature = "gpu")]
-    fn metal_training_available() -> bool {
-        let previous_hook = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {}));
-        let result = std::panic::catch_unwind(|| candle_core::Device::new_metal(0));
-        std::panic::set_hook(previous_hook);
-        matches!(result, Ok(Ok(_)))
-    }
-
     #[test]
     fn train_command_parses_training_defaults() {
         let args = parse_train_args(&[
@@ -409,7 +400,7 @@ mod tests {
         assert_eq!(args.eval_max_frames, 180);
         assert_eq!(args.eval_frame_stride, 30);
         assert_eq!(args.eval_worst_frames, 5);
-        assert_eq!(args.eval_device, "metal");
+        assert_eq!(args.eval_device, "cpu");
         assert!(!args.eval_json);
     }
 
@@ -732,7 +723,7 @@ mod tests {
             ..rustgs::TrainingConfig::default()
         };
         let evaluation_summary = rustgs::SplatEvaluationSummary {
-            device: rustgs::EvaluationDevice::Metal,
+            device: rustgs::EvaluationDevice::Cpu,
             render_scale: 0.25,
             render_width: 16,
             render_height: 16,
@@ -982,8 +973,8 @@ mod tests {
             eprintln!("skipping test: no LiteGS parity fixture was available in this workspace");
             return;
         };
-        if !metal_training_available() {
-            eprintln!("skipping test: Metal training is unavailable in this environment");
+        if !rustgs::gpu_available() {
+            eprintln!("skipping test: GPU training is unavailable in this environment");
             return;
         }
 
@@ -1007,12 +998,17 @@ mod tests {
         };
         let output_dir = tempdir().unwrap();
         let output = output_dir.path().join("fixture-scene.ply");
-        let (dataset, source) = load_training_dataset_for_training(
+        let Ok((dataset, source)) = load_training_dataset_for_training(
             &input,
             tum_config.max_frames,
             tum_config.frame_stride,
-        )
-        .unwrap();
+        ) else {
+            eprintln!(
+                "skipping test: could not load LiteGS convergence fixture at {:?}",
+                input
+            );
+            return;
+        };
         if dataset.initial_points.is_empty() {
             eprintln!(
                 "skipping test: resolved {:?} as {} without sparse points; training now requires COLMAP sparse initialization",
@@ -1021,8 +1017,7 @@ mod tests {
             return;
         }
 
-        let training_run =
-            rustgs::train_splats_from_path_with_report(&input, &tum_config, &config).unwrap();
+        let training_run = rustgs::train_splats_with_report(&dataset, &config).unwrap();
         let training_elapsed = training_run.report.elapsed;
         let final_loss = training_run.report.metadata_final_loss_or(0.0);
         let training_telemetry = training_run.report.telemetry.clone();

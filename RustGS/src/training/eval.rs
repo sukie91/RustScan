@@ -1,5 +1,4 @@
-use crate::diff::{DiffCamera, Splats};
-use crate::training::pose_utils::se3_rotation_row_major;
+use crate::core::GaussianCamera;
 use crate::{SplatMetadata, TrainingDataset};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -7,18 +6,9 @@ use std::str::FromStr;
 use std::time::Instant;
 
 #[cfg(feature = "gpu")]
-use super::metal::forward::{self as metal_forward, MetalForwardInputs, MetalForwardSettings};
-#[cfg(feature = "gpu")]
-use super::metal::runtime::MetalRuntime;
-#[cfg(feature = "gpu")]
 use super::splats::HostSplats;
-#[cfg(feature = "gpu")]
-use candle_core::Device;
 
 pub const MIN_RENDER_SCALE: f32 = 0.0625;
-
-#[cfg(feature = "gpu")]
-const EVALUATION_GAUSSIAN_BATCH_SIZE: usize = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct FinalTrainingMetrics {
@@ -50,14 +40,12 @@ fn summarized_final_loss(loss_history: &[f32], frame_count: usize) -> f32 {
 #[serde(rename_all = "snake_case")]
 pub enum EvaluationDevice {
     Cpu,
-    Metal,
 }
 
 impl std::fmt::Display for EvaluationDevice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Cpu => write!(f, "cpu"),
-            Self::Metal => write!(f, "metal"),
         }
     }
 }
@@ -67,10 +55,9 @@ impl FromStr for EvaluationDevice {
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value.trim().to_ascii_lowercase().as_str() {
-            "cpu" => Ok(Self::Cpu),
-            "metal" => Ok(Self::Metal),
+            "cpu" | "gpu" | "wgpu" | "metal" => Ok(Self::Cpu),
             other => Err(format!(
-                "unsupported evaluation device '{other}'. Expected cpu or metal"
+                "unsupported evaluation device '{other}'. Expected cpu"
             )),
         }
     }
@@ -150,10 +137,6 @@ pub enum SplatEvaluationError {
     #[error("image error: {0}")]
     Image(#[from] image::ImageError),
 
-    #[cfg(feature = "gpu")]
-    #[error("candle error: {0}")]
-    Candle(#[from] candle_core::Error),
-
     #[error("invalid evaluation input: {0}")]
     InvalidInput(String),
 }
@@ -199,8 +182,8 @@ pub fn summarize_psnr_samples(values: &[f32]) -> PsnrSummary {
     let variance = values
         .iter()
         .map(|value| {
-            let diff = value - mean;
-            diff * diff
+            let delta = value - mean;
+            delta * delta
         })
         .sum::<f32>()
         / values.len().max(1) as f32;
@@ -260,31 +243,23 @@ pub fn scaled_dimensions(width: usize, height: usize, render_scale: f32) -> (usi
 }
 
 #[cfg(feature = "gpu")]
-pub fn evaluation_device(device: EvaluationDevice) -> Result<Device, SplatEvaluationError> {
-    match device {
-        EvaluationDevice::Cpu => Ok(Device::Cpu),
-        EvaluationDevice::Metal => {
-            crate::try_metal_device().map_err(SplatEvaluationError::InvalidInput)
-        }
-    }
+pub fn evaluation_device(
+    device: EvaluationDevice,
+) -> Result<EvaluationDevice, SplatEvaluationError> {
+    Ok(device)
 }
 
 #[cfg(feature = "gpu")]
 pub fn runtime_from_splats(
     splats: &HostSplats,
-    device: &Device,
-) -> Result<Splats, SplatEvaluationError> {
-    Ok(splats.upload(device)?)
+    _device: &EvaluationDevice,
+) -> Result<HostSplats, SplatEvaluationError> {
+    Ok(splats.clone())
 }
 
 #[cfg(feature = "gpu")]
 pub struct SplatEvaluationRenderer {
-    device: Device,
-    runtime: MetalRuntime,
-    render_width: usize,
-    render_height: usize,
-    pixel_count: usize,
-    batch_size: usize,
+    renderer: crate::GaussianRenderer,
 }
 
 #[cfg(feature = "gpu")]
@@ -292,58 +267,27 @@ impl SplatEvaluationRenderer {
     pub fn new(
         render_width: usize,
         render_height: usize,
-        device: Device,
+        _device: EvaluationDevice,
     ) -> Result<Self, SplatEvaluationError> {
         Ok(Self {
-            runtime: MetalRuntime::new(render_width, render_height, device.clone())?,
-            device,
-            render_width,
-            render_height,
-            pixel_count: render_width.saturating_mul(render_height),
-            batch_size: EVALUATION_GAUSSIAN_BATCH_SIZE,
+            renderer: crate::GaussianRenderer::new(render_width, render_height),
         })
-    }
-
-    fn forward_settings(&self) -> MetalForwardSettings {
-        MetalForwardSettings {
-            pixel_count: self.pixel_count,
-            render_width: self.render_width,
-            render_height: self.render_height,
-            batch_size: self.batch_size,
-            use_native_forward: self.device.is_metal(),
-            litegs_mode: false,
-        }
     }
 
     pub fn render(
         &mut self,
-        trainable: &Splats,
-        camera: &DiffCamera,
+        splats: &HostSplats,
+        camera: &GaussianCamera,
     ) -> Result<Vec<f32>, SplatEvaluationError> {
-        let positions = trainable.positions().detach();
-        let render_colors = metal_forward::render_colors_for_camera(
-            trainable,
-            &positions,
-            camera,
-            &self.device,
-            trainable.sh_degree(),
-        )?;
-        let settings = self.forward_settings();
-        let (rendered, _, _) = metal_forward::execute_forward_pass_on_runtime(
-            &mut self.runtime,
-            &self.device,
-            settings,
-            MetalForwardInputs {
-                gaussians: trainable,
-                positions: &positions,
-                colors: &render_colors,
-                camera,
-                should_profile: false,
-                collect_visible_indices: false,
-                cluster_visible_mask: None,
-            },
-        )?;
-        Ok(rendered.color.flatten_all()?.to_vec1::<f32>()?)
+        let output = self
+            .renderer
+            .render_splats(splats, camera)
+            .map_err(|err| SplatEvaluationError::InvalidInput(err.to_string()))?;
+        Ok(output
+            .color
+            .into_iter()
+            .map(|value| value as f32 / 255.0)
+            .collect())
     }
 }
 
@@ -353,8 +297,8 @@ pub fn render_evaluation_frame(
     pose: &rustscan_types::ScenePose,
     render_width: usize,
     render_height: usize,
-    device: &Device,
-    trainable: &Splats,
+    _device: &EvaluationDevice,
+    trainable: &HostSplats,
     renderer: &mut SplatEvaluationRenderer,
 ) -> Result<(Vec<f32>, Vec<f32>), SplatEvaluationError> {
     let target = load_resized_target(
@@ -366,16 +310,10 @@ pub fn render_evaluation_frame(
     )?;
     let camera = scaled_camera_for_pose(
         pose.pose,
-        dataset.intrinsics.fx,
-        dataset.intrinsics.fy,
-        dataset.intrinsics.cx,
-        dataset.intrinsics.cy,
-        dataset.intrinsics.width as usize,
-        dataset.intrinsics.height as usize,
+        dataset.intrinsics,
         render_width,
         render_height,
-        device,
-    )?;
+    );
     let rendered = renderer.render(trainable, &camera)?;
     Ok((target, rendered))
 }
@@ -386,7 +324,7 @@ pub fn evaluate_splats(
     splats: &HostSplats,
     metadata: &SplatMetadata,
     config: &SplatEvaluationConfig,
-    device: &Device,
+    device: &EvaluationDevice,
     training_metrics: Option<FinalTrainingMetrics>,
 ) -> Result<SplatEvaluationResult, SplatEvaluationError> {
     let dataset = select_evaluation_frames(dataset, config.max_frames, config.frame_stride);
@@ -402,7 +340,7 @@ pub fn evaluate_splats(
         config.render_scale,
     );
     let runtime_splats = runtime_from_splats(splats, device)?;
-    let mut renderer = SplatEvaluationRenderer::new(render_width, render_height, device.clone())?;
+    let mut renderer = SplatEvaluationRenderer::new(render_width, render_height, *device)?;
 
     let start = Instant::now();
     let mut psnrs = Vec::with_capacity(dataset.poses.len());
@@ -434,11 +372,7 @@ pub fn evaluate_splats(
         .unwrap_or(metadata.final_loss);
     let final_step_loss = training_metrics.map(|metrics| metrics.final_step_loss);
     let summary = SplatEvaluationSummary {
-        device: if matches!(device, Device::Cpu) {
-            EvaluationDevice::Cpu
-        } else {
-            EvaluationDevice::Metal
-        },
+        device: *device,
         render_scale: config.render_scale,
         render_width,
         render_height,
@@ -467,29 +401,23 @@ pub fn evaluate_splats(
 #[cfg(feature = "gpu")]
 fn scaled_camera_for_pose(
     pose_c2w: rustscan_types::SE3,
-    fx: f32,
-    fy: f32,
-    cx: f32,
-    cy: f32,
-    src_width: usize,
-    src_height: usize,
+    intrinsics: rustscan_types::Intrinsics,
     dst_width: usize,
     dst_height: usize,
-    device: &Device,
-) -> candle_core::Result<DiffCamera> {
+) -> GaussianCamera {
     let view_pose = pose_c2w.inverse();
-    let sx = dst_width as f32 / src_width as f32;
-    let sy = dst_height as f32 / src_height as f32;
-    DiffCamera::new(
-        fx * sx,
-        fy * sy,
-        cx * sx,
-        cy * sy,
-        dst_width,
-        dst_height,
-        &se3_rotation_row_major(&view_pose),
-        &view_pose.translation(),
-        device,
+    let sx = dst_width as f32 / intrinsics.width as f32;
+    let sy = dst_height as f32 / intrinsics.height as f32;
+    GaussianCamera::new(
+        rustscan_types::Intrinsics::new(
+            intrinsics.fx * sx,
+            intrinsics.fy * sy,
+            intrinsics.cx * sx,
+            intrinsics.cy * sy,
+            dst_width as u32,
+            dst_height as u32,
+        ),
+        view_pose,
     )
 }
 
@@ -624,24 +552,23 @@ mod tests {
     }
 
     #[test]
-    fn select_evaluation_frames_honors_stride_within_prefix() {
-        let intrinsics = Intrinsics::from_focal(500.0, 64, 48);
-        let mut dataset = TrainingDataset::new(intrinsics);
+    fn select_evaluation_frames_copies_initial_points_and_stride() {
+        let mut dataset = TrainingDataset::new(Intrinsics::from_focal(500.0, 32, 32));
+        dataset.add_point([0.0, 0.0, 0.0], Some([1.0, 0.0, 0.0]));
         for idx in 0..6 {
             dataset.add_pose(ScenePose::new(
                 idx as u64,
-                PathBuf::from(format!("frame_{idx:04}.png")),
+                PathBuf::from(format!("frame-{idx}.png")),
                 SE3::identity(),
                 idx as f64,
             ));
         }
 
         let selected = select_evaluation_frames(&dataset, 5, 2);
-        let frame_ids = selected
-            .poses
-            .iter()
-            .map(|pose| pose.frame_id)
-            .collect::<Vec<_>>();
-        assert_eq!(frame_ids, vec![0, 2, 4]);
+        assert_eq!(selected.initial_points.len(), 1);
+        assert_eq!(selected.poses.len(), 3);
+        assert_eq!(selected.poses[0].frame_id, 0);
+        assert_eq!(selected.poses[1].frame_id, 2);
+        assert_eq!(selected.poses[2].frame_id, 4);
     }
 }

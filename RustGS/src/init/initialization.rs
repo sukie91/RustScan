@@ -8,12 +8,8 @@ use glam::Vec3;
 use kiddo::{KdTree, SquaredEuclidean};
 
 #[cfg(feature = "gpu")]
-use candle_core::Device;
-
-#[cfg(feature = "gpu")]
-use crate::diff::diff_splat::Splats;
-#[cfg(feature = "gpu")]
 use crate::training::HostSplats;
+use crate::TrainingError;
 
 /// Configuration for Gaussian initialization from point clouds.
 #[derive(Debug, Clone)]
@@ -43,22 +39,13 @@ impl Default for GaussianInitConfig {
 }
 
 /// Initialize runtime splats directly on device from a point cloud.
-#[cfg(feature = "gpu")]
-pub fn initialize_runtime_splats_from_points(
-    points: &[([f32; 3], Option<[f32; 3]>)],
-    config: &GaussianInitConfig,
-    device: &Device,
-) -> candle_core::Result<Splats> {
-    initialize_host_splats_from_points(points, config, 0)?.upload(device)
-}
-
 /// Initialize host-side splats from a point cloud without materializing AoS gaussians.
 #[cfg(feature = "gpu")]
 pub fn initialize_host_splats_from_points(
     points: &[([f32; 3], Option<[f32; 3]>)],
     config: &GaussianInitConfig,
     sh_degree: usize,
-) -> candle_core::Result<HostSplats> {
+) -> Result<HostSplats, TrainingError> {
     if points.is_empty() {
         return HostSplats::from_raw_parts(
             Vec::new(),

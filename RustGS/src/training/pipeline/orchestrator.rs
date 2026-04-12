@@ -4,14 +4,10 @@ use crate::TrainingError;
 #[cfg(feature = "gpu")]
 use super::events::{
     emit_training_event, TrainingEvent, TrainingEventRoute, TrainingEventSink,
-    TrainingPlanSelected, TrainingRun, TrainingRunCompleted, TrainingRunStarted,
+    TrainingPlanSelected, TrainingRun,
 };
 #[cfg(feature = "gpu")]
-use super::metal::entry as metal_entry;
-#[cfg(feature = "gpu")]
 use super::splats::HostSplats;
-#[cfg(feature = "gpu")]
-use super::telemetry::store_last_metal_training_telemetry;
 #[cfg(feature = "gpu")]
 use crate::TrainingDataset;
 
@@ -41,64 +37,10 @@ pub fn train_splats_with_events<F>(
 where
     F: FnMut(TrainingEvent),
 {
-    store_last_metal_training_telemetry(None);
-    emit_training_event(
-        &mut on_event,
-        TrainingEvent::RunStarted(TrainingRunStarted {
-            profile: config.training_profile,
-            iterations: config.iterations,
-            frame_count: dataset.poses.len(),
-            input_point_count: dataset.initial_points.len(),
-        }),
-    );
-
-    let run = match config.training_profile {
-        TrainingProfile::LegacyMetal => train_legacy_metal(dataset, config, &mut on_event),
-        TrainingProfile::LiteGsMacV1 => train_litegs_mac_v1(dataset, config, &mut on_event),
-    }?;
-
-    store_last_metal_training_telemetry(run.report.telemetry.clone());
-    emit_training_event(
-        &mut on_event,
-        TrainingEvent::RunCompleted(TrainingRunCompleted {
-            report: run.report.clone(),
-        }),
-    );
-    Ok(run)
-}
-
-#[cfg(feature = "gpu")]
-fn train_legacy_metal(
-    dataset: &TrainingDataset,
-    config: &TrainingConfig,
-    sink: &mut TrainingEventSink<'_>,
-) -> Result<TrainingRun, TrainingError> {
-    emit_standard_training_plan_event(sink);
-    metal_entry::train_splats_with_report(dataset, config)
-}
-
-#[cfg(feature = "gpu")]
-fn train_litegs_mac_v1(
-    dataset: &TrainingDataset,
-    config: &TrainingConfig,
-    sink: &mut TrainingEventSink<'_>,
-) -> Result<TrainingRun, TrainingError> {
-    validate_litegs_mac_v1_config(config)?;
-    log::info!(
-        "Training with LiteGS Mac V1 profile | sh_degree={} | cluster_size={} | tile_size={} | sparse_grad={} | reg_weight={:.4} | enable_transmittance={} | enable_depth={} | learnable_viewproj={} | lr_pose={:.6}",
-        config.litegs.sh_degree,
-        config.litegs.cluster_size,
-        config.litegs.tile_size,
-        config.litegs.sparse_grad,
-        config.litegs.reg_weight,
-        config.litegs.enable_transmittance,
-        config.litegs.enable_depth,
-        config.litegs.learnable_viewproj,
-        config.litegs.lr_pose,
-    );
-
-    emit_standard_training_plan_event(sink);
-    metal_entry::train_splats_with_report(dataset, config)
+    if config.training_profile == TrainingProfile::LiteGsMacV1 {
+        validate_litegs_mac_v1_config(config)?;
+    }
+    crate::training::wgpu::train_splats_with_events(dataset, config, &mut on_event)
 }
 
 #[cfg(feature = "gpu")]

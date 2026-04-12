@@ -3,23 +3,23 @@ use std::str::FromStr;
 
 /// Training backend selection.
 ///
-/// RustGS training now standardizes on the Metal backend. The enum is kept so
+/// RustGS training now standardizes on the wgpu backend. The enum is kept so
 /// existing config construction code does not break abruptly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrainingBackend {
-    /// Metal-native training path that keeps render/loss/backward/optimizer on GPU.
-    Metal,
+    /// Burn + wgpu training path.
+    Wgpu,
 }
 
 impl Default for TrainingBackend {
     fn default() -> Self {
-        Self::Metal
+        Self::Wgpu
     }
 }
 
 impl std::fmt::Display for TrainingBackend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "metal")
+        write!(f, "wgpu")
     }
 }
 
@@ -420,10 +420,10 @@ mod tests {
     use std::str::FromStr;
 
     #[test]
-    fn default_training_backend_is_metal() {
-        assert_eq!(TrainingBackend::default(), TrainingBackend::Metal);
+    fn default_training_backend_is_wgpu() {
+        assert_eq!(TrainingBackend::default(), TrainingBackend::Wgpu);
         let config = TrainingConfig::default();
-        assert_eq!(config.backend, TrainingBackend::Metal);
+        assert_eq!(config.backend, TrainingBackend::Wgpu);
         assert_eq!(config.training_profile, TrainingProfile::LegacyMetal);
         assert!(config.metal_use_native_forward);
         assert_eq!(config.prune_interval, 100);

@@ -4,7 +4,7 @@
 
 use crate::Intrinsics;
 use crate::SE3;
-use glam::Mat4;
+use glam::{Mat4, Quat, Vec3};
 
 /// Camera for Gaussian rendering.
 ///
@@ -29,6 +29,11 @@ impl GaussianCamera {
     /// Get the view matrix (world-to-camera).
     pub fn view_matrix(&self) -> Mat4 {
         Mat4::from_cols_array_2d(&self.extrinsics.to_matrix())
+    }
+
+    /// Get the world-space camera position.
+    pub fn position(&self) -> Vec3 {
+        self.extrinsics.inverse().vec()
     }
 
     /// Get the projection matrix.
@@ -82,6 +87,11 @@ impl GaussianCamera {
 
         Some([u, v])
     }
+}
+
+/// Build a world-to-camera view matrix from a pose.
+pub fn viewmat_from_pose(rotation: Quat, translation: Vec3) -> Mat4 {
+    Mat4::from_rotation_translation(rotation, translation)
 }
 
 #[cfg(test)]

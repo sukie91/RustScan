@@ -1,0 +1,38 @@
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SplatColorRepresentation {
+    Rgb,
+    SphericalHarmonics { degree: usize },
+}
+
+impl Default for SplatColorRepresentation {
+    fn default() -> Self {
+        Self::Rgb
+    }
+}
+
+impl SplatColorRepresentation {
+    pub const fn sh_degree(self) -> usize {
+        match self {
+            Self::Rgb => 0,
+            Self::SphericalHarmonics { degree } => degree,
+        }
+    }
+
+    pub const fn sh_coeff_count(self) -> usize {
+        sh_coeff_count_for_degree(self.sh_degree())
+    }
+}
+
+pub const SH_C0: f32 = 0.282_094_8;
+
+pub const fn sh_coeff_count_for_degree(degree: usize) -> usize {
+    (degree + 1) * (degree + 1)
+}
+
+pub fn rgb_to_sh0_value(rgb: f32) -> f32 {
+    (rgb - 0.5) / SH_C0
+}
+
+pub fn sh0_to_rgb_value(sh: f32) -> f32 {
+    (sh * SH_C0) + 0.5
+}

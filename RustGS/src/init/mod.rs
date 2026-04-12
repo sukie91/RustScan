@@ -7,6 +7,4 @@ pub mod initialization;
 pub use initialization::GaussianInitConfig;
 
 #[cfg(feature = "gpu")]
-pub use initialization::{
-    initialize_host_splats_from_points, initialize_runtime_splats_from_points,
-};
+pub use initialization::initialize_host_splats_from_points;

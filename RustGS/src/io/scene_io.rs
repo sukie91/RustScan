@@ -5,18 +5,11 @@ use std::io::{BufWriter, Write};
 use std::path::Path;
 
 #[cfg(feature = "gpu")]
-use crate::diff::diff_splat::sh_coeff_count_for_degree;
+use crate::sh::sh_coeff_count_for_degree;
 use thiserror::Error;
 
 #[cfg(test)]
-/// SH DC coefficient constant for RGB to SH conversion.
-const SH_C0: f32 = 0.282_094_8;
-
-/// Convert RGB [0,1] to SH DC coefficient.
-#[cfg(test)]
-fn rgb_to_sh_dc(rgb: f32) -> f32 {
-    (rgb - 0.5) / SH_C0
-}
+use crate::sh::rgb_to_sh0_value as rgb_to_sh_dc;
 
 #[derive(Debug, Clone)]
 pub struct SplatMetadata {

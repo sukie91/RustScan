@@ -72,13 +72,26 @@ fn trains_directly_from_workspace_tum_directory() {
         );
         return;
     };
-    if !rustgs::metal_available() {
-        eprintln!("skipping test: Metal unavailable in current environment");
+    if !rustgs::gpu_available() {
+        eprintln!("skipping test: GPU unavailable in current environment");
         return;
     }
     let mut config = TrainingConfig::default();
     config.iterations = 1;
     config.max_initial_gaussians = 10_000;
+    let dataset = load_training_dataset(
+        &root,
+        &TumRgbdConfig {
+            max_frames: 90,
+            frame_stride: 30,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    if dataset.initial_points.is_empty() {
+        eprintln!("skipping test: TUM fixture does not include sparse initialization points");
+        return;
+    }
 
     let splats = rustgs::train_splats_from_path(
         &root,
@@ -104,8 +117,8 @@ fn tum_training_smoke_produces_post_train_evaluation_summary() {
         );
         return;
     };
-    if !rustgs::metal_available() {
-        eprintln!("skipping test: Metal unavailable in current environment");
+    if !rustgs::gpu_available() {
+        eprintln!("skipping test: GPU unavailable in current environment");
         return;
     }
 
@@ -119,6 +132,10 @@ fn tum_training_smoke_produces_post_train_evaluation_summary() {
     let mut config = TrainingConfig::default();
     config.iterations = 1;
     config.max_initial_gaussians = 2_000;
+    if dataset.initial_points.is_empty() {
+        eprintln!("skipping test: TUM fixture does not include sparse initialization points");
+        return;
+    }
 
     let splats = rustgs::train_splats_from_path(&root, &tum_config, &config).unwrap();
     let metadata = SplatMetadata {

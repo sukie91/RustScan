@@ -12,7 +12,7 @@ pub(super) fn run_train_command(args: TrainArgs) -> anyhow::Result<()> {
     log::info!("Training 3DGS splats from {:?}", args.input);
     log::info!("Output: {:?}", args.output);
     log::info!("Iterations: {}", args.iterations);
-    log::info!("Backend: metal");
+    log::info!("Backend: wgpu");
     log::info!("Training profile: {}", args.training_profile);
     if args.sampling_step != 0 {
         log::warn!(
