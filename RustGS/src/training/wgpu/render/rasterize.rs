@@ -113,10 +113,10 @@ where
 }
 
 pub(crate) fn rasterize<B: RasterizeBackend>(
-    compact_gid_from_isect: Tensor<B, 1, Int>,
-    tile_offsets: Tensor<B, 1, Int>,
-    projected_splats: Tensor<B, 2>,
-    global_from_compact_gid: Tensor<B, 1, Int>,
+    compact_gid_from_isect: &Tensor<B, 1, Int>,
+    tile_offsets: &Tensor<B, 1, Int>,
+    projected_splats: &Tensor<B, 2>,
+    global_from_compact_gid: &Tensor<B, 1, Int>,
     total_splats: usize,
     img_size: (u32, u32),
     tile_bounds: (u32, u32),
@@ -124,10 +124,10 @@ pub(crate) fn rasterize<B: RasterizeBackend>(
     _device: &B::Device,
 ) -> RasterizeOutput<B> {
     let (out_img, visible) = B::rasterize_primitive(
-        compact_gid_from_isect.into_primitive(),
-        tile_offsets.into_primitive(),
-        projected_splats.into_primitive().tensor(),
-        global_from_compact_gid.into_primitive(),
+        compact_gid_from_isect.clone().into_primitive(),
+        tile_offsets.clone().into_primitive(),
+        projected_splats.clone().into_primitive().tensor(),
+        global_from_compact_gid.clone().into_primitive(),
         total_splats,
         img_size,
         tile_bounds,

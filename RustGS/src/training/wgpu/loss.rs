@@ -1,5 +1,8 @@
 use burn::prelude::*;
-use burn::tensor::s;
+use burn::tensor::{
+    module::conv2d,
+    ops::{ConvOptions, PadMode},
+};
 
 #[derive(Debug, Clone)]
 pub struct SsimConfig {
@@ -48,7 +51,8 @@ pub fn ssim_loss<B: Backend>(
     let c2 = ((config.k2 * config.data_range).powi(2)) as f32;
 
     let numerator = (mu_xy.mul_scalar(2.0) + c1) * (sigma_xy.mul_scalar(2.0) + c2);
-    let denominator = (mu_x_sq + mu_y_sq + c1) * (sigma_x_sq + sigma_y_sq + c2 + 1e-6);
+    let denominator = (mu_x_sq + mu_y_sq + c1).clamp_min(1e-8_f32)
+        * (sigma_x_sq + sigma_y_sq + c2).clamp_min(1e-8_f32);
     let ssim_map = numerator / denominator;
 
     ssim_map.mean().mul_scalar(-1.0).add_scalar(1.0).reshape([1])
@@ -90,80 +94,81 @@ fn gaussian_kernel_1d<B: Backend>(config: &SsimConfig, device: &B::Device) -> Te
 }
 
 fn separable_blur<B: Backend>(tensor: Tensor<B, 4>, kernel: Tensor<B, 1>) -> Tensor<B, 4> {
-    let horizontal = blur_width(tensor, kernel.clone());
-    blur_height(horizontal, kernel)
-}
-
-fn blur_width<B: Backend>(tensor: Tensor<B, 4>, kernel: Tensor<B, 1>) -> Tensor<B, 4> {
-    let [_, _, _, width] = tensor.dims();
-    let pad = kernel.dims()[0] / 2;
-    let padded = pad_width(tensor, pad);
-    let mut accum = padded
+    let kernel_size = kernel.dims()[0];
+    let pad = kernel_size / 2;
+    let [_n, channels, _height, _width] = tensor.dims();
+    let horizontal_kernel = kernel
         .clone()
-        .slice(s![.., .., .., 0..width])
-        .mul(kernel.clone().slice(s![0]).unsqueeze());
+        .reshape([1, 1, 1, kernel_size])
+        .repeat_dim(0, channels);
+    let horizontal = conv2d(
+        tensor.pad([(0, 0), (pad, pad)], PadMode::Edge),
+        horizontal_kernel,
+        None,
+        ConvOptions::new([1, 1], [0, 0], [1, 1], channels),
+    );
+    let vertical_kernel = kernel
+        .reshape([1, 1, kernel_size, 1])
+        .repeat_dim(0, channels);
 
-    for index in 1..kernel.dims()[0] {
-        let weight = kernel.clone().slice(s![index]).unsqueeze();
-        let window = padded.clone().slice(s![.., .., .., index..index + width]);
-        accum = accum + window.mul(weight);
-    }
-
-    accum
-}
-
-fn blur_height<B: Backend>(tensor: Tensor<B, 4>, kernel: Tensor<B, 1>) -> Tensor<B, 4> {
-    let [_, _, height, _] = tensor.dims();
-    let pad = kernel.dims()[0] / 2;
-    let padded = pad_height(tensor, pad);
-    let mut accum = padded
-        .clone()
-        .slice(s![.., .., 0..height, ..])
-        .mul(kernel.clone().slice(s![0]).unsqueeze());
-
-    for index in 1..kernel.dims()[0] {
-        let weight = kernel.clone().slice(s![index]).unsqueeze();
-        let window = padded.clone().slice(s![.., .., index..index + height, ..]);
-        accum = accum + window.mul(weight);
-    }
-
-    accum
-}
-
-fn pad_width<B: Backend>(tensor: Tensor<B, 4>, pad: usize) -> Tensor<B, 4> {
-    if pad == 0 {
-        return tensor;
-    }
-    let width = tensor.dims()[3];
-    let left = tensor.clone().slice(s![.., .., .., 0..1]).repeat_dim(3, pad);
-    let right = tensor
-        .clone()
-        .slice(s![.., .., .., width - 1..width])
-        .repeat_dim(3, pad);
-    Tensor::cat(vec![left, tensor, right], 3)
-}
-
-fn pad_height<B: Backend>(tensor: Tensor<B, 4>, pad: usize) -> Tensor<B, 4> {
-    if pad == 0 {
-        return tensor;
-    }
-    let height = tensor.dims()[2];
-    let top = tensor.clone().slice(s![.., .., 0..1, ..]).repeat_dim(2, pad);
-    let bottom = tensor
-        .clone()
-        .slice(s![.., .., height - 1..height, ..])
-        .repeat_dim(2, pad);
-    Tensor::cat(vec![top, tensor, bottom], 2)
+    conv2d(
+        horizontal.pad([(pad, pad), (0, 0)], PadMode::Edge),
+        vertical_kernel,
+        None,
+        ConvOptions::new([1, 1], [0, 0], [1, 1], channels),
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::{combined_loss, ssim_loss, SsimConfig};
     use crate::training::wgpu::backend::GsBackendBase;
-    use burn::tensor::Tensor;
+    use burn::prelude::Backend;
+    use burn::tensor::{ops::PadMode, s, Tensor, TensorData};
 
     fn device() -> <GsBackendBase as burn::tensor::backend::Backend>::Device {
         Default::default()
+    }
+
+    fn separable_blur_reference<B: Backend>(tensor: Tensor<B, 4>, kernel: Tensor<B, 1>) -> Tensor<B, 4> {
+        let horizontal = blur_width_reference(tensor, kernel.clone());
+        blur_height_reference(horizontal, kernel)
+    }
+
+    fn blur_width_reference<B: Backend>(tensor: Tensor<B, 4>, kernel: Tensor<B, 1>) -> Tensor<B, 4> {
+        let [_, _, _, width] = tensor.dims();
+        let pad = kernel.dims()[0] / 2;
+        let padded = tensor.pad([(0, 0), (pad, pad)], PadMode::Edge);
+        let mut accum = padded
+            .clone()
+            .slice(s![.., .., .., 0..width])
+            .mul(kernel.clone().slice(s![0]).unsqueeze());
+
+        for index in 1..kernel.dims()[0] {
+            let weight = kernel.clone().slice(s![index]).unsqueeze();
+            let window = padded.clone().slice(s![.., .., .., index..index + width]);
+            accum = accum + window.mul(weight);
+        }
+
+        accum
+    }
+
+    fn blur_height_reference<B: Backend>(tensor: Tensor<B, 4>, kernel: Tensor<B, 1>) -> Tensor<B, 4> {
+        let [_, _, height, _] = tensor.dims();
+        let pad = kernel.dims()[0] / 2;
+        let padded = tensor.pad([(pad, pad), (0, 0)], PadMode::Edge);
+        let mut accum = padded
+            .clone()
+            .slice(s![.., .., 0..height, ..])
+            .mul(kernel.clone().slice(s![0]).unsqueeze());
+
+        for index in 1..kernel.dims()[0] {
+            let weight = kernel.clone().slice(s![index]).unsqueeze();
+            let window = padded.clone().slice(s![.., .., index..index + height, ..]);
+            accum = accum + window.mul(weight);
+        }
+
+        accum
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -180,6 +185,19 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn test_ssim_loss_zero_images_is_finite() {
+        let device = device();
+        let image = Tensor::<GsBackendBase, 3>::zeros([16, 16, 3], &device);
+
+        let loss = ssim_loss(image.clone(), image, &SsimConfig::default(), &device)
+            .into_scalar_async()
+            .await
+            .expect("ssim scalar");
+
+        assert!(loss.is_finite(), "expected finite SSIM loss, got {loss}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn test_combined_loss() {
         let device = device();
         let pred = Tensor::<GsBackendBase, 3>::zeros([16, 16, 3], &device);
@@ -191,5 +209,32 @@ mod tests {
             .expect("combined loss scalar");
 
         assert!(loss > 0.5, "expected positive image mismatch loss, got {loss}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_separable_blur_matches_reference() {
+        let device = device();
+        let tensor = Tensor::<GsBackendBase, 4>::from_data(
+            TensorData::new((0..120).map(|v| v as f32 / 120.0).collect(), [1, 3, 5, 8]),
+            &device,
+        );
+        let kernel = Tensor::<GsBackendBase, 1>::from_floats([0.25, 0.5, 0.25], &device);
+
+        let reference = separable_blur_reference(tensor.clone(), kernel.clone())
+            .into_data_async()
+            .await
+            .expect("reference blur");
+        let optimized = super::separable_blur(tensor, kernel)
+            .into_data_async()
+            .await
+            .expect("optimized blur");
+
+        let reference = reference.as_slice::<f32>().expect("reference f32");
+        let optimized = optimized.as_slice::<f32>().expect("optimized f32");
+
+        for (idx, (lhs, rhs)) in reference.iter().zip(optimized.iter()).enumerate() {
+            let delta = (lhs - rhs).abs();
+            assert!(delta < 1e-4, "blur mismatch at index {idx}: {lhs} vs {rhs} (delta={delta})");
+        }
     }
 }

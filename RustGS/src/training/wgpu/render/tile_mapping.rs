@@ -176,7 +176,7 @@ where
 }
 
 pub(crate) fn tile_mapping<B: TileMappingBackend + PrefixSumBackend + RadixSortBackend>(
-    projected_splats: Tensor<B, 2>,
+    projected_splats: &Tensor<B, 2>,
     intersect_counts: Tensor<B, 1, Int>,
     num_intersections: usize,
     num_tiles: u32,
@@ -189,7 +189,7 @@ pub(crate) fn tile_mapping<B: TileMappingBackend + PrefixSumBackend + RadixSortB
     );
 
     let (tile_id_from_isect, compact_gid_from_isect) = B::map_gaussians_to_intersects_primitive(
-        projected_splats.into_primitive().tensor(),
+        projected_splats.clone().into_primitive().tensor(),
         cum_tiles_hit.into_primitive(),
         num_intersections,
         MGIUniforms {

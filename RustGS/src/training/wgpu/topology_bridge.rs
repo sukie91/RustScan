@@ -35,13 +35,16 @@ pub async fn snapshot_for_topology<B: Backend>(
         .clone()
         .into_vec::<f32>()
         .expect("topology grad_color readback");
-    let num_observations = if let Ok(values) = data[2].clone().into_vec::<u32>() {
+    // GsBackendBase::IntElement = i32 for the wgpu backend, so try i32 first.
+    let num_observations = if let Ok(values) = data[2].clone().into_vec::<i32>() {
+        values.into_iter().map(|value| value.max(0) as u32).collect()
+    } else if let Ok(values) = data[2].clone().into_vec::<u32>() {
         values
     } else {
         data[2]
             .clone()
             .into_vec::<i32>()
-            .expect("topology num_observations readback")
+            .expect("topology num_observations: expected i32 or u32 scalar tensor")
             .into_iter()
             .map(|value| value.max(0) as u32)
             .collect()

@@ -71,6 +71,14 @@ impl<B: Backend> AdamScaled<B> {
         self.transforms.scaling = Some(scaling);
     }
 
+    pub fn transform_scaling(&self) -> Tensor<B, 2> {
+        self.transforms
+            .scaling
+            .as_ref()
+            .expect("transform scaling not set")
+            .clone()
+    }
+
     pub fn set_sh_scaling(&mut self, scaling: Tensor<B, 3>) {
         self.sh_coeffs.scaling = Some(scaling);
     }

@@ -92,7 +92,7 @@ where
 
 pub(crate) fn project_visible<B: ProjectVisibleBackend>(
     splats: &DeviceSplats<B>,
-    global_from_compact_gid: Tensor<B, 1, Int>,
+    global_from_compact_gid: &Tensor<B, 1, Int>,
     num_visible: usize,
     camera: &GaussianCamera,
     img_size: (u32, u32),
@@ -112,7 +112,7 @@ pub(crate) fn project_visible<B: ProjectVisibleBackend>(
         splats.transforms.val().into_primitive().tensor(),
         splats.sh_coeffs.val().into_primitive().tensor(),
         splats.raw_opacities.val().into_primitive().tensor(),
-        global_from_compact_gid.into_primitive(),
+        global_from_compact_gid.clone().into_primitive(),
         uniforms,
         num_visible,
     )))

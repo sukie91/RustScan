@@ -138,7 +138,7 @@ fn calc_cam_j(
 ) -> mat3x2<f32> {
     let lims_pos = (1.15 * vec2<f32>(img_size) - pixel_center) / focal;
     let lims_neg = (-0.15 * vec2<f32>(img_size) - pixel_center) / focal;
-    let rz = 1.0 / mean_c.z;
+    let rz = 1.0 / max(mean_c.z, 0.01);
     let uv_clipped = clamp(mean_c.xy * rz, lims_neg, lims_pos);
     let duv_dxy = focal * rz;
     return mat3x2<f32>(
@@ -178,14 +178,17 @@ fn compensate_cov2d(cov2d: ptr<function, mat2x2<f32>>) -> f32 {
 }
 
 fn inverse2x2(m: mat2x2<f32>) -> mat2x2<f32> {
-    let det = determinant(m);
-    if det <= 0.0 {
+    var m_reg = m;
+    m_reg[0][0] += 1e-6;
+    m_reg[1][1] += 1e-6;
+    let det = determinant(m_reg);
+    if det <= 1e-10 {
         return mat2x2<f32>(vec2<f32>(0.0), vec2<f32>(0.0));
     }
     let inv_det = 1.0 / det;
     return mat2x2<f32>(
-        vec2<f32>(m[1][1] * inv_det, -m[0][1] * inv_det),
-        vec2<f32>(-m[0][1] * inv_det, m[0][0] * inv_det),
+        vec2<f32>(m_reg[1][1] * inv_det, -m_reg[0][1] * inv_det),
+        vec2<f32>(-m_reg[0][1] * inv_det, m_reg[0][0] * inv_det),
     );
 }
 
@@ -385,7 +388,7 @@ fn persp_proj_vjp(
     let y = mean3d.y;
     let z = mean3d.z;
 
-    let rz = 1.0 / z;
+    let rz = 1.0 / max(abs(z), 0.01);
     let rz2 = rz * rz;
 
     var v_mean3d = vec3<f32>(

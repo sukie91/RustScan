@@ -68,6 +68,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         uniforms.viewmat[2].xyz,
     );
     let mean_c = rotation * mean + uniforms.viewmat[3].xyz;
+    if mean_c.z < 0.01 {
+        return;
+    }
     let rotmat = helpers::quat_to_mat3(quat);
     let scale_mat = helpers::scale_to_mat3(scale);
     let m = rotmat * scale_mat;

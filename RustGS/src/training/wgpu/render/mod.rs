@@ -1,7 +1,7 @@
 //! Forward rendering pipeline.
 
 use burn::prelude::*;
-use burn::tensor::{Int, Tensor};
+use burn::tensor::{Int, Tensor, TensorData};
 use bytemuck::{Pod, Zeroable};
 use naga_oil::compose::{ComposableModuleDescriptor, Composer, NagaModuleDescriptor, ShaderType};
 use wgpu::naga;
@@ -102,20 +102,33 @@ pub(crate) fn compose_shader(file_path: &str, source: &str) -> String {
         .expect("serialize shader")
 }
 
-pub(crate) async fn read_u32_async<B: Backend>(tensor: &Tensor<B, 1, Int>) -> u32 {
-    let data = tensor
-        .clone()
+fn usize_from_int_data(data: &TensorData, index: usize, label: &str) -> usize {
+    if let Ok(values) = data.as_slice::<i32>() {
+        values[index].max(0) as usize
+    } else if let Ok(values) = data.as_slice::<u32>() {
+        values[index] as usize
+    } else {
+        panic!("{label}: expected i32/u32 tensor");
+    }
+}
+
+async fn read_projection_counts_async<B: Backend>(
+    num_visible_buf: Tensor<B, 1, Int>,
+    num_intersections_buf: Tensor<B, 1, Int>,
+) -> (usize, usize) {
+    let counts = Tensor::<B, 1, Int>::cat(
+        vec![num_visible_buf.reshape([1]), num_intersections_buf.reshape([1])],
+        0,
+    );
+    let counts_data = counts
         .into_data_async()
         .await
-        .expect("read scalar u32");
+        .expect("projection count readback");
 
-    if let Ok(values) = data.as_slice::<u32>() {
-        values[0]
-    } else if let Ok(values) = data.as_slice::<i32>() {
-        values[0] as u32
-    } else {
-        panic!("expected i32/u32 scalar tensor");
-    }
+    (
+        usize_from_int_data(&counts_data, 0, "num_visible"),
+        usize_from_int_data(&counts_data, 1, "num_intersections"),
+    )
 }
 
 #[allow(dead_code)]
@@ -147,8 +160,15 @@ where
         + RadixSortBackend,
 {
     let proj_out = project_forward(splats, camera, img_size, device);
-    let num_visible = read_u32_async(&proj_out.num_visible_buf).await as usize;
-    let num_intersections = read_u32_async(&proj_out.num_intersections_buf).await as usize;
+    let projection::ProjectForwardOutput {
+        global_from_presort_gid,
+        depths,
+        intersect_counts,
+        num_visible_buf,
+        num_intersections_buf,
+    } = proj_out;
+    let (num_visible, num_intersections) =
+        read_projection_counts_async(num_visible_buf, num_intersections_buf).await;
     let tile_bounds = calc_tile_bounds(img_size);
     let num_tiles = tile_bounds.0 * tile_bounds.1;
 
@@ -157,10 +177,10 @@ where
         let projected_splats = Tensor::<B, 2>::zeros([0, 9], device);
         let tile_offsets = Tensor::<B, 1, Int>::zeros([2 * num_tiles as usize], device);
         let raster_out = rasterize(
-            empty_indices.clone(),
-            tile_offsets.clone(),
-            projected_splats.clone(),
-            empty_indices.clone(),
+            &empty_indices,
+            &tile_offsets,
+            &projected_splats,
+            &empty_indices,
             splats.num_splats(),
             img_size,
             tile_bounds,
@@ -181,20 +201,17 @@ where
     }
 
     let global_from_compact_gid = sort_by_depth(
-        proj_out.depths.clone(),
-        proj_out.global_from_presort_gid,
+        depths,
+        global_from_presort_gid,
         num_visible,
         device,
     );
 
-    let compact_intersect_counts = proj_out
-        .intersect_counts
-        .clone()
-        .gather(0, global_from_compact_gid.clone());
+    let compact_intersect_counts = intersect_counts.gather(0, global_from_compact_gid.clone());
 
     let projected_splats = project_visible(
         splats,
-        global_from_compact_gid.clone(),
+        &global_from_compact_gid,
         num_visible,
         camera,
         img_size,
@@ -205,10 +222,10 @@ where
         let compact_gid_from_isect = Tensor::<B, 1, Int>::zeros([0], device);
         let tile_offsets = Tensor::<B, 1, Int>::zeros([2 * num_tiles as usize], device);
         let raster_out = rasterize(
-            compact_gid_from_isect.clone(),
-            tile_offsets.clone(),
-            projected_splats.clone(),
-            global_from_compact_gid.clone(),
+            &compact_gid_from_isect,
+            &tile_offsets,
+            &projected_splats,
+            &global_from_compact_gid,
             splats.num_splats(),
             img_size,
             tile_bounds,
@@ -229,7 +246,7 @@ where
     }
 
     let tile_out = tile_mapping(
-        projected_splats.clone(),
+        &projected_splats,
         compact_intersect_counts,
         num_intersections,
         num_tiles,
@@ -245,10 +262,10 @@ where
     );
 
     let raster_out = rasterize(
-        tile_out.compact_gid_from_isect.clone(),
-        tile_offsets.clone(),
-        projected_splats.clone(),
-        global_from_compact_gid.clone(),
+        &tile_out.compact_gid_from_isect,
+        &tile_offsets,
+        &projected_splats,
+        &global_from_compact_gid,
         splats.num_splats(),
         img_size,
         tile_bounds,

@@ -70,6 +70,27 @@ impl WgpuTrainer {
         }
     }
 
+    fn position_lr_at(&self, iteration: usize) -> f32 {
+        let lr_init = self.config.lr_position;
+        let lr_final = self.config.lr_pos_final;
+        if lr_final <= 0.0 || lr_final >= lr_init || self.config.iterations == 0 {
+            return lr_init;
+        }
+
+        let t = (iteration.min(self.config.iterations) as f32) / (self.config.iterations as f32);
+        lr_init * ((lr_final / lr_init).ln() * t).exp()
+    }
+
+    fn update_position_lr(&mut self, lr: f32) {
+        let pos_cols = Tensor::<GsBackendBase, 2>::from_data(
+            TensorData::from([[lr, lr, lr]]),
+            &self.device,
+        );
+        let rest = self.optimizer.transform_scaling().slice(s![.., 3..10]);
+        self.optimizer
+            .set_transform_scaling(Tensor::cat(vec![pos_cols, rest], 1));
+    }
+
     pub async fn train_step(
         &mut self,
         splats: &mut DeviceSplats<GsDiffBackend>,
@@ -92,6 +113,12 @@ impl WgpuTrainer {
             &self.device,
         );
         let loss_value = loss.clone().into_scalar_async().await.expect("loss scalar");
+        if !loss_value.is_finite() {
+            log::warn!(
+                "Non-finite loss ({loss_value:.6}) at iteration {iteration}; skipping gradient update"
+            );
+            return loss_value;
+        }
         let mut grads = loss.backward();
 
         let transforms_grad = splats
@@ -107,6 +134,8 @@ impl WgpuTrainer {
             .grad_remove(&mut grads)
             .unwrap_or_else(|| splats.raw_opacities.val().inner().zeros_like());
 
+        let pos_lr = self.position_lr_at(iteration.saturating_sub(1));
+        self.update_position_lr(pos_lr);
         self.accumulate_gradients(&transforms_grad, &sh_grad);
         self.optimizer
             .step_device_splats(splats, transforms_grad, sh_grad, opacity_grad);
@@ -209,10 +238,10 @@ impl WgpuTrainer {
         let plan = topology_bridge::plan_mutations(&snapshot, &self.config, iteration, frame_count);
         topology_apply::apply_mutations(splats, &plan, &self.device).await;
         self.optimizer.reset();
-        self.reset_accumulators(splats.num_splats(), splats.sh_coeffs.val().dims()[1]);
+        self.reset_accumulators(splats.num_splats(), splats.sh_coeffs.val().dims()[1], iteration);
     }
 
-    fn reset_accumulators(&mut self, num_splats: usize, sh_coeffs: usize) {
+    fn reset_accumulators(&mut self, num_splats: usize, sh_coeffs: usize, iteration: usize) {
         self.grad_2d_accum = Tensor::zeros([num_splats], &self.device);
         self.grad_color_accum = Tensor::zeros([num_splats], &self.device);
         self.num_observations = Tensor::zeros([num_splats], &self.device);
@@ -243,5 +272,39 @@ impl WgpuTrainer {
         self.optimizer.set_transform_scaling(transform_scales);
         self.optimizer.set_sh_scaling(sh_scales);
         self.optimizer.set_opacity_scaling(opacity_scales);
+        self.update_position_lr(self.position_lr_at(iteration.saturating_sub(1)));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::WgpuTrainer;
+    use crate::training::TrainingConfig;
+    use crate::training::wgpu::backend::GsDevice;
+
+    #[test]
+    fn test_position_lr_decay() {
+        let mut config = TrainingConfig::default();
+        config.iterations = 1000;
+        config.lr_position = 1.6e-4_f32;
+        config.lr_pos_final = 1.6e-6_f32;
+
+        let trainer = WgpuTrainer::new(config.clone(), GsDevice::default(), 1, 1);
+        let at_0 = trainer.position_lr_at(0);
+        let at_mid = trainer.position_lr_at(500);
+        let at_end = trainer.position_lr_at(config.iterations);
+
+        assert!(
+            (at_0 - config.lr_position).abs() < 1e-8,
+            "initial LR should equal lr_position"
+        );
+        assert!(
+            (at_end - config.lr_pos_final).abs() < config.lr_pos_final * 0.01,
+            "final LR should ≈ lr_pos_final"
+        );
+        assert!(
+            at_mid < config.lr_position && at_mid > config.lr_pos_final,
+            "mid LR should be between bounds"
+        );
     }
 }
