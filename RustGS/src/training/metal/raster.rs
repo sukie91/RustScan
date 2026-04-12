@@ -212,6 +212,10 @@ pub(crate) fn reserve_backward_buffers(
             .saturating_mul(size_of::<f32>()),
     )?;
     runtime.ensure_buffer(
+        MetalBufferSlot::GradRefineWeight,
+        gaussian_count.saturating_mul(size_of::<f32>()),
+    )?;
+    runtime.ensure_buffer(
         MetalBufferSlot::GradMagnitudes,
         gaussian_count.saturating_mul(size_of::<f32>()),
     )?;
@@ -303,6 +307,7 @@ pub(crate) fn rasterize_backward(
     runtime.dispatch_fill_u32(MetalBufferSlot::GradScales, 0, gaussian_count * 3)?;
     runtime.dispatch_fill_u32(MetalBufferSlot::GradOpacity, 0, gaussian_count)?;
     runtime.dispatch_fill_u32(MetalBufferSlot::GradColors, 0, gaussian_count * 3)?;
+    runtime.dispatch_fill_u32(MetalBufferSlot::GradRefineWeight, 0, gaussian_count)?;
 
     let setup = total_start.elapsed();
 
@@ -467,6 +472,16 @@ pub(crate) fn rasterize_backward(
             runtime
                 .buffer_handle(MetalBufferSlot::GradProjectedPositions)?
                 .ok_or_else(|| candle_core::Error::Msg("missing projected position grads".into()))?
+                .as_ref(),
+        ),
+        0,
+    );
+    encoder.set_buffer(
+        16,
+        Some(
+            runtime
+                .buffer_handle(MetalBufferSlot::GradRefineWeight)?
+                .ok_or_else(|| candle_core::Error::Msg("missing refine weights".into()))?
                 .as_ref(),
         ),
         0,

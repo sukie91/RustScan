@@ -59,7 +59,7 @@ fn projected_with_visible_sources(
 }
 
 #[test]
-fn update_gaussian_stats_uses_projected_grad_magnitudes_for_litegs() {
+fn update_gaussian_stats_uses_refine_weights_for_litegs() {
     let device = Device::Cpu;
     let config = TrainingConfig {
         training_profile: TrainingProfile::LiteGsMacV1,
@@ -73,7 +73,7 @@ fn update_gaussian_stats_uses_projected_grad_magnitudes_for_litegs() {
         .update_gaussian_stats(&[1e-9, 2e-9], &[0.0, 0.0035], &projected, 2)
         .unwrap();
 
-    let expected = 0.0035 * trainer.pixel_count as f32;
+    let expected = 0.0035;
     assert_eq!(trainer.gaussian_stats.len(), 2);
     assert!(trainer.gaussian_stats[0].mean2d_grad.mean.abs() < 1e-12);
     assert!((trainer.gaussian_stats[1].mean2d_grad.mean - expected).abs() < 1e-6);
@@ -179,12 +179,20 @@ fn litegs_profile_preserves_rotation_learning_rate() {
 }
 
 #[test]
-fn litegs_profile_uses_litegs_opacity_lr_default() {
+fn litegs_profile_uses_brush_aligned_effective_defaults() {
     let effective = effective_metal_config(&TrainingConfig {
         training_profile: TrainingProfile::LiteGsMacV1,
         ..TrainingConfig::default()
     });
-    assert_eq!(effective.lr_opacity, 0.025);
+    assert_eq!(effective.lr_position, 2e-5);
+    assert_eq!(effective.lr_pos_final, 2e-7);
+    assert_eq!(effective.lr_scale, 7e-3);
+    assert_eq!(effective.lr_rotation, 2e-3);
+    assert_eq!(effective.lr_opacity, 0.012);
+    assert_eq!(effective.lr_color, 0.002);
+    assert_eq!(effective.litegs.refine_every, 200);
+    assert_eq!(effective.litegs.growth_grad_threshold, 0.003);
+    assert_eq!(effective.litegs.growth_select_fraction, 0.2);
 }
 
 #[test]

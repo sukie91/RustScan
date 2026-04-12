@@ -7,6 +7,7 @@ use super::forward::{
     projected_axis_covariance_terms, projected_rows_to_cpu, row_to_quaternion, row_to_vec3,
     CpuProjectedGaussian, ProjectedGaussians, ProjectedTileBins, RenderedFrame,
 };
+use super::resources::MetalBufferSlot;
 use super::runtime::{MetalRuntime, METAL_TILE_SIZE};
 
 const SH_C1: f32 = 0.488_602_52;
@@ -83,6 +84,7 @@ pub(crate) struct MetalBackwardPass {
     pub grads: MetalBackwardGrads,
     pub grad_magnitudes: Vec<f32>,
     pub projected_grad_magnitudes: Vec<f32>,
+    pub refine_weights: Vec<f32>,
 }
 
 pub(crate) struct MetalBackwardRequest<'a> {
@@ -157,6 +159,13 @@ pub(crate) fn backward_weighted_l1(
     let projected_grad_magnitude_tensor = runtime.compute_projected_grad_magnitudes(n_gaussians)?;
     let projected_grad_magnitudes =
         runtime.read_tensor_flat::<f32>(&projected_grad_magnitude_tensor)?;
+    let refine_weight_tensor = runtime.tensor_from_buffer(
+        MetalBufferSlot::GradRefineWeight,
+        n_gaussians,
+        DType::F32,
+        (n_gaussians,),
+    )?;
+    let refine_weights = runtime.read_tensor_flat::<f32>(&refine_weight_tensor)?;
 
     let grads = MetalBackwardGrads {
         positions: frame.grad_positions,
@@ -169,6 +178,7 @@ pub(crate) fn backward_weighted_l1(
         grads,
         grad_magnitudes,
         projected_grad_magnitudes,
+        refine_weights,
     })
 }
 

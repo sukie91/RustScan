@@ -1,8 +1,8 @@
 use std::cmp::Ordering;
 
 use glam::{Quat, Vec3};
-use rand::distributions::{Distribution, WeightedIndex};
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::seq::index::sample_weighted;
+use rand::Rng;
 
 use super::density_controller::{
     DensityController, DensityControllerConfig, OpacityResetMode, PruneMode,
@@ -386,7 +386,7 @@ pub(super) fn schedule_topology(
         let Some(epoch) = litegs_current_epoch(step.iteration, step.frame_count) else {
             return TopologySchedule::default();
         };
-        let passed_warmup = step.iteration > policy.topology_warmup;
+        let phase_iter = step.iteration.saturating_sub(1);
         let frozen = policy
             .litegs
             .topology_freeze_after_epoch
@@ -396,19 +396,18 @@ pub(super) fn schedule_topology(
         let progress = if policy.max_iterations == 0 {
             1.0
         } else {
-            step.iteration as f32 / policy.max_iterations as f32
+            phase_iter as f32 / policy.max_iterations as f32
         };
-        let refine = step.iteration > 0
-            && passed_warmup
+        let refine = phase_iter > 0
             && !frozen
             && progress <= BRUSH_REFINE_PROGRESS_LIMIT
-            && step.iteration % refine_every == 0;
+            && phase_iter % refine_every == 0;
         return TopologySchedule {
             completed_epoch: Some(epoch),
             densify: refine,
             prune: refine,
             reset_opacity: false,
-            allow_extra_growth: refine && step.iteration < policy.litegs.growth_stop_iter,
+            allow_extra_growth: refine && phase_iter < policy.litegs.growth_stop_iter,
         };
     }
 
@@ -489,9 +488,7 @@ pub(super) fn analyze_topology_candidates(
         let opacity = splats.opacity(idx);
         let gaussian_stats = stats.get(idx).copied().unwrap_or_default();
         let mean2d_grad = if policy.is_litegs_mode() {
-            gaussian_stats
-                .refine_weight_max
-                .max(gaussian_stats.mean2d_grad.mean)
+            gaussian_stats.refine_weight_max
         } else {
             gaussian_stats.mean2d_grad.mean
         };
@@ -600,7 +597,23 @@ pub(super) fn litegs_select_densify_candidates(
     max_new: usize,
     growth_select_fraction: f32,
     allow_extra_growth: bool,
-    rng_seed: u64,
+) -> LiteGsDensifySelection {
+    let mut rng = rand::thread_rng();
+    litegs_select_densify_candidates_with_rng(
+        infos,
+        max_new,
+        growth_select_fraction,
+        allow_extra_growth,
+        &mut rng,
+    )
+}
+
+fn litegs_select_densify_candidates_with_rng<R: Rng + ?Sized>(
+    infos: &[TopologyCandidateInfo],
+    max_new: usize,
+    growth_select_fraction: f32,
+    allow_extra_growth: bool,
+    rng: &mut R,
 ) -> LiteGsDensifySelection {
     if max_new == 0 || infos.is_empty() {
         return LiteGsDensifySelection::default();
@@ -630,10 +643,9 @@ pub(super) fn litegs_select_densify_candidates(
         extra_growth_count: 0,
     };
     let mut used_sources = vec![false; infos.len()];
-    let mut rng = StdRng::seed_from_u64(rng_seed);
 
     if replacement_count > 0 {
-        for sampled in sample_weighted_indices(&replacement_weights, replacement_count, &mut rng) {
+        for sampled in sample_weighted_indices(&replacement_weights, replacement_count, rng) {
             let source_idx = replacement_sources[sampled];
             selection.selected_indices.push(source_idx);
             selection.replacement_count += 1;
@@ -644,8 +656,8 @@ pub(super) fn litegs_select_densify_candidates(
     if allow_extra_growth && selection.selected_indices.len() < max_new {
         let threshold_count = infos.iter().filter(|info| info.growth_candidate).count();
         let grow_count = (threshold_count as f32 * growth_select_fraction).round() as usize;
-        let extra_growth_limit = grow_count
-            .saturating_sub(selection.replacement_count)
+        let sample_high_grad = grow_count.saturating_sub(prune_candidates);
+        let extra_growth_limit = sample_high_grad
             .min(max_new.saturating_sub(selection.selected_indices.len()));
 
         if extra_growth_limit > 0 {
@@ -664,7 +676,7 @@ pub(super) fn litegs_select_densify_candidates(
             for sampled in sample_weighted_indices(
                 &growth_weights,
                 extra_growth_limit.min(growth_sources.len()),
-                &mut rng,
+                rng,
             ) {
                 let source_idx = growth_sources[sampled];
                 selection.selected_indices.push(source_idx);
@@ -884,7 +896,6 @@ impl Default for TopologyMutationAftermath {
 
 pub(super) struct TopologyMutationRequest<'a> {
     pub(super) policy: &'a TopologyPolicy,
-    pub(super) iteration: usize,
     pub(super) should_densify: bool,
     pub(super) should_prune: bool,
     pub(super) should_reset_opacity: bool,
@@ -1228,11 +1239,12 @@ fn plan_brush_refine_mutation(
 
     let mut added = 0usize;
     if request.should_densify && !request.litegs_selection.selected_indices.is_empty() {
+        let mut rng = rand::thread_rng();
         for &source_idx in &request.litegs_selection.selected_indices {
             let Some(row_idx) = surviving_indices.iter().position(|&idx| idx == source_idx) else {
                 continue;
             };
-            let sample_scalar = brush_refine_sample_scalar(request.iteration, source_idx);
+            let sample_scalar = brush_refine_sample_scalar(&mut rng);
             rows[row_idx] = TopologyPlanRow::BrushRefineExisting {
                 source_idx,
                 sample_scalar,
@@ -1378,33 +1390,31 @@ fn density_controller_taming_mode(policy: &TopologyPolicy) -> bool {
     policy.is_litegs_mode() && matches!(policy.litegs.prune_mode, LiteGsPruneMode::Weight)
 }
 
-fn sample_weighted_indices(weights: &[f32], count: usize, rng: &mut StdRng) -> Vec<usize> {
+fn sample_weighted_indices<R: Rng + ?Sized>(
+    weights: &[f32],
+    count: usize,
+    rng: &mut R,
+) -> Vec<usize> {
     if count == 0 || weights.is_empty() {
         return Vec::new();
     }
 
-    let mut remaining: Vec<(usize, f32)> = weights
+    let sanitized: Vec<f32> = weights
         .iter()
-        .copied()
-        .enumerate()
-        .filter(|(_, weight)| weight.is_finite() && *weight > 0.0)
+        .map(|weight| {
+            if weight.is_finite() && *weight > 0.0 {
+                *weight
+            } else {
+                0.0
+            }
+        })
         .collect();
-    let mut sampled = Vec::with_capacity(count.min(remaining.len()));
-    while sampled.len() < count && !remaining.is_empty() {
-        let dist = match WeightedIndex::new(remaining.iter().map(|(_, weight)| *weight)) {
-            Ok(dist) => dist,
-            Err(_) => break,
-        };
-        let selected = dist.sample(rng);
-        let (source_idx, _) = remaining.swap_remove(selected);
-        sampled.push(source_idx);
-    }
-    sampled
+    sample_weighted(rng, sanitized.len(), |idx| sanitized[idx], count.min(sanitized.len()))
+        .map(|sample| sample.into_iter().collect())
+        .unwrap_or_default()
 }
 
-fn brush_refine_sample_scalar(iteration: usize, source_idx: usize) -> f32 {
-    let seed = ((iteration as u64) << 32) ^ source_idx as u64 ^ 0x9E37_79B9_7F4A_7C15;
-    let mut rng = StdRng::seed_from_u64(seed);
+fn brush_refine_sample_scalar<R: Rng + ?Sized>(rng: &mut R) -> f32 {
     let u1 = rng.gen::<f32>().clamp(1e-6, 1.0 - 1e-6);
     let u2 = rng.gen::<f32>();
     (-2.0 * u1.ln()).sqrt() * (std::f32::consts::TAU * u2).cos()
@@ -1690,25 +1700,25 @@ mod tests {
         let epoch2 = schedule_topology(
             &policy,
             TopologyStepContext {
-                iteration: 6,
+                iteration: 7,
                 frame_count: 2,
             },
         );
         let epoch4 = schedule_topology(
             &policy,
             TopologyStepContext {
-                iteration: 10,
+                iteration: 11,
                 frame_count: 2,
             },
         );
 
-        assert_eq!(epoch2.completed_epoch, Some(2));
+        assert_eq!(epoch2.completed_epoch, Some(3));
         assert!(epoch2.densify);
         assert!(epoch2.prune);
         assert!(!epoch2.reset_opacity);
         assert!(epoch2.allow_extra_growth);
 
-        assert_eq!(epoch4.completed_epoch, Some(4));
+        assert_eq!(epoch4.completed_epoch, Some(5));
         assert!(!epoch4.densify);
         assert!(!epoch4.prune);
         assert!(!epoch4.reset_opacity);
@@ -1743,14 +1753,14 @@ mod tests {
         let first_refine = schedule_topology(
             &policy,
             TopologyStepContext {
-                iteration: 200,
+                iteration: 201,
                 frame_count: 638,
             },
         );
         let second_refine = schedule_topology(
             &policy,
             TopologyStepContext {
-                iteration: 400,
+                iteration: 401,
                 frame_count: 638,
             },
         );
@@ -1795,7 +1805,7 @@ mod tests {
             candidate(false, true, 1, 0.7, 1.0),
         ];
 
-        let selection = litegs_select_densify_candidates(&infos, 3, 1.0, true, 7);
+        let selection = litegs_select_densify_candidates(&infos, 3, 1.0, true);
 
         assert_eq!(selection.replacement_count, 1);
         assert_eq!(selection.extra_growth_count, 2);
@@ -2132,7 +2142,6 @@ mod tests {
             &mut origins,
             TopologyMutationRequest {
                 policy: &policy,
-                iteration: 2,
                 should_densify: true,
                 should_prune: true,
                 should_reset_opacity: false,
@@ -2196,7 +2205,6 @@ mod tests {
             &mut origins,
             TopologyMutationRequest {
                 policy: &policy,
-                iteration: 3,
                 should_densify: false,
                 should_prune: false,
                 should_reset_opacity: true,

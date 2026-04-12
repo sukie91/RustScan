@@ -9,16 +9,64 @@ use super::memory::{
 use super::pose_embedding::PoseEmbeddings;
 use super::splats::HostSplats;
 use super::trainer::MetalTrainer;
-use super::{TrainingConfig, TrainingProfile};
+use super::{LiteGsConfig, TrainingConfig, TrainingProfile};
 use crate::{TrainingDataset, TrainingError};
 use std::time::Instant;
 
 pub(crate) fn effective_metal_config(config: &TrainingConfig) -> TrainingConfig {
     let mut effective = config.clone();
-    if effective.training_profile == TrainingProfile::LiteGsMacV1
-        && (effective.lr_opacity - TrainingConfig::default().lr_opacity).abs() < f32::EPSILON
-    {
-        effective.lr_opacity = 0.025;
+    if effective.training_profile == TrainingProfile::LiteGsMacV1 {
+        let defaults = TrainingConfig::default();
+        let litegs_defaults = LiteGsConfig::default();
+        let mut aligned = Vec::new();
+
+        if (effective.lr_position - defaults.lr_position).abs() < f32::EPSILON {
+            effective.lr_position = 2e-5;
+            aligned.push("lr_position=2e-5");
+        }
+        if (effective.lr_pos_final - defaults.lr_pos_final).abs() < f32::EPSILON {
+            effective.lr_pos_final = 2e-7;
+            aligned.push("lr_pos_final=2e-7");
+        }
+        if (effective.lr_scale - defaults.lr_scale).abs() < f32::EPSILON {
+            effective.lr_scale = 7e-3;
+            aligned.push("lr_scale=7e-3");
+        }
+        if (effective.lr_rotation - defaults.lr_rotation).abs() < f32::EPSILON {
+            effective.lr_rotation = 2e-3;
+            aligned.push("lr_rotation=2e-3");
+        }
+        if (effective.lr_opacity - defaults.lr_opacity).abs() < f32::EPSILON {
+            effective.lr_opacity = 0.012;
+            aligned.push("lr_opacity=0.012");
+        }
+        if (effective.lr_color - defaults.lr_color).abs() < f32::EPSILON {
+            effective.lr_color = 0.002;
+            aligned.push("lr_color=0.002");
+        }
+        if effective.litegs.refine_every == litegs_defaults.refine_every {
+            effective.litegs.refine_every = 200;
+            aligned.push("litegs.refine_every=200");
+        }
+        if (effective.litegs.growth_grad_threshold - litegs_defaults.growth_grad_threshold).abs()
+            < f32::EPSILON
+        {
+            effective.litegs.growth_grad_threshold = 0.003;
+            aligned.push("litegs.growth_grad_threshold=0.003");
+        }
+        if (effective.litegs.growth_select_fraction - litegs_defaults.growth_select_fraction).abs()
+            < f32::EPSILON
+        {
+            effective.litegs.growth_select_fraction = 0.2;
+            aligned.push("litegs.growth_select_fraction=0.2");
+        }
+
+        if !aligned.is_empty() {
+            log::info!(
+                "LiteGS Mac V1 aligned effective defaults to Brush-compatible values: {}",
+                aligned.join(", ")
+            );
+        }
     }
     if effective.training_profile != TrainingProfile::LiteGsMacV1 && effective.lr_rotation != 0.0 {
         log::warn!(

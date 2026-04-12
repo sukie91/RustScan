@@ -79,6 +79,7 @@ kernel void tile_backward(
     constant BwdLossScalars& loss_scalars [[buffer(13)]],
     device const float* ssim_color_grad [[buffer(14)]],
     device atomic_float* grad_projected_positions [[buffer(15)]],
+    device atomic_float* grad_refine_weight [[buffer(16)]],
     uint2 gid [[thread_position_in_grid]]
 ) {
     if (gid.x >= camera.width || gid.y >= camera.height) return;
@@ -202,6 +203,11 @@ kernel void tile_backward(
         const float dl_dv = dl_dkernel * dk_ddy * (-1.0f / g.sigma_y);
         atomic_fetch_add_explicit(&grad_projected_positions[src_idx * 2 + 0], dl_du, memory_order_relaxed);
         atomic_fetch_add_explicit(&grad_projected_positions[src_idx * 2 + 1], dl_dv, memory_order_relaxed);
+        const float refine_alpha = max(final_alpha, 1e-5f);
+        const float refine_weight =
+            length(float2(dl_du * float(camera.width), dl_dv * float(camera.height)))
+            / refine_alpha;
+        atomic_fetch_add_explicit(&grad_refine_weight[src_idx], refine_weight, memory_order_relaxed);
 
         float dl_dsigma_x = 0.0f;
         float dl_dsigma_y = 0.0f;

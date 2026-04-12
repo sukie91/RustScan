@@ -91,7 +91,7 @@ impl MetalTrainer {
     pub(super) fn update_gaussian_stats(
         &mut self,
         param_grad_magnitudes: &[f32],
-        projected_grad_magnitudes: &[f32],
+        refine_weights: &[f32],
         projected: &ProjectedGaussians,
         gaussian_count: usize,
     ) -> candle_core::Result<()> {
@@ -136,12 +136,11 @@ impl MetalTrainer {
             };
             stats.consecutive_invisible_epochs = 0;
 
-            let grad_mag = projected_grad_magnitudes
+            let refine_weight = refine_weights
                 .get(source_idx as usize)
                 .copied()
                 .unwrap_or_default()
-                .max(0.0)
-                * self.pixel_count.max(1) as f32;
+                .max(0.0);
             let sigma_x = sigma_x
                 .get(visible_idx)
                 .copied()
@@ -156,12 +155,12 @@ impl MetalTrainer {
                 .max(1e-4);
             let opacity = opacity.get(visible_idx).copied().unwrap_or(0.0).max(0.0);
             let fragment_weight = opacity * sigma_x * sigma_y;
-            let fragment_err = grad_mag * fragment_weight;
+            let fragment_err = refine_weight * fragment_weight;
 
-            stats.mean2d_grad.update(grad_mag);
+            stats.mean2d_grad.update(refine_weight);
             stats.fragment_weight.update(fragment_weight);
             stats.fragment_err.update(fragment_err);
-            stats.refine_weight_max = stats.refine_weight_max.max(grad_mag);
+            stats.refine_weight_max = stats.refine_weight_max.max(refine_weight);
             stats.visible_count = stats.visible_count.saturating_add(1);
         }
 
@@ -169,10 +168,9 @@ impl MetalTrainer {
             && (self.iteration <= 6 || self.iteration % self.litegs.refine_every.max(1) == 0)
         {
             let mut visible_raw_max = 0.0f32;
-            let mut visible_scaled_max = 0.0f32;
             let mut visible_nonzero = 0usize;
             for source_idx in projected.visible_source_indices().iter().copied() {
-                let raw = projected_grad_magnitudes
+                let raw = refine_weights
                     .get(source_idx as usize)
                     .copied()
                     .unwrap_or_default()
@@ -180,18 +178,15 @@ impl MetalTrainer {
                 if raw > 0.0 {
                     visible_nonzero += 1;
                     visible_raw_max = visible_raw_max.max(raw);
-                    visible_scaled_max =
-                        visible_scaled_max.max(raw * self.pixel_count.max(1) as f32);
                 }
             }
-            let (all_raw_max, all_raw_mean, all_raw_nonzero) = abs_stats(projected_grad_magnitudes);
+            let (all_raw_max, all_raw_mean, all_raw_nonzero) = abs_stats(refine_weights);
             log::info!(
-                "Growth stats step {} | visible={} | visible_nonzero={} | visible_raw_max={:.6e} | visible_scaled_max={:.6e} | all_raw_max={:.6e} | all_raw_mean={:.6e} | all_raw_nonzero={}",
+                "Growth stats step {} | visible={} | visible_nonzero={} | visible_refine_max={:.6e} | all_refine_max={:.6e} | all_refine_mean={:.6e} | all_refine_nonzero={}",
                 self.iteration,
                 projected.visible_source_indices().len(),
                 visible_nonzero,
                 visible_raw_max,
-                visible_scaled_max,
                 all_raw_max,
                 all_raw_mean,
                 all_raw_nonzero,
@@ -539,7 +534,6 @@ impl MetalTrainer {
                 max_gaussians.saturating_sub(old_len),
                 self.litegs.growth_select_fraction,
                 allow_extra_growth,
-                self.iteration as u64,
             )
         } else {
             topology::LiteGsDensifySelection::default()
@@ -607,7 +601,6 @@ impl MetalTrainer {
             &topology_splats,
             TopologyMutationRequest {
                 policy: &policy,
-                iteration: self.iteration,
                 should_densify,
                 should_prune,
                 should_reset_opacity,

@@ -344,7 +344,11 @@ impl MetalTrainer {
             lr_rotation: config.lr_rotation,
             lr_opacity: config.lr_opacity,
             lr_color: config.lr_color,
-            lr_sh_rest: config.lr_color / 10.0,
+            lr_sh_rest: if config.training_profile == TrainingProfile::LiteGsMacV1 {
+                config.lr_color / 20.0
+            } else {
+                config.lr_color / 10.0
+            },
             beta1: 0.9,
             beta2: 0.999,
             eps: 1e-8,

@@ -259,7 +259,7 @@ impl MetalTrainer {
 
         self.update_gaussian_stats(
             &backward.grad_magnitudes,
-            &backward.projected_grad_magnitudes,
+            &backward.refine_weights,
             &projected,
             gaussians.len(),
         )?;

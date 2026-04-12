@@ -388,6 +388,10 @@ impl MetalRuntime {
                 .saturating_mul(3)
                 .saturating_mul(size_of::<f32>()),
         )?;
+        self.ensure_buffer(
+            MetalBufferSlot::GradRefineWeight,
+            gaussian_capacity.saturating_mul(size_of::<f32>()),
+        )?;
         Ok(())
     }
 
