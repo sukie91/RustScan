@@ -39,6 +39,7 @@ pub struct SmoothResult {
 }
 
 /// Compute Laplacian of a vertex (uniform weights)
+#[allow(dead_code)]
 fn compute_laplacian_uniform(mesh: &RustMesh, vh: VertexHandle) -> Option<Vec3> {
     let current = mesh.point(vh)?;
     let (neighbor_sum, neighbor_count) = accumulate_neighbor_positions(mesh, vh, None);
@@ -257,7 +258,7 @@ pub fn cotangent_weight_laplacian(mesh: &RustMesh, vh: VertexHandle) -> Option<V
         }
 
         // For the second triangle (on the opposite halfedge side)
-        if let Some(opp_face) = mesh.face_handle(opp) {
+        if let Some(_opp_face) = mesh.face_handle(opp) {
             // This halfedge has a face, so there's an opposite triangle
             let next_opp = mesh.next_halfedge_handle(opp);
             let opp1 = mesh.to_vertex_handle(next_opp);

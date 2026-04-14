@@ -545,7 +545,7 @@ mod tests {
     #[test]
     fn test_remove_degenerate_faces() {
         let mut mesh = create_test_mesh();
-        let initial_faces = mesh.n_faces();
+        let _initial_faces = mesh.n_faces();
 
         // Add a degenerate triangle (all same point)
         let v0 = mesh.add_vertex(Vec3::new(0.0, 0.0, 0.0));
@@ -579,7 +579,7 @@ mod tests {
 
         let flipped = fix_winding_order(&mut mesh).unwrap();
         // At least one face should be flipped
-        assert!(flipped >= 0);
+        assert!(flipped > 0);
     }
 
     #[test]
@@ -589,12 +589,13 @@ mod tests {
 
         // Add vertices very close together
         let v0 = mesh.add_vertex(Vec3::new(0.001, 0.0, 0.0)); // very close to (0,0,0)
-        let v1 = mesh.add_vertex(Vec3::new(0.0001, 0.0, 0.0)); // even closer
+        let _v1 = mesh.add_vertex(Vec3::new(0.0001, 0.0, 0.0)); // even closer
         mesh.add_face(&[VertexHandle::new(0), v0, VertexHandle::new(2)]);
         mesh.add_face(&[VertexHandle::new(0), VertexHandle::new(1), v0]);
 
         let merged = merge_close_vertices(&mut mesh, 0.01).unwrap();
-        assert!(merged >= 0, "Should merge some close vertices");
+        assert!(merged > 0, "Should merge some close vertices");
+        assert!(mesh.n_vertices() <= initial_verts + 1);
     }
 
     #[test]
@@ -603,7 +604,7 @@ mod tests {
 
         // Add two very close vertices and a face referencing one of them.
         let v0 = mesh.add_vertex(Vec3::new(0.001, 0.0, 0.0));
-        let v1 = mesh.add_vertex(Vec3::new(0.0009, 0.0, 0.0));
+        let _v1 = mesh.add_vertex(Vec3::new(0.0009, 0.0, 0.0));
         mesh.add_face(&[VertexHandle::new(0), v0, VertexHandle::new(1)]);
 
         // This should complete quickly even if connectivity is imperfect.

@@ -291,6 +291,24 @@ impl RustMesh {
         Some(fh)
     }
 
+    /// Compatibility wrapper for older OpenMesh parity import code paths.
+    ///
+    /// The current implementation keeps parity-specific anchor behavior by
+    /// skipping any post-insert boundary normalization. Callers that need the
+    /// normalized vertex anchors should invoke
+    /// `normalize_boundary_halfedge_handles()` explicitly afterwards.
+    pub fn add_face_openmesh_parity(
+        &mut self,
+        vertices: &[VertexHandle],
+    ) -> Option<FaceHandle> {
+        let fh = self.add_face(vertices)?;
+        let anchor = self
+            .face_halfedge_handle(fh)
+            .map(|heh| self.prev_halfedge_handle(heh));
+        self.set_face_halfedge_handle(fh, anchor);
+        Some(fh)
+    }
+
     /// Get the number of faces (includes deleted faces)
     #[inline]
     pub fn n_faces(&self) -> usize {
@@ -464,19 +482,54 @@ impl RustMesh {
     /// Get the from-vertex of a halfedge
     #[inline]
     pub fn from_vertex_handle(&self, heh: HalfedgeHandle) -> VertexHandle {
-        self.kernel.from_vertex_handle(heh)
+        if !heh.is_valid() {
+            return VertexHandle::invalid();
+        }
+
+        let opp = heh.opposite();
+        if opp.idx_usize() >= self.n_halfedges() {
+            return VertexHandle::invalid();
+        }
+
+        self.kernel.to_vertex_handle(opp)
     }
 
     /// Get the opposite halfedge (across the edge)
     #[inline]
     pub fn opposite_halfedge_handle(&self, heh: HalfedgeHandle) -> HalfedgeHandle {
-        self.kernel.opposite_halfedge_handle(heh).unwrap_or(heh)
+        if !heh.is_valid() {
+            return heh;
+        }
+
+        let opp = heh.opposite();
+        if opp.idx_usize() < self.n_halfedges() {
+            opp
+        } else {
+            heh
+        }
     }
 
     /// Get the next halfedge in the cycle
     #[inline]
     pub fn next_halfedge_handle(&self, heh: HalfedgeHandle) -> HalfedgeHandle {
         self.kernel.next_halfedge_handle(heh).unwrap_or(heh)
+    }
+
+    /// Get the next outgoing halfedge around the same source vertex.
+    ///
+    /// This matches the traversal pattern used elsewhere in the crate:
+    /// `next(opposite(heh))`. If the computed halfedge no longer originates
+    /// from the same vertex, keep the current halfedge so callers can stop
+    /// without jumping into a different one-ring.
+    #[inline]
+    pub fn next_outgoing_halfedge(&self, heh: HalfedgeHandle) -> HalfedgeHandle {
+        let from = self.from_vertex_handle(heh);
+        let next = self.next_halfedge_handle(self.opposite_halfedge_handle(heh));
+        if self.from_vertex_handle(next) == from {
+            next
+        } else {
+            heh
+        }
     }
 
     /// Get the previous halfedge in the cycle
@@ -605,20 +658,6 @@ impl RustMesh {
             }
         }
 
-        // Collect neighbors of v0 (excluding v1)
-        let neighbors_v0: Vec<VertexHandle> = self
-            .collect_vertex_neighbors(v0)
-            .into_iter()
-            .filter(|&v| v != v1)
-            .collect();
-
-        // Collect neighbors of v1 (excluding v0)
-        let neighbors_v1: Vec<VertexHandle> = self
-            .collect_vertex_neighbors(v1)
-            .into_iter()
-            .filter(|&v| v != v0)
-            .collect();
-
         // Check for duplicate edges: after collapse, v0's neighbors become v1's neighbors.
         // If any neighbor of v0 is already a neighbor of v1 (and not in an adjacent face),
         // collapsing would create a duplicate edge.
@@ -626,24 +665,59 @@ impl RustMesh {
         // Vertices that are allowed to be shared are those in the faces adjacent to the edge.
         let mut allowed_shared: Vec<VertexHandle> = Vec::new();
         if let Some(fh) = fh_left {
-            for vh in self.face_vertices_vec(fh) {
-                if vh != v0 && vh != v1 && !allowed_shared.contains(&vh) {
+            let h1 = self.next_halfedge_handle(heh);
+            let h2 = self.next_halfedge_handle(h1);
+            if self.next_halfedge_handle(h2) == heh {
+                let vh = self.to_vertex_handle(h1);
+                if vh != v0 && vh != v1 {
                     allowed_shared.push(vh);
+                }
+            } else {
+                for vh in self.face_vertices_vec(fh) {
+                    if vh != v0 && vh != v1 && !allowed_shared.contains(&vh) {
+                        allowed_shared.push(vh);
+                    }
                 }
             }
         }
         if let Some(fh) = fh_right {
-            for vh in self.face_vertices_vec(fh) {
+            let h1 = self.next_halfedge_handle(heh_opp);
+            let h2 = self.next_halfedge_handle(h1);
+            if self.next_halfedge_handle(h2) == heh_opp {
+                let vh = self.to_vertex_handle(h1);
                 if vh != v0 && vh != v1 && !allowed_shared.contains(&vh) {
                     allowed_shared.push(vh);
+                }
+            } else {
+                for vh in self.face_vertices_vec(fh) {
+                    if vh != v0 && vh != v1 && !allowed_shared.contains(&vh) {
+                        allowed_shared.push(vh);
+                    }
                 }
             }
         }
 
-        // Any shared neighbor NOT in the adjacent faces would create a duplicate edge
-        for &nv in &neighbors_v0 {
-            if neighbors_v1.contains(&nv) && !allowed_shared.contains(&nv) {
-                return false;
+        let neighbors_v1 = self.collect_vertex_neighbors_fast(v1);
+
+        if let Some(start_heh) = self.halfedge_handle(v0) {
+            let mut current_heh = start_heh;
+            let max_iterations = self.n_halfedges().max(1);
+
+            for _ in 0..max_iterations {
+                let neighbor = self.to_vertex_handle(current_heh);
+                if neighbor != v1
+                    && !allowed_shared.contains(&neighbor)
+                    && neighbors_v1.contains(&neighbor)
+                {
+                    return false;
+                }
+
+                let next_heh = self.next_outgoing_halfedge(current_heh);
+                if !next_heh.is_valid() || next_heh == current_heh || next_heh == start_heh {
+                    break;
+                }
+
+                current_heh = next_heh;
             }
         }
 
@@ -708,11 +782,10 @@ impl RustMesh {
             return false;
         }
 
-        // A vertex is on boundary if ANY incident halfedge has no face
-        // Use circulator approach (same as subdivision.rs)
-        if let Some(heh) = self.halfedge_handle(vh) {
-            let mut current = heh;
-            let max_iterations = 100; // Valence is typically small
+        if let Some(start_heh) = self.halfedge_handle(vh) {
+            let mut current = start_heh;
+            let max_iterations = self.n_halfedges().max(1);
+
             for _ in 0..max_iterations {
                 // Check both the outgoing halfedge and its opposite
                 if self.is_boundary(current) {
@@ -722,47 +795,76 @@ impl RustMesh {
                 if self.is_boundary(opp) {
                     return true;
                 }
-                current = self.next_halfedge_handle(opp);
-                if current == heh || !current.is_valid() {
+
+                let next = self.next_outgoing_halfedge(current);
+                if !next.is_valid() || next == current || next == start_heh {
                     break;
                 }
+
+                current = next;
             }
         }
         false
     }
 
-    fn collect_vertex_neighbors(&self, vh: VertexHandle) -> Vec<VertexHandle> {
-        let mut neighbors = Vec::new();
+    #[inline]
+    pub fn vertex_face_count_at_least(&self, vh: VertexHandle, min_faces: usize) -> bool {
+        if min_faces == 0 {
+            return true;
+        }
+        if !vh.is_valid() || self.is_vertex_deleted(vh) {
+            return false;
+        }
 
-        // Use circulator for O(valence) instead of O(n_faces)
-        if let Some(heh) = self.halfedge_handle(vh) {
-            let start_heh = heh;
-            let mut current_heh = heh;
-            let max_iterations = 100; // Valence is typically small
+        let Some(start_heh) = self.halfedge_handle(vh) else {
+            return false;
+        };
 
-            for _ in 0..max_iterations {
-                // Get the neighbor vertex from current outgoing halfedge
-                let neighbor = self.to_vertex_handle(current_heh);
-                if !neighbors.contains(&neighbor) {
-                    neighbors.push(neighbor);
+        let mut current_heh = start_heh;
+        let mut faces_seen = 0usize;
+        let max_iterations = self.n_halfedges().max(1);
+
+        for _ in 0..max_iterations {
+            if self.face_handle(current_heh).is_some() {
+                faces_seen += 1;
+                if faces_seen >= min_faces {
+                    return true;
                 }
-
-                // Move to next outgoing halfedge: opposite -> next
-                let opp = self.opposite_halfedge_handle(current_heh);
-                let next_heh = self.next_halfedge_handle(opp);
-
-                // Check if we've completed the cycle or hit invalid halfedge
-                if !next_heh.is_valid() || next_heh == start_heh {
-                    break;
-                }
-
-                // Critical: verify the next halfedge is still from our vertex
-                if self.from_vertex_handle(next_heh) != vh {
-                    break; // Prevent jumping to wrong vertex's halfedge at boundary
-                }
-
-                current_heh = next_heh;
             }
+
+            let next_heh = self.next_outgoing_halfedge(current_heh);
+            if !next_heh.is_valid() || next_heh == current_heh || next_heh == start_heh {
+                break;
+            }
+
+            current_heh = next_heh;
+        }
+
+        false
+    }
+
+    fn collect_vertex_neighbors_fast(&self, vh: VertexHandle) -> Vec<VertexHandle> {
+        if !vh.is_valid() || self.is_vertex_deleted(vh) {
+            return Vec::new();
+        }
+
+        let Some(start_heh) = self.halfedge_handle(vh) else {
+            return Vec::new();
+        };
+
+        let mut neighbors = Vec::new();
+        let mut current_heh = start_heh;
+        let max_iterations = self.n_halfedges().max(1);
+
+        for _ in 0..max_iterations {
+            neighbors.push(self.to_vertex_handle(current_heh));
+
+            let next_heh = self.next_outgoing_halfedge(current_heh);
+            if !next_heh.is_valid() || next_heh == current_heh || next_heh == start_heh {
+                break;
+            }
+
+            current_heh = next_heh;
         }
 
         neighbors
@@ -934,7 +1036,17 @@ impl RustMesh {
         }
     }
 
+    /// Normalize vertex anchor halfedges so boundary vertices prefer a boundary
+    /// outgoing halfedge, matching the legacy import contract used by IO code.
+    pub fn normalize_boundary_halfedge_handles(&mut self) {
+        let vertices: Vec<VertexHandle> = self.vertices().collect();
+        for vh in vertices {
+            self.adjust_outgoing_halfedge(vh);
+        }
+    }
+
     /// Redirect all halfedges that reference from_vertex to reference to_vertex
+    #[allow(dead_code)]
     fn redirect_halfedges(
         &mut self,
         from_vertex: VertexHandle,
@@ -968,6 +1080,7 @@ impl RustMesh {
     }
 
     /// Get all halfedges of a face
+    #[allow(dead_code)]
     fn get_face_halfedges(&self, fh: FaceHandle) -> Vec<HalfedgeHandle> {
         let mut result = Vec::new();
         if let Some(start_heh) = self.kernel.face(fh).and_then(|f| f.halfedge_handle) {
@@ -1112,6 +1225,7 @@ impl RustMesh {
         *self = rebuilt;
     }
 
+    #[allow(dead_code)]
     fn rebuild_preserving_vertex_indices(&mut self, faces: &[Vec<VertexHandle>]) {
         let old_vertex_count = self.n_vertices();
         let preserve_normals = self.has_vertex_normals();
@@ -1562,6 +1676,7 @@ fn dedupe_face_vertices(vertices: Vec<VertexHandle>) -> Vec<VertexHandle> {
     unique
 }
 
+#[allow(dead_code)]
 fn canonical_face_key(vertices: &[VertexHandle]) -> Vec<usize> {
     let ids: Vec<usize> = vertices.iter().map(|vh| vh.idx_usize()).collect();
     if ids.is_empty() {

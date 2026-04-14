@@ -71,6 +71,7 @@ pub enum DynamicProperty {
     Int(Vec<i32>),
 }
 
+#[allow(dead_code)]
 impl DynamicProperty {
     fn resize(&mut self, size: usize) {
         match self {
@@ -361,6 +362,7 @@ struct NamedProperty {
     values: DynamicProperty,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum VertexPropertyRef<'a> {
     Float { name: &'a str, values: &'a [f32] },
@@ -388,6 +390,7 @@ pub(crate) struct PropertyStore {
     next_prop_id: u32,
 }
 
+#[allow(dead_code)]
 impl PropertyStore {
     pub(crate) fn clear(&mut self) {
         self.props.clear();

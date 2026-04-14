@@ -220,7 +220,7 @@ impl Face {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::handles::{FaceHandle, HalfedgeHandle, VertexHandle};
+    use crate::handles::HalfedgeHandle;
 
     #[test]
     fn test_vertex_creation() {

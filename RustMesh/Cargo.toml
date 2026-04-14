@@ -31,27 +31,10 @@ parallel = []
 criterion = "0.5"
 tempfile = "3"
 
-# 发布配置 - 激进优化
-[profile.release]
-lto = true
-codegen-units = 1
-opt-level = 3
-strip = true
-panic = "abort"
-
-# 开发配置 - 快速编译 + 调试支持
-[profile.dev]
-opt-level = 1
-debug = "line-tables-only"
-
-# 测试配置
-[profile.test]
-opt-level = 0
-
 [[bench]]
 name = "bench"
 harness = false
-path = "examples/bench.rs"
+path = "benches/bench.rs"
 
 [[bench]]
 name = "quadric_bench"

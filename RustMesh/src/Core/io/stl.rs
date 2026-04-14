@@ -5,7 +5,7 @@
 use crate::RustMesh;
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{self, BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 use std::path::Path;
 
 /// STL file format variant

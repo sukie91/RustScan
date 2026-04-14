@@ -178,7 +178,7 @@ pub fn find_boundary_loops(mesh: &RustMesh) -> Vec<BoundaryLoop> {
 /// True if the vertex forms a valid ear
 fn is_valid_ear(
     _mesh: &RustMesh,
-    vertices: &[VertexHandle],
+    _vertices: &[VertexHandle],
     points: &[Vec3],
     prev_idx: usize,
     curr_idx: usize,
@@ -490,6 +490,7 @@ mod tests {
     }
 
     /// Create a simple mesh with a square hole
+    #[allow(dead_code)]
     fn create_mesh_with_square_hole() -> RustMesh {
         let mut mesh = RustMesh::new();
 
@@ -524,7 +525,7 @@ mod tests {
 
     #[test]
     fn test_find_boundary_loops_empty() {
-        let mut mesh = RustMesh::new();
+        let mesh = RustMesh::new();
         let loops = find_boundary_loops(&mesh);
         assert!(loops.is_empty());
     }
@@ -654,7 +655,7 @@ mod tests {
         let mut mesh = RustMesh::new();
 
         // Add a single vertex and try to fill
-        let v0 = mesh.add_vertex(Vec3::new(0.0, 0.0, 0.0));
+        let _v0 = mesh.add_vertex(Vec3::new(0.0, 0.0, 0.0));
 
         // No boundary edges yet - should fail
         let invalid_heh = HalfedgeHandle::invalid();

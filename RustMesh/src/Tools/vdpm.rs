@@ -397,15 +397,13 @@ fn collect_collapse_topology(
 ) -> ([Option<FaceHandle>; 2], Vec<VertexHandle>, bool) {
     let mut removed_faces: [Option<FaceHandle>; 2] = [None, None];
     let mut fan_vertices = Vec::new();
-    let mut is_boundary = false;
-
     // Get the opposite halfedge
     let opp = mesh.opposite_halfedge_handle(heh);
 
     // Check if the edge is on boundary
     let left_face = mesh.face_handle(heh);
     let right_face = mesh.face_handle(opp);
-    is_boundary = left_face.is_none() || right_face.is_none();
+    let is_boundary = left_face.is_none() || right_face.is_none();
 
     // Store removed faces
     removed_faces[0] = left_face;

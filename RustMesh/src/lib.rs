@@ -15,7 +15,9 @@
 //! ```
 
 // Re-export types
-pub use attrib_soa_kernel::AttribSoAKernel;
+pub use attrib_soa_kernel::{
+    AttribSoAKernel, EPropHandle, FPropHandle, HPropHandle, PropHandle, VPropHandle,
+};
 pub use circulators::*;
 pub use connectivity::RustMesh;
 pub use decimation::{

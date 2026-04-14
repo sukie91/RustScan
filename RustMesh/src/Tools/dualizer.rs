@@ -12,7 +12,7 @@
 //! - This preserves the Euler characteristic: V - E + F = V* - E + F* (unchanged)
 
 use crate::connectivity::RustMesh;
-use crate::handles::{EdgeHandle, FaceHandle, HalfedgeHandle, VertexHandle};
+use crate::handles::{FaceHandle, HalfedgeHandle, VertexHandle};
 use glam::Vec3;
 use std::collections::HashMap;
 
@@ -225,6 +225,7 @@ fn is_boundary_halfedge(mesh: &RustMesh, heh: HalfedgeHandle) -> bool {
 }
 
 /// Get all boundary halfedges in the mesh
+#[allow(dead_code)]
 fn get_boundary_halfedges(mesh: &RustMesh) -> Vec<HalfedgeHandle> {
     let mut boundary_hehs = Vec::new();
     let n_halfedges = mesh.n_halfedges();
@@ -404,6 +405,7 @@ fn boundary_loop_centroid(mesh: &RustMesh, loop_hehs: &[HalfedgeHandle]) -> Vec3
 }
 
 /// Get vertices in a boundary loop (ordered)
+#[allow(dead_code)]
 fn get_boundary_loop_vertices(mesh: &RustMesh, loop_hehs: &[HalfedgeHandle]) -> Vec<VertexHandle> {
     let mut vertices = Vec::new();
     for heh in loop_hehs {

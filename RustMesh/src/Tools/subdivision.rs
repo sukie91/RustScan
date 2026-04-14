@@ -121,6 +121,7 @@ fn is_triangular(mesh: &RustMesh) -> bool {
 }
 
 /// Get all halfedges of a face
+#[allow(dead_code)]
 fn get_face_halfedges(mesh: &RustMesh, fh: FaceHandle) -> Vec<HalfedgeHandle> {
     let mut halfedges = Vec::with_capacity(3);
     if let Some(start_heh) = mesh.face_halfedge_handle(fh) {
@@ -1699,7 +1700,7 @@ pub fn butterfly_subdivide(mesh: &mut RustMesh) -> SubdivisionResult<Subdivision
     // Step 2: Split each face using the new edge vertices
     let faces: Vec<_> = mesh.faces().collect();
     for fh in faces {
-        let halfedge = match mesh.face_halfedge_handle(fh) {
+        let _halfedge = match mesh.face_halfedge_handle(fh) {
             Some(he) => he,
             None => continue,
         };

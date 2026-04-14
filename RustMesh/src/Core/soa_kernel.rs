@@ -387,6 +387,7 @@ impl SoAKernel {
     }
 
     #[inline]
+    #[allow(dead_code)]
     pub(crate) fn find_halfedge(
         &self,
         start_vh: VertexHandle,
@@ -560,6 +561,7 @@ impl SoAKernel {
         self.face_props.name(handle)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn interpolate_vertex_props_pair(
         &mut self,
         a: VertexHandle,
@@ -570,6 +572,7 @@ impl SoAKernel {
             .blend2_index(a.idx_usize(), b.idx_usize(), dst.idx_usize());
     }
 
+    #[allow(dead_code)]
     pub(crate) fn interpolate_vertex_props_triangle(
         &mut self,
         a: VertexHandle,
@@ -585,15 +588,18 @@ impl SoAKernel {
         );
     }
 
+    #[allow(dead_code)]
     pub(crate) fn merge_vertex_props(&mut self, removed: VertexHandle, kept: VertexHandle) {
         self.vertex_props
             .blend2_index(removed.idx_usize(), kept.idx_usize(), kept.idx_usize());
     }
 
+    #[allow(dead_code)]
     pub(crate) fn copy_edge_props(&mut self, from: EdgeHandle, to: EdgeHandle) {
         self.edge_props.copy_index(from.idx_usize(), to.idx_usize());
     }
 
+    #[allow(dead_code)]
     pub(crate) fn copy_face_props(&mut self, from: FaceHandle, to: FaceHandle) {
         self.face_props.copy_index(from.idx_usize(), to.idx_usize());
     }
@@ -845,6 +851,7 @@ impl SoAKernel {
     }
 
     #[inline]
+    #[allow(dead_code)]
     pub(crate) fn remap_edge_lookup(
         &mut self,
         old_v0: VertexHandle,
@@ -1259,10 +1266,6 @@ impl SoAKernel {
             return (0.0, 0.0, 0.0);
         }
 
-        let mut sum_x = 0.0f32;
-        let mut sum_y = 0.0f32;
-        let mut sum_z = 0.0f32;
-
         let ptr_x = self.x_ptr();
         let ptr_y = self.y_ptr();
         let ptr_z = self.z_ptr();
@@ -1271,7 +1274,7 @@ impl SoAKernel {
         let n_simd = (n / 4) * 4;
 
         #[cfg(target_arch = "aarch64")]
-        unsafe {
+        let (mut sum_x, mut sum_y, mut sum_z) = unsafe {
             use std::arch::aarch64::*;
 
             let mut acc_x = vdupq_n_f32(0.0);
@@ -1288,10 +1291,11 @@ impl SoAKernel {
                 i += 4;
             }
 
-            sum_x = vaddvq_f32(acc_x);
-            sum_y = vaddvq_f32(acc_y);
-            sum_z = vaddvq_f32(acc_z);
-        }
+            (vaddvq_f32(acc_x), vaddvq_f32(acc_y), vaddvq_f32(acc_z))
+        };
+
+        #[cfg(not(target_arch = "aarch64"))]
+        let (mut sum_x, mut sum_y, mut sum_z) = (0.0f32, 0.0f32, 0.0f32);
 
         // Handle remaining elements
         while i < n {

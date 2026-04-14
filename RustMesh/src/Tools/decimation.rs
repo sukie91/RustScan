@@ -610,6 +610,7 @@ pub struct DecimationTrace {
 }
 
 /// Priority queue item for collapse candidates
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct CollapseCandidate {
     priority: f32,
@@ -620,6 +621,7 @@ struct CollapseCandidate {
     faces_removed: u8,
 }
 
+#[allow(dead_code)]
 struct CollapseTopology {
     neighbors: Vec<Vec<VertexHandle>>,
     boundary_vertices: Vec<bool>,
@@ -1389,13 +1391,7 @@ impl<'a> Decimater<'a> {
         if second_cw == heh {
             return false;
         }
-        if self
-            .mesh
-            .vertex_faces(v0)
-            .map(|faces| faces.count())
-            .unwrap_or(0)
-            < 2
-        {
+        if !self.mesh.vertex_face_count_at_least(v0, 2) {
             return false;
         }
 
@@ -1492,6 +1488,7 @@ impl<'a> Decimater<'a> {
 }
 
 impl<'a> Decimater<'a> {
+    #[allow(dead_code)]
     fn best_collapse_candidate(
         &self,
         vertex_quadrics: &[Option<Quadricd>],
@@ -1576,6 +1573,7 @@ impl<'a> Decimater<'a> {
     }
 }
 
+#[allow(dead_code)]
 fn is_better_candidate(candidate: &CollapseCandidate, current: &CollapseCandidate) -> bool {
     const EPS: f32 = 1.0e-6;
 
@@ -1594,6 +1592,7 @@ fn is_better_candidate(candidate: &CollapseCandidate, current: &CollapseCandidat
     candidate.halfedge.idx() < current.halfedge.idx()
 }
 
+#[allow(dead_code)]
 fn build_collapse_topology(mesh: &RustMesh) -> CollapseTopology {
     let mut neighbors = vec![Vec::new(); mesh.n_vertices()];
     let mut face_valences = vec![0usize; mesh.n_faces()];
@@ -1645,6 +1644,7 @@ fn build_collapse_topology(mesh: &RustMesh) -> CollapseTopology {
     }
 }
 
+#[allow(dead_code)]
 fn push_unique_neighbor(
     neighbors: &mut Vec<VertexHandle>,
     candidate: VertexHandle,
@@ -1655,6 +1655,7 @@ fn push_unique_neighbor(
     }
 }
 
+#[allow(dead_code)]
 fn is_collapse_ok_with_topology(
     mesh: &RustMesh,
     topology: &CollapseTopology,

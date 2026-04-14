@@ -55,6 +55,7 @@ impl PlyPropertyType {
     }
 
     /// Size in bytes
+    #[allow(dead_code)]
     fn size(&self) -> usize {
         match self {
             Self::Char | Self::UChar => 1,
@@ -86,6 +87,7 @@ struct PlyElement {
 #[derive(Debug)]
 struct PlyHeader {
     format: PlyFormat,
+    #[allow(dead_code)]
     version: String,
     elements: Vec<PlyElement>,
     comments: Vec<String>,

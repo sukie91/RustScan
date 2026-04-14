@@ -34,9 +34,10 @@ impl<'a> Iterator for VertexVertexCirculator<'a> {
         let next_target = self.mesh.to_vertex_handle(self.current_heh);
 
         let next_heh = self.mesh.next_outgoing_halfedge(self.current_heh);
+        let stuck = next_heh == self.current_heh;
 
         self.first = false;
-        self.current_heh = next_heh;
+        self.current_heh = if stuck { self.start_heh } else { next_heh };
         Some(next_target)
     }
 }
@@ -44,7 +45,7 @@ impl<'a> Iterator for VertexVertexCirculator<'a> {
 impl<'a> RustMesh {
     pub fn vertex_vertices(&'a self, vh: VertexHandle) -> Option<VertexVertexCirculator<'a>> {
         let start_heh = self.halfedge_handle(vh)?;
-        let max_iterations = self.n_halfedges().max(1000);
+        let max_iterations = self.n_halfedges().max(1);
         Some(VertexVertexCirculator {
             mesh: self,
             start_heh,
@@ -91,13 +92,17 @@ impl<'a> Iterator for VertexFaceCirculator<'a> {
             let fh = self.mesh.face_handle(self.current_heh);
 
             let next_heh = self.mesh.next_outgoing_halfedge(self.current_heh);
+            let stuck = next_heh == self.current_heh;
 
             self.first = false;
-            self.current_heh = next_heh;
+            self.current_heh = if stuck { self.start_heh } else { next_heh };
 
             // Return face if valid (skip boundary halfedges that have no face)
             if let Some(face) = fh {
                 return Some(face);
+            }
+            if stuck {
+                return None;
             }
             // Continue loop to find next valid face (skip boundary)
         }
@@ -107,7 +112,7 @@ impl<'a> Iterator for VertexFaceCirculator<'a> {
 impl<'a> RustMesh {
     pub fn vertex_faces(&'a self, vh: VertexHandle) -> Option<VertexFaceCirculator<'a>> {
         let start_heh = self.halfedge_handle(vh)?;
-        let max_iterations = self.n_halfedges().max(1000);
+        let max_iterations = self.n_halfedges().max(1);
         Some(VertexFaceCirculator {
             mesh: self,
             start_heh,
@@ -146,6 +151,7 @@ impl<'a> Iterator for VertexHalfedgeIter<'a> {
         let heh = self.current_heh;
 
         let next_outgoing = self.mesh.next_outgoing_halfedge(self.current_heh);
+        let stuck = next_outgoing == self.current_heh;
 
         // Check if we've completed the cycle
         if !self.first && next_outgoing == self.start_heh {
@@ -160,7 +166,7 @@ impl<'a> Iterator for VertexHalfedgeIter<'a> {
         }
 
         self.first = false;
-        self.current_heh = next_outgoing;
+        self.current_heh = if stuck { self.start_heh } else { next_outgoing };
 
         Some(heh)
     }
@@ -169,7 +175,7 @@ impl<'a> Iterator for VertexHalfedgeIter<'a> {
 impl<'a> RustMesh {
     pub fn vertex_halfedges(&'a self, vh: VertexHandle) -> Option<VertexHalfedgeIter<'a>> {
         let start_heh = self.halfedge_handle(vh)?;
-        let max_iterations = self.n_halfedges().max(1000);
+        let max_iterations = self.n_halfedges().max(1);
         Some(VertexHalfedgeIter {
             mesh: self,
             start_heh,
@@ -244,7 +250,7 @@ impl<'a> Iterator for FaceVertexCirculator<'a> {
 impl<'a> RustMesh {
     pub fn face_vertices(&'a self, fh: FaceHandle) -> Option<FaceVertexCirculator<'a>> {
         let start_heh = self.face_halfedge_handle(fh)?;
-        let max_iterations = self.n_halfedges().max(1000);
+        let max_iterations = self.n_halfedges().max(1);
         Some(FaceVertexCirculator {
             mesh: self,
             start_heh,
@@ -295,7 +301,7 @@ impl<'a> Iterator for FaceHalfedgeIter<'a> {
 impl<'a> RustMesh {
     pub fn face_halfedges(&'a self, fh: FaceHandle) -> Option<FaceHalfedgeIter<'a>> {
         let start_heh = self.face_halfedge_handle(fh)?;
-        let max_iterations = self.n_halfedges().max(1000);
+        let max_iterations = self.n_halfedges().max(1);
         Some(FaceHalfedgeIter {
             mesh: self,
             start_heh,
@@ -371,7 +377,7 @@ impl<'a> Iterator for FaceFaceCirculator<'a> {
 impl<'a> RustMesh {
     pub fn face_faces(&'a self, fh: FaceHandle) -> Option<FaceFaceCirculator<'a>> {
         let start_heh = self.face_halfedge_handle(fh)?;
-        let max_iterations = self.n_halfedges().max(1000);
+        let max_iterations = self.n_halfedges().max(1);
         Some(FaceFaceCirculator {
             mesh: self,
             start_heh,
@@ -392,11 +398,10 @@ impl<'a> RustMesh {
 /// This visits halfedges that are connected to the current halfedge through
 /// shared vertices or shared faces.
 pub struct HalfedgeHalfedgeCirculator<'a> {
-    mesh: &'a RustMesh,
-    center_heh: HalfedgeHandle,
     /// Adjacent halfedges to visit
     adjacent: Vec<HalfedgeHandle>,
     current_idx: usize,
+    _marker: std::marker::PhantomData<&'a RustMesh>,
 }
 
 impl<'a> Iterator for HalfedgeHalfedgeCirculator<'a> {
@@ -452,14 +457,13 @@ impl<'a> RustMesh {
         }
 
         // Limit max iterations for safety
-        let max_iterations = self.n_halfedges().max(1000);
+        let max_iterations = self.n_halfedges().max(1);
         adjacent.truncate(max_iterations);
 
         Some(HalfedgeHalfedgeCirculator {
-            mesh: self,
-            center_heh: heh,
             adjacent,
             current_idx: 0,
+            _marker: std::marker::PhantomData,
         })
     }
 }
@@ -468,9 +472,9 @@ impl<'a> RustMesh {
 ///
 /// This visits edges that share a vertex with the given edge.
 pub struct EdgeEdgeCirculator<'a> {
-    mesh: &'a RustMesh,
     adjacent: Vec<EdgeHandle>,
     current_idx: usize,
+    _marker: std::marker::PhantomData<&'a RustMesh>,
 }
 
 impl<'a> Iterator for EdgeEdgeCirculator<'a> {
@@ -517,9 +521,9 @@ impl<'a> RustMesh {
         }
 
         Some(EdgeEdgeCirculator {
-            mesh: self,
             adjacent,
             current_idx: 0,
+            _marker: std::marker::PhantomData,
         })
     }
 }
