@@ -23,46 +23,6 @@ impl std::fmt::Display for TrainingBackend {
     }
 }
 
-/// Public training profile selection.
-///
-/// `LegacyMetal` preserves the existing RustGS behavior. `LiteGsMacV1` reserves
-/// a dedicated LiteGS-compatible path for Apple Silicon parity work.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum TrainingProfile {
-    LegacyMetal,
-    LiteGsMacV1,
-}
-
-impl Default for TrainingProfile {
-    fn default() -> Self {
-        Self::LegacyMetal
-    }
-}
-
-impl std::fmt::Display for TrainingProfile {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::LegacyMetal => write!(f, "legacy-metal"),
-            Self::LiteGsMacV1 => write!(f, "litegs-mac-v1"),
-        }
-    }
-}
-
-impl FromStr for TrainingProfile {
-    type Err = String;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match normalize_config_token(value).as_str() {
-            "legacy-metal" => Ok(Self::LegacyMetal),
-            "litegs-mac-v1" => Ok(Self::LiteGsMacV1),
-            other => Err(format!(
-                "unsupported training profile '{other}'. Expected one of: legacy-metal, litegs-mac-v1"
-            )),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LiteGsTileSize {
     pub width: usize,
@@ -288,10 +248,10 @@ const LITEGS_DEFAULT_GROWTH_GRAD_THRESHOLD: f32 = 0.00014;
 pub struct TrainingConfig {
     /// Training backend implementation to use.
     ///
-    /// Only `Metal` is supported for the top-level training flow.
+    /// RustGS now standardizes on the wgpu backend.
     pub backend: TrainingBackend,
-    /// Public training profile used to route the top-level trainer.
-    pub training_profile: TrainingProfile,
+    /// Enable LiteGS-compatible SH and topology semantics.
+    pub litegs_mode: bool,
     /// Nested LiteGS-compatible configuration surface.
     pub litegs: LiteGsConfig,
     /// Number of training iterations
@@ -348,23 +308,15 @@ pub struct TrainingConfig {
     pub frame_prefetch_ahead: usize,
     /// Deterministic shuffle seed for frame ordering. Zero preserves dataset order.
     pub frame_shuffle_seed: u64,
-    /// Render scale used by the Metal backend (relative to input resolution).
-    pub metal_render_scale: f32,
-    /// Number of Gaussians processed per GPU micro-batch in the Metal backend.
-    pub metal_gaussian_batch_size: usize,
-    /// Emit per-step timing breakdowns for the Metal backend.
-    pub metal_profile_steps: bool,
-    /// Log the Metal timing breakdown every N steps when profiling is enabled.
-    pub metal_profile_interval: usize,
-    /// Use the native Metal forward rasterizer during normal training.
-    pub metal_use_native_forward: bool,
+    /// Render scale used by the wgpu backend (relative to input resolution).
+    pub render_scale: f32,
 }
 
 impl Default for TrainingConfig {
     fn default() -> Self {
         Self {
             backend: TrainingBackend::default(),
-            training_profile: TrainingProfile::default(),
+            litegs_mode: false,
             litegs: LiteGsConfig::default(),
             iterations: 30000,
             lr_position: 0.00016,
@@ -391,11 +343,7 @@ impl Default for TrainingConfig {
             frame_cache_capacity: 8,
             frame_prefetch_ahead: 4,
             frame_shuffle_seed: 0,
-            metal_render_scale: 0.5,
-            metal_gaussian_batch_size: 32,
-            metal_profile_steps: false,
-            metal_profile_interval: 25,
-            metal_use_native_forward: true,
+            render_scale: 0.5,
         }
     }
 }
@@ -415,7 +363,7 @@ pub struct TrainingResult {
 mod tests {
     use super::{
         LiteGsConfig, LiteGsOpacityResetMode, LiteGsPruneMode, LiteGsTileSize, TrainingBackend,
-        TrainingConfig, TrainingProfile, LITEGS_DEFAULT_GROWTH_GRAD_THRESHOLD,
+        TrainingConfig, LITEGS_DEFAULT_GROWTH_GRAD_THRESHOLD,
     };
     use std::str::FromStr;
 
@@ -424,8 +372,8 @@ mod tests {
         assert_eq!(TrainingBackend::default(), TrainingBackend::Wgpu);
         let config = TrainingConfig::default();
         assert_eq!(config.backend, TrainingBackend::Wgpu);
-        assert_eq!(config.training_profile, TrainingProfile::LegacyMetal);
-        assert!(config.metal_use_native_forward);
+        assert!(!config.litegs_mode);
+        assert_eq!(config.render_scale, 0.5);
         assert_eq!(config.prune_interval, 100);
         assert_eq!(config.litegs, LiteGsConfig::default());
     }
@@ -472,15 +420,7 @@ mod tests {
     }
 
     #[test]
-    fn training_profile_and_litegs_enums_parse_cli_tokens() {
-        assert_eq!(
-            TrainingProfile::from_str("legacy-metal").unwrap(),
-            TrainingProfile::LegacyMetal
-        );
-        assert_eq!(
-            TrainingProfile::from_str("litegs_mac_v1").unwrap(),
-            TrainingProfile::LiteGsMacV1
-        );
+    fn litegs_enums_parse_cli_tokens() {
         assert_eq!(
             LiteGsTileSize::from_str("16x8").unwrap(),
             LiteGsTileSize::new(16, 8)

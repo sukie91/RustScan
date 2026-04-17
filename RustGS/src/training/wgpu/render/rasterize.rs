@@ -79,7 +79,8 @@ where
         let device = projected_splats.device.clone();
         let client = projected_splats.client.clone();
 
-        let out_img = Tensor::<Self, 3>::zeros([img_size.1 as usize, img_size.0 as usize, 4], &device);
+        let out_img =
+            Tensor::<Self, 3>::zeros([img_size.1 as usize, img_size.0 as usize, 4], &device);
         let visible = Tensor::<Self, 1>::zeros([total_splats], &device);
 
         let num_tiles = tile_bounds.0 * tile_bounds.1;
@@ -108,7 +109,10 @@ where
             );
         }
 
-        (out_img.into_primitive().tensor(), visible.into_primitive().tensor())
+        (
+            out_img.into_primitive().tensor(),
+            visible.into_primitive().tensor(),
+        )
     }
 }
 

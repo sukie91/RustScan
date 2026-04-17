@@ -1,3 +1,4 @@
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SplatColorRepresentation {
     Rgb,
@@ -10,16 +11,13 @@ impl Default for SplatColorRepresentation {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 impl SplatColorRepresentation {
     pub const fn sh_degree(self) -> usize {
         match self {
             Self::Rgb => 0,
             Self::SphericalHarmonics { degree } => degree,
         }
-    }
-
-    pub const fn sh_coeff_count(self) -> usize {
-        sh_coeff_count_for_degree(self.sh_degree())
     }
 }
 

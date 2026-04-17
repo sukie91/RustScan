@@ -1,14 +1,11 @@
 #import helpers;
 
-@group(0) @binding(0) var<storage, read> transforms: array<f32>;
-@group(0) @binding(1) var<storage, read> sh_coeffs: array<f32>;
-@group(0) @binding(2) var<storage, read> raw_opacities: array<f32>;
-@group(0) @binding(3) var<storage, read> global_from_compact_gid: array<u32>;
-@group(0) @binding(4) var<storage, read> v_splats: array<f32>;
-@group(0) @binding(5) var<storage, read_write> v_transforms: array<f32>;
-@group(0) @binding(6) var<storage, read_write> v_sh_coeffs: array<f32>;
-@group(0) @binding(7) var<storage, read_write> v_raw_opacities: array<f32>;
-@group(0) @binding(8) var<uniform> uniforms: helpers::ProjectUniforms;
+@group(0) @binding(0) var<storage, read> params: array<f32>;
+@group(0) @binding(1) var<storage, read> global_from_compact_gid: array<u32>;
+@group(0) @binding(2) var<storage, read> v_splats: array<f32>;
+@group(0) @binding(3) var<storage, read_write> v_params: array<f32>;
+@group(0) @binding(4) var<storage, read_write> v_sh_coeffs: array<f32>;
+@group(0) @binding(5) var<storage, read> uniforms: helpers::ProjectUniforms;
 
 @compute @workgroup_size(256, 1, 1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -33,19 +30,20 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     );
     let v_color_a = v_splats[rg_base + 8u];
 
-    let t_base = global_gid * 10u;
-    let mean = vec3<f32>(transforms[t_base], transforms[t_base + 1u], transforms[t_base + 2u]);
+    let t_base = global_gid * 11u;
+    let p_base = global_gid * 11u;
+    let mean = vec3<f32>(params[t_base], params[t_base + 1u], params[t_base + 2u]);
     let quat_unorm = vec4<f32>(
-        transforms[t_base + 3u],
-        transforms[t_base + 4u],
-        transforms[t_base + 5u],
-        transforms[t_base + 6u],
+        params[t_base + 3u],
+        params[t_base + 4u],
+        params[t_base + 5u],
+        params[t_base + 6u],
     );
     let quat = normalize(quat_unorm);
     let log_scale = vec3<f32>(
-        transforms[t_base + 7u],
-        transforms[t_base + 8u],
-        transforms[t_base + 9u],
+        params[t_base + 7u],
+        params[t_base + 8u],
+        params[t_base + 9u],
     );
     let scale = exp(log_scale);
 
@@ -85,8 +83,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     var cov2d = j * cov_cam * transpose(j);
     let filter_comp = helpers::compensate_cov2d(&cov2d);
 
-    let opac = helpers::sigmoid(raw_opacities[global_gid]);
-    v_raw_opacities[global_gid] = filter_comp * v_color_a * opac * (1.0 - opac);
+    let opac = helpers::sigmoid(params[t_base + 10u]);
+    v_params[p_base + 10u] = filter_comp * v_color_a * opac * (1.0 - opac);
 
     let cov2d_inv = helpers::inverse2x2(cov2d);
     let v_cov2d_inv = mat2x2<f32>(
@@ -117,14 +115,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         helpers::quat_to_mat3_vjp(quat, v_m * scale_mat);
     let v_mean = transpose(rotation) * v_mean_c;
 
-    v_transforms[t_base] = v_mean.x;
-    v_transforms[t_base + 1u] = v_mean.y;
-    v_transforms[t_base + 2u] = v_mean.z;
-    v_transforms[t_base + 3u] = v_quat.x;
-    v_transforms[t_base + 4u] = v_quat.y;
-    v_transforms[t_base + 5u] = v_quat.z;
-    v_transforms[t_base + 6u] = v_quat.w;
-    v_transforms[t_base + 7u] = v_log_scale.x;
-    v_transforms[t_base + 8u] = v_log_scale.y;
-    v_transforms[t_base + 9u] = v_log_scale.z;
+    v_params[p_base] = v_mean.x;
+    v_params[p_base + 1u] = v_mean.y;
+    v_params[p_base + 2u] = v_mean.z;
+    v_params[p_base + 3u] = v_quat.x;
+    v_params[p_base + 4u] = v_quat.y;
+    v_params[p_base + 5u] = v_quat.z;
+    v_params[p_base + 6u] = v_quat.w;
+    v_params[p_base + 7u] = v_log_scale.x;
+    v_params[p_base + 8u] = v_log_scale.y;
+    v_params[p_base + 9u] = v_log_scale.z;
 }

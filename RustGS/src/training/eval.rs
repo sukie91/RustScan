@@ -6,7 +6,7 @@ use std::str::FromStr;
 use std::time::Instant;
 
 #[cfg(feature = "gpu")]
-use super::splats::HostSplats;
+use crate::core::HostSplats;
 
 pub const MIN_RENDER_SCALE: f32 = 0.0625;
 
@@ -308,12 +308,7 @@ pub fn render_evaluation_frame(
         render_width,
         render_height,
     )?;
-    let camera = scaled_camera_for_pose(
-        pose.pose,
-        dataset.intrinsics,
-        render_width,
-        render_height,
-    );
+    let camera = scaled_camera_for_pose(pose.pose, dataset.intrinsics, render_width, render_height);
     let rendered = renderer.render(trainable, &camera)?;
     Ok((target, rendered))
 }

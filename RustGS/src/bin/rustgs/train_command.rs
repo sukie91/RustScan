@@ -13,7 +13,7 @@ pub(super) fn run_train_command(args: TrainArgs) -> anyhow::Result<()> {
     log::info!("Output: {:?}", args.output);
     log::info!("Iterations: {}", args.iterations);
     log::info!("Backend: wgpu");
-    log::info!("Training profile: {}", args.training_profile);
+    log::info!("LiteGS mode: {}", args.litegs_mode);
     if args.sampling_step != 0 {
         log::warn!(
             "--sampling-step={} is ignored because training now initializes strictly from dataset sparse points",
@@ -252,18 +252,14 @@ pub(super) fn build_training_config(args: &TrainArgs) -> anyhow::Result<rustgs::
     }
 
     let mut config = rustgs::TrainingConfig::default();
-    config.training_profile = args.training_profile;
+    config.litegs_mode = args.litegs_mode;
     config.iterations = args.iterations;
     config.max_initial_gaussians = args.max_initial_gaussians;
     config.sampling_step = args.sampling_step;
-    config.metal_render_scale = args.metal_render_scale;
-    config.metal_gaussian_batch_size = args.metal_gaussian_batch_size;
-    config.metal_profile_steps = args.metal_profile_steps;
-    config.metal_profile_interval = args.metal_profile_interval;
+    config.render_scale = args.render_scale;
     config.prune_interval = args.prune_interval;
     config.topology_warmup = args.topology_warmup;
     config.topology_log_interval = args.topology_log_interval;
-    config.metal_use_native_forward = !args.metal_disable_native_forward;
     config.lr_position = args.lr_position;
     config.lr_pos_final = args.lr_position_final;
     config.lr_scale = args.lr_scale;
@@ -303,7 +299,7 @@ pub(super) fn build_training_config(args: &TrainArgs) -> anyhow::Result<rustgs::
 }
 
 fn log_litegs_training_config(config: &rustgs::TrainingConfig) {
-    if config.training_profile != rustgs::TrainingProfile::LiteGsMacV1 {
+    if !config.litegs_mode {
         return;
     }
 
@@ -396,14 +392,14 @@ pub(super) fn maybe_write_litegs_parity_report_with_manifest_dir(
     evaluation_summary: Option<&rustgs::SplatEvaluationSummary>,
     manifest_dir: &Path,
 ) -> anyhow::Result<()> {
-    if config.training_profile != rustgs::TrainingProfile::LiteGsMacV1 {
+    if !config.litegs_mode {
         return Ok(());
     }
 
     let report_path = rustgs::default_parity_report_path(output);
     let fixture_id = rustgs::parity_fixture_id_for_input_path(input);
     let mut report =
-        rustgs::ParityHarnessReport::new(fixture_id, config.training_profile, &config.litegs);
+        rustgs::ParityHarnessReport::new(fixture_id, config.litegs_mode, &config.litegs);
 
     report.topology.initialization_gaussians =
         inferred_initialization_gaussian_count(dataset, config);
@@ -565,14 +561,11 @@ mod tests {
             sampling_step: 0,
             max_frames: 0,
             frame_stride: 1,
-            metal_render_scale: 0.5,
-            metal_gaussian_batch_size: 32,
-            metal_profile_steps: false,
-            metal_profile_interval: 25,
+            render_scale: 0.5,
             prune_interval: 100,
             topology_warmup: 100,
             topology_log_interval: 500,
-            training_profile: rustgs::TrainingProfile::LegacyMetal,
+            litegs_mode: false,
             litegs_sh_degree: 3,
             litegs_cluster_size: 0,
             litegs_tile_size: rustgs::LiteGsTileSize::new(8, 16),
@@ -605,7 +598,6 @@ mod tests {
             lr_rotation: 0.001,
             lr_opacity: 0.05,
             lr_color: 0.0025,
-            metal_disable_native_forward: false,
             log_level: "error".to_string(),
             eval_after_train: false,
             eval_render_scale: 0.25,

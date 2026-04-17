@@ -7,8 +7,8 @@ use std::thread::{self, JoinHandle};
 
 use image::{DynamicImage, GenericImageView, ImageReader};
 
-use crate::{TrainingDataset, TrainingError};
 use crate::TrainingConfig;
+use crate::{TrainingDataset, TrainingError};
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct DecodedFrame {

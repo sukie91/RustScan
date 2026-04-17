@@ -16,16 +16,18 @@ use burn::tensor::{Shape, Tensor, TensorData};
 use std::time::Instant;
 
 use crate::core::GaussianCamera;
+use crate::core::HostSplats;
 use crate::training::data::frame_loader::{
     ordered_frame_indices, FrameLoaderOptions, PrefetchFrameLoader,
 };
 use crate::training::data::frame_targets::resize_rgb_u8_to_f32;
 use crate::training::data::init_map::build_initial_splats;
 use crate::training::pipeline::events::{
-    emit_training_event, TrainingEvent, TrainingEventRoute, TrainingPlanSelected, TrainingRun,
-    TrainingRunCompleted, TrainingRunReport, TrainingRunStarted,
+    emit_training_event, TrainingControl, TrainingEvent, TrainingEventCadence, TrainingEventRoute,
+    TrainingIterationProgress, TrainingPlanSelected, TrainingRun, TrainingRunCancelled,
+    TrainingRunCompleted, TrainingRunReport, TrainingRunStarted, TrainingSnapshotReady,
 };
-use crate::training::{scaled_dimensions, HostSplats, TrainingConfig};
+use crate::training::{scaled_dimensions, TrainingConfig};
 use crate::{Intrinsics, TrainingDataset, TrainingError};
 
 pub use backend::{GsBackend, GsBackendBase, GsDevice, GsDiffBackend};
@@ -51,6 +53,18 @@ pub fn train_splats_with_report(
 pub fn train_splats_with_events<F>(
     dataset: &TrainingDataset,
     config: &TrainingConfig,
+    on_event: F,
+) -> Result<TrainingRun, TrainingError>
+where
+    F: FnMut(TrainingEvent),
+{
+    train_splats_with_controlled_events(dataset, config, TrainingControl::default(), on_event)
+}
+
+pub fn train_splats_with_controlled_events<F>(
+    dataset: &TrainingDataset,
+    config: &TrainingConfig,
+    control: TrainingControl,
     mut on_event: F,
 ) -> Result<TrainingRun, TrainingError>
 where
@@ -59,7 +73,7 @@ where
     emit_training_event(
         &mut on_event,
         TrainingEvent::RunStarted(TrainingRunStarted {
-            profile: config.training_profile,
+            litegs_mode: config.litegs_mode,
             iterations: config.iterations,
             frame_count: dataset.poses.len(),
             input_point_count: dataset.initial_points.len(),
@@ -72,7 +86,17 @@ where
         }),
     );
 
-    let run = run_training(dataset, config)?;
+    let run = run_training(dataset, config, &control, &mut on_event)?;
+
+    if run.report.cancelled {
+        emit_training_event(
+            &mut on_event,
+            TrainingEvent::RunCancelled(TrainingRunCancelled {
+                completed_iterations: run.report.completed_iterations,
+                elapsed: run.report.elapsed,
+            }),
+        );
+    }
 
     emit_training_event(
         &mut on_event,
@@ -83,10 +107,15 @@ where
     Ok(run)
 }
 
-fn run_training(
+fn run_training<F>(
     dataset: &TrainingDataset,
     config: &TrainingConfig,
-) -> Result<TrainingRun, TrainingError> {
+    control: &TrainingControl,
+    on_event: &mut F,
+) -> Result<TrainingRun, TrainingError>
+where
+    F: FnMut(TrainingEvent) + ?Sized,
+{
     if dataset.poses.is_empty() {
         return Err(TrainingError::InvalidInput(
             "training dataset does not contain any poses".to_string(),
@@ -97,7 +126,7 @@ fn run_training(
     let input_width = dataset.intrinsics.width as usize;
     let input_height = dataset.intrinsics.height as usize;
     let (target_width, target_height) =
-        scaled_dimensions(input_width, input_height, config.metal_render_scale);
+        scaled_dimensions(input_width, input_height, config.render_scale);
     let initial_splats = build_initial_splats(dataset, config)?;
 
     let mut loader = PrefetchFrameLoader::new(
@@ -136,21 +165,92 @@ fn run_training(
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .map_err(|err| TrainingError::TrainingFailed(format!("failed to build tokio runtime: {err}")))?
+        .map_err(|err| {
+            TrainingError::TrainingFailed(format!("failed to build tokio runtime: {err}"))
+        })?
         .block_on(async move {
             let device = GsDevice::default();
-            let mut device_splats = host_splats_to_device::<GsDiffBackend>(&initial_splats, &device);
-            let target_tensors =
-                convert_images_to_tensors::<GsDiffBackend>(&target_images, target_width, target_height, &device);
+            let mut device_splats =
+                host_splats_to_device::<GsDiffBackend>(&initial_splats, &device);
+            let target_tensors = convert_images_to_tensors::<GsDiffBackend>(
+                &target_images,
+                target_width,
+                target_height,
+                &device,
+            );
             let sh_coeffs = device_splats.sh_coeffs.val().dims()[1];
-            let mut trainer =
-                WgpuTrainer::new(config.clone(), device.clone(), device_splats.num_splats(), sh_coeffs);
+            let mut trainer = WgpuTrainer::new(
+                config.clone(),
+                device.clone(),
+                device_splats.num_splats(),
+                sh_coeffs,
+            );
+            let mut observer = TrainingEventObserver {
+                control,
+                cadence: control.cadence(),
+                started_at,
+                on_event,
+            };
             let report = trainer
-                .train(&mut device_splats, &cameras, &target_tensors, config.iterations)
+                .train_with_observer(
+                    &mut device_splats,
+                    &cameras,
+                    &target_tensors,
+                    config.iterations,
+                    &mut observer,
+                )
                 .await;
             let splats = device_splats_to_host(&device_splats).await;
             Ok(build_training_run(splats, report, started_at.elapsed()))
         })
+}
+
+struct TrainingEventObserver<'a, F>
+where
+    F: FnMut(TrainingEvent) + ?Sized,
+{
+    control: &'a TrainingControl,
+    cadence: TrainingEventCadence,
+    started_at: Instant,
+    on_event: &'a mut F,
+}
+
+impl<F> trainer::TrainingLoopObserver for TrainingEventObserver<'_, F>
+where
+    F: FnMut(TrainingEvent) + ?Sized,
+{
+    fn should_cancel(&self) -> bool {
+        self.control.is_cancel_requested()
+    }
+
+    fn should_emit_snapshot(&self, iteration: usize) -> bool {
+        self.cadence.should_emit_snapshot(iteration)
+    }
+
+    fn on_iteration(&mut self, metrics: trainer::TrainingIterationMetrics) {
+        if !self.cadence.should_emit_progress(metrics.iteration) {
+            return;
+        }
+
+        (self.on_event)(TrainingEvent::IterationProgress(
+            TrainingIterationProgress {
+                iteration: metrics.iteration,
+                latest_loss: metrics.loss,
+                gaussian_count: metrics.gaussian_count,
+                elapsed: self.started_at.elapsed(),
+            },
+        ));
+    }
+
+    fn on_snapshot(&mut self, metrics: trainer::TrainingIterationMetrics, splats: HostSplats) {
+        (self.on_event)(TrainingEvent::SnapshotReady(TrainingSnapshotReady {
+            iteration: metrics.iteration,
+            latest_loss: metrics.loss,
+            gaussian_count: metrics.gaussian_count,
+            elapsed: self.started_at.elapsed(),
+            splats,
+        }));
+    }
 }
 
 fn gaussian_camera_from_scene_pose(
@@ -178,7 +278,11 @@ fn build_training_run(
     elapsed: std::time::Duration,
 ) -> TrainingRun {
     let final_loss = report.losses.last().copied();
-    let gaussian_count = report.num_splats.last().copied().unwrap_or_else(|| splats.len());
+    let gaussian_count = report
+        .num_splats
+        .last()
+        .copied()
+        .unwrap_or_else(|| splats.len());
 
     TrainingRun {
         report: TrainingRunReport {
@@ -187,6 +291,8 @@ fn build_training_run(
             final_step_loss: final_loss,
             gaussian_count,
             sh_degree: splats.sh_degree(),
+            completed_iterations: report.completed_iterations,
+            cancelled: report.cancelled,
             telemetry: None,
         },
         splats,
@@ -208,4 +314,70 @@ fn convert_images_to_tensors<B: Backend>(
             )
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::training::wgpu::trainer::TrainingLoopObserver;
+
+    #[test]
+    fn observer_emits_progress_and_snapshot_on_cadence() {
+        let control = TrainingControl::new(TrainingEventCadence {
+            progress_every: 2,
+            snapshot_every: Some(3),
+        });
+        let mut events = Vec::new();
+        let started = Instant::now();
+        let mut sink = |event| events.push(event);
+        let mut observer = TrainingEventObserver {
+            control: &control,
+            cadence: control.cadence(),
+            started_at: started,
+            on_event: &mut sink,
+        };
+
+        observer.on_iteration(trainer::TrainingIterationMetrics {
+            iteration: 1,
+            loss: 1.0,
+            gaussian_count: 8,
+        });
+        observer.on_iteration(trainer::TrainingIterationMetrics {
+            iteration: 2,
+            loss: 0.8,
+            gaussian_count: 8,
+        });
+        assert!(observer.should_emit_snapshot(3));
+        observer.on_snapshot(
+            trainer::TrainingIterationMetrics {
+                iteration: 3,
+                loss: 0.7,
+                gaussian_count: 9,
+            },
+            HostSplats::default(),
+        );
+
+        assert!(events.iter().any(|event| matches!(
+            event,
+            TrainingEvent::IterationProgress(TrainingIterationProgress { iteration: 2, .. })
+        )));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, TrainingEvent::SnapshotReady(_))));
+    }
+
+    #[test]
+    fn observer_honors_cooperative_cancellation() {
+        let control = TrainingControl::default();
+        let mut sink = |_event| {};
+        let observer = TrainingEventObserver {
+            control: &control,
+            cadence: control.cadence(),
+            started_at: Instant::now(),
+            on_event: &mut sink,
+        };
+        assert!(!observer.should_cancel());
+        control.request_cancel();
+        assert!(observer.should_cancel());
+    }
 }

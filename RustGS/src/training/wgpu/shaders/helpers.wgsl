@@ -18,6 +18,12 @@ struct ProjectUniforms {
     pad_a: u32,
 }
 
+struct RasterizeUniforms {
+    tile_bounds: vec2<u32>,
+    img_size: vec2<u32>,
+    background: vec4<f32>,
+}
+
 struct ProjectedSplat {
     xy_x: f32,
     xy_y: f32,

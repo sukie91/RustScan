@@ -10,11 +10,11 @@
 //! 4. Alpha blending
 
 #[cfg(feature = "gpu")]
-use crate::sh::sh0_to_rgb_value;
+use crate::core::SplatView;
 #[cfg(all(test, feature = "gpu"))]
 use crate::sh::rgb_to_sh0_value;
 #[cfg(feature = "gpu")]
-use crate::training::SplatView;
+use crate::sh::sh0_to_rgb_value;
 
 /// 2D projected splat
 #[derive(Debug, Clone)]
@@ -411,8 +411,8 @@ mod tests {
         rotation: [f32; 4],
         opacity: f32,
         color: [f32; 3],
-    ) -> crate::training::HostSplats {
-        crate::training::HostSplats::from_raw_parts(
+    ) -> crate::core::HostSplats {
+        crate::core::HostSplats::from_raw_parts(
             position.into(),
             scale.map(f32::ln).into(),
             rotation.into(),

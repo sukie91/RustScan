@@ -69,11 +69,15 @@ impl ProjectUniforms {
 }
 
 pub(crate) fn calc_tile_bounds(img_size: (u32, u32)) -> (u32, u32) {
-    (img_size.0.div_ceil(TILE_WIDTH), img_size.1.div_ceil(TILE_WIDTH))
+    (
+        img_size.0.div_ceil(TILE_WIDTH),
+        img_size.1.div_ceil(TILE_WIDTH),
+    )
 }
 
 pub(crate) fn compose_shader(file_path: &str, source: &str) -> String {
     let mut composer = Composer::default();
+    composer.capabilities = naga::valid::Capabilities::all();
     composer
         .add_composable_module(ComposableModuleDescriptor {
             source: HELPERS_SRC,
@@ -98,8 +102,12 @@ pub(crate) fn compose_shader(file_path: &str, source: &str) -> String {
     .validate(&module)
     .expect("validate shader");
 
-    naga::back::wgsl::write_string(&module, &info, naga::back::wgsl::WriterFlags::EXPLICIT_TYPES)
-        .expect("serialize shader")
+    naga::back::wgsl::write_string(
+        &module,
+        &info,
+        naga::back::wgsl::WriterFlags::EXPLICIT_TYPES,
+    )
+    .expect("serialize shader")
 }
 
 fn usize_from_int_data(data: &TensorData, index: usize, label: &str) -> usize {
@@ -117,7 +125,10 @@ async fn read_projection_counts_async<B: Backend>(
     num_intersections_buf: Tensor<B, 1, Int>,
 ) -> (usize, usize) {
     let counts = Tensor::<B, 1, Int>::cat(
-        vec![num_visible_buf.reshape([1]), num_intersections_buf.reshape([1])],
+        vec![
+            num_visible_buf.reshape([1]),
+            num_intersections_buf.reshape([1]),
+        ],
         0,
     );
     let counts_data = counts
@@ -200,12 +211,8 @@ where
         };
     }
 
-    let global_from_compact_gid = sort_by_depth(
-        depths,
-        global_from_presort_gid,
-        num_visible,
-        device,
-    );
+    let global_from_compact_gid =
+        sort_by_depth(depths, global_from_presort_gid, num_visible, device);
 
     let compact_intersect_counts = intersect_counts.gather(0, global_from_compact_gid.clone());
 
@@ -289,10 +296,10 @@ where
 mod tests {
     use super::render_forward;
     use crate::core::GaussianCamera;
+    use crate::core::HostSplats;
     use crate::sh::rgb_to_sh0_value;
     use crate::training::wgpu::backend::GsBackendBase;
     use crate::training::wgpu::splats::host_splats_to_device;
-    use crate::training::HostSplats;
     use crate::{Intrinsics, SE3};
 
     fn test_camera() -> GaussianCamera {

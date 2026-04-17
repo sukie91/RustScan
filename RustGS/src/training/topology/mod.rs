@@ -9,11 +9,12 @@ use super::density_controller::{
 };
 use super::parity_harness::ParityTopologyMetrics;
 use super::runtime_splats::TopologySplatMetrics;
+use crate::core::HostSplats;
 #[cfg(test)]
-use super::splats::sigmoid_scalar;
+use crate::core::splats::sigmoid_scalar;
 #[cfg(test)]
-use super::splats::HostSplats as Splats;
-use super::{LiteGsConfig, LiteGsOpacityResetMode, LiteGsPruneMode, TrainingConfig, TrainingProfile};
+use crate::core::HostSplats as Splats;
+use super::{LiteGsConfig, LiteGsOpacityResetMode, LiteGsPruneMode, TrainingConfig};
 
 const LITEGS_OPACITY_THRESHOLD: f32 = 0.005;
 const LITEGS_PERCENT_DENSE: f32 = 0.01;
@@ -21,6 +22,7 @@ const BRUSH_MIN_OPACITY: f32 = 1.0 / 255.0;
 const BRUSH_MIN_SCALE: f32 = 1e-10;
 const BRUSH_REFINE_PROGRESS_LIMIT: f32 = 0.95;
 
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, Copy, Default)]
 pub(super) struct RunningMoments {
     pub(super) mean: f32,
@@ -28,7 +30,9 @@ pub(super) struct RunningMoments {
     pub(super) count: usize,
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 impl RunningMoments {
+    #[allow(dead_code)]
     pub(super) fn update(&mut self, value: f32) {
         if !value.is_finite() {
             return;
@@ -42,6 +46,7 @@ impl RunningMoments {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, Copy, Default)]
 pub(super) struct MetalGaussianStats {
     pub(super) mean2d_grad: RunningMoments,
@@ -49,7 +54,9 @@ pub(super) struct MetalGaussianStats {
     pub(super) fragment_err: RunningMoments,
     pub(super) refine_weight_max: f32,
     pub(super) visible_count: usize,
+    #[allow(dead_code)]
     pub(super) age: usize,
+    #[allow(dead_code)]
     pub(super) consecutive_invisible_epochs: usize,
 }
 
@@ -86,12 +93,13 @@ pub(super) struct LiteGsDensifySelection {
 
 #[derive(Debug, Clone)]
 pub(super) struct TopologyPolicy {
-    pub(super) training_profile: TrainingProfile,
+    pub(super) litegs_mode: bool,
     pub(super) litegs: LiteGsConfig,
     pub(super) prune_threshold: f32,
     pub(super) densify_interval: usize,
     pub(super) prune_interval: usize,
     pub(super) topology_warmup: usize,
+    #[allow(dead_code)]
     pub(super) topology_log_interval: usize,
     pub(super) legacy_densify_grad_threshold: f32,
     pub(super) legacy_clone_scale_threshold: f32,
@@ -106,7 +114,7 @@ pub(super) struct TopologyPolicy {
 impl TopologyPolicy {
     pub(crate) fn from_training_config(config: &TrainingConfig, scene_extent: f32) -> Self {
         Self {
-            training_profile: config.training_profile,
+            litegs_mode: config.litegs_mode,
             litegs: config.litegs.clone(),
             prune_threshold: config.prune_threshold,
             densify_interval: config.densify_interval,
@@ -125,13 +133,15 @@ impl TopologyPolicy {
     }
 
     pub(super) fn is_litegs_mode(&self) -> bool {
-        self.training_profile == TrainingProfile::LiteGsMacV1
+        self.litegs_mode
     }
 
+    #[allow(dead_code)]
     pub(super) fn should_log_topology(&self, iteration: usize) -> bool {
         iteration % self.topology_log_interval.max(1) == 0
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn litegs_total_epochs(&self, frame_count: usize) -> usize {
         if frame_count == 0 {
             0
@@ -140,6 +150,7 @@ impl TopologyPolicy {
         }
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn litegs_effective_densify_from_epoch(&self, frame_count: usize) -> usize {
         let total_epochs = self.litegs_total_epochs(frame_count);
         if total_epochs == 0 || self.litegs.densify_from >= total_epochs {
@@ -149,6 +160,7 @@ impl TopologyPolicy {
         }
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn litegs_densify_until_epoch(&self, frame_count: usize) -> usize {
         let total_epochs = self.litegs_total_epochs(frame_count);
         let densify_from = self.litegs_effective_densify_from_epoch(frame_count);
@@ -171,6 +183,7 @@ impl TopologyPolicy {
         (self.scene_extent * LITEGS_PERCENT_DENSE).max(1e-4)
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn density_controller_reference_config(
         &self,
         current_gaussians: usize,
@@ -227,6 +240,7 @@ impl TopologyPolicy {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct DensityControllerReferenceSummary {
     pub(super) prune_mask: Vec<bool>,
@@ -235,6 +249,7 @@ pub(super) struct DensityControllerReferenceSummary {
     pub(super) densify_budget: Option<usize>,
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 impl DensityControllerReferenceSummary {
     pub(super) fn prune_candidates(&self) -> usize {
         self.prune_mask
@@ -258,11 +273,13 @@ impl DensityControllerReferenceSummary {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone)]
 pub(super) struct DensityControllerReferenceAdapter {
     controller: DensityController,
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 impl DensityControllerReferenceAdapter {
     pub(super) fn from_topology_state(
         policy: &TopologyPolicy,
@@ -333,6 +350,7 @@ impl DensityControllerReferenceAdapter {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn density_controller_reference_summary(
     policy: &TopologyPolicy,
     splats: &TopologySplatMetrics,
@@ -346,7 +364,6 @@ pub(super) fn density_controller_reference_summary(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum TopologyExecutionDisposition {
     Apply,
-    SkipDestructiveLiteGs,
     SkipNoEligibleCandidates,
 }
 
@@ -424,6 +441,7 @@ pub(super) fn schedule_topology(
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn should_collect_visible_indices(
     policy: &TopologyPolicy,
     schedule: TopologySchedule,
@@ -431,9 +449,25 @@ pub(super) fn should_collect_visible_indices(
     policy.is_litegs_mode() || schedule.densify || schedule.prune
 }
 
+pub(crate) fn should_apply_topology_step(
+    config: &TrainingConfig,
+    iteration: usize,
+    frame_count: usize,
+) -> bool {
+    let policy = TopologyPolicy::from_training_config(config, 1.0);
+    let schedule = schedule_topology(
+        &policy,
+        TopologyStepContext {
+            iteration,
+            frame_count,
+        },
+    );
+    schedule.densify || schedule.prune || schedule.reset_opacity
+}
+
 pub(crate) fn plan_topology_from_host_snapshot(
     config: &TrainingConfig,
-    splats: &super::splats::HostSplats,
+    splats: &HostSplats,
     grad_2d_accum: &[f32],
     grad_color_accum: &[f32],
     num_observations: &[u32],
@@ -803,8 +837,8 @@ pub(super) fn prune_snapshot(
             && max_scale.is_finite()
             && max_scale <= policy.legacy_prune_scale_threshold
             && position.iter().all(|value| value.is_finite())
-            && rotation.iter().all(|value| value.is_finite())
-            && sh_coeffs.iter().all(|value| value.is_finite());
+            && rotation.iter().all(|value: &f32| value.is_finite())
+            && sh_coeffs.iter().all(|value: &f32| value.is_finite());
         if valid {
             keep_mask[idx] = true;
         }
@@ -874,7 +908,7 @@ pub(super) fn densify_snapshot_litegs(
             .max_by(|lhs, rhs| lhs.1.partial_cmp(&rhs.1).unwrap_or(Ordering::Equal))
             .unwrap_or((0, 0.0));
         position[max_axis] += max_axis_scale * 0.5;
-        log_scale[max_axis] = (max_axis_scale / 1.6).max(1e-6).ln();
+        log_scale[max_axis] = (max_axis_scale / 1.6f32).max(1e-6f32).ln();
 
         snapshot.push(position, log_scale, rotation, opacity_logit, &sh_coeffs);
         stats.push(MetalGaussianStats::default());
@@ -1001,6 +1035,7 @@ impl TopologyPlanRow {
         }
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn is_existing(&self) -> bool {
         matches!(
             self,
@@ -1101,6 +1136,7 @@ pub(crate) struct TopologyMutationPlan {
 }
 
 impl TopologyMutationPlan {
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn origins(&self) -> Vec<Option<usize>> {
         self.rows
             .iter()
@@ -1108,6 +1144,7 @@ impl TopologyMutationPlan {
             .collect()
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn remap_stats(&self, current: &[MetalGaussianStats]) -> Vec<MetalGaussianStats> {
         self.rows
             .iter()
@@ -1385,6 +1422,7 @@ fn topology_mutation_aftermath(
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn apply_topology_metrics_delta(
     metrics: &mut ParityTopologyMetrics,
     delta: TopologyMetricsDelta,
@@ -1433,6 +1471,7 @@ pub(super) fn apply_topology_metrics_delta(
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn density_controller_opacity_reset_mode(mode: LiteGsOpacityResetMode) -> OpacityResetMode {
     match mode {
         LiteGsOpacityResetMode::Decay => OpacityResetMode::Decay,
@@ -1440,6 +1479,7 @@ fn density_controller_opacity_reset_mode(mode: LiteGsOpacityResetMode) -> Opacit
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn density_controller_prune_mode(mode: LiteGsPruneMode) -> PruneMode {
     match mode {
         LiteGsPruneMode::Threshold => PruneMode::Threshold,
@@ -1447,6 +1487,7 @@ fn density_controller_prune_mode(mode: LiteGsPruneMode) -> PruneMode {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn density_controller_taming_mode(policy: &TopologyPolicy) -> bool {
     policy.is_litegs_mode() && matches!(policy.litegs.prune_mode, LiteGsPruneMode::Weight)
 }
@@ -1519,6 +1560,7 @@ fn brush_refine_offset(
     (quat * (Vec3::from_array(metrics.scale(source_idx)) * sample_scalar)).to_array()
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn record_topology_epoch(
     first: &mut Option<usize>,
     last: &mut Option<usize>,
@@ -1669,15 +1711,15 @@ mod tests {
         analyze_topology_candidates, apply_snapshot_mutations, apply_topology_metrics_delta,
         densify_snapshot_litegs, density_controller_reference_summary, litegs_requested_additions,
         litegs_select_densify_candidates, prune_snapshot, schedule_topology,
-        should_collect_visible_indices, LiteGsDensifySelection, MetalGaussianStats, RunningMoments,
-        TopologyAnalysis, TopologyMutationRequest, TopologyPolicy, TopologySchedule,
-        TopologyStatsAction, TopologyStepContext,
+        should_apply_topology_step, should_collect_visible_indices, LiteGsDensifySelection,
+        MetalGaussianStats, RunningMoments, TopologyAnalysis, TopologyMutationRequest,
+        TopologyPolicy, TopologySchedule, TopologyStatsAction, TopologyStepContext,
     };
     use crate::sh::{rgb_to_sh0_value, sh_coeff_count_for_degree, SplatColorRepresentation};
     use crate::training::parity_harness::ParityTopologyMetrics;
     use crate::training::runtime_splats::TopologySplatMetrics;
-    use crate::training::splats::HostSplats as Splats;
-    use crate::training::{LiteGsConfig, TrainingConfig, TrainingProfile};
+    use crate::core::HostSplats as Splats;
+    use crate::training::{LiteGsConfig, TrainingConfig};
 
     fn legacy_policy() -> TopologyPolicy {
         let config = TrainingConfig {
@@ -1719,7 +1761,7 @@ mod tests {
                 }
                 SplatColorRepresentation::SphericalHarmonics { .. } => {
                     sh_coeffs.extend_from_slice(&colors[color_base..color_base + 3]);
-                    let rest = super::super::splats::row_slice(&sh_rest, sh_rest_row_width, idx);
+                    let rest = crate::core::splats::row_slice(&sh_rest, sh_rest_row_width, idx);
                     sh_coeffs.extend_from_slice(rest);
                 }
             }
@@ -1778,7 +1820,7 @@ mod tests {
     #[test]
     fn litegs_schedule_respects_refine_cadence_and_freeze() {
         let config = TrainingConfig {
-            training_profile: TrainingProfile::LiteGsMacV1,
+            litegs_mode: true,
             iterations: 30,
             topology_warmup: 0,
             litegs: LiteGsConfig {
@@ -1823,7 +1865,7 @@ mod tests {
     #[test]
     fn litegs_short_run_schedule_disables_densify_window() {
         let config = TrainingConfig {
-            training_profile: TrainingProfile::LiteGsMacV1,
+            litegs_mode: true,
             iterations: 500,
             topology_warmup: 100,
             litegs: LiteGsConfig {
@@ -1876,6 +1918,35 @@ mod tests {
         assert!(second_refine.prune);
         assert!(second_refine.allow_extra_growth);
         assert!(!second_refine.reset_opacity);
+    }
+
+    #[test]
+    fn should_apply_topology_step_uses_litegs_refine_cadence() {
+        let config = TrainingConfig {
+            litegs_mode: true,
+            iterations: 500,
+            densify_interval: 100,
+            prune_interval: 100,
+            topology_warmup: 100,
+            litegs: LiteGsConfig {
+                refine_every: 160,
+                ..LiteGsConfig::default()
+            },
+            ..TrainingConfig::default()
+        };
+
+        assert!(
+            !should_apply_topology_step(&config, 100, 638),
+            "legacy cadence checkpoint should not trigger LiteGS refine scheduling"
+        );
+        assert!(
+            should_apply_topology_step(&config, 161, 638),
+            "LiteGS refine should trigger at phase_iter=160"
+        );
+        assert!(
+            !should_apply_topology_step(&config, 201, 638),
+            "non-refine iterations should not trigger topology work"
+        );
     }
 
     #[test]
@@ -1935,7 +2006,7 @@ mod tests {
     #[test]
     fn litegs_densify_preserves_sh_layout() {
         let config = TrainingConfig {
-            training_profile: TrainingProfile::LiteGsMacV1,
+            litegs_mode: true,
             litegs: LiteGsConfig {
                 sh_degree: 3,
                 ..LiteGsConfig::default()
@@ -1966,7 +2037,7 @@ mod tests {
     #[test]
     fn analyze_topology_candidates_marks_litegs_growth_and_prune() {
         let config = TrainingConfig {
-            training_profile: TrainingProfile::LiteGsMacV1,
+            litegs_mode: true,
             litegs: LiteGsConfig {
                 prune_min_age: 1,
                 prune_invisible_epochs: 1,
@@ -2023,7 +2094,7 @@ mod tests {
     #[test]
     fn density_controller_reference_summary_tracks_threshold_masks() {
         let config = TrainingConfig {
-            training_profile: TrainingProfile::LiteGsMacV1,
+            litegs_mode: true,
             iterations: 12,
             litegs: LiteGsConfig {
                 densify_from: 1,
@@ -2089,7 +2160,7 @@ mod tests {
     #[test]
     fn density_controller_reference_summary_tracks_weight_budget() {
         let config = TrainingConfig {
-            training_profile: TrainingProfile::LiteGsMacV1,
+            litegs_mode: true,
             iterations: 12,
             litegs: LiteGsConfig {
                 densify_from: 1,
@@ -2278,7 +2349,7 @@ mod tests {
     #[test]
     fn mutation_aftermath_marks_litegs_opacity_reset_without_structural_change() {
         let config = TrainingConfig {
-            training_profile: TrainingProfile::LiteGsMacV1,
+            litegs_mode: true,
             ..TrainingConfig::default()
         };
         let policy = TopologyPolicy::from_training_config(&config, 1.0);

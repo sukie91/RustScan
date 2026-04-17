@@ -55,7 +55,11 @@ pub fn ssim_loss<B: Backend>(
         * (sigma_x_sq + sigma_y_sq + c2).clamp_min(1e-8_f32);
     let ssim_map = numerator / denominator;
 
-    ssim_map.mean().mul_scalar(-1.0).add_scalar(1.0).reshape([1])
+    ssim_map
+        .mean()
+        .mul_scalar(-1.0)
+        .add_scalar(1.0)
+        .reshape([1])
 }
 
 pub fn combined_loss<B: Backend>(
@@ -81,7 +85,8 @@ fn gaussian_kernel_1d<B: Backend>(config: &SsimConfig, device: &B::Device) -> Te
     let mut sum = 0.0f32;
 
     for offset in -radius..=radius {
-        let value = (-((offset * offset) as f64) / (2.0 * config.sigma * config.sigma)).exp() as f32;
+        let value =
+            (-((offset * offset) as f64) / (2.0 * config.sigma * config.sigma)).exp() as f32;
         values.push(value);
         sum += value;
     }
@@ -130,12 +135,18 @@ mod tests {
         Default::default()
     }
 
-    fn separable_blur_reference<B: Backend>(tensor: Tensor<B, 4>, kernel: Tensor<B, 1>) -> Tensor<B, 4> {
+    fn separable_blur_reference<B: Backend>(
+        tensor: Tensor<B, 4>,
+        kernel: Tensor<B, 1>,
+    ) -> Tensor<B, 4> {
         let horizontal = blur_width_reference(tensor, kernel.clone());
         blur_height_reference(horizontal, kernel)
     }
 
-    fn blur_width_reference<B: Backend>(tensor: Tensor<B, 4>, kernel: Tensor<B, 1>) -> Tensor<B, 4> {
+    fn blur_width_reference<B: Backend>(
+        tensor: Tensor<B, 4>,
+        kernel: Tensor<B, 1>,
+    ) -> Tensor<B, 4> {
         let [_, _, _, width] = tensor.dims();
         let pad = kernel.dims()[0] / 2;
         let padded = tensor.pad([(0, 0), (pad, pad)], PadMode::Edge);
@@ -153,7 +164,10 @@ mod tests {
         accum
     }
 
-    fn blur_height_reference<B: Backend>(tensor: Tensor<B, 4>, kernel: Tensor<B, 1>) -> Tensor<B, 4> {
+    fn blur_height_reference<B: Backend>(
+        tensor: Tensor<B, 4>,
+        kernel: Tensor<B, 1>,
+    ) -> Tensor<B, 4> {
         let [_, _, height, _] = tensor.dims();
         let pad = kernel.dims()[0] / 2;
         let padded = tensor.pad([(pad, pad), (0, 0)], PadMode::Edge);
@@ -181,7 +195,10 @@ mod tests {
             .await
             .expect("ssim scalar");
 
-        assert!(loss.abs() < 0.01, "expected near-zero SSIM loss, got {loss}");
+        assert!(
+            loss.abs() < 0.01,
+            "expected near-zero SSIM loss, got {loss}"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -208,7 +225,10 @@ mod tests {
             .await
             .expect("combined loss scalar");
 
-        assert!(loss > 0.5, "expected positive image mismatch loss, got {loss}");
+        assert!(
+            loss > 0.5,
+            "expected positive image mismatch loss, got {loss}"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -234,7 +254,10 @@ mod tests {
 
         for (idx, (lhs, rhs)) in reference.iter().zip(optimized.iter()).enumerate() {
             let delta = (lhs - rhs).abs();
-            assert!(delta < 1e-4, "blur mismatch at index {idx}: {lhs} vs {rhs} (delta={delta})");
+            assert!(
+                delta < 1e-4,
+                "blur mismatch at index {idx}: {lhs} vs {rhs} (delta={delta})"
+            );
         }
     }
 }

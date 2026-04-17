@@ -1,14 +1,10 @@
-use super::{LiteGsConfig, TrainingConfig, TrainingProfile};
+use crate::training::{LiteGsConfig, TrainingConfig};
 use crate::TrainingError;
 
 #[cfg(feature = "gpu")]
-use super::events::{
-    emit_training_event, TrainingEvent, TrainingEventRoute, TrainingEventSink,
-    TrainingPlanSelected, TrainingRun,
-};
+use super::events::{TrainingControl, TrainingEvent, TrainingRun};
 #[cfg(feature = "gpu")]
-use super::splats::HostSplats;
-#[cfg(feature = "gpu")]
+use crate::core::HostSplats;
 use crate::TrainingDataset;
 
 #[cfg(feature = "gpu")]
@@ -32,25 +28,33 @@ pub fn train_splats_with_report(
 pub fn train_splats_with_events<F>(
     dataset: &TrainingDataset,
     config: &TrainingConfig,
+    on_event: F,
+) -> Result<TrainingRun, TrainingError>
+where
+    F: FnMut(TrainingEvent),
+{
+    train_splats_with_controlled_events(dataset, config, TrainingControl::default(), on_event)
+}
+
+#[cfg(feature = "gpu")]
+pub fn train_splats_with_controlled_events<F>(
+    dataset: &TrainingDataset,
+    config: &TrainingConfig,
+    control: TrainingControl,
     mut on_event: F,
 ) -> Result<TrainingRun, TrainingError>
 where
     F: FnMut(TrainingEvent),
 {
-    if config.training_profile == TrainingProfile::LiteGsMacV1 {
+    if config.litegs_mode {
         validate_litegs_mac_v1_config(config)?;
     }
-    crate::training::wgpu::train_splats_with_events(dataset, config, &mut on_event)
-}
-
-#[cfg(feature = "gpu")]
-fn emit_standard_training_plan_event(sink: &mut TrainingEventSink<'_>) {
-    emit_training_event(
-        sink,
-        TrainingEvent::PlanSelected(TrainingPlanSelected {
-            route: TrainingEventRoute::Standard,
-        }),
-    );
+    crate::training::wgpu::train_splats_with_controlled_events(
+        dataset,
+        config,
+        control,
+        &mut on_event,
+    )
 }
 
 pub(crate) fn validate_litegs_mac_v1_config(config: &TrainingConfig) -> Result<(), TrainingError> {
@@ -119,14 +123,12 @@ pub(crate) fn validate_litegs_mac_v1_config(config: &TrainingConfig) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::validate_litegs_mac_v1_config;
-    use crate::training::{
-        LiteGsConfig, LiteGsOpacityResetMode, LiteGsPruneMode, TrainingConfig, TrainingProfile,
-    };
+    use crate::training::{LiteGsConfig, LiteGsOpacityResetMode, LiteGsPruneMode, TrainingConfig};
 
     #[test]
     fn litegs_mac_v1_accepts_bootstrap_defaults() {
         let config = TrainingConfig {
-            training_profile: TrainingProfile::LiteGsMacV1,
+            litegs_mode: true,
             ..TrainingConfig::default()
         };
         validate_litegs_mac_v1_config(&config).unwrap();
@@ -135,7 +137,7 @@ mod tests {
     #[test]
     fn litegs_mac_v1_accepts_wired_non_clustered_overrides() {
         let config = TrainingConfig {
-            training_profile: TrainingProfile::LiteGsMacV1,
+            litegs_mode: true,
             litegs: LiteGsConfig {
                 reg_weight: 0.01,
                 enable_transmittance: true,
@@ -161,7 +163,7 @@ mod tests {
     #[test]
     fn litegs_mac_v1_accepts_clustered_override() {
         let config = TrainingConfig {
-            training_profile: TrainingProfile::LiteGsMacV1,
+            litegs_mode: true,
             litegs: LiteGsConfig {
                 cluster_size: 128,
                 ..LiteGsConfig::default()
@@ -175,7 +177,7 @@ mod tests {
     #[test]
     fn litegs_mac_v1_accepts_sparse_grad_override() {
         let config = TrainingConfig {
-            training_profile: TrainingProfile::LiteGsMacV1,
+            litegs_mode: true,
             litegs: LiteGsConfig {
                 sparse_grad: true,
                 ..LiteGsConfig::default()
@@ -189,7 +191,7 @@ mod tests {
     #[test]
     fn litegs_mac_v1_accepts_enable_depth_override() {
         let config = TrainingConfig {
-            training_profile: TrainingProfile::LiteGsMacV1,
+            litegs_mode: true,
             litegs: LiteGsConfig {
                 enable_depth: true,
                 ..LiteGsConfig::default()

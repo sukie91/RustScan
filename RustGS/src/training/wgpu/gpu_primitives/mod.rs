@@ -29,12 +29,12 @@ mod tests {
         let sorted_indices = radix_sort_u32::<GsBackendBase>(tensor, &device)
             .await
             .expect("radix sort indices");
-        let data = sorted_indices.into_data_async().await.expect("indices readback");
+        let data = sorted_indices
+            .into_data_async()
+            .await
+            .expect("indices readback");
         let indices = data.as_slice::<i32>().expect("i32 indices");
-        let sorted_values: Vec<u32> = indices
-            .iter()
-            .map(|index| input[*index as usize])
-            .collect();
+        let sorted_values: Vec<u32> = indices.iter().map(|index| input[*index as usize]).collect();
 
         assert_eq!(sorted_values, vec![1, 2, 3, 5, 8, 9]);
     }

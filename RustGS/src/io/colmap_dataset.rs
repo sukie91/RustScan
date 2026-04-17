@@ -263,6 +263,8 @@ pub fn load_colmap_dataset(
         images.len()
     };
     let stride = config.frame_stride.max(1);
+    let mut missing_image_count = 0usize;
+    let mut missing_image_examples = Vec::new();
 
     // Add poses
     for (frame_idx, image) in images
@@ -273,7 +275,10 @@ pub fn load_colmap_dataset(
     {
         let image_path = image_dir.join(&image.name);
         if !image_path.exists() {
-            log::warn!("image {} not found at {}", image.name, image_path.display());
+            missing_image_count += 1;
+            if missing_image_examples.len() < 5 {
+                missing_image_examples.push(image_path.display().to_string());
+            }
             continue;
         }
 
@@ -292,13 +297,22 @@ pub fn load_colmap_dataset(
             sparse_dir.display(),
         )));
     }
+    if missing_image_count > 0 {
+        log::warn!(
+            "COLMAP dataset {} skipped {} frames because image files were missing (showing up to 5): {}",
+            sparse_dir.display(),
+            missing_image_count,
+            missing_image_examples.join(", ")
+        );
+    }
 
     log::info!(
-        "Loaded COLMAP dataset {} | cameras={} | images_total={} | frames={} | points={} | resolution={}x{}",
+        "Loaded COLMAP dataset {} | cameras={} | images_total={} | frames={} | missing_images={} | points={} | resolution={}x{}",
         sparse_dir.display(),
         cameras.len(),
         considered,
         dataset.poses.len(),
+        missing_image_count,
         dataset.initial_points.len(),
         intrinsics.width,
         intrinsics.height,

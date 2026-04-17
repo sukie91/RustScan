@@ -25,10 +25,6 @@ mod pipeline;
 mod runtime_splats;
 
 #[cfg(feature = "gpu")]
-#[path = "state/splats.rs"]
-mod splats;
-
-#[cfg(feature = "gpu")]
 mod telemetry;
 
 #[cfg(feature = "gpu")]
@@ -59,20 +55,20 @@ pub use parity_harness::{
 };
 #[cfg(feature = "gpu")]
 pub use pipeline::events::{
-    TrainingEvent, TrainingEventRoute, TrainingPlanSelected, TrainingRun, TrainingRunCompleted,
-    TrainingRunReport, TrainingRunStarted,
+    TrainingControl, TrainingEvent, TrainingEventCadence, TrainingEventRoute,
+    TrainingIterationProgress, TrainingPlanSelected, TrainingRun, TrainingRunCancelled,
+    TrainingRunCompleted, TrainingRunReport, TrainingRunStarted, TrainingSnapshotReady,
 };
-#[cfg(feature = "gpu")]
-pub use splats::{HostSplats, SplatView};
 
 pub use config::{
     LiteGsConfig, LiteGsOpacityResetMode, LiteGsPruneMode, LiteGsTileSize, TrainingBackend,
-    TrainingConfig, TrainingProfile, TrainingResult,
+    TrainingConfig, TrainingResult,
 };
 #[cfg(feature = "gpu")]
 pub use telemetry::{last_training_telemetry, LiteGsOptimizerLrs, LiteGsTrainingTelemetry};
 
 #[cfg(feature = "gpu")]
 pub use pipeline::orchestrator::{
-    train_splats, train_splats_with_events, train_splats_with_report,
+    train_splats, train_splats_with_controlled_events, train_splats_with_events,
+    train_splats_with_report,
 };

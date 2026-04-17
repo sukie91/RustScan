@@ -1,12 +1,13 @@
 use burn::prelude::*;
 use burn::tensor::{Int, Transaction};
 
+use crate::core::HostSplats;
 use crate::training::topology::{plan_topology_from_host_snapshot, TopologyMutationPlan};
 
 use super::splats::{device_splats_to_host, DeviceSplats};
 
 pub struct TopologySnapshot {
-    pub splats: crate::training::HostSplats,
+    pub splats: HostSplats,
     pub grad_2d_accum: Vec<f32>,
     pub grad_color_accum: Vec<f32>,
     pub num_observations: Vec<u32>,
@@ -37,7 +38,10 @@ pub async fn snapshot_for_topology<B: Backend>(
         .expect("topology grad_color readback");
     // GsBackendBase::IntElement = i32 for the wgpu backend, so try i32 first.
     let num_observations = if let Ok(values) = data[2].clone().into_vec::<i32>() {
-        values.into_iter().map(|value| value.max(0) as u32).collect()
+        values
+            .into_iter()
+            .map(|value| value.max(0) as u32)
+            .collect()
     } else if let Ok(values) = data[2].clone().into_vec::<u32>() {
         values
     } else {

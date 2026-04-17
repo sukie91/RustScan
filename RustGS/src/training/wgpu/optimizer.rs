@@ -197,13 +197,17 @@ mod tests {
         let grad = Tensor::<GsBackendBase, 1>::ones([3], &device);
         let mut state = AdamState::default();
 
-        let updated = AdamScaled::<GsBackendBase>::step_tensor(&config, param.clone(), grad, &mut state);
+        let updated =
+            AdamScaled::<GsBackendBase>::step_tensor(&config, param.clone(), grad, &mut state);
 
         let before = param.into_data_async().await.expect("param readback");
         let after = updated.into_data_async().await.expect("updated readback");
         let before = before.as_slice::<f32>().expect("f32 params");
         let after = after.as_slice::<f32>().expect("f32 params");
 
-        assert!(after.iter().zip(before.iter()).all(|(after, before)| after < before));
+        assert!(after
+            .iter()
+            .zip(before.iter())
+            .all(|(after, before)| after < before));
     }
 }

@@ -10,10 +10,10 @@ pub use autodiff::render_splats;
 mod tests {
     use super::render_splats;
     use crate::core::GaussianCamera;
+    use crate::core::HostSplats;
     use crate::sh::rgb_to_sh0_value;
     use crate::training::wgpu::backend::GsDiffBackend;
     use crate::training::wgpu::splats::host_splats_to_device;
-    use crate::training::HostSplats;
     use crate::{Intrinsics, SE3};
 
     fn test_camera() -> GaussianCamera {
@@ -40,8 +40,49 @@ mod tests {
         let loss = image.mean();
         let mut grads = loss.backward();
 
-        assert!(splats.transforms.grad_remove(&mut grads).is_some());
-        assert!(splats.sh_coeffs.grad_remove(&mut grads).is_some());
-        assert!(splats.raw_opacities.grad_remove(&mut grads).is_some());
+        let transforms = splats
+            .transforms
+            .grad_remove(&mut grads)
+            .expect("transforms grad missing");
+        let sh = splats
+            .sh_coeffs
+            .grad_remove(&mut grads)
+            .expect("sh grad missing");
+        let opacity = splats
+            .raw_opacities
+            .grad_remove(&mut grads)
+            .expect("opacity grad missing");
+
+        let transforms_mean = transforms
+            .abs()
+            .mean()
+            .into_scalar_async()
+            .await
+            .expect("transforms mean scalar");
+        let sh_mean = sh
+            .abs()
+            .mean()
+            .into_scalar_async()
+            .await
+            .expect("sh mean scalar");
+        let opacity_mean = opacity
+            .abs()
+            .mean()
+            .into_scalar_async()
+            .await
+            .expect("opacity mean scalar");
+
+        assert!(
+            transforms_mean > 1e-9,
+            "expected non-zero transform gradients, got {transforms_mean:e}"
+        );
+        assert!(
+            sh_mean > 1e-9,
+            "expected non-zero SH gradients, got {sh_mean:e}"
+        );
+        assert!(
+            opacity_mean > 1e-9,
+            "expected non-zero opacity gradients, got {opacity_mean:e}"
+        );
     }
 }

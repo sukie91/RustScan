@@ -2,6 +2,7 @@ use burn::module::Param;
 use burn::prelude::*;
 use glam::{Quat, Vec3};
 
+use crate::core::HostSplats;
 use crate::training::topology::{TopologyMutationPlan, TopologyPlanRow};
 
 use super::splats::{device_splats_to_host, host_splats_to_device, DeviceSplats};
@@ -26,9 +27,9 @@ pub(crate) async fn apply_mutations<B: Backend>(
 }
 
 fn rebuild_host_snapshot(
-    snapshot: &crate::training::HostSplats,
+    snapshot: &HostSplats,
     plan: &TopologyMutationPlan,
-) -> crate::training::HostSplats {
+) -> HostSplats {
     let sh_row_width = if snapshot.is_empty() {
         3
     } else {
@@ -62,7 +63,8 @@ fn rebuild_host_snapshot(
                 log_scale[0] = (max_scale * 0.5).max(1e-6).ln();
             }
             TopologyPlanRow::BrushRefineExisting { sample_scalar, .. } => {
-                let offset = brush_refine_offset(rotation, snapshot.scale(source_idx), sample_scalar);
+                let offset =
+                    brush_refine_offset(rotation, snapshot.scale(source_idx), sample_scalar);
                 let refined_scale = brush_refine_scale(snapshot.scale(source_idx));
                 position[0] -= offset[0];
                 position[1] -= offset[1];
@@ -71,7 +73,8 @@ fn rebuild_host_snapshot(
                 opacity_logit = brush_refine_opacity_logit(opacity_logit);
             }
             TopologyPlanRow::BrushRefineNew { sample_scalar, .. } => {
-                let offset = brush_refine_offset(rotation, snapshot.scale(source_idx), sample_scalar);
+                let offset =
+                    brush_refine_offset(rotation, snapshot.scale(source_idx), sample_scalar);
                 let refined_scale = brush_refine_scale(snapshot.scale(source_idx));
                 position[0] += offset[0];
                 position[1] += offset[1];
@@ -88,7 +91,7 @@ fn rebuild_host_snapshot(
         sh_coeffs.extend_from_slice(snapshot.sh_coeffs_row(source_idx));
     }
 
-    crate::training::HostSplats::from_raw_parts(
+    HostSplats::from_raw_parts(
         positions,
         log_scales,
         rotations,

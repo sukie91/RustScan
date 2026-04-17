@@ -1,20 +1,16 @@
 use serde::{Deserialize, Serialize};
 
-use crate::sh::{
-    rgb_to_sh0_value, sh0_to_rgb_value, sh_coeff_count_for_degree, SplatColorRepresentation,
-};
+use crate::sh::{rgb_to_sh0_value, sh0_to_rgb_value, sh_coeff_count_for_degree};
 use crate::TrainingError;
-
-use super::{TrainingConfig, TrainingProfile};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HostSplats {
-    pub(super) positions: Vec<f32>,
-    pub(super) log_scales: Vec<f32>,
-    pub(super) rotations: Vec<f32>,
-    pub(super) opacity_logits: Vec<f32>,
-    pub(super) sh_coeffs: Vec<f32>,
-    pub(super) sh_degree: usize,
+    pub(crate) positions: Vec<f32>,
+    pub(crate) log_scales: Vec<f32>,
+    pub(crate) rotations: Vec<f32>,
+    pub(crate) opacity_logits: Vec<f32>,
+    pub(crate) sh_coeffs: Vec<f32>,
+    pub(crate) sh_degree: usize,
 }
 
 impl Default for HostSplats {
@@ -150,11 +146,11 @@ impl HostSplats {
         self.sh_degree
     }
 
-    pub(super) fn sh_coeffs_row_width(&self) -> usize {
+    pub(crate) fn sh_coeffs_row_width(&self) -> usize {
         sh_coeff_count_for_degree(self.sh_degree) * 3
     }
 
-    pub(super) fn sh_rest_row_width(&self) -> usize {
+    pub(crate) fn sh_rest_row_width(&self) -> usize {
         self.sh_coeffs_row_width().saturating_sub(3)
     }
 
@@ -179,7 +175,8 @@ impl HostSplats {
         sigmoid_scalar(self.opacity_logit(idx)).clamp(0.0, 1.0)
     }
 
-    pub(super) fn push(
+    #[allow(dead_code)]
+    pub(crate) fn push(
         &mut self,
         position: [f32; 3],
         log_scale: [f32; 3],
@@ -211,7 +208,7 @@ impl HostSplats {
             .resize(self.sh_coeffs.len() + self.sh_rest_row_width(), 0.0);
     }
 
-    pub(super) fn truncate_rows(&mut self, row_count: usize) {
+    pub(crate) fn truncate_rows(&mut self, row_count: usize) {
         if row_count >= self.len() {
             return;
         }
@@ -224,7 +221,8 @@ impl HostSplats {
             .truncate(row_count * self.sh_coeffs_row_width());
     }
 
-    pub(super) fn retained_view(&self, row_count: usize) -> Self {
+    #[allow(dead_code)]
+    pub(crate) fn retained_view(&self, row_count: usize) -> Self {
         Self {
             positions: Vec::with_capacity(row_count * 3),
             log_scales: Vec::with_capacity(row_count * 3),
@@ -235,7 +233,8 @@ impl HostSplats {
         }
     }
 
-    pub(super) fn downsample_evenly(&mut self, target_count: usize) {
+    #[allow(dead_code)]
+    pub(crate) fn downsample_evenly(&mut self, target_count: usize) {
         if target_count == 0 || self.len() <= target_count {
             return;
         }
@@ -269,7 +268,7 @@ impl HostSplats {
         }
     }
 
-    pub(super) fn scene_extent(&self) -> f32 {
+    pub(crate) fn scene_extent(&self) -> f32 {
         if self.is_empty() {
             return 1.0;
         }
@@ -297,6 +296,7 @@ impl HostSplats {
         max_dist.max(1e-3)
     }
 
+    #[allow(dead_code)]
     fn push_sh_coeffs_row(&mut self, sh_coeffs: &[f32]) {
         let row_width = self.sh_coeffs_row_width();
         if row_width == 0 {
@@ -311,19 +311,7 @@ impl HostSplats {
     }
 }
 
-pub(super) fn splat_color_representation_for_config(
-    config: &TrainingConfig,
-) -> SplatColorRepresentation {
-    if config.training_profile == TrainingProfile::LiteGsMacV1 {
-        SplatColorRepresentation::SphericalHarmonics {
-            degree: config.litegs.sh_degree,
-        }
-    } else {
-        SplatColorRepresentation::Rgb
-    }
-}
-
-pub(super) fn row_slice(values: &[f32], width: usize, idx: usize) -> &[f32] {
+pub(crate) fn row_slice(values: &[f32], width: usize, idx: usize) -> &[f32] {
     let start = idx.saturating_mul(width);
     let end = start.saturating_add(width);
     values.get(start..end).unwrap_or(&[])
@@ -344,15 +332,14 @@ fn validate_component_len(
     Ok(())
 }
 
-pub(super) fn sigmoid_scalar(value: f32) -> f32 {
+pub(crate) fn sigmoid_scalar(value: f32) -> f32 {
     1.0 / (1.0 + (-value).exp())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{splat_color_representation_for_config, HostSplats};
-    use crate::sh::{rgb_to_sh0_value, SplatColorRepresentation};
-    use crate::{LiteGsConfig, TrainingConfig, TrainingProfile};
+    use super::HostSplats;
+    use crate::sh::rgb_to_sh0_value;
 
     #[test]
     fn validation_rejects_mismatched_component_lengths() {
@@ -367,25 +354,6 @@ mod tests {
 
         let err = invalid.validate().unwrap_err().to_string();
         assert!(err.contains("positions expected 6 values"));
-    }
-
-    #[test]
-    fn config_selects_internal_splat_color_representation() {
-        let legacy = splat_color_representation_for_config(&TrainingConfig::default());
-        assert_eq!(legacy, SplatColorRepresentation::Rgb);
-
-        let litegs = splat_color_representation_for_config(&TrainingConfig {
-            training_profile: TrainingProfile::LiteGsMacV1,
-            litegs: LiteGsConfig {
-                sh_degree: 3,
-                ..LiteGsConfig::default()
-            },
-            ..TrainingConfig::default()
-        });
-        assert_eq!(
-            litegs,
-            SplatColorRepresentation::SphericalHarmonics { degree: 3 }
-        );
     }
 
     #[test]

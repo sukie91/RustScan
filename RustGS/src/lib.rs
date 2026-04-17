@@ -49,7 +49,7 @@ use std::path::Path;
 pub use rustscan_types::{Intrinsics, MapPointData, ScenePose, TrainingDataset, SE3};
 
 // Re-export core types
-pub use crate::core::GaussianCamera;
+pub use crate::core::{GaussianCamera, HostSplats, SplatView};
 
 // Re-export render types
 pub use crate::render::{
@@ -57,6 +57,8 @@ pub use crate::render::{
 };
 
 // Re-export training types
+#[cfg(feature = "gpu")]
+pub use crate::training::SplatEvaluationRenderer;
 pub use crate::training::{
     compare_loss_curve_samples, default_litegs_parity_fixtures, default_parity_report_path,
     parity_fixture_id_for_input_path, resolve_litegs_parity_fixture_input_path,
@@ -66,7 +68,7 @@ pub use crate::training::{
     ParityGateEvaluation, ParityGateStatus, ParityHarnessReport, ParityLossCurveSample,
     ParityLossTerms, ParityMetricSnapshot, ParityReferenceComparison, ParityThresholds,
     ParityTimingMetrics, ParityTopologyMetrics, PsnrSummary, SplatEvaluationConfig,
-    SplatEvaluationError, SplatEvaluationResult, SplatEvaluationSummary, TrainingProfile,
+    SplatEvaluationError, SplatEvaluationResult, SplatEvaluationSummary,
     DEFAULT_CONVERGENCE_FIXTURE_ID, DEFAULT_TINY_FIXTURE_ID,
 };
 pub use crate::training::{
@@ -76,12 +78,11 @@ pub use crate::training::{
 #[cfg(feature = "gpu")]
 pub use crate::training::{
     evaluate_splats, evaluation_device, last_training_telemetry, render_evaluation_frame,
-    runtime_from_splats, LiteGsOptimizerLrs, LiteGsTrainingTelemetry, TrainingEvent,
-    TrainingEventRoute, TrainingPlanSelected, TrainingRun, TrainingRunCompleted,
-    TrainingRunReport, TrainingRunStarted,
+    runtime_from_splats, LiteGsOptimizerLrs, LiteGsTrainingTelemetry, TrainingControl,
+    TrainingEvent, TrainingEventCadence, TrainingEventRoute, TrainingIterationProgress,
+    TrainingPlanSelected, TrainingRun, TrainingRunCancelled, TrainingRunCompleted,
+    TrainingRunReport, TrainingRunStarted, TrainingSnapshotReady,
 };
-#[cfg(feature = "gpu")]
-pub use crate::training::{HostSplats, SplatEvaluationRenderer, SplatView};
 pub use crate::training::{TrainingBackend, TrainingConfig, TrainingResult};
 
 // Re-export IO types
@@ -94,9 +95,9 @@ pub use crate::io::tum_dataset::{load_tum_rgbd_dataset, TumRgbdConfig};
 pub use crate::io::TrainingCheckpoint;
 
 // Re-export initialization types
-pub use crate::init::GaussianInitConfig;
 #[cfg(feature = "gpu")]
 pub use crate::init::initialize_host_splats_from_points;
+pub use crate::init::GaussianInitConfig;
 
 #[cfg(not(feature = "gpu"))]
 pub fn gpu_available() -> bool {
@@ -200,6 +201,20 @@ where
     training::train_splats_with_events(dataset, config, on_event)
 }
 
+/// Train 3DGS splats while emitting structured training events and honoring training control.
+#[cfg(feature = "gpu")]
+pub fn train_splats_with_controlled_events<F>(
+    dataset: &TrainingDataset,
+    config: &TrainingConfig,
+    control: TrainingControl,
+    on_event: F,
+) -> Result<TrainingRun, TrainingError>
+where
+    F: FnMut(TrainingEvent),
+{
+    training::train_splats_with_controlled_events(dataset, config, control, on_event)
+}
+
 /// Compatibility adapter for path-based dataset loading that returns the host-side splat artifact.
 #[cfg(feature = "gpu")]
 pub fn train_splats_from_path(
@@ -235,6 +250,22 @@ where
 {
     let dataset = load_training_dataset(input, tum_config)?;
     training::train_splats_with_events(&dataset, config, on_event)
+}
+
+/// Path-based training entry point with structured event emission and training control.
+#[cfg(feature = "gpu")]
+pub fn train_splats_from_path_with_controlled_events<F>(
+    input: &Path,
+    tum_config: &TumRgbdConfig,
+    config: &TrainingConfig,
+    control: TrainingControl,
+    on_event: F,
+) -> Result<TrainingRun, TrainingError>
+where
+    F: FnMut(TrainingEvent),
+{
+    let dataset = load_training_dataset(input, tum_config)?;
+    training::train_splats_with_controlled_events(&dataset, config, control, on_event)
 }
 
 #[cfg(test)]

@@ -3,18 +3,43 @@ use burn::tensor::{s, Int, TensorData};
 use rand::{rngs::StdRng, Rng, SeedableRng};
 
 use crate::core::GaussianCamera;
+use crate::core::HostSplats;
+use crate::training::topology::should_apply_topology_step;
 use crate::training::TrainingConfig;
 
 use super::backend::{GsBackendBase, GsDevice, GsDiffBackend};
 use super::loss::{combined_loss, SsimConfig};
 use super::optimizer::{AdamScaled, AdamScaledConfig};
-use super::splats::DeviceSplats;
+use super::splats::{device_splats_to_host, DeviceSplats};
 use super::{render_bwd, topology_apply, topology_bridge};
 
 #[derive(Debug, Clone, Default)]
 pub struct WgpuTrainingReport {
     pub losses: Vec<f32>,
     pub num_splats: Vec<usize>,
+    pub completed_iterations: usize,
+    pub cancelled: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct TrainingIterationMetrics {
+    pub iteration: usize,
+    pub loss: f32,
+    pub gaussian_count: usize,
+}
+
+pub(crate) trait TrainingLoopObserver {
+    fn should_cancel(&self) -> bool {
+        false
+    }
+
+    fn should_emit_snapshot(&self, _iteration: usize) -> bool {
+        false
+    }
+
+    fn on_iteration(&mut self, _metrics: TrainingIterationMetrics) {}
+
+    fn on_snapshot(&mut self, _metrics: TrainingIterationMetrics, _splats: HostSplats) {}
 }
 
 pub struct WgpuTrainer {
@@ -27,7 +52,12 @@ pub struct WgpuTrainer {
 }
 
 impl WgpuTrainer {
-    pub fn new(config: TrainingConfig, device: GsDevice, initial_splats: usize, sh_coeffs: usize) -> Self {
+    pub fn new(
+        config: TrainingConfig,
+        device: GsDevice,
+        initial_splats: usize,
+        sh_coeffs: usize,
+    ) -> Self {
         let mut optimizer = AdamScaled::<GsBackendBase>::new(AdamScaledConfig {
             lr: 1.0,
             ..AdamScaledConfig::default()
@@ -53,8 +83,7 @@ impl WgpuTrainer {
             TensorData::new(sh_scale_values, [1, sh_coeffs.max(1), 1]),
             &device,
         );
-        let opacity_scales =
-            Tensor::<GsBackendBase, 1>::from_floats([config.lr_opacity], &device);
+        let opacity_scales = Tensor::<GsBackendBase, 1>::from_floats([config.lr_opacity], &device);
 
         optimizer.set_transform_scaling(transform_scales);
         optimizer.set_sh_scaling(sh_scales);
@@ -82,10 +111,8 @@ impl WgpuTrainer {
     }
 
     fn update_position_lr(&mut self, lr: f32) {
-        let pos_cols = Tensor::<GsBackendBase, 2>::from_data(
-            TensorData::from([[lr, lr, lr]]),
-            &self.device,
-        );
+        let pos_cols =
+            Tensor::<GsBackendBase, 2>::from_data(TensorData::from([[lr, lr, lr]]), &self.device);
         let rest = self.optimizer.transform_scaling().slice(s![.., 3..10]);
         self.optimizer
             .set_transform_scaling(Tensor::cat(vec![pos_cols, rest], 1));
@@ -102,7 +129,9 @@ impl WgpuTrainer {
         let [height, width, _] = target_img.dims();
         let background = [0.0, 0.0, 0.0];
 
-        let pred = render_bwd::render_splats(splats, camera, (width as u32, height as u32), background).await;
+        let pred =
+            render_bwd::render_splats(splats, camera, (width as u32, height as u32), background)
+                .await;
         let pred_rgb = pred.slice(s![.., .., 0..3]);
         let loss = combined_loss(
             pred_rgb,
@@ -134,14 +163,106 @@ impl WgpuTrainer {
             .grad_remove(&mut grads)
             .unwrap_or_else(|| splats.raw_opacities.val().inner().zeros_like());
 
+        // Brush keeps a strong gradient-validation path; mirror that observability here
+        // so we can quickly spot silent no-op training regressions.
+        let should_log_diagnostics = iteration <= 3 || iteration % 100 == 0;
+        let grad_transforms_for_diag = if should_log_diagnostics {
+            Some(transforms_grad.clone())
+        } else {
+            None
+        };
+        let grad_sh_for_diag = if should_log_diagnostics {
+            Some(sh_grad.clone())
+        } else {
+            None
+        };
+        let grad_opacity_for_diag = if should_log_diagnostics {
+            Some(opacity_grad.clone())
+        } else {
+            None
+        };
+        let prev_transforms = if should_log_diagnostics {
+            Some(splats.transforms.val().inner())
+        } else {
+            None
+        };
+        let prev_sh = if should_log_diagnostics {
+            Some(splats.sh_coeffs.val().inner())
+        } else {
+            None
+        };
+        let prev_opacity = if should_log_diagnostics {
+            Some(splats.raw_opacities.val().inner())
+        } else {
+            None
+        };
+
         let pos_lr = self.position_lr_at(iteration.saturating_sub(1));
         self.update_position_lr(pos_lr);
         self.accumulate_gradients(&transforms_grad, &sh_grad);
         self.optimizer
             .step_device_splats(splats, transforms_grad, sh_grad, opacity_grad);
 
-        if self.should_apply_topology(iteration) {
-            self.apply_topology_mutations(splats, iteration, frame_count).await;
+        if should_log_diagnostics {
+            let grad_transforms_mean_abs = grad_transforms_for_diag
+                .expect("transforms grad for diagnostics")
+                .abs()
+                .mean()
+                .into_scalar_async()
+                .await
+                .expect("transforms grad mean");
+            let grad_sh_mean_abs = grad_sh_for_diag
+                .expect("sh grad for diagnostics")
+                .abs()
+                .mean()
+                .into_scalar_async()
+                .await
+                .expect("sh grad mean");
+            let grad_opacity_mean_abs = grad_opacity_for_diag
+                .expect("opacity grad for diagnostics")
+                .abs()
+                .mean()
+                .into_scalar_async()
+                .await
+                .expect("opacity grad mean");
+
+            let delta_transforms_mean_abs = (splats.transforms.val().inner()
+                - prev_transforms.expect("prev transforms for diagnostics"))
+            .abs()
+            .mean()
+            .into_scalar_async()
+            .await
+            .expect("transforms delta mean");
+            let delta_sh_mean_abs = (splats.sh_coeffs.val().inner()
+                - prev_sh.expect("prev sh for diagnostics"))
+            .abs()
+            .mean()
+            .into_scalar_async()
+            .await
+            .expect("sh delta mean");
+            let delta_opacity_mean_abs = (splats.raw_opacities.val().inner()
+                - prev_opacity.expect("prev opacity for diagnostics"))
+            .abs()
+            .mean()
+            .into_scalar_async()
+            .await
+            .expect("opacity delta mean");
+
+            log::info!(
+                "WGPU train diagnostics step {} | grad_mean_abs: transforms={:.6e}, sh={:.6e}, opacity={:.6e} | delta_mean_abs: transforms={:.6e}, sh={:.6e}, opacity={:.6e}",
+                iteration,
+                grad_transforms_mean_abs,
+                grad_sh_mean_abs,
+                grad_opacity_mean_abs,
+                delta_transforms_mean_abs,
+                delta_sh_mean_abs,
+                delta_opacity_mean_abs,
+            );
+        }
+
+        if self.should_apply_topology(iteration, frame_count) {
+            self.apply_topology_mutations(splats, iteration, frame_count)
+                .await;
         }
 
         loss_value
@@ -154,10 +275,36 @@ impl WgpuTrainer {
         target_images: &[Tensor<GsDiffBackend, 3>],
         num_iterations: usize,
     ) -> WgpuTrainingReport {
+        struct NoopObserver;
+        impl TrainingLoopObserver for NoopObserver {}
+        let mut observer = NoopObserver;
+        self.train_with_observer(
+            splats,
+            cameras,
+            target_images,
+            num_iterations,
+            &mut observer,
+        )
+        .await
+    }
+
+    pub(crate) async fn train_with_observer(
+        &mut self,
+        splats: &mut DeviceSplats<GsDiffBackend>,
+        cameras: &[GaussianCamera],
+        target_images: &[Tensor<GsDiffBackend, 3>],
+        num_iterations: usize,
+        observer: &mut dyn TrainingLoopObserver,
+    ) -> WgpuTrainingReport {
         let mut report = WgpuTrainingReport::default();
         let mut rng = StdRng::seed_from_u64(self.config.frame_shuffle_seed);
 
         for iteration in 0..num_iterations {
+            if observer.should_cancel() {
+                report.cancelled = true;
+                break;
+            }
+
             let sample_idx = if cameras.len() == 1 {
                 0
             } else {
@@ -175,6 +322,19 @@ impl WgpuTrainer {
 
             report.losses.push(loss);
             report.num_splats.push(splats.num_splats());
+            report.completed_iterations = report.losses.len();
+
+            let metrics = TrainingIterationMetrics {
+                iteration: iteration + 1,
+                loss,
+                gaussian_count: splats.num_splats(),
+            };
+            observer.on_iteration(metrics);
+
+            if observer.should_emit_snapshot(metrics.iteration) {
+                let host = device_splats_to_host(splats).await;
+                observer.on_snapshot(metrics, host);
+            }
 
             if iteration % 100 == 0 {
                 log::info!(
@@ -184,15 +344,18 @@ impl WgpuTrainer {
                     splats.num_splats()
                 );
             }
+
+            if observer.should_cancel() {
+                report.cancelled = true;
+                break;
+            }
         }
 
         report
     }
 
-    fn should_apply_topology(&self, iteration: usize) -> bool {
-        let next_iter = iteration.max(1);
-        (self.config.densify_interval > 0 && next_iter % self.config.densify_interval == 0)
-            || (self.config.prune_interval > 0 && next_iter % self.config.prune_interval == 0)
+    fn should_apply_topology(&self, iteration: usize, frame_count: usize) -> bool {
+        should_apply_topology_step(&self.config, iteration.max(1), frame_count)
     }
 
     fn accumulate_gradients(
@@ -238,7 +401,11 @@ impl WgpuTrainer {
         let plan = topology_bridge::plan_mutations(&snapshot, &self.config, iteration, frame_count);
         topology_apply::apply_mutations(splats, &plan, &self.device).await;
         self.optimizer.reset();
-        self.reset_accumulators(splats.num_splats(), splats.sh_coeffs.val().dims()[1], iteration);
+        self.reset_accumulators(
+            splats.num_splats(),
+            splats.sh_coeffs.val().dims()[1],
+            iteration,
+        );
     }
 
     fn reset_accumulators(&mut self, num_splats: usize, sh_coeffs: usize, iteration: usize) {
@@ -278,9 +445,11 @@ impl WgpuTrainer {
 
 #[cfg(test)]
 mod tests {
-    use super::WgpuTrainer;
-    use crate::training::TrainingConfig;
+    use super::{TrainingLoopObserver, WgpuTrainer};
+    use crate::core::HostSplats;
     use crate::training::wgpu::backend::GsDevice;
+    use crate::training::wgpu::{host_splats_to_device, GsDiffBackend};
+    use crate::training::TrainingConfig;
 
     #[test]
     fn test_position_lr_decay() {
@@ -306,5 +475,32 @@ mod tests {
             at_mid < config.lr_position && at_mid > config.lr_pos_final,
             "mid LR should be between bounds"
         );
+    }
+
+    #[tokio::test]
+    async fn train_with_observer_stops_early_when_cancelled() {
+        struct CancelledObserver;
+        impl TrainingLoopObserver for CancelledObserver {
+            fn should_cancel(&self) -> bool {
+                true
+            }
+        }
+
+        let mut config = TrainingConfig::default();
+        config.iterations = 100;
+
+        let device = GsDevice::default();
+        let host = HostSplats::default();
+        let mut splats = host_splats_to_device::<GsDiffBackend>(&host, &device);
+        let mut trainer = WgpuTrainer::new(config, device, 0, 1);
+        let mut observer = CancelledObserver;
+
+        let report = trainer
+            .train_with_observer(&mut splats, &[], &[], 100, &mut observer)
+            .await;
+
+        assert!(report.cancelled);
+        assert_eq!(report.completed_iterations, 0);
+        assert!(report.losses.is_empty());
     }
 }

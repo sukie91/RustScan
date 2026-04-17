@@ -9,7 +9,7 @@ pub mod scene_io;
 pub mod tum_dataset;
 
 #[cfg(feature = "gpu")]
-use crate::training::HostSplats;
+use crate::core::HostSplats;
 use crate::TrainingError;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -75,7 +75,7 @@ mod tests {
     fn checkpoint_round_trips_host_splats() {
         let tempdir = tempdir().unwrap();
         let path = tempdir.path().join("checkpoint.json");
-        let splats = crate::training::HostSplats::from_raw_parts(
+        let splats = crate::core::HostSplats::from_raw_parts(
             vec![0.0, 0.0, 1.0],
             vec![0.1f32.ln(), 0.1f32.ln(), 0.1f32.ln()],
             vec![1.0, 0.0, 0.0, 0.0],

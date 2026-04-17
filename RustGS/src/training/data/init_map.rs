@@ -1,4 +1,4 @@
-use super::super::splats::{splat_color_representation_for_config, HostSplats};
+use crate::core::HostSplats;
 use crate::init::{initialize_host_splats_from_points, GaussianInitConfig};
 use crate::{TrainingConfig, TrainingDataset, TrainingError};
 
@@ -12,7 +12,11 @@ pub(crate) fn build_initial_splats(
         ));
     }
 
-    let sh_degree = splat_color_representation_for_config(config).sh_degree();
+    let sh_degree = if config.litegs_mode {
+        config.litegs.sh_degree
+    } else {
+        0
+    };
     let init_config = gaussian_init_config_for_training();
     let mut splats =
         initialize_host_splats_from_points(&dataset.initial_points, &init_config, sh_degree)

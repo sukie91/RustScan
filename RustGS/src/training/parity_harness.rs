@@ -1,4 +1,4 @@
-use super::{LiteGsConfig, TrainingProfile};
+use super::LiteGsConfig;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io;
@@ -280,7 +280,7 @@ pub struct ParityMetricSnapshot {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ParityHarnessReport {
     pub fixture_id: String,
-    pub profile: TrainingProfile,
+    pub litegs_mode: bool,
     pub litegs: LiteGsConfig,
     pub thresholds: ParityThresholds,
     pub loss_terms: ParityLossTerms,
@@ -294,14 +294,10 @@ pub struct ParityHarnessReport {
 }
 
 impl ParityHarnessReport {
-    pub fn new(
-        fixture_id: impl Into<String>,
-        profile: TrainingProfile,
-        litegs: &LiteGsConfig,
-    ) -> Self {
+    pub fn new(fixture_id: impl Into<String>, litegs_mode: bool, litegs: &LiteGsConfig) -> Self {
         Self {
             fixture_id: fixture_id.into(),
-            profile,
+            litegs_mode,
             litegs: litegs.clone(),
             thresholds: ParityThresholds::default(),
             loss_terms: ParityLossTerms::default(),
@@ -652,7 +648,7 @@ mod tests {
         ParityLossCurveSample, ParityReferenceComparison, ParityThresholds,
         DEFAULT_CONVERGENCE_FIXTURE_ID, DEFAULT_TINY_FIXTURE_ID,
     };
-    use crate::{LiteGsConfig, TrainingProfile};
+    use crate::LiteGsConfig;
     use std::path::{Path, PathBuf};
     use tempfile::tempdir;
 
@@ -690,11 +686,8 @@ mod tests {
     fn parity_report_round_trips_through_json() {
         let tempdir = tempdir().unwrap();
         let path = tempdir.path().join("parity/report.json");
-        let mut report = ParityHarnessReport::new(
-            DEFAULT_TINY_FIXTURE_ID,
-            TrainingProfile::LiteGsMacV1,
-            &LiteGsConfig::default(),
-        );
+        let mut report =
+            ParityHarnessReport::new(DEFAULT_TINY_FIXTURE_ID, true, &LiteGsConfig::default());
         report.metrics.final_psnr = Some(28.4);
         report.loss_curve_samples.push(ParityLossCurveSample {
             iteration: 4,
@@ -842,7 +835,7 @@ mod tests {
     fn parity_gate_reports_missing_reference_for_convergence_fixture() {
         let mut report = ParityHarnessReport::new(
             DEFAULT_CONVERGENCE_FIXTURE_ID,
-            TrainingProfile::LiteGsMacV1,
+            true,
             &LiteGsConfig::default(),
         );
         report.metrics.export_roundtrip_ok = true;
@@ -859,7 +852,7 @@ mod tests {
     fn parity_gate_fails_when_gaussian_count_delta_exceeds_tolerance() {
         let mut report = ParityHarnessReport::new(
             DEFAULT_CONVERGENCE_FIXTURE_ID,
-            TrainingProfile::LiteGsMacV1,
+            true,
             &LiteGsConfig::default(),
         );
         report.metrics.export_roundtrip_ok = true;
@@ -877,7 +870,7 @@ mod tests {
     fn parity_gate_passes_when_reference_backed_checks_are_within_tolerance() {
         let mut report = ParityHarnessReport::new(
             DEFAULT_CONVERGENCE_FIXTURE_ID,
-            TrainingProfile::LiteGsMacV1,
+            true,
             &LiteGsConfig::default(),
         );
         report.metrics.export_roundtrip_ok = true;

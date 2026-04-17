@@ -1,11 +1,11 @@
 use burn::prelude::*;
-use burn::tensor::{Int, Tensor, TensorPrimitive};
-use burn_cubecl::cubecl::{CubeCount, prelude::KernelId, server::KernelArguments};
-use burn_cubecl::{BoolElement, CubeBackend, FloatElement, IntElement, kernel::into_contiguous};
+use burn::tensor::{ops::FloatTensorOps, FloatDType, Int, Tensor, TensorPrimitive};
+use burn_cubecl::cubecl::{prelude::KernelId, server::KernelArguments, CubeCount};
+use burn_cubecl::{kernel::into_contiguous, BoolElement, CubeBackend, FloatElement, IntElement};
 use burn_wgpu::{CubeDim, KernelSource, SourceKernel, SourceTemplate, WgpuRuntime};
 use bytemuck::{Pod, Zeroable};
 
-use crate::training::wgpu::render::{TILE_SIZE, compose_shader};
+use crate::training::wgpu::render::{compose_shader, TILE_SIZE};
 
 const SHADER_SRC: &str = include_str!("../shaders/rasterize_backwards.wgsl");
 
@@ -21,10 +21,7 @@ struct RasterizeBwdRaw;
 
 impl RasterizeBwdRaw {
     fn source(&self) -> SourceTemplate {
-        SourceTemplate::new(compose_shader(
-            "rasterize_backwards.wgsl",
-            SHADER_SRC,
-        ))
+        SourceTemplate::new(compose_shader("rasterize_backwards.wgsl", SHADER_SRC))
     }
 }
 
@@ -81,7 +78,11 @@ where
         let device = projected_splats.device.clone();
         let client = projected_splats.client.clone();
 
-        let v_splats = Tensor::<Self, 2>::zeros([num_visible, 10], &device);
+        let v_splats = <Self as FloatTensorOps<Self>>::float_zeros(
+            [num_visible, 10].into(),
+            &device,
+            FloatDType::F32,
+        );
         let num_tiles = tile_bounds.0 * tile_bounds.1;
 
         if num_visible > 0 && num_tiles > 0 {
@@ -92,25 +93,28 @@ where
             };
             let uniforms_handle = client.create_from_slice(bytemuck::bytes_of(&uniforms));
 
-            client.launch(
-                Box::new(SourceKernel::new(
-                    RasterizeBwdKernel,
-                    CubeDim::new_1d(TILE_SIZE),
-                )),
-                CubeCount::Static(num_tiles, 1, 1),
-                KernelArguments::new().with_buffers(vec![
-                    compact_gid_from_isect.handle.binding(),
-                    tile_offsets.handle.binding(),
-                    projected_splats.handle.binding(),
-                    out_img.handle.binding(),
-                    v_output.handle.binding(),
-                    v_splats.clone().into_primitive().tensor().handle.binding(),
-                    uniforms_handle.binding(),
-                ]),
-            );
+            // SAFETY: Shader indices are guarded and buffers are sized to all accessed ranges.
+            unsafe {
+                client.launch_unchecked(
+                    Box::new(SourceKernel::new(
+                        RasterizeBwdKernel,
+                        CubeDim::new_1d(TILE_SIZE),
+                    )),
+                    CubeCount::Static(num_tiles, 1, 1),
+                    KernelArguments::new().with_buffers(vec![
+                        compact_gid_from_isect.handle.binding(),
+                        tile_offsets.handle.binding(),
+                        projected_splats.handle.binding(),
+                        out_img.handle.binding(),
+                        v_output.handle.binding(),
+                        v_splats.handle.clone().binding(),
+                        uniforms_handle.binding(),
+                    ]),
+                );
+            }
         }
 
-        v_splats.into_primitive().tensor()
+        v_splats
     }
 }
 
@@ -138,4 +142,48 @@ pub(crate) fn rasterize_bwd<B: RasterizeBwdBackend>(
         tile_bounds,
         background,
     )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rasterize_bwd;
+    use crate::training::wgpu::backend::GsBackendBase;
+    use burn::prelude::*;
+    use burn::tensor::{Int, Tensor, TensorData};
+
+    #[test]
+    fn test_rasterize_bwd_kernel_writes_output_buffer() {
+        let device = <GsBackendBase as Backend>::Device::default();
+        let compact_gid_from_isect =
+            Tensor::<GsBackendBase, 1, Int>::from_data(TensorData::from([0i32]), &device);
+        let tile_offsets =
+            Tensor::<GsBackendBase, 1, Int>::from_data(TensorData::from([0i32, 1i32]), &device);
+        let projected_splats = Tensor::<GsBackendBase, 2>::from_data(
+            TensorData::new(vec![8.5f32, 8.5, 1.0, 0.0, 1.0, 1.0, 1.0, 1.0, 0.9], [1, 9]),
+            &device,
+        );
+        let out_img = Tensor::<GsBackendBase, 3>::ones([16, 16, 4], &device);
+        let v_output = Tensor::<GsBackendBase, 3>::ones([16, 16, 4], &device);
+
+        let v_splats = rasterize_bwd::<GsBackendBase>(
+            compact_gid_from_isect,
+            tile_offsets,
+            projected_splats,
+            out_img,
+            v_output,
+            1,
+            (16, 16),
+            (1, 1),
+            [0.0, 0.0, 0.0],
+            &device,
+        );
+
+        let data = v_splats.into_data();
+        let values = data.as_slice::<f32>().expect("v_splats should be f32");
+        let mean_abs = values.iter().map(|v| v.abs()).sum::<f32>() / values.len() as f32;
+        assert!(
+            mean_abs > 1e-6,
+            "expected rasterize_bwd kernel to produce non-zero grads, mean_abs={mean_abs:e}"
+        );
+    }
 }

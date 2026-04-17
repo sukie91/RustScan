@@ -49,21 +49,9 @@ struct TrainArgs {
     #[arg(long, default_value = "1")]
     frame_stride: usize,
 
-    /// Relative render scale used by Metal training
+    /// Relative render scale used by training
     #[arg(long, default_value = "0.5")]
-    metal_render_scale: f32,
-
-    /// Number of Gaussians processed per GPU micro-batch during Metal training
-    #[arg(long, default_value = "32")]
-    metal_gaussian_batch_size: usize,
-
-    /// Emit per-step timing breakdowns for Metal training
-    #[arg(long, default_value_t = false)]
-    metal_profile_steps: bool,
-
-    /// Log the Metal timing breakdown every N steps when profiling is enabled
-    #[arg(long, default_value = "25")]
-    metal_profile_interval: usize,
+    render_scale: f32,
 
     /// Run prune scheduling every N iterations
     #[arg(long, default_value = "100")]
@@ -77,9 +65,9 @@ struct TrainArgs {
     #[arg(long, default_value = "500")]
     topology_log_interval: usize,
 
-    /// Training profile to execute
-    #[arg(long, default_value_t = rustgs::TrainingProfile::LegacyMetal)]
-    training_profile: rustgs::TrainingProfile,
+    /// Enable LiteGS-compatible SH and topology behavior
+    #[arg(long, default_value_t = false)]
+    litegs_mode: bool,
 
     /// LiteGS SH degree
     #[arg(long, default_value = "3")]
@@ -208,10 +196,6 @@ struct TrainArgs {
     /// Color/SH learning rate
     #[arg(long, default_value = "0.0025")]
     lr_color: f32,
-
-    /// Use the tensor fallback instead of the native Metal forward rasterizer
-    #[arg(long, default_value_t = false)]
-    metal_disable_native_forward: bool,
 
     /// Log level (trace, debug, info, warn, error)
     #[arg(long, default_value = "info")]
@@ -390,7 +374,8 @@ mod tests {
             "scene.ply",
         ]);
 
-        assert_eq!(args.training_profile, rustgs::TrainingProfile::LegacyMetal);
+        assert!(!args.litegs_mode);
+        assert_eq!(args.render_scale, 0.5);
         assert_eq!(args.litegs_sh_degree, 3);
         assert_eq!(args.litegs_cluster_size, 0);
         assert_eq!(args.litegs_tile_size, rustgs::LiteGsTileSize::new(8, 16));
@@ -499,8 +484,7 @@ mod tests {
             "scene.json",
             "--output",
             "scene.ply",
-            "--training-profile",
-            "litegs-mac-v1",
+            "--litegs-mode",
             "--litegs-sh-degree",
             "4",
             "--litegs-cluster-size",
@@ -542,10 +526,7 @@ mod tests {
         ]);
         let config = build_training_config(&args).unwrap();
 
-        assert_eq!(
-            config.training_profile,
-            rustgs::TrainingProfile::LiteGsMacV1
-        );
+        assert_eq!(config.litegs_mode, true);
         assert_eq!(config.litegs.sh_degree, 4);
         assert_eq!(config.litegs.cluster_size, 0);
         assert_eq!(config.litegs.tile_size, rustgs::LiteGsTileSize::new(16, 16));
@@ -588,7 +569,7 @@ mod tests {
         dataset.add_point([0.0, 0.0, 0.0], None);
         dataset.add_point([1.0, 0.0, 0.0], None);
         let config = rustgs::TrainingConfig {
-            training_profile: rustgs::TrainingProfile::LiteGsMacV1,
+            litegs_mode: true,
             ..rustgs::TrainingConfig::default()
         };
 
@@ -637,7 +618,7 @@ mod tests {
             rustgs::TrainingDataset::new(rustgs::Intrinsics::from_focal(500.0, 32, 32));
         dataset.add_point([0.0, 0.0, 0.0], None);
         let config = rustgs::TrainingConfig {
-            training_profile: rustgs::TrainingProfile::LiteGsMacV1,
+            litegs_mode: true,
             ..rustgs::TrainingConfig::default()
         };
         let telemetry = rustgs::LiteGsTrainingTelemetry {
@@ -719,7 +700,7 @@ mod tests {
             rustgs::TrainingDataset::new(rustgs::Intrinsics::from_focal(500.0, 32, 32));
         dataset.add_point([0.0, 0.0, 0.0], None);
         let config = rustgs::TrainingConfig {
-            training_profile: rustgs::TrainingProfile::LiteGsMacV1,
+            litegs_mode: true,
             ..rustgs::TrainingConfig::default()
         };
         let evaluation_summary = rustgs::SplatEvaluationSummary {
@@ -777,7 +758,7 @@ mod tests {
             rustgs::TrainingDataset::new(rustgs::Intrinsics::from_focal(500.0, 32, 32));
         dataset.add_point([0.0, 0.0, 0.0], None);
         let config = rustgs::TrainingConfig {
-            training_profile: rustgs::TrainingProfile::LiteGsMacV1,
+            litegs_mode: true,
             litegs: rustgs::LiteGsConfig {
                 cluster_size: 64,
                 sparse_grad: true,
@@ -859,7 +840,7 @@ mod tests {
 
         let mut reference_report = rustgs::ParityHarnessReport::new(
             rustgs::DEFAULT_CONVERGENCE_FIXTURE_ID,
-            rustgs::TrainingProfile::LiteGsMacV1,
+            true,
             &rustgs::LiteGsConfig::default(),
         );
         reference_report.loss_curve_samples = vec![
@@ -891,7 +872,7 @@ mod tests {
             rustgs::TrainingDataset::new(rustgs::Intrinsics::from_focal(500.0, 32, 32));
         dataset.add_point([0.0, 0.0, 0.0], None);
         let config = rustgs::TrainingConfig {
-            training_profile: rustgs::TrainingProfile::LiteGsMacV1,
+            litegs_mode: true,
             ..rustgs::TrainingConfig::default()
         };
         let telemetry = rustgs::LiteGsTrainingTelemetry {
@@ -984,10 +965,10 @@ mod tests {
             ..Default::default()
         };
         let config = rustgs::TrainingConfig {
-            training_profile: rustgs::TrainingProfile::LiteGsMacV1,
+            litegs_mode: true,
             iterations: 1,
             max_initial_gaussians: 2048,
-            metal_render_scale: 0.5,
+            render_scale: 0.5,
             litegs: rustgs::LiteGsConfig {
                 cluster_size: 64,
                 sparse_grad: true,
@@ -1051,7 +1032,7 @@ mod tests {
         let report = rustgs::ParityHarnessReport::load_json(&report_path).unwrap();
 
         assert_eq!(report.fixture_id, rustgs::DEFAULT_CONVERGENCE_FIXTURE_ID);
-        assert_eq!(report.profile, rustgs::TrainingProfile::LiteGsMacV1);
+        assert!(report.litegs_mode);
         assert_eq!(report.litegs.cluster_size, 64);
         assert!(report.litegs.sparse_grad);
         assert!(report.litegs.enable_depth);

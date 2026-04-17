@@ -1,6 +1,8 @@
 #![cfg(feature = "gpu")]
 
-use rustgs::{train_splats_with_report, Intrinsics, ScenePose, TrainingConfig, TrainingDataset, SE3};
+use rustgs::{
+    train_splats_with_report, Intrinsics, ScenePose, TrainingConfig, TrainingDataset, SE3,
+};
 use std::fs;
 use std::path::Path;
 use std::time::Duration;
@@ -42,7 +44,7 @@ fn tiny_config() -> TrainingConfig {
         iterations: 100,
         max_initial_gaussians: 10,
         use_synthetic_depth: true,
-        metal_render_scale: 1.0,
+        render_scale: 1.0,
         densify_interval: 0,
         prune_interval: 0,
         frame_shuffle_seed: 0,

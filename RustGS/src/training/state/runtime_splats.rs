@@ -1,4 +1,5 @@
-use super::splats::{sigmoid_scalar, HostSplats};
+use crate::core::splats::sigmoid_scalar;
+use crate::core::HostSplats;
 
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct TopologySplatMetrics {

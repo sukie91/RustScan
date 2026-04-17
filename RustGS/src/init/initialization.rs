@@ -8,7 +8,7 @@ use glam::Vec3;
 use kiddo::{KdTree, SquaredEuclidean};
 
 #[cfg(feature = "gpu")]
-use crate::training::HostSplats;
+use crate::core::HostSplats;
 use crate::TrainingError;
 
 /// Configuration for Gaussian initialization from point clouds.

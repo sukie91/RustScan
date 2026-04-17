@@ -2,7 +2,7 @@ use burn::module::Param;
 use burn::prelude::*;
 use burn::tensor::{Shape, TensorData, Transaction};
 
-use crate::training::HostSplats;
+use crate::core::HostSplats;
 
 /// GPU-resident differentiable Gaussian splat set.
 ///
@@ -40,11 +40,17 @@ pub fn host_splats_to_device<B: Backend>(hs: &HostSplats, device: &B::Device) ->
         device,
     );
     let sh_coeffs = Tensor::<B, 3>::from_data(
-        TensorData::new(hs.as_view().sh_coeffs.to_vec(), Shape::new([num_splats, num_coeffs, 3])),
+        TensorData::new(
+            hs.as_view().sh_coeffs.to_vec(),
+            Shape::new([num_splats, num_coeffs, 3]),
+        ),
         device,
     );
     let raw_opacities = Tensor::<B, 1>::from_data(
-        TensorData::new(hs.as_view().opacity_logits.to_vec(), Shape::new([num_splats])),
+        TensorData::new(
+            hs.as_view().opacity_logits.to_vec(),
+            Shape::new([num_splats]),
+        ),
         device,
     );
 

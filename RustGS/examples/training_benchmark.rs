@@ -1,4 +1,4 @@
-use rustgs::{gpu_available, TrainingProfile};
+use rustgs::gpu_available;
 
 #[derive(Debug, Clone)]
 struct BenchmarkArgs {
@@ -9,7 +9,7 @@ struct BenchmarkArgs {
     warmup_steps: usize,
     measured_steps: usize,
     smoke_iterations: usize,
-    training_profile: TrainingProfile,
+    litegs_mode: bool,
     json: bool,
 }
 
@@ -23,7 +23,7 @@ impl Default for BenchmarkArgs {
             warmup_steps: 2,
             measured_steps: 5,
             smoke_iterations: 8,
-            training_profile: TrainingProfile::LegacyMetal,
+            litegs_mode: false,
             json: false,
         }
     }
@@ -42,12 +42,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "{{\"status\":\"unavailable\",\"reason\":\"legacy metal benchmark removed during wgpu migration\"}}"
         );
     } else {
+        println!("training benchmark example is not implemented for the post-migration wgpu path");
         println!(
-            "training benchmark example is not implemented for the post-migration wgpu path"
-        );
-        println!(
-            "requested profile={} fixture={}x{} frames={} gaussians={} warmup={} measure={} smoke_iters={}",
-            args.training_profile,
+            "requested litegs_mode={} fixture={}x{} frames={} gaussians={} warmup={} measure={} smoke_iters={}",
+            args.litegs_mode,
             args.width,
             args.height,
             args.frame_count,
@@ -74,12 +72,7 @@ fn parse_args() -> Result<BenchmarkArgs, Box<dyn std::error::Error>> {
             "--warmup" => spec.warmup_steps = parse_next(&mut args, "--warmup")?,
             "--measure" => spec.measured_steps = parse_next(&mut args, "--measure")?,
             "--smoke-iters" => spec.smoke_iterations = parse_next(&mut args, "--smoke-iters")?,
-            "--profile" => {
-                let value = args
-                    .next()
-                    .ok_or_else(|| "missing value for --profile".to_string())?;
-                spec.training_profile = value.parse::<TrainingProfile>()?;
-            }
+            "--litegs-mode" => spec.litegs_mode = true,
             "--json" => spec.json = true,
             "--help" | "-h" => {
                 print_help();
@@ -118,6 +111,6 @@ fn print_help() {
     println!("  --warmup <n>        warmup steps (default: 2)");
     println!("  --measure <n>       measured steps (default: 5)");
     println!("  --smoke-iters <n>   smoke training iterations (default: 8)");
-    println!("  --profile <name>    legacy-metal | litegs-mac-v1");
+    println!("  --litegs-mode       enable LiteGS-compatible mode");
     println!("  --json              print JSON output");
 }

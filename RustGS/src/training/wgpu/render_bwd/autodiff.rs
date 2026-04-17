@@ -1,5 +1,4 @@
 use burn::backend::{
-    Autodiff,
     autodiff::{
         checkpoint::{
             base::Checkpointer,
@@ -8,22 +7,23 @@ use burn::backend::{
         grads::Gradients,
         ops::{Backward, Ops, OpsKind},
     },
+    Autodiff,
 };
 use burn::module::Param;
 use burn::prelude::*;
-use burn::tensor::{Tensor, TensorPrimitive, backend::AutodiffBackend as BurnAutodiffBackend};
+use burn::tensor::{backend::AutodiffBackend as BurnAutodiffBackend, Tensor, TensorPrimitive};
 
 use crate::core::GaussianCamera;
+use crate::training::wgpu::backend::{GsBackendBase, GsDiffBackend};
 use crate::training::wgpu::gpu_primitives::{
     prefix_sum::PrefixSumBackend, radix_sort::RadixSortBackend,
 };
-use crate::training::wgpu::backend::{GsBackendBase, GsDiffBackend};
 use crate::training::wgpu::render::{
     self, calc_tile_bounds, project_visible, projection, rasterize, sorting, tile_mapping,
 };
 use crate::training::wgpu::render_bwd::{
-    project_bwd::{ProjectBwdBackend, from_inner_splats, project_bwd},
-    rasterize_bwd::{RasterizeBwdBackend, rasterize_bwd},
+    project_bwd::{from_inner_splats, project_bwd, ProjectBwdBackend},
+    rasterize_bwd::{rasterize_bwd, RasterizeBwdBackend},
 };
 use crate::training::wgpu::splats::DeviceSplats;
 
@@ -41,8 +41,7 @@ trait RenderBackend:
 {
 }
 
-impl<T> RenderBackend for T
-where
+impl<T> RenderBackend for T where
     T: Backend
         + projection::ProjectionBackend
         + sorting::SortingBackend
@@ -52,7 +51,7 @@ where
         + RasterizeBwdBackend
         + ProjectBwdBackend
         + PrefixSumBackend
-        + RadixSortBackend,
+        + RadixSortBackend
 {
 }
 
@@ -88,9 +87,8 @@ impl<B: RenderBackend> Backward<B, 3> for RenderBackward {
         let state = ops.state;
         let [transforms_node, sh_coeffs_node, raw_opacities_node] = ops.parents;
         let device = state.transforms.device();
-        let v_output = Tensor::<B, 3>::from_primitive(TensorPrimitive::Float(grads.consume::<B>(
-            &ops.node,
-        )));
+        let v_output =
+            Tensor::<B, 3>::from_primitive(TensorPrimitive::Float(grads.consume::<B>(&ops.node)));
 
         let v_splats = rasterize_bwd::<B>(
             state.compact_gid_from_isect,
@@ -170,7 +168,8 @@ where
     };
 
     let device = inner_splats.transforms.val().device();
-    let fwd_out = render::render_forward::<B>(&inner_splats, camera, img_size, background, &device).await;
+    let fwd_out =
+        render::render_forward::<B>(&inner_splats, camera, img_size, background, &device).await;
 
     match RenderBackward
         .prepare::<C>([
@@ -214,6 +213,5 @@ pub async fn render_splats(
     img_size: (u32, u32),
     background: [f32; 3],
 ) -> Tensor<GsDiffBackend, 3> {
-    render_splats_impl::<GsBackendBase, NoCheckpointing>(splats, camera, img_size, background)
-        .await
+    render_splats_impl::<GsBackendBase, NoCheckpointing>(splats, camera, img_size, background).await
 }

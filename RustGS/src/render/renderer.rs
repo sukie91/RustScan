@@ -8,15 +8,13 @@
 #[cfg(feature = "gpu")]
 use crate::core::GaussianCamera;
 #[cfg(feature = "gpu")]
-use crate::sh::sh0_to_rgb_value;
+use crate::core::{HostSplats, SplatView};
 #[cfg(all(test, feature = "gpu"))]
 use crate::sh::rgb_to_sh0_value;
 #[cfg(feature = "gpu")]
-use crate::training::{HostSplats, SplatView};
+use crate::sh::sh0_to_rgb_value;
 #[cfg(feature = "gpu")]
 use crate::TrainingError;
-#[cfg(feature = "gpu")]
-use glam::{Mat3, Vec3};
 
 /// Output of rendering
 #[derive(Debug, Clone)]
@@ -263,32 +261,26 @@ impl GaussianRenderer {
             camera.intrinsics.cx,
             camera.intrinsics.cy,
         );
-        let rotation = camera.extrinsics.rotation_matrix();
-        let rotation_mat = Mat3::from_cols(
-            Vec3::new(rotation[0][0], rotation[0][1], rotation[0][2]),
-            Vec3::new(rotation[1][0], rotation[1][1], rotation[1][2]),
-            Vec3::new(rotation[2][0], rotation[2][1], rotation[2][2]),
-        );
-        let translation = camera.extrinsics.translation();
-        let camera_origin = Vec3::new(translation[0], translation[1], translation[2]);
         let sh_row_width = ((splats.sh_degree + 1) * (splats.sh_degree + 1)) * 3;
 
         (0..splats.opacity_logits.len())
             .filter_map(|idx| {
                 let pos_base = idx * 3;
-                let position = Vec3::new(
+                let position = [
                     splats.positions[pos_base],
                     splats.positions[pos_base + 1],
                     splats.positions[pos_base + 2],
-                );
-                let cam_pos = rotation_mat.transpose() * (position - camera_origin);
-                if cam_pos.z <= 0.001 || cam_pos.z >= 100.0 {
+                ];
+                // `GaussianCamera::extrinsics` is world-to-camera, so use it directly.
+                let cam_pos = camera.extrinsics.transform_point(&position);
+                let cam_z = cam_pos[2];
+                if cam_z <= 0.001 || cam_z >= 100.0 {
                     return None;
                 }
 
-                let u = fx * cam_pos.x / cam_pos.z + cx;
-                let v = fy * cam_pos.y / cam_pos.z + cy;
-                let radius = (fx + fy) * splats.log_scales[pos_base].exp() / cam_pos.z;
+                let u = fx * cam_pos[0] / cam_z + cx;
+                let v = fy * cam_pos[1] / cam_z + cy;
+                let radius = (fx + fy) * splats.log_scales[pos_base].exp() / cam_z;
                 let sh_base = idx * sh_row_width;
                 let gc = [
                     (sh0_to_rgb_value(splats.sh_coeffs[sh_base]).clamp(0.0, 1.0) * 255.0) as u8,
@@ -296,7 +288,7 @@ impl GaussianRenderer {
                     (sh0_to_rgb_value(splats.sh_coeffs[sh_base + 2]).clamp(0.0, 1.0) * 255.0) as u8,
                 ];
 
-                Some((gc, cam_pos.z, u, v, radius))
+                Some((gc, cam_z, u, v, radius))
             })
             .collect()
     }
@@ -401,5 +393,31 @@ mod tests {
             .color
             .iter()
             .any(|&channel| channel != 25 && channel != 51 && channel != 76));
+    }
+
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn test_projection_uses_world_to_camera_extrinsics() {
+        let renderer = GaussianRenderer::new(64, 64);
+        let splats = single_rgb_splats([1.0, 0.0, 2.0], [0.01, 0.01, 0.01], [1.0, 1.0, 1.0]);
+        let intrinsics = Intrinsics::from_focal(500.0, 64, 64);
+        // World-to-camera: camera translated +1 on world X => t_cw = [-1, 0, 0].
+        let camera = GaussianCamera::new(
+            intrinsics,
+            SE3::new(&[0.0, 0.0, 0.0, 1.0], &[-1.0, 0.0, 0.0]),
+        );
+
+        let projected = renderer.project_visible_splats(splats.as_view(), &camera);
+        assert_eq!(projected.len(), 1);
+        let (_gc, _depth, u, v, _radius) = projected[0];
+
+        assert!(
+            (u - 32.0).abs() < 1.0,
+            "expected world-to-camera projection near principal point, got u={u}"
+        );
+        assert!(
+            (v - 32.0).abs() < 1.0,
+            "expected world-to-camera projection near principal point, got v={v}"
+        );
     }
 }

@@ -475,7 +475,7 @@ fn append_vertex_values(
 #[cfg(feature = "gpu")]
 pub fn save_splats_ply(
     path: &Path,
-    splats: &crate::training::HostSplats,
+    splats: &crate::core::HostSplats,
     metadata: &SplatMetadata,
 ) -> Result<(), SceneIoError> {
     splats
@@ -549,7 +549,7 @@ pub fn save_splats_ply(
 #[cfg(feature = "gpu")]
 pub fn load_splats_ply(
     path: &Path,
-) -> Result<(crate::training::HostSplats, SplatMetadata), SceneIoError> {
+) -> Result<(crate::core::HostSplats, SplatMetadata), SceneIoError> {
     let bytes = std::fs::read(path).map_err(|source| SceneIoError::Read {
         path: path.display().to_string(),
         source,
@@ -699,7 +699,7 @@ pub fn load_splats_ply(
         metadata.gaussian_count = parsed_vertices;
     }
 
-    let splats = crate::training::HostSplats::from_raw_parts(
+    let splats = crate::core::HostSplats::from_raw_parts(
         positions,
         log_scales,
         rotations,
@@ -730,7 +730,7 @@ mod tests {
             gaussian_count: 1,
             sh_degree: 0,
         };
-        let splats = crate::training::HostSplats::from_raw_parts(
+        let splats = crate::core::HostSplats::from_raw_parts(
             vec![0.0, 0.0, 1.0],
             vec![0.1f32.ln(), 0.1f32.ln(), 0.1f32.ln()],
             vec![1.0, 0.0, 0.0, 0.0],
@@ -762,7 +762,7 @@ mod tests {
         };
         let mut sh_coeffs = vec![rgb_to_sh_dc(0.2), rgb_to_sh_dc(0.3), rgb_to_sh_dc(0.4)];
         sh_coeffs.extend((0..45).map(|idx| idx as f32 * 0.01));
-        let splats = crate::training::HostSplats::from_raw_parts(
+        let splats = crate::core::HostSplats::from_raw_parts(
             vec![1.0, 2.0, 3.0],
             vec![0.2f32.ln(), 0.3f32.ln(), 0.4f32.ln()],
             vec![1.0, 0.0, 0.0, 0.0],

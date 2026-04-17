@@ -83,11 +83,19 @@ where
                 KernelArguments::new().with_buffers(vec![
                     transforms.handle.binding(),
                     raw_opacities.handle.binding(),
-                    global_from_presort_gid.clone().into_primitive().handle.binding(),
+                    global_from_presort_gid
+                        .clone()
+                        .into_primitive()
+                        .handle
+                        .binding(),
                     depths.clone().into_primitive().tensor().handle.binding(),
                     num_visible_buf.clone().into_primitive().handle.binding(),
                     intersect_counts.clone().into_primitive().handle.binding(),
-                    num_intersections_buf.clone().into_primitive().handle.binding(),
+                    num_intersections_buf
+                        .clone()
+                        .into_primitive()
+                        .handle
+                        .binding(),
                     uniforms_handle.binding(),
                 ]),
             );

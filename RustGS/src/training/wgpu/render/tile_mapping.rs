@@ -5,7 +5,9 @@ use burn_cubecl::{kernel::into_contiguous, BoolElement, CubeBackend, FloatElemen
 use burn_wgpu::{CubeDim, KernelSource, SourceKernel, SourceTemplate, WgpuRuntime};
 use bytemuck::{Pod, Zeroable};
 
-use crate::training::wgpu::gpu_primitives::{prefix_sum::PrefixSumBackend, radix_sort::RadixSortBackend};
+use crate::training::wgpu::gpu_primitives::{
+    prefix_sum::PrefixSumBackend, radix_sort::RadixSortBackend,
+};
 
 use super::compose_shader;
 
@@ -127,7 +129,11 @@ where
                     projected.handle.binding(),
                     cum_tiles_hit.handle.binding(),
                     tile_id_from_isect.clone().into_primitive().handle.binding(),
-                    compact_gid_from_isect.clone().into_primitive().handle.binding(),
+                    compact_gid_from_isect
+                        .clone()
+                        .into_primitive()
+                        .handle
+                        .binding(),
                     uniforms_handle.binding(),
                 ]),
             );
