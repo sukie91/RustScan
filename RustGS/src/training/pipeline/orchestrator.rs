@@ -65,10 +65,6 @@ pub(crate) fn validate_litegs_mac_v1_config(config: &TrainingConfig) -> Result<(
         // Learnable camera extrinsics is now supported (Story 3.2)
         // Uses sparse Adam for pose optimization
     }
-    if config.litegs.cluster_size != defaults.cluster_size {
-        // Clustered training is now supported
-        // Uses spatial hash clustering and AABB frustum culling
-    }
     if config.litegs.tile_size != defaults.tile_size {
         unsupported.push(format!(
             "tile_size={} overrides are reserved for later LiteGS parity work; bootstrap profile currently expects {}",
@@ -158,20 +154,6 @@ mod tests {
         };
 
         validate_litegs_mac_v1_config(&config).unwrap();
-    }
-
-    #[test]
-    fn litegs_mac_v1_accepts_clustered_override() {
-        let config = TrainingConfig {
-            litegs_mode: true,
-            litegs: LiteGsConfig {
-                cluster_size: 128,
-                ..LiteGsConfig::default()
-            },
-            ..TrainingConfig::default()
-        };
-
-        assert!(validate_litegs_mac_v1_config(&config).is_ok());
     }
 
     #[test]

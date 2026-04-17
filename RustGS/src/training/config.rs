@@ -153,11 +153,10 @@ impl FromStr for LiteGsPruneMode {
 /// Nested LiteGS-compatible configuration surface.
 ///
 /// The defaults are chosen for the phased Apple Silicon parity plan:
-/// non-clustered by default, sparse-grad off, and camera optimization deferred.
+/// sparse-grad off and camera optimization deferred.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct LiteGsConfig {
     pub sh_degree: usize,
-    pub cluster_size: usize,
     pub tile_size: LiteGsTileSize,
     pub sparse_grad: bool,
     pub reg_weight: f32,
@@ -195,10 +194,6 @@ pub struct LiteGsConfig {
     /// Learning rate for camera pose optimization (quaternion + translation).
     /// Default is 1e-4. Only used when learnable_viewproj is true.
     pub lr_pose: f32,
-    /// Enable Morton code spatial sorting after densification.
-    /// Improves memory coherence during rendering by reordering Gaussians
-    /// along a Z-order curve based on their 3D positions.
-    pub morton_sort_on_densify: bool,
     /// Prune Gaussians with max(scale) > prune_scale_threshold.
     /// Default is 0.5 (Gausplat-style). Set to 0 to disable scale-based pruning.
     pub prune_scale_threshold: f32,
@@ -208,7 +203,6 @@ impl Default for LiteGsConfig {
     fn default() -> Self {
         Self {
             sh_degree: 3,
-            cluster_size: 0,
             tile_size: LiteGsTileSize::default(),
             sparse_grad: false,
             reg_weight: 0.0,
@@ -231,7 +225,6 @@ impl Default for LiteGsConfig {
             target_primitives: 1_000_000,
             learnable_viewproj: false,
             lr_pose: 1e-4,
-            morton_sort_on_densify: true,
             prune_scale_threshold: 0.5,
         }
     }
@@ -392,7 +385,6 @@ mod tests {
     fn litegs_config_defaults_match_mac_bootstrap_plan() {
         let litegs = LiteGsConfig::default();
         assert_eq!(litegs.sh_degree, 3);
-        assert_eq!(litegs.cluster_size, 0);
         assert_eq!(litegs.tile_size, LiteGsTileSize::new(8, 16));
         assert!(!litegs.sparse_grad);
         assert_eq!(litegs.reg_weight, 0.0);

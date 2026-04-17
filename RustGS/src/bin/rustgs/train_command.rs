@@ -268,7 +268,6 @@ pub(super) fn build_training_config(args: &TrainArgs) -> anyhow::Result<rustgs::
     config.lr_color = args.lr_color;
     config.litegs = rustgs::LiteGsConfig {
         sh_degree: args.litegs_sh_degree,
-        cluster_size: args.litegs_cluster_size,
         tile_size: args.litegs_tile_size,
         sparse_grad: args.litegs_sparse_grad,
         reg_weight: args.litegs_reg_weight,
@@ -291,7 +290,6 @@ pub(super) fn build_training_config(args: &TrainArgs) -> anyhow::Result<rustgs::
         target_primitives: args.litegs_target_primitives,
         learnable_viewproj: args.litegs_learnable_viewproj,
         lr_pose: args.litegs_lr_pose,
-        morton_sort_on_densify: args.litegs_morton_sort_on_densify,
         prune_scale_threshold: args.litegs_prune_scale_threshold,
     };
 
@@ -304,9 +302,8 @@ fn log_litegs_training_config(config: &rustgs::TrainingConfig) {
     }
 
     log::info!(
-        "LiteGS profile config | sh_degree={} | cluster_size={} | tile_size={} | sparse_grad={} | reg_weight={:.4} | enable_transmittance={} | enable_depth={} | learnable_viewproj={} | lr_pose={:.6} | densify_from={} | densify_until={:?} | topology_freeze_after_epoch={:?} | refine_every={} | densification_interval={} | growth_grad_threshold={:.6} | growth_select_fraction={:.3} | growth_stop_iter={} | opacity_reset_interval={} | opacity_reset_mode={} | prune_mode={} | target_primitives={}",
+        "LiteGS profile config | sh_degree={} | tile_size={} | sparse_grad={} | reg_weight={:.4} | enable_transmittance={} | enable_depth={} | learnable_viewproj={} | lr_pose={:.6} | densify_from={} | densify_until={:?} | topology_freeze_after_epoch={:?} | refine_every={} | densification_interval={} | growth_grad_threshold={:.6} | growth_select_fraction={:.3} | growth_stop_iter={} | opacity_reset_interval={} | opacity_reset_mode={} | prune_mode={} | target_primitives={}",
         config.litegs.sh_degree,
-        config.litegs.cluster_size,
         config.litegs.tile_size,
         config.litegs.sparse_grad,
         config.litegs.reg_weight,
@@ -567,7 +564,6 @@ mod tests {
             topology_log_interval: 500,
             litegs_mode: false,
             litegs_sh_degree: 3,
-            litegs_cluster_size: 0,
             litegs_tile_size: rustgs::LiteGsTileSize::new(8, 16),
             litegs_sparse_grad: false,
             litegs_reg_weight: 0.0,
@@ -590,7 +586,6 @@ mod tests {
             litegs_target_primitives: 300_000,
             litegs_learnable_viewproj: false,
             litegs_lr_pose: 0.0001,
-            litegs_morton_sort_on_densify: false,
             litegs_prune_scale_threshold: 0.5,
             lr_position: 0.00016,
             lr_position_final: 0.0000016,

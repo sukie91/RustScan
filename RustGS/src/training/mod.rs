@@ -3,14 +3,10 @@
 //! Primary runtime path:
 //! - `wgpu` - Burn + wgpu backend used by the top-level API.
 
-#[path = "spatial/clustering.rs"]
-pub mod clustering;
 mod config;
 #[path = "topology/density_controller.rs"]
 pub mod density_controller;
 pub mod eval;
-#[path = "spatial/morton.rs"]
-pub mod morton;
 pub mod parity_harness;
 mod pose_utils;
 

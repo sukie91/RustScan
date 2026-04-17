@@ -73,10 +73,6 @@ struct TrainArgs {
     #[arg(long, default_value = "3")]
     litegs_sh_degree: usize,
 
-    /// LiteGS cluster size (0 disables clustering for Mac V1 bootstrap)
-    #[arg(long, default_value = "0")]
-    litegs_cluster_size: usize,
-
     /// LiteGS tile size, e.g. 8x16 or 8,16
     #[arg(long, default_value_t = rustgs::LiteGsTileSize::new(8, 16))]
     litegs_tile_size: rustgs::LiteGsTileSize,
@@ -164,10 +160,6 @@ struct TrainArgs {
     /// LiteGS pose learning rate
     #[arg(long, default_value = "0.0001")]
     litegs_lr_pose: f32,
-
-    /// Enable Morton code spatial sorting after densification for better memory coherence
-    #[arg(long, default_value_t = true)]
-    litegs_morton_sort_on_densify: bool,
 
     /// Prune Gaussians with max scale > threshold (0 disables scale pruning)
     #[arg(long, default_value = "0.5")]
@@ -377,7 +369,6 @@ mod tests {
         assert!(!args.litegs_mode);
         assert_eq!(args.render_scale, 0.5);
         assert_eq!(args.litegs_sh_degree, 3);
-        assert_eq!(args.litegs_cluster_size, 0);
         assert_eq!(args.litegs_tile_size, rustgs::LiteGsTileSize::new(8, 16));
         assert!(!args.litegs_sparse_grad);
         assert!(!args.eval_after_train);
@@ -487,8 +478,6 @@ mod tests {
             "--litegs-mode",
             "--litegs-sh-degree",
             "4",
-            "--litegs-cluster-size",
-            "0",
             "--litegs-tile-size",
             "16x16",
             "--litegs-sparse-grad",
@@ -528,7 +517,6 @@ mod tests {
 
         assert_eq!(config.litegs_mode, true);
         assert_eq!(config.litegs.sh_degree, 4);
-        assert_eq!(config.litegs.cluster_size, 0);
         assert_eq!(config.litegs.tile_size, rustgs::LiteGsTileSize::new(16, 16));
         assert!(config.litegs.sparse_grad);
         assert_eq!(config.litegs.reg_weight, 0.01);
@@ -760,7 +748,6 @@ mod tests {
         let config = rustgs::TrainingConfig {
             litegs_mode: true,
             litegs: rustgs::LiteGsConfig {
-                cluster_size: 64,
                 sparse_grad: true,
                 enable_depth: true,
                 ..rustgs::LiteGsConfig::default()
@@ -812,7 +799,6 @@ mod tests {
 
         let report_path = rustgs::default_parity_report_path(&output);
         let report = rustgs::ParityHarnessReport::load_json(&report_path).unwrap();
-        assert_eq!(report.litegs.cluster_size, 64);
         assert!(report.litegs.sparse_grad);
         assert!(report.litegs.enable_depth);
         assert_eq!(report.loss_terms.depth, Some(0.6));
@@ -970,7 +956,6 @@ mod tests {
             max_initial_gaussians: 2048,
             render_scale: 0.5,
             litegs: rustgs::LiteGsConfig {
-                cluster_size: 64,
                 sparse_grad: true,
                 enable_depth: true,
                 ..rustgs::LiteGsConfig::default()
@@ -1033,7 +1018,6 @@ mod tests {
 
         assert_eq!(report.fixture_id, rustgs::DEFAULT_CONVERGENCE_FIXTURE_ID);
         assert!(report.litegs_mode);
-        assert_eq!(report.litegs.cluster_size, 64);
         assert!(report.litegs.sparse_grad);
         assert!(report.litegs.enable_depth);
         assert_eq!(report.topology.export_outputs, 1);

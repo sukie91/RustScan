@@ -940,8 +940,6 @@ pub(super) fn densify_snapshot_litegs(
 pub(super) struct TopologyMutationResult {
     pub(super) added: usize,
     pub(super) pruned: usize,
-    #[allow(dead_code)]
-    pub(super) morton_sorted: bool,
     pub(super) aftermath: TopologyMutationAftermath,
 }
 
@@ -1131,7 +1129,6 @@ pub(crate) struct TopologyMutationPlan {
     pub(crate) rows: Vec<TopologyPlanRow>,
     pub(crate) added: usize,
     pub(crate) pruned: usize,
-    pub(crate) morton_sorted: bool,
     pub(super) aftermath: TopologyMutationAftermath,
 }
 
@@ -1211,14 +1208,11 @@ pub(crate) fn plan_topology_mutation(
         }
     }
 
-    let morton_sorted = false;
-
     let aftermath = topology_mutation_aftermath(&request, rows.len(), added, pruned);
     TopologyMutationPlan {
         rows,
         added,
         pruned,
-        morton_sorted,
         aftermath,
     }
 }
@@ -1360,7 +1354,6 @@ fn plan_brush_refine_mutation(
         rows,
         added,
         pruned,
-        morton_sorted: false,
         aftermath,
     }
 }
@@ -1383,7 +1376,6 @@ pub(super) fn apply_snapshot_mutations(
     TopologyMutationResult {
         added: plan.added,
         pruned: plan.pruned,
-        morton_sorted: plan.morton_sorted,
         aftermath: plan.aftermath,
     }
 }
