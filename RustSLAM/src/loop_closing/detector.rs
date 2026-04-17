@@ -83,7 +83,7 @@ pub struct LoopDetector {
     /// Minimum distance (in frames) between current and candidate
     min_distance: u64,
     /// Maximum time gap (seconds) for loop detection
-    max_time_gap: f64,
+    _max_time_gap: f64,
     /// Confidence threshold for consistency check
     consistency_threshold: usize,
     /// Recent loop candidates for consistency check
@@ -99,7 +99,7 @@ impl LoopDetector {
             min_loop_score: 0.05,
             min_matches: 20,
             min_distance: 30,
-            max_time_gap: 60.0,
+            _max_time_gap: 60.0,
             consistency_threshold: 3,
             recent_loops: Vec::new(),
             max_recent_loops: 20,
@@ -459,6 +459,7 @@ pub fn compute_sim3_from_matches(points1: &[[f32; 3]], points2: &[[f32; 3]]) -> 
 }
 
 /// Calculate Hamming distance between two descriptors
+#[allow(dead_code)]
 fn hamming_distance(a: &[u8], b: &[u8]) -> f32 {
     a.iter()
         .zip(b.iter())

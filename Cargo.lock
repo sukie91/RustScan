@@ -6550,6 +6550,7 @@ dependencies = [
  "egui",
  "glam",
  "rfd",
+ "rustgs",
  "rustslam",
  "serde",
  "serde_json",

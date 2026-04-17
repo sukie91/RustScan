@@ -154,7 +154,7 @@ impl DepthFusion {
 
 /// Temporal depth fusion (for depth from motion)
 pub struct TemporalDepthFusion {
-    config: DepthFusionConfig,
+    _config: DepthFusionConfig,
     prev_depth: Option<Vec<f32>>,
     alpha: f32, // Blending factor
 }
@@ -163,7 +163,7 @@ impl TemporalDepthFusion {
     /// Create a new temporal depth fusion
     pub fn new(config: DepthFusionConfig, alpha: f32) -> Self {
         Self {
-            config,
+            _config: config,
             prev_depth: None,
             alpha: alpha.clamp(0.0, 1.0),
         }

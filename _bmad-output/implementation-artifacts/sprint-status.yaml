@@ -1,4 +1,4 @@
-# generated: 2026-03-06
+# generated: 2026-04-14
 # project: RustScan
 # project_key: NOKEY
 # tracking_system: file-system
@@ -40,7 +40,7 @@
 # - No story files exist in implementation-artifacts; status derived from epics.md + code review
 # - Epic 3 and Epic 4 marked in-progress due to quality issues found in code review
 
-generated: 2026-03-06
+generated: 2026-04-14
 project: RustScan
 project_key: NOKEY
 tracking_system: file-system
@@ -242,3 +242,41 @@ development_status:
   16-2-handoff-note-convention-for-interrupted-work: done
   16-3-chunked-training-development-workflow-documentation: done
   epic-16-retrospective: optional
+
+  # ============================================================
+  # Epic 17: Load And Inspect COLMAP Training Datasets — DONE
+  # ============================================================
+  epic-17: done
+  17-1-rustviewer-can-resolve-a-colmap-dataset-into-a-trainingdataset: done
+  17-2-loaded-colmap-datasets-populate-the-existing-viewer-scene: done
+  17-3-rustviewer-exposes-a-colmap-load-flow-and-dataset-load-status: done
+  epic-17-retrospective: optional
+
+  # ============================================================
+  # Epic 18: Run And Monitor RustGS Training From RustViewer — DONE
+  # ============================================================
+  epic-18: done
+  18-1-rustviewer-manages-background-rustgs-training-sessions: done
+  18-2-rustgs-emits-intermediate-training-progress-events: done
+  18-3-rustviewer-shows-training-controls-and-progress-metrics: done
+  18-4-rustviewer-can-stop-training-and-surface-runtime-failures: done
+  epic-18-retrospective: optional
+
+  # ============================================================
+  # Epic 19: View Evolving Gaussian Results During Training — DONE
+  # ============================================================
+  epic-19: done
+  19-1-rustgs-streams-host-side-gaussian-snapshots-at-a-configurable-cadence: done
+  19-2-rustviewer-applies-snapshot-updates-to-live-gaussian-scene-state: done
+  19-3-rustviewer-renders-a-dedicated-training-preview-from-the-latest-snapshot: done
+  19-4-rustviewer-retains-the-latest-successful-training-result-for-inspection: done
+  epic-19-retrospective: optional
+
+  # ============================================================
+  # Epic 20: Inspect Live Training Previews From User-Controlled Viewpoints — DONE
+  # ============================================================
+  epic-20: done
+  20-1-rustviewer-bridges-viewer-camera-state-into-a-rustgs-preview-camera: done
+  20-2-users-can-interactively-change-the-training-preview-viewpoint: done
+  20-3-the-preview-continues-refreshing-from-the-current-viewpoint-as-training-advances: done
+  epic-20-retrospective: optional

@@ -69,13 +69,13 @@ pub struct KeyframeSelector {
 #[derive(Debug, Clone)]
 pub struct TrackingStatus {
     /// Number of tracked features
-    num_tracked: usize,
+    pub num_tracked: usize,
     /// Number of total features
-    num_total: usize,
+    pub num_total: usize,
     /// Timestamp
-    timestamp: f64,
+    pub timestamp: f64,
     /// Tracking quality (0-1)
-    quality: f32,
+    pub quality: f32,
 }
 
 impl KeyframeSelector {

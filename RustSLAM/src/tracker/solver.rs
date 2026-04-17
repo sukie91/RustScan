@@ -628,7 +628,7 @@ impl EssentialSolver {
         let n = pts1.len().min(pts2.len());
         let mut rng = Lcg::new(n as u64 + (self.ransac_max_iterations as u64));
         let mut best_inliers = Vec::new();
-        let mut best_E = None;
+        let mut best_e = None;
 
         for _ in 0..self.ransac_max_iterations {
             let sample = rng.sample_unique(n, 8);
@@ -643,21 +643,21 @@ impl EssentialSolver {
                 s2.push(pts2[idx]);
             }
 
-            let E = self.compute_essential(&s1, &s2)?;
-            let inliers = self.inlier_mask(pts1, pts2, &E);
+            let e = self.compute_essential(&s1, &s2)?;
+            let inliers = self.inlier_mask(pts1, pts2, &e);
             let count = inliers.iter().filter(|&&x| x).count();
             if count > best_inliers.iter().filter(|&&x| x).count() {
                 best_inliers = inliers;
-                best_E = Some(E);
+                best_e = Some(e);
             }
         }
 
-        let E = best_E.or_else(|| self.compute_essential(pts1, pts2))?;
+        let e = best_e.or_else(|| self.compute_essential(pts1, pts2))?;
         if best_inliers.is_empty() {
-            best_inliers = self.inlier_mask(pts1, pts2, &E);
+            best_inliers = self.inlier_mask(pts1, pts2, &e);
         }
 
-        Some((E, best_inliers))
+        Some((e, best_inliers))
     }
 
     /// Normalize points for numerical stability
@@ -691,24 +691,24 @@ impl EssentialSolver {
             .collect();
 
         // Transformation matrix
-        let T = Mat3::from_cols(
+        let t = Mat3::from_cols(
             Vec3::new(scale, 0.0, 0.0),
             Vec3::new(0.0, scale, 0.0),
             Vec3::new(-cx * scale, -cy * scale, 1.0),
         );
 
-        (normalized, T)
+        (normalized, t)
     }
 
     /// Solve using 8-point algorithm
-    fn solve_8point(&self, A: &[[f32; 9]]) -> Option<Mat3> {
-        let n = A.len();
+    fn solve_8point(&self, a: &[[f32; 9]]) -> Option<Mat3> {
+        let n = a.len();
         if n < 8 {
             return None;
         }
 
         let mut data = Vec::with_capacity(n * 9);
-        for row in A {
+        for row in a {
             data.extend_from_slice(row);
         }
 
@@ -728,8 +728,8 @@ impl EssentialSolver {
     }
 
     /// Enforce rank-2 constraint on essential matrix
-    pub fn enforce_rank2(&self, E: Mat3) -> Mat3 {
-        let na_e = mat3_to_na(&E);
+    pub fn enforce_rank2(&self, e: Mat3) -> Mat3 {
+        let na_e = mat3_to_na(&e);
         let svd = na_e.svd(true, true);
         let mut u = svd.u.unwrap_or(Matrix3::identity());
         let mut v_t = svd.v_t.unwrap_or(Matrix3::identity());
@@ -747,9 +747,9 @@ impl EssentialSolver {
     }
 
     /// RANSAC filtering
-    fn inlier_mask(&self, pts1: &[[f32; 2]], pts2: &[[f32; 2]], E: &Mat3) -> Vec<bool> {
+    fn inlier_mask(&self, pts1: &[[f32; 2]], pts2: &[[f32; 2]], e: &Mat3) -> Vec<bool> {
         let n = pts1.len().min(pts2.len());
-        let na_e = mat3_to_na(E);
+        let na_e = mat3_to_na(e);
         let threshold = self.ransac_threshold.max(1e-6);
         let mut inliers = Vec::with_capacity(n);
 
@@ -774,8 +774,8 @@ impl EssentialSolver {
     /// Recover pose from essential matrix
     ///
     /// Returns: 4 possible pose solutions
-    pub fn recover_pose(&self, E: Mat3) -> [SE3; 4] {
-        let na_e = mat3_to_na(&E);
+    pub fn recover_pose(&self, e: Mat3) -> [SE3; 4] {
+        let na_e = mat3_to_na(&e);
         let svd = na_e.svd(true, true);
         let mut u = svd.u.unwrap_or(Matrix3::identity());
         let mut v_t = svd.v_t.unwrap_or(Matrix3::identity());
@@ -816,14 +816,14 @@ impl EssentialSolver {
             return None;
         }
 
-        let (norm_pts1, T1) = self.normalize_points(pts1);
-        let (norm_pts2, T2) = self.normalize_points(pts2);
+        let (norm_pts1, t1) = self.normalize_points(pts1);
+        let (norm_pts2, t2) = self.normalize_points(pts2);
 
-        let mut A = Vec::with_capacity(n);
+        let mut a = Vec::with_capacity(n);
         for i in 0..n {
             let x1 = &norm_pts1[i];
             let x2 = &norm_pts2[i];
-            A.push([
+            a.push([
                 x2[0] * x1[0],
                 x2[0] * x1[1],
                 x2[0],
@@ -836,9 +836,9 @@ impl EssentialSolver {
             ]);
         }
 
-        let e_norm = self.solve_8point(&A)?;
+        let e_norm = self.solve_8point(&a)?;
         let e_rank2 = self.enforce_rank2(e_norm);
-        let e = T2.transpose() * e_rank2 * T1;
+        let e = t2.transpose() * e_rank2 * t1;
         Some(e)
     }
 }
@@ -1094,6 +1094,7 @@ impl Triangulator {
     }
 
     /// Check if a point is observable from a camera pose
+    #[allow(dead_code)]
     fn is_observable(&self, point: &[f32; 3], pose: &SE3) -> bool {
         let cam_center = Vec3::from(pose.inverse().translation());
         let point_vec = Vec3::new(point[0], point[1], point[2]);

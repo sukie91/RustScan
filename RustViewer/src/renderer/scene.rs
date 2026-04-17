@@ -137,4 +137,23 @@ impl Scene {
     pub fn mesh_vertex_count(&self) -> usize {
         self.mesh_vertices.len()
     }
+
+    pub fn recompute_bounds(&mut self) {
+        let mut bounds = SceneBounds::default();
+
+        for &position in &self.trajectory {
+            bounds.extend(position);
+        }
+        for &position in &self.map_points {
+            bounds.extend(position);
+        }
+        for gaussian in &self.gaussians {
+            bounds.extend(gaussian.position);
+        }
+        for vertex in &self.mesh_vertices {
+            bounds.extend(vertex.position);
+        }
+
+        self.bounds = bounds;
+    }
 }

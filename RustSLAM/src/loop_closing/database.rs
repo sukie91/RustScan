@@ -27,7 +27,7 @@ pub struct KeyFrameDatabase {
     /// Inverted index: word_id -> keyframe IDs
     inverted_index: RwLock<HashMap<u32, HashSet<u64>>>,
     /// Number of words in vocabulary
-    num_words: u32,
+    _num_words: u32,
 }
 
 impl KeyFrameDatabase {
@@ -36,7 +36,7 @@ impl KeyFrameDatabase {
         Self {
             entries: RwLock::new(HashMap::new()),
             inverted_index: RwLock::new(HashMap::new()),
-            num_words,
+            _num_words: num_words,
         }
     }
 

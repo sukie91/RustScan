@@ -186,7 +186,7 @@ impl BundleAdjuster {
         let landmark = &self.landmarks[lm_idx];
 
         let pose = camera.pose;
-        let R = pose.rotation_matrix();
+        let r = pose.rotation_matrix();
         let t = pose.translation();
 
         // Transform point to camera frame
@@ -198,9 +198,9 @@ impl BundleAdjuster {
         let tz = t[2] as f32;
 
         // p_cam = R^T * (p_world - t)
-        let x = R[0][0] * (px - tx) + R[1][0] * (py - ty) + R[2][0] * (pz - tz);
-        let y = R[0][1] * (px - tx) + R[1][1] * (py - ty) + R[2][1] * (pz - tz);
-        let z = R[0][2] * (px - tx) + R[1][2] * (py - ty) + R[2][2] * (pz - tz);
+        let x = r[0][0] * (px - tx) + r[1][0] * (py - ty) + r[2][0] * (pz - tz);
+        let y = r[0][1] * (px - tx) + r[1][1] * (py - ty) + r[2][1] * (pz - tz);
+        let z = r[0][2] * (px - tx) + r[1][2] * (py - ty) + r[2][2] * (pz - tz);
 
         if z <= 1e-10 {
             return None;

@@ -1,4 +1,5 @@
 //! SLAM processing pipeline helpers for the RustScan CLI.
+#![allow(dead_code)]
 
 use crate::config::SlamConfig;
 use crate::core::{Frame, FrameFeatures};

@@ -297,10 +297,7 @@ impl RustMesh {
     /// skipping any post-insert boundary normalization. Callers that need the
     /// normalized vertex anchors should invoke
     /// `normalize_boundary_halfedge_handles()` explicitly afterwards.
-    pub fn add_face_openmesh_parity(
-        &mut self,
-        vertices: &[VertexHandle],
-    ) -> Option<FaceHandle> {
+    pub fn add_face_openmesh_parity(&mut self, vertices: &[VertexHandle]) -> Option<FaceHandle> {
         let fh = self.add_face(vertices)?;
         let anchor = self
             .face_halfedge_handle(fh)

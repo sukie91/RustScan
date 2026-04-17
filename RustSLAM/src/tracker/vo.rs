@@ -314,7 +314,7 @@ impl VisualOdometry {
         }
 
         // Compute essential matrix
-        if let Some((E, inliers)) = self.essential_solver.compute(&matches, &pts1, &pts2) {
+        if let Some((e, inliers)) = self.essential_solver.compute(&matches, &pts1, &pts2) {
             let inlier_count = inliers.iter().filter(|&&x| x).count();
 
             if inlier_count >= self.min_inliers && matches.len() >= self.min_matches {
@@ -333,7 +333,7 @@ impl VisualOdometry {
                 }
 
                 // Recover pose from essential matrix
-                let poses = self.essential_solver.recover_pose(E);
+                let poses = self.essential_solver.recover_pose(e);
                 let prev_pose = SE3::identity();
                 let mut best_pose = poses[0];
                 let mut best_points = Vec::new();

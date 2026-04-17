@@ -3,4 +3,5 @@
 pub mod app;
 pub mod loader;
 pub mod renderer;
+pub mod training;
 pub mod ui;

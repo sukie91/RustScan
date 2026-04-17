@@ -39,7 +39,7 @@ pub struct GaussianTracker {
     /// Image width
     width: usize,
     /// Image height
-    height: usize,
+    _height: usize,
     /// Camera intrinsics
     fx: f32,
     fy: f32,
@@ -50,7 +50,7 @@ pub struct GaussianTracker {
     /// Depth threshold for matching
     depth_threshold: f32,
     /// Maximum correspondence distance
-    max_correspondence_dist: f32,
+    _max_correspondence_dist: f32,
 }
 
 impl GaussianTracker {
@@ -67,14 +67,14 @@ impl GaussianTracker {
         Self {
             renderer: GaussianRenderer::new(width, height),
             width,
-            height,
+            _height: height,
             fx,
             fy,
             cx,
             cy,
             icp_iterations: 10,
             depth_threshold: 0.5,         // 50cm
-            max_correspondence_dist: 0.1, // 10cm
+            _max_correspondence_dist: 0.1, // 10cm
         }
     }
 

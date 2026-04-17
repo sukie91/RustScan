@@ -306,6 +306,7 @@ impl VideoDecoder {
         Ok(pending.pop_front())
     }
 
+    #[allow(dead_code)]
     fn convert_frame(&mut self, decoded: &frame::Video) -> Result<Arc<VideoFrame>> {
         convert_frame_with(&mut self.scaler, &self.info, &mut self.next_index, decoded)
     }

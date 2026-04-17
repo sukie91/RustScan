@@ -2,7 +2,7 @@
 
 use crate::renderer::camera::ArcballCamera;
 use crate::ui::theme::*;
-use egui::{Color32, Vec2};
+use egui::Vec2;
 
 /// Draw an empty-state overlay when no scene data is loaded.
 pub fn draw_empty_state(ui: &mut egui::Ui) {
@@ -14,7 +14,7 @@ pub fn draw_empty_state(ui: &mut egui::Ui) {
             ui.label(
                 egui::RichText::new("📂")
                     .size(64.0)
-                    .color(Color32::from_rgba_unmultiplied(142, 142, 147, 153)),
+                    .color(TEXT_DISABLED.gamma_multiply(0.85)),
             );
 
             ui.add_space(24.0);
@@ -35,7 +35,7 @@ pub fn draw_empty_state(ui: &mut egui::Ui) {
                     "Load checkpoint, Gaussian, or mesh files to visualize 3D results",
                 )
                 .size(13.0)
-                .color(SYSTEM_GRAY),
+                .color(TEXT_SECONDARY),
             );
 
             ui.add_space(24.0);
@@ -47,9 +47,9 @@ pub fn draw_empty_state(ui: &mut egui::Ui) {
                 .allocate_exact_size(Vec2::new(button_width, button_height), egui::Sense::click());
 
             let bg_color = if response.clicked() {
-                Color32::from_rgb(0, 85, 200)
+                egui::Color32::from_rgb(0, 85, 200)
             } else if response.hovered() {
-                Color32::from_rgb(0, 110, 230)
+                egui::Color32::from_rgb(0, 110, 230)
             } else {
                 SYSTEM_BLUE
             };
@@ -60,7 +60,7 @@ pub fn draw_empty_state(ui: &mut egui::Ui) {
                 egui::Align2::CENTER_CENTER,
                 "Open Files",
                 egui::FontId::proportional(13.0),
-                Color32::WHITE,
+                egui::Color32::WHITE,
             );
         });
     });
@@ -79,11 +79,7 @@ pub fn draw_viewport_overlay(ui: &mut egui::Ui, camera: &ArcballCamera, has_data
     let indicator_rect = egui::Rect::from_min_size(pos, Vec2::new(indicator_size, indicator_size));
 
     // Background
-    ui.painter().rect_filled(
-        indicator_rect,
-        8.0,
-        Color32::from_rgba_unmultiplied(255, 255, 255, 242),
-    );
+    ui.painter().rect_filled(indicator_rect, 8.0, overlay_bg());
 
     // Draw axis labels
     let center = indicator_rect.center();

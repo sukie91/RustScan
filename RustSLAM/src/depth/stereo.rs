@@ -143,6 +143,7 @@ impl StereoMatcher {
     }
 
     /// Aggregate costs using simplified SGM
+    #[allow(dead_code)]
     fn aggregate_costs(
         &self,
         cost_volume: &[i32],
@@ -173,6 +174,7 @@ impl StereoMatcher {
     }
 
     /// Aggregate costs in a single direction
+    #[allow(dead_code)]
     fn aggregate_direction(
         &self,
         aggregated: &mut [i32],

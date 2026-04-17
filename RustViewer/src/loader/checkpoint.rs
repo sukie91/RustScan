@@ -20,6 +20,12 @@ pub enum LoadError {
     PlyParse(String),
     #[error("Unsupported file format: {0}")]
     UnsupportedFormat(String),
+    #[error("COLMAP sparse structure missing: {0}")]
+    ColmapSparseStructureMissing(String),
+    #[error("COLMAP images missing: {0}")]
+    ColmapImagesMissing(String),
+    #[error("COLMAP load failed: {0}")]
+    ColmapLoadFailed(String),
 }
 
 // ── Mirror structs for pipeline.json ────────────────────────────────────────

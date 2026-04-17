@@ -4,14 +4,78 @@ use egui::{Color32, Vec2};
 
 use crate::renderer::camera::ArcballCamera;
 use crate::renderer::scene::Scene;
+use crate::training::{TrainingProgress, TrainingSessionState};
 use crate::ui::theme::*;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PanelAction {
+    OpenCheckpoint,
+    OpenGaussian,
+    OpenMesh,
+    OpenColmap,
+    StartTraining,
+    StopTraining,
+    AutoFitScene,
+}
+
+#[derive(Debug, Clone)]
+pub struct DatasetUiSummary {
+    pub root_path: String,
+    pub frame_count: usize,
+    pub sparse_point_count: usize,
+    pub width: u32,
+    pub height: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct TrainingControls {
+    pub iterations: usize,
+    pub render_scale: f32,
+    pub litegs_mode: bool,
+    pub progress_every: usize,
+    pub snapshot_every: usize,
+}
+
+impl Default for TrainingControls {
+    fn default() -> Self {
+        Self {
+            iterations: 1000,
+            render_scale: 0.5,
+            litegs_mode: false,
+            progress_every: 5,
+            snapshot_every: 25,
+        }
+    }
+}
+
 /// State shared between the UI and app logic.
-#[derive(Default)]
+#[derive(Debug, Clone)]
 pub struct UiState {
     pub load_error: Option<String>,
     pub is_loading: bool,
     pub loading_message: Option<String>,
+    pub dataset_summary: Option<DatasetUiSummary>,
+    pub training_controls: TrainingControls,
+    pub training_state: TrainingSessionState,
+    pub training_progress: TrainingProgress,
+    pub training_error: Option<String>,
+    pub preview_error: Option<String>,
+}
+
+impl Default for UiState {
+    fn default() -> Self {
+        Self {
+            load_error: None,
+            is_loading: false,
+            loading_message: None,
+            dataset_summary: None,
+            training_controls: TrainingControls::default(),
+            training_state: TrainingSessionState::Idle,
+            training_progress: TrainingProgress::default(),
+            training_error: None,
+            preview_error: None,
+        }
+    }
 }
 
 /// Draw the left-side control panel.
@@ -20,8 +84,8 @@ pub fn draw_side_panel(
     state: &mut UiState,
     scene: &mut Scene,
     camera: &mut ArcballCamera,
-    file_tx: &std::sync::mpsc::Sender<(String, std::path::PathBuf)>,
-) {
+) -> Vec<PanelAction> {
+    let mut actions = Vec::new();
     ui.vertical(|ui| {
         ui.spacing_mut().item_spacing = Vec2::new(0.0, 12.0);
 
@@ -40,42 +104,32 @@ pub fn draw_side_panel(
         draw_section_header(ui, "FILE OPERATIONS");
 
         if draw_blue_button(ui, "📂", "Load Checkpoint") {
-            let tx = file_tx.clone();
-            std::thread::spawn(move || {
-                if let Some(path) = rfd::FileDialog::new()
-                    .add_filter("JSON", &["json"])
-                    .pick_file()
-                {
-                    let _ = tx.send(("checkpoint".to_string(), path));
-                }
-            });
+            actions.push(PanelAction::OpenCheckpoint);
         }
 
         if draw_blue_button(ui, "✨", "Load Gaussians") {
-            let tx = file_tx.clone();
-            std::thread::spawn(move || {
-                if let Some(path) = rfd::FileDialog::new()
-                    .add_filter("PLY", &["ply"])
-                    .pick_file()
-                {
-                    let _ = tx.send(("gaussian".to_string(), path));
-                }
-            });
+            actions.push(PanelAction::OpenGaussian);
         }
 
         if draw_blue_button(ui, "🔷", "Load Mesh") {
-            let tx = file_tx.clone();
-            std::thread::spawn(move || {
-                if let Some(path) = rfd::FileDialog::new()
-                    .add_filter("Mesh", &["obj", "ply"])
-                    .pick_file()
-                {
-                    let _ = tx.send(("mesh".to_string(), path));
-                }
-            });
+            actions.push(PanelAction::OpenMesh);
+        }
+
+        if draw_blue_button(ui, "🗂", "Load COLMAP") {
+            actions.push(PanelAction::OpenColmap);
         }
 
         // Divider
+        draw_divider(ui);
+
+        draw_section_header(ui, "DATASET");
+        draw_dataset_summary(ui, state);
+
+        draw_divider(ui);
+
+        draw_section_header(ui, "TRAINING");
+        draw_training_controls(ui, state, &mut actions);
+
         draw_divider(ui);
 
         // SCENE LAYERS section
@@ -109,11 +163,14 @@ pub fn draw_side_panel(
         // Auto Fit button
         if draw_auto_fit_button(ui) && scene.has_data() {
             camera.fit_scene(&scene.bounds);
+            actions.push(PanelAction::AutoFitScene);
         }
 
         // Statistics cards - always visible
         draw_stats_cards(ui, scene);
     });
+
+    actions
 }
 
 fn draw_loading_indicator(ui: &mut egui::Ui, state: &UiState) {
@@ -133,7 +190,7 @@ fn draw_loading_indicator(ui: &mut egui::Ui, state: &UiState) {
 
 fn draw_error_alert(ui: &mut egui::Ui, error: &str, state: &mut UiState) {
     let frame = egui::Frame::new()
-        .fill(Color32::from_rgba_unmultiplied(255, 59, 48, 26))
+        .fill(Color32::from_rgba_unmultiplied(255, 59, 48, 36))
         .corner_radius(6.0)
         .inner_margin(12.0);
 
@@ -160,6 +217,191 @@ fn draw_section_header(ui: &mut egui::Ui, text: &str) {
             .strong()
             .color(SYSTEM_GRAY),
     );
+}
+
+fn draw_dataset_summary(ui: &mut egui::Ui, state: &UiState) {
+    let frame = egui::Frame::new()
+        .fill(CARD_BG)
+        .corner_radius(8.0)
+        .inner_margin(12.0);
+
+    frame.show(ui, |ui| {
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing = Vec2::new(0.0, 8.0);
+
+            match &state.dataset_summary {
+                Some(summary) => {
+                    ui.label(
+                        egui::RichText::new(summary.root_path.as_str())
+                            .size(11.0)
+                            .color(TEXT_SECONDARY),
+                    );
+                    draw_metric_row(ui, "Frames", summary.frame_count.to_string());
+                    draw_metric_row(ui, "Sparse Points", summary.sparse_point_count.to_string());
+                    draw_metric_row(
+                        ui,
+                        "Resolution",
+                        format!("{}x{}", summary.width, summary.height),
+                    );
+                }
+                None => {
+                    ui.label(
+                        egui::RichText::new("No COLMAP dataset loaded")
+                            .size(12.0)
+                            .color(TEXT_SECONDARY),
+                    );
+                }
+            }
+        });
+    });
+}
+
+fn draw_training_controls(ui: &mut egui::Ui, state: &mut UiState, actions: &mut Vec<PanelAction>) {
+    let frame = egui::Frame::new()
+        .fill(CARD_BG)
+        .corner_radius(8.0)
+        .inner_margin(12.0);
+
+    frame.show(ui, |ui| {
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing = Vec2::new(0.0, 10.0);
+
+            draw_metric_row(ui, "State", training_state_label(state.training_state));
+
+            ui.add(
+                egui::Slider::new(&mut state.training_controls.iterations, 10..=30_000)
+                    .text("Iterations")
+                    .logarithmic(true),
+            );
+            ui.add(
+                egui::Slider::new(&mut state.training_controls.render_scale, 0.125..=1.0)
+                    .text("Render Scale"),
+            );
+            ui.add(
+                egui::Slider::new(&mut state.training_controls.progress_every, 1..=500)
+                    .text("Progress Every"),
+            );
+            ui.add(
+                egui::Slider::new(&mut state.training_controls.snapshot_every, 1..=1000)
+                    .text("Snapshot Every"),
+            );
+            ui.checkbox(&mut state.training_controls.litegs_mode, "LiteGS Mode");
+
+            if let Some(error) = &state.training_error {
+                ui.label(egui::RichText::new(error).size(11.0).color(SYSTEM_RED));
+            }
+            if let Some(error) = &state.preview_error {
+                ui.label(
+                    egui::RichText::new(format!("Preview: {error}"))
+                        .size(11.0)
+                        .color(SYSTEM_ORANGE),
+                );
+            }
+
+            draw_metric_row(
+                ui,
+                "Iteration",
+                state
+                    .training_progress
+                    .latest_iteration
+                    .map(|value| {
+                        if let Some(total) = state.training_progress.total_iterations {
+                            format!("{value}/{total}")
+                        } else {
+                            value.to_string()
+                        }
+                    })
+                    .unwrap_or_else(|| "—".to_string()),
+            );
+            draw_metric_row(
+                ui,
+                "Loss",
+                state
+                    .training_progress
+                    .latest_loss
+                    .map(|value| format!("{value:.5}"))
+                    .unwrap_or_else(|| "—".to_string()),
+            );
+            draw_metric_row(
+                ui,
+                "Gaussians",
+                state
+                    .training_progress
+                    .gaussian_count
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "—".to_string()),
+            );
+            draw_metric_row(
+                ui,
+                "Elapsed",
+                format_duration(state.training_progress.elapsed),
+            );
+
+            let dataset_ready = state.dataset_summary.is_some();
+            let training_active = matches!(
+                state.training_state,
+                TrainingSessionState::Starting
+                    | TrainingSessionState::Training
+                    | TrainingSessionState::Stopping
+            );
+
+            let button_label = if training_active {
+                "Stop Training"
+            } else {
+                "Start Training"
+            };
+            let button_icon = if training_active { "⏹" } else { "▶" };
+            let clicked = if training_active {
+                draw_secondary_button(ui, button_icon, button_label)
+            } else {
+                ui.add_enabled_ui(dataset_ready, |ui| {
+                    draw_blue_button(ui, button_icon, button_label)
+                })
+                .inner
+            };
+
+            if clicked {
+                actions.push(if training_active {
+                    PanelAction::StopTraining
+                } else {
+                    PanelAction::StartTraining
+                });
+            }
+        });
+    });
+}
+
+fn draw_metric_row(ui: &mut egui::Ui, label: &str, value: impl Into<String>) {
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(label).size(11.0).color(TEXT_SECONDARY));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.label(
+                egui::RichText::new(value.into())
+                    .size(12.0)
+                    .strong()
+                    .color(TEXT_PRIMARY),
+            );
+        });
+    });
+}
+
+fn training_state_label(state: TrainingSessionState) -> String {
+    match state {
+        TrainingSessionState::Idle => "idle",
+        TrainingSessionState::Loading => "loading",
+        TrainingSessionState::Starting => "starting",
+        TrainingSessionState::Training => "training",
+        TrainingSessionState::Stopping => "stopping",
+        TrainingSessionState::Completed => "completed",
+        TrainingSessionState::Failed => "failed",
+        TrainingSessionState::Cancelled => "cancelled",
+    }
+    .to_string()
+}
+
+fn format_duration(duration: std::time::Duration) -> String {
+    let secs = duration.as_secs();
+    format!("{:02}:{:02}", secs / 60, secs % 60)
 }
 
 fn draw_blue_button(ui: &mut egui::Ui, icon: &str, label: &str) -> bool {
@@ -214,11 +456,58 @@ fn draw_blue_button(ui: &mut egui::Ui, icon: &str, label: &str) -> bool {
 fn draw_divider(ui: &mut egui::Ui) {
     let (rect, _) =
         ui.allocate_exact_size(Vec2::new(ui.available_width(), 1.0), egui::Sense::hover());
-    ui.painter().rect_filled(
-        rect,
-        0.0,
-        Color32::from_rgba_unmultiplied(229, 229, 229, 204),
+    ui.painter().rect_filled(rect, 0.0, SEPARATOR);
+}
+
+fn draw_secondary_button(ui: &mut egui::Ui, icon: &str, label: &str) -> bool {
+    let button_height = 32.0;
+    let (rect, response) = ui.allocate_exact_size(
+        Vec2::new(ui.available_width(), button_height),
+        egui::Sense::click(),
     );
+
+    let bg_color = if response.hovered() {
+        hover_bg()
+    } else {
+        CARD_BG
+    };
+
+    ui.painter().rect_filled(rect, 6.0, bg_color);
+    ui.painter().rect_stroke(
+        rect,
+        6.0,
+        egui::Stroke::new(1.0, SEPARATOR),
+        egui::StrokeKind::Outside,
+    );
+
+    let font_id = egui::FontId::proportional(13.0);
+    let icon_width = ui.fonts(|f| f.glyph_width(&font_id, icon.chars().next().unwrap()));
+    let text_width = ui.fonts(|f| {
+        f.layout_no_wrap(label.to_string(), font_id.clone(), TEXT_PRIMARY)
+            .size()
+            .x
+    });
+    let gap = 8.0;
+    let total_width = icon_width + gap + text_width;
+    let start_x = rect.center().x - total_width / 2.0;
+    let center_y = rect.center().y;
+
+    ui.painter().text(
+        egui::pos2(start_x + icon_width / 2.0, center_y),
+        egui::Align2::CENTER_CENTER,
+        icon,
+        font_id.clone(),
+        TEXT_PRIMARY,
+    );
+    ui.painter().text(
+        egui::pos2(start_x + icon_width + gap + text_width / 2.0, center_y),
+        egui::Align2::CENTER_CENTER,
+        label,
+        font_id,
+        TEXT_PRIMARY,
+    );
+
+    response.clicked()
 }
 
 fn draw_layer_toggle(ui: &mut egui::Ui, checked: &mut bool, label: &str, color: Color32) {
@@ -285,7 +574,7 @@ fn draw_auto_fit_button(ui: &mut egui::Ui) -> bool {
     );
 
     let bg_color = if response.hovered() {
-        Color32::from_rgba_unmultiplied(0, 0, 0, 10)
+        hover_bg()
     } else {
         Color32::TRANSPARENT
     };
@@ -393,7 +682,7 @@ fn draw_stats_cards(ui: &mut egui::Ui, scene: &Scene) {
                     ui.label(
                         egui::RichText::new("Keyframes")
                             .size(11.0)
-                            .color(Color32::from_rgb(153, 153, 153)),
+                            .color(TEXT_SECONDARY),
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(
@@ -410,7 +699,7 @@ fn draw_stats_cards(ui: &mut egui::Ui, scene: &Scene) {
                     ui.label(
                         egui::RichText::new("Map Points")
                             .size(11.0)
-                            .color(Color32::from_rgb(153, 153, 153)),
+                            .color(TEXT_SECONDARY),
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(
@@ -427,7 +716,7 @@ fn draw_stats_cards(ui: &mut egui::Ui, scene: &Scene) {
                     ui.label(
                         egui::RichText::new("Gaussians")
                             .size(11.0)
-                            .color(Color32::from_rgb(153, 153, 153)),
+                            .color(TEXT_SECONDARY),
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(

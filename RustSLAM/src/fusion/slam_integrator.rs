@@ -207,16 +207,14 @@ impl SparseDenseSlam {
         self.current_pose = tracked_pose;
 
         // Create keyframe if needed
-        let mut is_keyframe = false;
-
-        if self.keyframes.is_empty() {
+        let is_keyframe = if self.keyframes.is_empty() {
             // First frame - always create keyframe
-            is_keyframe = true;
+            true
         } else {
             // Check if should create new keyframe
             let last_kf = &self.keyframes[self.keyframes.len() - 1];
-            is_keyframe = last_kf.should_create_kf(&tracked_pose);
-        }
+            last_kf.should_create_kf(&tracked_pose)
+        };
 
         // Create keyframe if needed
         if is_keyframe {
