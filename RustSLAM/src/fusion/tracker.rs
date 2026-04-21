@@ -73,7 +73,7 @@ impl GaussianTracker {
             cx,
             cy,
             icp_iterations: 10,
-            depth_threshold: 0.5,         // 50cm
+            depth_threshold: 0.5,          // 50cm
             _max_correspondence_dist: 0.1, // 10cm
         }
     }

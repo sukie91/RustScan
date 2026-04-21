@@ -25,6 +25,7 @@ kiddo = "5.2.1"
 image = "0.25"
 log = "0.4"
 libc = "0.2"
+bytes = { version = "1", optional = true }
 
 # CLI dependencies
 clap = { version = "4", features = ["derive"], optional = true }
@@ -45,6 +46,7 @@ tokio = { version = "1", features = ["macros", "rt"], optional = true }
 [features]
 default = ["gpu", "cli"]
 gpu = [
+    "dep:bytes",
     "dep:burn",
     "dep:burn-wgpu",
     "dep:burn-cubecl",

@@ -1,26 +1,38 @@
+#[cfg(test)]
 use std::cmp::Ordering;
 
+mod apply;
+mod bridge;
+mod density_controller;
+mod reference;
+mod schedule;
+mod splat_metrics;
+
+#[cfg(test)]
 use glam::{Quat, Vec3};
 use rand::seq::index::sample_weighted;
-use rand::Rng;
+use rand::{rngs::StdRng, Rng, SeedableRng};
 
-use super::density_controller::{
-    DensityController, DensityControllerConfig, OpacityResetMode, PruneMode,
-};
-use super::parity_harness::ParityTopologyMetrics;
-use super::runtime_splats::TopologySplatMetrics;
+pub(crate) use self::schedule::should_apply_topology_step;
+pub(crate) use apply::apply_mutations;
+pub(crate) use bridge::{plan_mutations, snapshot_for_topology};
+
+use self::density_controller::{DensityControllerConfig, PruneMode};
+use self::schedule::{plan_topology_execution, schedule_topology, TopologyStepContext};
+use self::splat_metrics::TopologySplatMetrics;
+use super::metrics::ParityTopologyMetrics;
+use super::{LiteGsConfig, LiteGsPruneMode, TrainingConfig};
 use crate::core::HostSplats;
 #[cfg(test)]
-use crate::core::splats::sigmoid_scalar;
-#[cfg(test)]
 use crate::core::HostSplats as Splats;
-use super::{LiteGsConfig, LiteGsOpacityResetMode, LiteGsPruneMode, TrainingConfig};
 
 const LITEGS_OPACITY_THRESHOLD: f32 = 0.005;
 const LITEGS_PERCENT_DENSE: f32 = 0.01;
 const BRUSH_MIN_OPACITY: f32 = 1.0 / 255.0;
 const BRUSH_MIN_SCALE: f32 = 1e-10;
 const BRUSH_REFINE_PROGRESS_LIMIT: f32 = 0.95;
+const TOPOLOGY_SELECTION_SALT: u64 = 0x6c69_7465_6773_7365;
+const TOPOLOGY_REFINE_SALT: u64 = 0x6272_7573_685f_7266;
 
 #[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, Copy, Default)]
@@ -62,7 +74,6 @@ pub(super) struct MetalGaussianStats {
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct TopologyCandidateInfo {
-    pub(super) max_scale: f32,
     pub(super) opacity: f32,
     pub(super) mean2d_grad: f32,
     pub(super) visible_count: usize,
@@ -93,19 +104,7 @@ pub(super) struct LiteGsDensifySelection {
 
 #[derive(Debug, Clone)]
 pub(super) struct TopologyPolicy {
-    pub(super) litegs_mode: bool,
     pub(super) litegs: LiteGsConfig,
-    pub(super) prune_threshold: f32,
-    pub(super) densify_interval: usize,
-    pub(super) prune_interval: usize,
-    pub(super) topology_warmup: usize,
-    #[allow(dead_code)]
-    pub(super) topology_log_interval: usize,
-    pub(super) legacy_densify_grad_threshold: f32,
-    pub(super) legacy_clone_scale_threshold: f32,
-    pub(super) legacy_split_scale_threshold: f32,
-    pub(super) legacy_prune_scale_threshold: f32,
-    pub(super) legacy_max_densify_per_update: usize,
     pub(super) max_gaussian_budget: usize,
     pub(super) scene_extent: f32,
     pub(super) max_iterations: usize,
@@ -114,31 +113,11 @@ pub(super) struct TopologyPolicy {
 impl TopologyPolicy {
     pub(crate) fn from_training_config(config: &TrainingConfig, scene_extent: f32) -> Self {
         Self {
-            litegs_mode: config.litegs_mode,
             litegs: config.litegs.clone(),
-            prune_threshold: config.prune_threshold,
-            densify_interval: config.densify_interval,
-            prune_interval: config.prune_interval,
-            topology_warmup: config.topology_warmup,
-            topology_log_interval: config.topology_log_interval.max(1),
-            legacy_densify_grad_threshold: config.legacy_densify_grad_threshold,
-            legacy_clone_scale_threshold: config.legacy_clone_scale_threshold,
-            legacy_split_scale_threshold: config.legacy_split_scale_threshold,
-            legacy_prune_scale_threshold: config.legacy_prune_scale_threshold,
-            legacy_max_densify_per_update: config.legacy_max_densify_per_update.max(1),
             max_gaussian_budget: config.max_initial_gaussians.max(1),
             scene_extent,
             max_iterations: config.iterations,
         }
-    }
-
-    pub(super) fn is_litegs_mode(&self) -> bool {
-        self.litegs_mode
-    }
-
-    #[allow(dead_code)]
-    pub(super) fn should_log_topology(&self, iteration: usize) -> bool {
-        iteration % self.topology_log_interval.max(1) == 0
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -189,280 +168,18 @@ impl TopologyPolicy {
         current_gaussians: usize,
     ) -> DensityControllerConfig {
         DensityControllerConfig {
-            densify_grad_threshold: if self.is_litegs_mode() {
-                self.litegs.growth_grad_threshold
-            } else {
-                self.legacy_densify_grad_threshold
-            },
-            opacity_threshold: if self.is_litegs_mode() {
-                LITEGS_OPACITY_THRESHOLD
-            } else {
-                self.prune_threshold
-            },
+            densify_grad_threshold: self.litegs.growth_grad_threshold,
+            opacity_threshold: LITEGS_OPACITY_THRESHOLD,
             percent_dense: LITEGS_PERCENT_DENSE,
             screen_extent: self.scene_extent.max(1e-6),
-            screen_size_threshold: if self.is_litegs_mode() {
-                self.litegs.prune_scale_threshold
-            } else {
-                self.legacy_prune_scale_threshold
-            },
             init_points_num: current_gaussians.max(1),
-            target_primitives: if self.is_litegs_mode() {
-                self.litegs.target_primitives.max(current_gaussians.max(1))
-            } else {
-                self.max_gaussian_budget.max(current_gaussians.max(1))
-            },
-            densify_from: if self.is_litegs_mode() {
-                self.litegs.densify_from
-            } else {
-                self.topology_warmup
-            },
-            densify_until: if self.is_litegs_mode() {
-                self.litegs.densify_until.unwrap_or(self.max_iterations)
-            } else {
-                self.max_iterations
-            },
-            densification_interval: if self.is_litegs_mode() {
-                self.litegs.densification_interval.max(1)
-            } else {
-                self.densify_interval.max(1)
-            },
-            opacity_reset_interval: if self.is_litegs_mode() {
-                self.litegs.opacity_reset_interval.max(1)
-            } else {
-                self.prune_interval.max(1)
-            },
-            opacity_reset_mode: density_controller_opacity_reset_mode(
-                self.litegs.opacity_reset_mode,
-            ),
+            target_primitives: self.litegs.target_primitives.max(current_gaussians.max(1)),
+            densify_from: self.litegs.densify_from,
+            densify_until: self.litegs.densify_until.unwrap_or(self.max_iterations),
+            densification_interval: self.litegs.densification_interval.max(1),
             prune_mode: density_controller_prune_mode(self.litegs.prune_mode),
         }
     }
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(super) struct DensityControllerReferenceSummary {
-    pub(super) prune_mask: Vec<bool>,
-    pub(super) clone_mask: Vec<bool>,
-    pub(super) split_mask: Vec<bool>,
-    pub(super) densify_budget: Option<usize>,
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
-impl DensityControllerReferenceSummary {
-    pub(super) fn prune_candidates(&self) -> usize {
-        self.prune_mask
-            .iter()
-            .filter(|candidate| **candidate)
-            .count()
-    }
-
-    pub(super) fn clone_candidates(&self) -> usize {
-        self.clone_mask
-            .iter()
-            .filter(|candidate| **candidate)
-            .count()
-    }
-
-    pub(super) fn split_candidates(&self) -> usize {
-        self.split_mask
-            .iter()
-            .filter(|candidate| **candidate)
-            .count()
-    }
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
-#[derive(Debug, Clone)]
-pub(super) struct DensityControllerReferenceAdapter {
-    controller: DensityController,
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
-impl DensityControllerReferenceAdapter {
-    pub(super) fn from_topology_state(
-        policy: &TopologyPolicy,
-        splats: &TopologySplatMetrics,
-        stats: &[MetalGaussianStats],
-    ) -> Self {
-        let mut controller = DensityController::new(
-            policy.density_controller_reference_config(splats.len()),
-            density_controller_taming_mode(policy),
-        );
-        controller.stats.resize(splats.len());
-
-        for idx in 0..splats.len() {
-            let gaussian_stats = stats.get(idx).copied().unwrap_or_default();
-            let mean2d_grad_count = gaussian_stats.mean2d_grad.count as f32;
-            let fragment_weight_count = gaussian_stats.fragment_weight.count as f32;
-            let fragment_err_count = gaussian_stats.fragment_err.count as f32;
-
-            controller.stats.visible_count[idx] =
-                gaussian_stats.visible_count.min(u32::MAX as usize) as u32;
-            controller.stats.mean2d_grad[idx] = (
-                gaussian_stats.mean2d_grad.mean * mean2d_grad_count,
-                mean2d_grad_count,
-            );
-            controller.stats.fragment_weight[idx] = (
-                gaussian_stats.fragment_weight.mean * fragment_weight_count,
-                fragment_weight_count,
-            );
-            controller.stats.fragment_err[idx] = (
-                gaussian_stats.fragment_err.mean * fragment_err_count,
-                gaussian_stats.fragment_err.m2
-                    + fragment_err_count
-                        * gaussian_stats.fragment_err.mean
-                        * gaussian_stats.fragment_err.mean,
-                fragment_err_count,
-            );
-            controller.stats.opacity[idx] = splats.opacity(idx);
-            controller.stats.max_scale[idx] = splats.max_scale(idx);
-        }
-
-        Self { controller }
-    }
-
-    pub(super) fn summary(
-        &self,
-        completed_epoch: Option<usize>,
-    ) -> DensityControllerReferenceSummary {
-        let prune_mask = self.controller.get_prune_mask();
-        let clone_mask = self.controller.get_clone_mask();
-        let split_mask = self.controller.get_split_mask();
-        let prune_candidates = prune_mask.iter().filter(|candidate| **candidate).count();
-        let densify_budget = completed_epoch
-            .filter(|epoch| self.controller.is_densify_active(*epoch))
-            .map(|epoch| {
-                self.controller.compute_densify_budget(
-                    self.controller.stats.len(),
-                    prune_candidates,
-                    epoch,
-                )
-            });
-
-        DensityControllerReferenceSummary {
-            prune_mask,
-            clone_mask,
-            split_mask,
-            densify_budget,
-        }
-    }
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
-pub(super) fn density_controller_reference_summary(
-    policy: &TopologyPolicy,
-    splats: &TopologySplatMetrics,
-    stats: &[MetalGaussianStats],
-    completed_epoch: Option<usize>,
-) -> DensityControllerReferenceSummary {
-    DensityControllerReferenceAdapter::from_topology_state(policy, splats, stats)
-        .summary(completed_epoch)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum TopologyExecutionDisposition {
-    Apply,
-    SkipNoEligibleCandidates,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub(super) struct TopologyExecutionPlan {
-    pub(super) completed_epoch: Option<usize>,
-    pub(super) should_densify: bool,
-    pub(super) should_prune: bool,
-    pub(super) should_reset_opacity: bool,
-    pub(super) disposition: TopologyExecutionDisposition,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(super) struct TopologySchedule {
-    pub(super) completed_epoch: Option<usize>,
-    pub(super) densify: bool,
-    pub(super) prune: bool,
-    pub(super) reset_opacity: bool,
-    pub(super) allow_extra_growth: bool,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub(super) struct TopologyStepContext {
-    pub(super) iteration: usize,
-    pub(super) frame_count: usize,
-}
-
-pub(super) fn schedule_topology(
-    policy: &TopologyPolicy,
-    step: TopologyStepContext,
-) -> TopologySchedule {
-    if policy.is_litegs_mode() {
-        let Some(epoch) = litegs_current_epoch(step.iteration, step.frame_count) else {
-            return TopologySchedule::default();
-        };
-        let phase_iter = step.iteration.saturating_sub(1);
-        let frozen = policy
-            .litegs
-            .topology_freeze_after_epoch
-            .map(|freeze_epoch| epoch >= freeze_epoch)
-            .unwrap_or(false);
-        let refine_every = policy.litegs.refine_every.max(1);
-        let progress = if policy.max_iterations == 0 {
-            1.0
-        } else {
-            phase_iter as f32 / policy.max_iterations as f32
-        };
-        let refine = phase_iter > 0
-            && !frozen
-            && progress <= BRUSH_REFINE_PROGRESS_LIMIT
-            && phase_iter % refine_every == 0;
-        return TopologySchedule {
-            completed_epoch: Some(epoch),
-            densify: refine,
-            prune: refine,
-            reset_opacity: false,
-            allow_extra_growth: refine && phase_iter < policy.litegs.growth_stop_iter,
-        };
-    }
-
-    TopologySchedule {
-        completed_epoch: None,
-        densify: should_densify_at(
-            policy.densify_interval,
-            policy.topology_warmup,
-            step.iteration,
-        ),
-        prune: should_prune_at(
-            policy.prune_interval,
-            policy.topology_warmup,
-            step.iteration,
-        ),
-        reset_opacity: false,
-        allow_extra_growth: false,
-    }
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
-pub(super) fn should_collect_visible_indices(
-    policy: &TopologyPolicy,
-    schedule: TopologySchedule,
-) -> bool {
-    policy.is_litegs_mode() || schedule.densify || schedule.prune
-}
-
-pub(crate) fn should_apply_topology_step(
-    config: &TrainingConfig,
-    iteration: usize,
-    frame_count: usize,
-) -> bool {
-    let policy = TopologyPolicy::from_training_config(config, 1.0);
-    let schedule = schedule_topology(
-        &policy,
-        TopologyStepContext {
-            iteration,
-            frame_count,
-        },
-    );
-    schedule.densify || schedule.prune || schedule.reset_opacity
 }
 
 pub(crate) fn plan_topology_from_host_snapshot(
@@ -492,70 +209,34 @@ pub(crate) fn plan_topology_from_host_snapshot(
     );
     let analysis = analyze_topology_candidates(&policy, &metrics, &stats);
 
-    let requested_additions = if policy.is_litegs_mode() {
-        litegs_requested_additions(
-            &analysis.infos,
-            policy.litegs.growth_select_fraction,
-            schedule.allow_extra_growth,
-        )
-    } else {
-        policy.legacy_max_densify_per_update
-    };
+    let requested_additions = litegs_requested_additions(
+        &analysis.infos,
+        policy.litegs.growth_select_fraction,
+        schedule.allow_extra_growth,
+    );
     let max_gaussians = requested_gaussian_cap(&policy, metrics.len(), requested_additions);
     let max_new = max_gaussians.saturating_sub(metrics.len());
-    let litegs_selection = if policy.is_litegs_mode() {
-        litegs_select_densify_candidates(
-            &analysis.infos,
-            max_new,
-            policy.litegs.growth_select_fraction,
-            schedule.allow_extra_growth,
-        )
-    } else {
-        LiteGsDensifySelection::default()
-    };
+    let topology_seed = topology_rng_seed(config.frame_shuffle_seed, iteration);
+    let litegs_selection = litegs_select_densify_candidates_seeded(
+        &analysis.infos,
+        max_new,
+        policy.litegs.growth_select_fraction,
+        schedule.allow_extra_growth,
+        topology_seed,
+    );
 
     let execution = plan_topology_execution(&policy, schedule, &analysis, &litegs_selection);
     let request = TopologyMutationRequest {
-        policy: &policy,
         should_densify: execution.should_densify,
-        should_prune: execution.should_prune,
         should_reset_opacity: execution.should_reset_opacity,
         completed_epoch: execution.completed_epoch,
         late_stage: iteration >= config.iterations.saturating_mul(9) / 10,
-        max_gaussians,
         infos: &analysis.infos,
         litegs_selection: &litegs_selection,
+        random_seed: topology_seed,
     };
 
     plan_topology_mutation(&metrics, request)
-}
-
-pub(super) fn plan_topology_execution(
-    policy: &TopologyPolicy,
-    schedule: TopologySchedule,
-    analysis: &TopologyAnalysis,
-    litegs_selection: &LiteGsDensifySelection,
-) -> TopologyExecutionPlan {
-    let mut plan = TopologyExecutionPlan {
-        completed_epoch: schedule.completed_epoch,
-        should_densify: schedule.densify,
-        should_prune: schedule.prune,
-        should_reset_opacity: schedule.reset_opacity,
-        disposition: TopologyExecutionDisposition::Apply,
-    };
-
-    let has_candidates = if policy.is_litegs_mode() {
-        !litegs_selection.selected_indices.is_empty() || analysis.prune_candidates > 0
-    } else {
-        analysis.clone_candidates > 0
-            || analysis.split_candidates > 0
-            || analysis.prune_candidates > 0
-    };
-    if !has_candidates && !plan.should_reset_opacity {
-        plan.disposition = TopologyExecutionDisposition::SkipNoEligibleCandidates;
-    }
-
-    plan
 }
 
 pub(super) fn analyze_topology_candidates(
@@ -568,11 +249,7 @@ pub(super) fn analyze_topology_candidates(
         ..TopologyAnalysis::default()
     };
     let mut grad_sum = 0.0f32;
-    let clone_scale_threshold = if policy.is_litegs_mode() {
-        policy.litegs_clone_scale_threshold()
-    } else {
-        policy.legacy_clone_scale_threshold
-    };
+    let clone_scale_threshold = policy.litegs_clone_scale_threshold();
     let (brush_center, brush_extent) = splats.brush_bounds_center_extent();
     let brush_max_allowed_bounds = brush_extent.max(policy.scene_extent.max(1e-6)) * 100.0;
 
@@ -582,41 +259,27 @@ pub(super) fn analyze_topology_candidates(
         let max_scale = splats.max_scale(idx);
         let opacity = splats.opacity(idx);
         let gaussian_stats = stats.get(idx).copied().unwrap_or_default();
-        let mean2d_grad = if policy.is_litegs_mode() {
-            gaussian_stats.refine_weight_max
-        } else {
-            gaussian_stats.mean2d_grad.mean
-        };
-
-        let growth_threshold = if policy.is_litegs_mode() {
-            policy.litegs.growth_grad_threshold
-        } else {
-            policy.legacy_densify_grad_threshold
-        };
+        let mean2d_grad = gaussian_stats.refine_weight_max;
+        let growth_threshold = policy.litegs.growth_grad_threshold;
         let growth_candidate = mean2d_grad.is_finite()
             && mean2d_grad >= growth_threshold
             && gaussian_stats.visible_count > 0;
         let candidate_info = TopologyCandidateInfo {
-            max_scale,
             opacity,
             mean2d_grad,
             visible_count: gaussian_stats.visible_count,
             prune_candidate: false,
             growth_candidate,
         };
-        let prune_candidate = if policy.is_litegs_mode() {
-            litegs_should_prune_candidate(
-                policy,
-                &candidate_info,
-                position,
-                scale,
-                brush_center,
-                brush_max_allowed_bounds,
-                splats.retainable(idx),
-            )
-        } else {
-            false
-        };
+        let prune_candidate = litegs_should_prune_candidate(
+            policy,
+            &candidate_info,
+            position,
+            scale,
+            brush_center,
+            brush_max_allowed_bounds,
+            splats.retainable(idx),
+        );
 
         analysis.infos.push(TopologyCandidateInfo {
             prune_candidate,
@@ -636,32 +299,16 @@ pub(super) fn analyze_topology_candidates(
             grad_sum += mean2d_grad;
         }
 
-        if policy.is_litegs_mode() {
-            if growth_candidate {
-                analysis.growth_candidates += 1;
-                if max_scale <= clone_scale_threshold {
-                    analysis.clone_candidates += 1;
-                } else {
-                    analysis.split_candidates += 1;
-                }
+        if growth_candidate {
+            analysis.growth_candidates += 1;
+            if max_scale <= clone_scale_threshold {
+                analysis.clone_candidates += 1;
+            } else {
+                analysis.split_candidates += 1;
             }
-            if prune_candidate {
-                analysis.prune_candidates += 1;
-            }
-        } else {
-            if mean2d_grad > policy.legacy_densify_grad_threshold
-                && opacity > policy.prune_threshold
-            {
-                if max_scale < policy.legacy_clone_scale_threshold {
-                    analysis.clone_candidates += 1;
-                }
-                if max_scale > policy.legacy_split_scale_threshold {
-                    analysis.split_candidates += 1;
-                }
-            }
-            if opacity < policy.prune_threshold || max_scale > policy.legacy_prune_scale_threshold {
-                analysis.prune_candidates += 1;
-            }
+        }
+        if prune_candidate {
+            analysis.prune_candidates += 1;
         }
     }
 
@@ -687,13 +334,30 @@ pub(super) fn litegs_requested_additions(
     prune_candidates.saturating_add(grow_count.saturating_sub(prune_candidates))
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn litegs_select_densify_candidates(
     infos: &[TopologyCandidateInfo],
     max_new: usize,
     growth_select_fraction: f32,
     allow_extra_growth: bool,
 ) -> LiteGsDensifySelection {
-    let mut rng = rand::thread_rng();
+    litegs_select_densify_candidates_seeded(
+        infos,
+        max_new,
+        growth_select_fraction,
+        allow_extra_growth,
+        0,
+    )
+}
+
+fn litegs_select_densify_candidates_seeded(
+    infos: &[TopologyCandidateInfo],
+    max_new: usize,
+    growth_select_fraction: f32,
+    allow_extra_growth: bool,
+    seed: u64,
+) -> LiteGsDensifySelection {
+    let mut rng = StdRng::seed_from_u64(seed ^ TOPOLOGY_SELECTION_SALT);
     litegs_select_densify_candidates_with_rng(
         infos,
         max_new,
@@ -788,76 +452,9 @@ pub(super) fn requested_gaussian_cap(
     current_len: usize,
     litegs_requested_additions: usize,
 ) -> usize {
-    if policy.is_litegs_mode() {
-        policy
-            .max_gaussian_budget
-            .max(current_len.saturating_add(litegs_requested_additions))
-    } else {
-        policy
-            .max_gaussian_budget
-            .max(current_len.saturating_add(policy.legacy_max_densify_per_update))
-    }
-}
-
-#[cfg(test)]
-pub(super) fn prune_snapshot(
-    policy: &TopologyPolicy,
-    snapshot: &mut Splats,
-    stats: &mut Vec<MetalGaussianStats>,
-    origins: &mut Vec<Option<usize>>,
-    infos: &[TopologyCandidateInfo],
-) -> usize {
-    if snapshot.len() <= 1 {
-        return 0;
-    }
-
-    let mut keep_mask = vec![false; snapshot.len()];
-    let mut best_idx = 0usize;
-    let mut best_score = f32::NEG_INFINITY;
-
-    for idx in 0..snapshot.len() {
-        let position = snapshot.position(idx);
-        let rotation = snapshot.rotation(idx);
-        let sh_coeffs = snapshot.sh_coeffs_row(idx);
-        let info = infos.get(idx).copied().unwrap_or_else(|| {
-            let scale = snapshot.scale(idx);
-            TopologyCandidateInfo {
-                max_scale: scale[0].max(scale[1]).max(scale[2]),
-                opacity: sigmoid_scalar(snapshot.opacity_logits[idx]),
-                mean2d_grad: stats.get(idx).copied().unwrap_or_default().mean2d_grad.mean,
-                visible_count: 0,
-                prune_candidate: false,
-                growth_candidate: false,
-            }
-        });
-        let opacity = info.opacity;
-        let max_scale = info.max_scale;
-        let valid = opacity.is_finite()
-            && opacity >= policy.prune_threshold
-            && max_scale.is_finite()
-            && max_scale <= policy.legacy_prune_scale_threshold
-            && position.iter().all(|value| value.is_finite())
-            && rotation.iter().all(|value: &f32| value.is_finite())
-            && sh_coeffs.iter().all(|value: &f32| value.is_finite());
-        if valid {
-            keep_mask[idx] = true;
-        }
-        let score = if opacity.is_finite() {
-            opacity
-        } else {
-            f32::NEG_INFINITY
-        };
-        if score > best_score {
-            best_score = score;
-            best_idx = idx;
-        }
-    }
-
-    if !keep_mask.iter().any(|keep| *keep) {
-        keep_mask[best_idx] = true;
-    }
-
-    filter_snapshot(snapshot, stats, origins, &keep_mask)
+    policy
+        .max_gaussian_budget
+        .max(current_len.saturating_add(litegs_requested_additions))
 }
 
 #[cfg(test)]
@@ -947,7 +544,6 @@ pub(super) struct TopologyMutationResult {
 pub(super) enum TopologyStatsAction {
     KeepCurrent,
     UseMutated,
-    ResetAll,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -988,29 +584,19 @@ impl Default for TopologyMutationAftermath {
 }
 
 pub(super) struct TopologyMutationRequest<'a> {
-    pub(super) policy: &'a TopologyPolicy,
     pub(super) should_densify: bool,
-    pub(super) should_prune: bool,
     pub(super) should_reset_opacity: bool,
     pub(super) completed_epoch: Option<usize>,
     pub(super) late_stage: bool,
-    pub(super) max_gaussians: usize,
     pub(super) infos: &'a [TopologyCandidateInfo],
     pub(super) litegs_selection: &'a LiteGsDensifySelection,
+    pub(super) random_seed: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum TopologyPlanRow {
     Existing {
         source_idx: usize,
-    },
-    LegacyOffsetClone {
-        source_idx: usize,
-        axis: usize,
-    },
-    LegacySplit {
-        source_idx: usize,
-        direction: i8,
     },
     BrushRefineExisting {
         source_idx: usize,
@@ -1026,8 +612,6 @@ impl TopologyPlanRow {
     pub(crate) fn source_idx(&self) -> usize {
         match *self {
             Self::Existing { source_idx }
-            | Self::LegacyOffsetClone { source_idx, .. }
-            | Self::LegacySplit { source_idx, .. }
             | Self::BrushRefineExisting { source_idx, .. }
             | Self::BrushRefineNew { source_idx, .. } => source_idx,
         }
@@ -1041,22 +625,12 @@ impl TopologyPlanRow {
         )
     }
 
+    #[cfg(test)]
     fn position(&self, metrics: &TopologySplatMetrics) -> [f32; 3] {
         let source_idx = self.source_idx();
         let mut position = metrics.position(source_idx);
         match *self {
             Self::Existing { .. } => position,
-            Self::LegacyOffsetClone { axis, .. } => {
-                let scale = metrics.scale(source_idx);
-                if axis < 3 {
-                    position[axis] += scale[axis].max(0.01) * 0.5;
-                }
-                position
-            }
-            Self::LegacySplit { direction, .. } => {
-                position[0] += (direction as f32) * metrics.max_scale(source_idx) * 0.1;
-                position
-            }
             Self::BrushRefineExisting { sample_scalar, .. } => {
                 let offset = brush_refine_offset(metrics, source_idx, sample_scalar);
                 position[0] -= offset[0];
@@ -1074,15 +648,12 @@ impl TopologyPlanRow {
         }
     }
 
+    #[cfg(test)]
     fn scale(&self, metrics: &TopologySplatMetrics) -> [f32; 3] {
         let source_idx = self.source_idx();
         let mut scale = metrics.scale(source_idx);
         match *self {
-            Self::Existing { .. } | Self::LegacyOffsetClone { .. } => scale,
-            Self::LegacySplit { .. } => {
-                scale[0] = (metrics.max_scale(source_idx) * 0.5).max(1e-6);
-                scale
-            }
+            Self::Existing { .. } => scale,
             Self::BrushRefineExisting { .. } | Self::BrushRefineNew { .. } => {
                 scale = brush_refine_scale(scale);
                 scale
@@ -1090,11 +661,7 @@ impl TopologyPlanRow {
         }
     }
 
-    fn max_scale(&self, metrics: &TopologySplatMetrics) -> f32 {
-        let scale = self.scale(metrics);
-        scale[0].max(scale[1]).max(scale[2])
-    }
-
+    #[cfg(test)]
     fn opacity(&self, metrics: &TopologySplatMetrics) -> f32 {
         match *self {
             Self::BrushRefineExisting { .. } | Self::BrushRefineNew { .. } => {
@@ -1102,25 +669,6 @@ impl TopologyPlanRow {
             }
             _ => metrics.opacity(self.source_idx()),
         }
-    }
-
-    fn retainable(&self, metrics: &TopologySplatMetrics) -> bool {
-        metrics.retainable(self.source_idx())
-            && self.position(metrics).iter().all(|value| value.is_finite())
-    }
-
-    fn keep_for_legacy_prune(
-        &self,
-        metrics: &TopologySplatMetrics,
-        policy: &TopologyPolicy,
-    ) -> bool {
-        let opacity = self.opacity(metrics);
-        let max_scale = self.max_scale(metrics);
-        opacity.is_finite()
-            && opacity >= policy.prune_threshold
-            && max_scale.is_finite()
-            && max_scale <= policy.legacy_prune_scale_threshold
-            && self.retainable(metrics)
     }
 }
 
@@ -1160,149 +708,7 @@ pub(crate) fn plan_topology_mutation(
     metrics: &TopologySplatMetrics,
     request: TopologyMutationRequest<'_>,
 ) -> TopologyMutationPlan {
-    if request.policy.is_litegs_mode() {
-        return plan_brush_refine_mutation(metrics, request);
-    }
-
-    let mut rows: Vec<TopologyPlanRow> = (0..metrics.len())
-        .map(|source_idx| TopologyPlanRow::Existing { source_idx })
-        .collect();
-    let additions = if request.should_densify {
-        plan_legacy_densify_rows(
-            request.policy,
-            metrics,
-            request.infos,
-            request.max_gaussians,
-        )
-    } else {
-        Vec::new()
-    };
-    let added = additions.len();
-    rows.extend(additions);
-
-    let mut pruned = 0usize;
-    if request.should_prune && rows.len() > 1 {
-        let mut keep_mask = rows
-            .iter()
-            .map(|row| row.keep_for_legacy_prune(metrics, request.policy))
-            .collect::<Vec<_>>();
-
-        if !keep_mask.iter().any(|keep| *keep) {
-            if let Some((best_idx, _)) = rows.iter().enumerate().max_by(|lhs, rhs| {
-                lhs.1
-                    .opacity(metrics)
-                    .partial_cmp(&rhs.1.opacity(metrics))
-                    .unwrap_or(Ordering::Equal)
-            }) {
-                keep_mask[best_idx] = true;
-            }
-        }
-
-        pruned = keep_mask.iter().filter(|keep| !**keep).count();
-        if pruned > 0 {
-            rows = rows
-                .into_iter()
-                .zip(keep_mask)
-                .filter_map(|(row, keep)| keep.then_some(row))
-                .collect();
-        }
-    }
-
-    let aftermath = topology_mutation_aftermath(&request, rows.len(), added, pruned);
-    TopologyMutationPlan {
-        rows,
-        added,
-        pruned,
-        aftermath,
-    }
-}
-
-fn plan_legacy_densify_rows(
-    policy: &TopologyPolicy,
-    metrics: &TopologySplatMetrics,
-    infos: &[TopologyCandidateInfo],
-    max_gaussians: usize,
-) -> Vec<TopologyPlanRow> {
-    if metrics.len() >= max_gaussians {
-        return Vec::new();
-    }
-
-    let clone_opacity_threshold = policy.prune_threshold;
-    let original_len = metrics.len();
-    let mut clone_candidates = Vec::new();
-    let mut split_candidates = Vec::new();
-
-    for idx in 0..original_len {
-        let info = infos.get(idx).copied().unwrap_or(TopologyCandidateInfo {
-            max_scale: 0.0,
-            opacity: 0.0,
-            mean2d_grad: 0.0,
-            visible_count: 0,
-            prune_candidate: false,
-            growth_candidate: false,
-        });
-        let opacity = info.opacity;
-        let max_scale = info.max_scale;
-        let grad_accum = info.mean2d_grad;
-        if !grad_accum.is_finite() || !opacity.is_finite() {
-            continue;
-        }
-        if grad_accum <= policy.legacy_densify_grad_threshold {
-            continue;
-        }
-        if max_scale < policy.legacy_clone_scale_threshold && opacity > clone_opacity_threshold {
-            clone_candidates.push((idx, grad_accum));
-        }
-        if max_scale > policy.legacy_split_scale_threshold && opacity > policy.prune_threshold {
-            split_candidates.push((idx, grad_accum * max_scale));
-        }
-    }
-
-    clone_candidates.sort_by(|lhs, rhs| rhs.1.partial_cmp(&lhs.1).unwrap_or(Ordering::Equal));
-    split_candidates.sort_by(|lhs, rhs| rhs.1.partial_cmp(&lhs.1).unwrap_or(Ordering::Equal));
-
-    let mut rows = Vec::new();
-    let mut available = max_gaussians.saturating_sub(metrics.len());
-    let per_pass_limit = policy
-        .legacy_max_densify_per_update
-        .min(available)
-        .min((original_len / 32).max(32));
-    let clone_limit = clone_candidates.len().min(per_pass_limit);
-    for (rank, (idx, score)) in clone_candidates.into_iter().take(clone_limit).enumerate() {
-        if score <= 0.0 {
-            continue;
-        }
-        rows.push(TopologyPlanRow::LegacyOffsetClone {
-            source_idx: idx,
-            axis: rank % 3,
-        });
-        available = available.saturating_sub(1);
-        if available == 0 {
-            return rows;
-        }
-    }
-
-    let split_limit = split_candidates
-        .len()
-        .min((per_pass_limit / 4).max(1))
-        .min(available / 2);
-    for (idx, score) in split_candidates.into_iter().take(split_limit) {
-        if score <= policy.legacy_densify_grad_threshold {
-            continue;
-        }
-        for direction in [1i8, -1i8] {
-            if available == 0 {
-                break;
-            }
-            rows.push(TopologyPlanRow::LegacySplit {
-                source_idx: idx,
-                direction,
-            });
-            available = available.saturating_sub(1);
-        }
-    }
-
-    rows
+    plan_brush_refine_mutation(metrics, request)
 }
 
 fn plan_brush_refine_mutation(
@@ -1331,7 +737,7 @@ fn plan_brush_refine_mutation(
 
     let mut added = 0usize;
     if request.should_densify && !request.litegs_selection.selected_indices.is_empty() {
-        let mut rng = rand::thread_rng();
+        let mut rng = StdRng::seed_from_u64(request.random_seed ^ TOPOLOGY_REFINE_SALT);
         for &source_idx in &request.litegs_selection.selected_indices {
             let Some(row_idx) = surviving_indices.iter().position(|&idx| idx == source_idx) else {
                 continue;
@@ -1389,8 +795,6 @@ fn topology_mutation_aftermath(
     let topology_changed = added > 0 || pruned > 0;
     let gaussian_stats_action = if topology_changed {
         TopologyStatsAction::UseMutated
-    } else if request.should_reset_opacity && !request.policy.is_litegs_mode() {
-        TopologyStatsAction::ResetAll
     } else {
         TopologyStatsAction::KeepCurrent
     };
@@ -1401,7 +805,7 @@ fn topology_mutation_aftermath(
         requires_cluster_resync: topology_changed,
         requires_runtime_reserve: topology_changed,
         apply_opacity_reset: request.should_reset_opacity,
-        reset_refine_window_stats: request.policy.is_litegs_mode(),
+        reset_refine_window_stats: true,
         gaussian_stats_action,
         metrics_delta: TopologyMetricsDelta {
             final_gaussians,
@@ -1464,24 +868,11 @@ pub(super) fn apply_topology_metrics_delta(
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
-fn density_controller_opacity_reset_mode(mode: LiteGsOpacityResetMode) -> OpacityResetMode {
-    match mode {
-        LiteGsOpacityResetMode::Decay => OpacityResetMode::Decay,
-        LiteGsOpacityResetMode::Reset => OpacityResetMode::Reset,
-    }
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
 fn density_controller_prune_mode(mode: LiteGsPruneMode) -> PruneMode {
     match mode {
         LiteGsPruneMode::Threshold => PruneMode::Threshold,
         LiteGsPruneMode::Weight => PruneMode::Weight,
     }
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
-fn density_controller_taming_mode(policy: &TopologyPolicy) -> bool {
-    policy.is_litegs_mode() && matches!(policy.litegs.prune_mode, LiteGsPruneMode::Weight)
 }
 
 fn sample_weighted_indices<R: Rng + ?Sized>(
@@ -1519,6 +910,14 @@ fn brush_refine_sample_scalar<R: Rng + ?Sized>(rng: &mut R) -> f32 {
     (-2.0 * u1.ln()).sqrt() * (std::f32::consts::TAU * u2).cos()
 }
 
+fn topology_rng_seed(base_seed: u64, iteration: usize) -> u64 {
+    base_seed
+        .wrapping_mul(0x9e37_79b9_7f4a_7c15)
+        .wrapping_add(iteration as u64)
+        .rotate_left(17)
+}
+
+#[cfg(test)]
 fn brush_refine_scale(scale: [f32; 3]) -> [f32; 3] {
     let mut refined = scale;
     let mut max_axis = 0usize;
@@ -1531,12 +930,14 @@ fn brush_refine_scale(scale: [f32; 3]) -> [f32; 3] {
     refined
 }
 
+#[cfg(test)]
 fn brush_refine_opacity(opacity: f32) -> f32 {
     let clamped = opacity.clamp(BRUSH_MIN_OPACITY, 1.0 - BRUSH_MIN_OPACITY);
     let inverted = (1.0 - clamped).max(0.0);
     (1.0 - inverted.sqrt()).clamp(BRUSH_MIN_OPACITY, 1.0 - BRUSH_MIN_OPACITY)
 }
 
+#[cfg(test)]
 fn brush_refine_offset(
     metrics: &TopologySplatMetrics,
     source_idx: usize,
@@ -1588,21 +989,6 @@ fn litegs_should_prune_candidate(
     opacity_prune || scale_small || scale_large || out_of_bounds || !retainable
 }
 
-fn should_densify_at(densify_interval: usize, topology_warmup: usize, iteration: usize) -> bool {
-    densify_interval > 0 && iteration > topology_warmup && iteration % densify_interval == 0
-}
-
-fn should_prune_at(prune_interval: usize, topology_warmup: usize, iteration: usize) -> bool {
-    prune_interval > 0 && iteration > topology_warmup && iteration % prune_interval == 0
-}
-
-fn litegs_current_epoch(iteration: usize, frame_count: usize) -> Option<usize> {
-    if frame_count == 0 || iteration == 0 {
-        return None;
-    }
-    Some(iteration.saturating_sub(1) / frame_count)
-}
-
 fn build_host_snapshot_stats(
     len: usize,
     grad_2d_accum: &[f32],
@@ -1636,42 +1022,6 @@ fn build_host_snapshot_stats(
 }
 
 #[cfg(test)]
-fn filter_snapshot(
-    snapshot: &mut Splats,
-    stats: &mut Vec<MetalGaussianStats>,
-    origins: &mut Vec<Option<usize>>,
-    keep_mask: &[bool],
-) -> usize {
-    let pruned = keep_mask.iter().filter(|keep| !**keep).count();
-    if pruned == 0 {
-        return 0;
-    }
-
-    let mut kept_snapshot = snapshot.retained_view(snapshot.len() - pruned);
-    let mut kept_stats = Vec::with_capacity(snapshot.len() - pruned);
-    let mut kept_origins = Vec::with_capacity(snapshot.len() - pruned);
-
-    for idx in 0..snapshot.len() {
-        if keep_mask[idx] {
-            kept_snapshot.push(
-                snapshot.position(idx),
-                snapshot.log_scale(idx),
-                snapshot.rotation(idx),
-                snapshot.opacity_logits[idx],
-                snapshot.sh_coeffs_row(idx),
-            );
-            kept_stats.push(stats[idx]);
-            kept_origins.push(origins[idx]);
-        }
-    }
-
-    *snapshot = kept_snapshot;
-    *stats = kept_stats;
-    *origins = kept_origins;
-    pruned
-}
-
-#[cfg(test)]
 fn rebuild_snapshot_from_plan(
     snapshot: &Splats,
     metrics: &TopologySplatMetrics,
@@ -1699,32 +1049,20 @@ fn rebuild_snapshot_from_plan(
 
 #[cfg(test)]
 mod tests {
+    use super::reference::density_controller_reference_summary;
+    use super::schedule::{schedule_topology, TopologyStepContext};
+    use super::splat_metrics::TopologySplatMetrics;
     use super::{
         analyze_topology_candidates, apply_snapshot_mutations, apply_topology_metrics_delta,
-        densify_snapshot_litegs, density_controller_reference_summary, litegs_requested_additions,
-        litegs_select_densify_candidates, prune_snapshot, schedule_topology,
-        should_apply_topology_step, should_collect_visible_indices, LiteGsDensifySelection,
-        MetalGaussianStats, RunningMoments, TopologyAnalysis, TopologyMutationRequest,
-        TopologyPolicy, TopologySchedule, TopologyStatsAction, TopologyStepContext,
+        densify_snapshot_litegs, litegs_requested_additions, litegs_select_densify_candidates,
+        litegs_select_densify_candidates_seeded, should_apply_topology_step,
+        LiteGsDensifySelection, MetalGaussianStats, RunningMoments, TopologyMutationRequest,
+        TopologyPolicy, TopologyStatsAction,
     };
-    use crate::sh::{rgb_to_sh0_value, sh_coeff_count_for_degree, SplatColorRepresentation};
-    use crate::training::parity_harness::ParityTopologyMetrics;
-    use crate::training::runtime_splats::TopologySplatMetrics;
     use crate::core::HostSplats as Splats;
+    use crate::sh::{rgb_to_sh0_value, sh_coeff_count_for_degree, SplatColorRepresentation};
+    use crate::training::metrics::ParityTopologyMetrics;
     use crate::training::{LiteGsConfig, TrainingConfig};
-
-    fn legacy_policy() -> TopologyPolicy {
-        let config = TrainingConfig {
-            densify_interval: 128,
-            prune_interval: 200,
-            topology_warmup: 0,
-            prune_threshold: 0.05,
-            max_initial_gaussians: 128,
-            iterations: 1000,
-            ..TrainingConfig::default()
-        };
-        TopologyPolicy::from_training_config(&config, 1.0)
-    }
 
     fn test_snapshot(
         positions: Vec<f32>,
@@ -1769,52 +1107,9 @@ mod tests {
     }
 
     #[test]
-    fn legacy_schedule_keeps_densify_and_prune_independent() {
-        let policy = legacy_policy();
-
-        let densify = schedule_topology(
-            &policy,
-            TopologyStepContext {
-                iteration: 128,
-                frame_count: 1,
-            },
-        );
-        let prune = schedule_topology(
-            &policy,
-            TopologyStepContext {
-                iteration: 200,
-                frame_count: 1,
-            },
-        );
-
-        assert_eq!(
-            densify,
-            TopologySchedule {
-                completed_epoch: None,
-                densify: true,
-                prune: false,
-                reset_opacity: false,
-                allow_extra_growth: false,
-            }
-        );
-        assert_eq!(
-            prune,
-            TopologySchedule {
-                completed_epoch: None,
-                densify: false,
-                prune: true,
-                reset_opacity: false,
-                allow_extra_growth: false,
-            }
-        );
-    }
-
-    #[test]
     fn litegs_schedule_respects_refine_cadence_and_freeze() {
         let config = TrainingConfig {
-            litegs_mode: true,
             iterations: 30,
-            topology_warmup: 0,
             litegs: LiteGsConfig {
                 densify_from: 1,
                 densify_until: Some(6),
@@ -1857,9 +1152,7 @@ mod tests {
     #[test]
     fn litegs_short_run_schedule_disables_densify_window() {
         let config = TrainingConfig {
-            litegs_mode: true,
             iterations: 500,
-            topology_warmup: 100,
             litegs: LiteGsConfig {
                 densify_from: 3,
                 refine_every: 200,
@@ -1915,11 +1208,7 @@ mod tests {
     #[test]
     fn should_apply_topology_step_uses_litegs_refine_cadence() {
         let config = TrainingConfig {
-            litegs_mode: true,
             iterations: 500,
-            densify_interval: 100,
-            prune_interval: 100,
-            topology_warmup: 100,
             litegs: LiteGsConfig {
                 refine_every: 160,
                 ..LiteGsConfig::default()
@@ -1973,32 +1262,26 @@ mod tests {
     }
 
     #[test]
-    fn prune_snapshot_keeps_best_gaussian_when_all_candidates_fail() {
-        let policy = legacy_policy();
-        let mut snapshot = test_snapshot(
-            vec![0.0, 0.0, 1.0, 1.0, 0.0, 2.0],
-            vec![10.0; 6],
-            vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
-            vec![-10.0, -1.0],
-            vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
-            Vec::new(),
-            SplatColorRepresentation::Rgb,
-        );
-        let mut stats = vec![MetalGaussianStats::default(), MetalGaussianStats::default()];
-        let mut origins = vec![Some(0), Some(1)];
-        let infos = TopologyAnalysis::default().infos;
+    fn litegs_selection_is_repeatable_for_same_seed() {
+        let infos = vec![
+            candidate(true, false, 0, 0.0, 0.0),
+            candidate(false, true, 1, 0.9, 2.0),
+            candidate(false, true, 1, 0.8, 3.0),
+            candidate(false, true, 1, 0.7, 1.0),
+            candidate(false, true, 1, 0.6, 4.0),
+        ];
 
-        let pruned = prune_snapshot(&policy, &mut snapshot, &mut stats, &mut origins, &infos);
+        let lhs = litegs_select_densify_candidates_seeded(&infos, 3, 1.0, true, 42);
+        let rhs = litegs_select_densify_candidates_seeded(&infos, 3, 1.0, true, 42);
 
-        assert_eq!(pruned, 1);
-        assert_eq!(snapshot.len(), 1);
-        assert_eq!(origins, vec![Some(1)]);
+        assert_eq!(lhs.selected_indices, rhs.selected_indices);
+        assert_eq!(lhs.replacement_count, rhs.replacement_count);
+        assert_eq!(lhs.extra_growth_count, rhs.extra_growth_count);
     }
 
     #[test]
     fn litegs_densify_preserves_sh_layout() {
         let config = TrainingConfig {
-            litegs_mode: true,
             litegs: LiteGsConfig {
                 sh_degree: 3,
                 ..LiteGsConfig::default()
@@ -2029,7 +1312,6 @@ mod tests {
     #[test]
     fn analyze_topology_candidates_marks_litegs_growth_and_prune() {
         let config = TrainingConfig {
-            litegs_mode: true,
             litegs: LiteGsConfig {
                 prune_min_age: 1,
                 prune_invisible_epochs: 1,
@@ -2086,7 +1368,6 @@ mod tests {
     #[test]
     fn density_controller_reference_summary_tracks_threshold_masks() {
         let config = TrainingConfig {
-            litegs_mode: true,
             iterations: 12,
             litegs: LiteGsConfig {
                 densify_from: 1,
@@ -2152,7 +1433,6 @@ mod tests {
     #[test]
     fn density_controller_reference_summary_tracks_weight_budget() {
         let config = TrainingConfig {
-            litegs_mode: true,
             iterations: 12,
             litegs: LiteGsConfig {
                 densify_from: 1,
@@ -2235,32 +1515,7 @@ mod tests {
     }
 
     #[test]
-    fn collect_visible_indices_only_when_legacy_topology_work_is_scheduled() {
-        let policy = legacy_policy();
-
-        assert!(!should_collect_visible_indices(
-            &policy,
-            TopologySchedule::default(),
-        ));
-        assert!(should_collect_visible_indices(
-            &policy,
-            TopologySchedule {
-                densify: true,
-                ..TopologySchedule::default()
-            },
-        ));
-        assert!(should_collect_visible_indices(
-            &policy,
-            TopologySchedule {
-                prune: true,
-                ..TopologySchedule::default()
-            },
-        ));
-    }
-
-    #[test]
     fn mutation_aftermath_requests_structural_rebuild_and_metrics() {
-        let policy = legacy_policy();
         let mut snapshot = test_snapshot(
             vec![0.0, 0.0, 1.0, 1.0, 0.0, 1.0],
             vec![
@@ -2294,21 +1549,24 @@ mod tests {
             candidate(false, true, 1, 0.9, 1.0),
             candidate(true, false, 0, 0.0, 0.0),
         ];
+        let selection = LiteGsDensifySelection {
+            selected_indices: vec![0],
+            replacement_count: 1,
+            extra_growth_count: 0,
+        };
 
         let mutation = apply_snapshot_mutations(
             &mut snapshot,
             &mut stats,
             &mut origins,
             TopologyMutationRequest {
-                policy: &policy,
                 should_densify: true,
-                should_prune: true,
                 should_reset_opacity: false,
                 completed_epoch: Some(2),
                 late_stage: true,
-                max_gaussians: 4,
                 infos: &infos,
-                litegs_selection: &LiteGsDensifySelection::default(),
+                litegs_selection: &selection,
+                random_seed: 0,
             },
         );
 
@@ -2340,11 +1598,6 @@ mod tests {
 
     #[test]
     fn mutation_aftermath_marks_litegs_opacity_reset_without_structural_change() {
-        let config = TrainingConfig {
-            litegs_mode: true,
-            ..TrainingConfig::default()
-        };
-        let policy = TopologyPolicy::from_training_config(&config, 1.0);
         let mut snapshot = test_snapshot(
             vec![0.0, 0.0, 1.0],
             vec![0.05f32.ln(), 0.05f32.ln(), 0.05f32.ln()],
@@ -2363,15 +1616,13 @@ mod tests {
             &mut stats,
             &mut origins,
             TopologyMutationRequest {
-                policy: &policy,
                 should_densify: false,
-                should_prune: false,
                 should_reset_opacity: true,
                 completed_epoch: Some(3),
                 late_stage: true,
-                max_gaussians: 1,
                 infos: &infos,
                 litegs_selection: &LiteGsDensifySelection::default(),
+                random_seed: 0,
             },
         );
 
@@ -2401,7 +1652,6 @@ mod tests {
         mean2d_grad: f32,
     ) -> super::TopologyCandidateInfo {
         super::TopologyCandidateInfo {
-            max_scale: 0.01,
             opacity,
             mean2d_grad,
             visible_count,

@@ -1,0 +1,322 @@
+//! WGPU training runtime orchestration.
+
+use std::time::Instant;
+
+use crate::core::GaussianCamera;
+use crate::core::HostSplats;
+use crate::training::data::frame_loader::{
+    ordered_frame_indices, FrameLoaderOptions, PrefetchFrameLoader,
+};
+use crate::training::data::init_map::build_initial_splats;
+use crate::training::evaluation::scaled_dimensions;
+use crate::training::events::{
+    emit_training_event, TrainingControl, TrainingEvent, TrainingEventCadence, TrainingEventRoute,
+    TrainingIterationProgress, TrainingPlanSelected, TrainingRun, TrainingRunCancelled,
+    TrainingRunCompleted, TrainingRunReport, TrainingRunStarted, TrainingSnapshotReady,
+};
+use crate::training::TrainingConfig;
+use crate::{Intrinsics, TrainingDataset, TrainingError};
+
+use super::backend::{GsDevice, GsDiffBackend};
+use super::splats::{device_splats_to_host, host_splats_to_device};
+use super::trainer::{
+    TrainingIterationMetrics, TrainingLoopObserver, WgpuTrainer, WgpuTrainingReport,
+};
+
+pub fn train_splats_with_controlled_events<F>(
+    dataset: &TrainingDataset,
+    config: &TrainingConfig,
+    control: TrainingControl,
+    mut on_event: F,
+) -> Result<TrainingRun, TrainingError>
+where
+    F: FnMut(TrainingEvent),
+{
+    emit_training_event(
+        &mut on_event,
+        TrainingEvent::RunStarted(TrainingRunStarted {
+            iterations: config.iterations,
+            frame_count: dataset.poses.len(),
+            input_point_count: dataset.initial_points.len(),
+        }),
+    );
+    emit_training_event(
+        &mut on_event,
+        TrainingEvent::PlanSelected(TrainingPlanSelected {
+            route: TrainingEventRoute::Standard,
+        }),
+    );
+
+    let run = run_training(dataset, config, &control, &mut on_event)?;
+
+    if run.report.cancelled {
+        emit_training_event(
+            &mut on_event,
+            TrainingEvent::RunCancelled(TrainingRunCancelled {
+                completed_iterations: run.report.completed_iterations,
+                elapsed: run.report.elapsed,
+            }),
+        );
+    }
+
+    emit_training_event(
+        &mut on_event,
+        TrainingEvent::RunCompleted(TrainingRunCompleted {
+            report: run.report.clone(),
+        }),
+    );
+    Ok(run)
+}
+
+fn run_training<F>(
+    dataset: &TrainingDataset,
+    config: &TrainingConfig,
+    control: &TrainingControl,
+    on_event: &mut F,
+) -> Result<TrainingRun, TrainingError>
+where
+    F: FnMut(TrainingEvent) + ?Sized,
+{
+    if dataset.poses.is_empty() {
+        return Err(TrainingError::InvalidInput(
+            "training dataset does not contain any poses".to_string(),
+        ));
+    }
+
+    let started_at = Instant::now();
+    let input_width = dataset.intrinsics.width as usize;
+    let input_height = dataset.intrinsics.height as usize;
+    let (target_width, target_height) =
+        scaled_dimensions(input_width, input_height, config.render_scale);
+    let initial_splats = build_initial_splats(dataset, config)?;
+
+    let mut loader = PrefetchFrameLoader::new(
+        dataset,
+        config,
+        FrameLoaderOptions {
+            cache_capacity: config.frame_cache_capacity,
+            prefetch_ahead: config.frame_prefetch_ahead,
+            rgb_target_size: Some((target_width, target_height)),
+        },
+    )?;
+
+    let frame_order = ordered_frame_indices(dataset.poses.len(), 1, config.frame_shuffle_seed);
+    let mut cameras = Vec::with_capacity(frame_order.len());
+    let mut target_images = Vec::with_capacity(frame_order.len());
+
+    for (cursor, &pose_idx) in frame_order.iter().enumerate() {
+        loader.prefetch_order_window(&frame_order, cursor)?;
+        let pose = &dataset.poses[pose_idx];
+        let decoded = loader.get(pose_idx)?;
+
+        cameras.push(gaussian_camera_from_scene_pose(
+            &pose.pose,
+            dataset.intrinsics,
+            target_width,
+            target_height,
+        ));
+        target_images.push(
+            decoded
+                .target_rgb
+                .clone()
+                .expect("frame loader should prepare target_rgb when rgb_target_size is set"),
+        );
+    }
+
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|err| {
+            TrainingError::TrainingFailed(format!("failed to build tokio runtime: {err}"))
+        })?
+        .block_on(async move {
+            let device = GsDevice::default();
+            let mut device_splats =
+                host_splats_to_device::<GsDiffBackend>(&initial_splats, &device);
+            let sh_coeffs = device_splats.sh_coeffs.val().dims()[1];
+            let mut trainer = WgpuTrainer::new(
+                config.clone(),
+                device.clone(),
+                device_splats.num_splats(),
+                sh_coeffs,
+            );
+            let mut observer = TrainingEventObserver {
+                control,
+                cadence: control.cadence(),
+                started_at,
+                on_event,
+            };
+            let report = trainer
+                .train_with_observer(
+                    &mut device_splats,
+                    &cameras,
+                    &target_images,
+                    (target_width, target_height),
+                    config.iterations,
+                    &mut observer,
+                )
+                .await;
+            let splats = device_splats_to_host(&device_splats).await;
+            Ok(build_training_run(splats, report, started_at.elapsed()))
+        })
+}
+
+struct TrainingEventObserver<'a, F>
+where
+    F: FnMut(TrainingEvent) + ?Sized,
+{
+    control: &'a TrainingControl,
+    cadence: TrainingEventCadence,
+    started_at: Instant,
+    on_event: &'a mut F,
+}
+
+impl<F> TrainingLoopObserver for TrainingEventObserver<'_, F>
+where
+    F: FnMut(TrainingEvent) + ?Sized,
+{
+    fn should_cancel(&self) -> bool {
+        self.control.is_cancel_requested()
+    }
+
+    fn should_emit_progress(&self, iteration: usize) -> bool {
+        self.cadence.should_emit_progress(iteration)
+    }
+
+    fn should_emit_snapshot(&self, iteration: usize) -> bool {
+        self.cadence.should_emit_snapshot(iteration)
+    }
+
+    fn on_iteration(&mut self, metrics: TrainingIterationMetrics) {
+        (self.on_event)(TrainingEvent::IterationProgress(
+            TrainingIterationProgress {
+                iteration: metrics.iteration,
+                latest_loss: metrics.loss,
+                gaussian_count: metrics.gaussian_count,
+                elapsed: self.started_at.elapsed(),
+            },
+        ));
+    }
+
+    fn on_snapshot(&mut self, metrics: TrainingIterationMetrics, splats: HostSplats) {
+        (self.on_event)(TrainingEvent::SnapshotReady(TrainingSnapshotReady {
+            iteration: metrics.iteration,
+            latest_loss: metrics.loss,
+            gaussian_count: metrics.gaussian_count,
+            elapsed: self.started_at.elapsed(),
+            splats,
+        }));
+    }
+}
+
+fn gaussian_camera_from_scene_pose(
+    pose: &crate::SE3,
+    intrinsics: crate::Intrinsics,
+    target_width: usize,
+    target_height: usize,
+) -> GaussianCamera {
+    let sx = target_width as f32 / intrinsics.width as f32;
+    let sy = target_height as f32 / intrinsics.height as f32;
+    let scaled_intrinsics = Intrinsics::new(
+        intrinsics.fx * sx,
+        intrinsics.fy * sy,
+        intrinsics.cx * sx,
+        intrinsics.cy * sy,
+        target_width as u32,
+        target_height as u32,
+    );
+    GaussianCamera::new(scaled_intrinsics, pose.inverse())
+}
+
+fn build_training_run(
+    splats: HostSplats,
+    report: WgpuTrainingReport,
+    elapsed: std::time::Duration,
+) -> TrainingRun {
+    let final_loss = report.final_loss;
+    let gaussian_count = if report.final_gaussian_count == 0 {
+        splats.len()
+    } else {
+        report.final_gaussian_count
+    };
+
+    TrainingRun {
+        report: TrainingRunReport {
+            elapsed,
+            final_loss,
+            final_step_loss: final_loss,
+            gaussian_count,
+            sh_degree: splats.sh_degree(),
+            completed_iterations: report.completed_iterations,
+            cancelled: report.cancelled,
+            telemetry: None,
+        },
+        splats,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::trainer::TrainingLoopObserver;
+    use super::*;
+
+    #[test]
+    fn observer_emits_progress_and_snapshot_on_cadence() {
+        let control = TrainingControl::new(TrainingEventCadence {
+            progress_every: 2,
+            snapshot_every: Some(3),
+        });
+        let mut events = Vec::new();
+        let started = Instant::now();
+        let mut sink = |event| events.push(event);
+        let mut observer = TrainingEventObserver {
+            control: &control,
+            cadence: control.cadence(),
+            started_at: started,
+            on_event: &mut sink,
+        };
+
+        observer.on_iteration(TrainingIterationMetrics {
+            iteration: 1,
+            loss: 1.0,
+            gaussian_count: 8,
+        });
+        observer.on_iteration(TrainingIterationMetrics {
+            iteration: 2,
+            loss: 0.8,
+            gaussian_count: 8,
+        });
+        assert!(observer.should_emit_snapshot(3));
+        observer.on_snapshot(
+            TrainingIterationMetrics {
+                iteration: 3,
+                loss: 0.7,
+                gaussian_count: 9,
+            },
+            HostSplats::default(),
+        );
+
+        assert!(events.iter().any(|event| matches!(
+            event,
+            TrainingEvent::IterationProgress(TrainingIterationProgress { iteration: 2, .. })
+        )));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, TrainingEvent::SnapshotReady(_))));
+    }
+
+    #[test]
+    fn observer_honors_cooperative_cancellation() {
+        let control = TrainingControl::default();
+        let mut sink = |_event| {};
+        let observer = TrainingEventObserver {
+            control: &control,
+            cadence: control.cadence(),
+            started_at: Instant::now(),
+            on_event: &mut sink,
+        };
+        assert!(!observer.should_cancel());
+        control.request_cancel();
+        assert!(observer.should_cancel());
+    }
+}

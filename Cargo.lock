@@ -6614,6 +6614,7 @@ dependencies = [
  "burn-ir",
  "burn-wgpu",
  "bytemuck",
+ "bytes",
  "clap",
  "env_logger",
  "glam",

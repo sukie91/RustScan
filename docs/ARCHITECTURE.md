@@ -121,7 +121,7 @@ Metal runtime 也已经从单体模块拆解为：
 ## Current Architectural Constraints
 
 - RustGS 仍然是 Metal-first 训练后端，没有引入多后端抽象。
-- `LegacyMetal` 和 `LiteGsMacV1` 仍然是有效训练 profile；这里的 `legacy` 是行为语义，不再代表兼容 API。
+- 用户侧默认训练 profile 已经收口到 `LiteGsMacV1` 语义；legacy 只体现在 removed-surface 说明与显式拒绝旧 flag 的测试上，不再体现在活跃实现里。
 - 训练核心已经是 SoA，但评估/CPU renderer 周边仍有少量 `Gaussian` AoS 适配层。
 - 质量侧工作仍未结束，TUM PSNR、scene-scale-aware normalization、parity gate 仍是后续重点。
 

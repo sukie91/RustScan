@@ -45,8 +45,6 @@ fn tiny_config() -> TrainingConfig {
         max_initial_gaussians: 10,
         use_synthetic_depth: true,
         render_scale: 1.0,
-        densify_interval: 0,
-        prune_interval: 0,
         frame_shuffle_seed: 0,
         ..TrainingConfig::default()
     }

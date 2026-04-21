@@ -13,7 +13,6 @@ pub(super) fn run_train_command(args: TrainArgs) -> anyhow::Result<()> {
     log::info!("Output: {:?}", args.output);
     log::info!("Iterations: {}", args.iterations);
     log::info!("Backend: wgpu");
-    log::info!("LiteGS mode: {}", args.litegs_mode);
     if args.sampling_step != 0 {
         log::warn!(
             "--sampling-step={} is ignored because training now initializes strictly from dataset sparse points",
@@ -31,6 +30,7 @@ pub(super) fn run_train_command(args: TrainArgs) -> anyhow::Result<()> {
     ensure_sparse_initialization_points(&dataset, source, &args.input)?;
 
     let config = build_training_config(&args)?;
+    log::info!("Frame shuffle seed: {}", config.frame_shuffle_seed);
     log_litegs_training_config(&config);
 
     let training_run = rustgs::train_splats_with_report(&dataset, &config)?;
@@ -252,14 +252,11 @@ pub(super) fn build_training_config(args: &TrainArgs) -> anyhow::Result<rustgs::
     }
 
     let mut config = rustgs::TrainingConfig::default();
-    config.litegs_mode = args.litegs_mode;
     config.iterations = args.iterations;
     config.max_initial_gaussians = args.max_initial_gaussians;
     config.sampling_step = args.sampling_step;
+    config.frame_shuffle_seed = args.frame_shuffle_seed;
     config.render_scale = args.render_scale;
-    config.prune_interval = args.prune_interval;
-    config.topology_warmup = args.topology_warmup;
-    config.topology_log_interval = args.topology_log_interval;
     config.lr_position = args.lr_position;
     config.lr_pos_final = args.lr_position_final;
     config.lr_scale = args.lr_scale;
@@ -297,10 +294,6 @@ pub(super) fn build_training_config(args: &TrainArgs) -> anyhow::Result<rustgs::
 }
 
 fn log_litegs_training_config(config: &rustgs::TrainingConfig) {
-    if !config.litegs_mode {
-        return;
-    }
-
     log::info!(
         "LiteGS profile config | sh_degree={} | tile_size={} | sparse_grad={} | reg_weight={:.4} | enable_transmittance={} | enable_depth={} | learnable_viewproj={} | lr_pose={:.6} | densify_from={} | densify_until={:?} | topology_freeze_after_epoch={:?} | refine_every={} | densification_interval={} | growth_grad_threshold={:.6} | growth_select_fraction={:.3} | growth_stop_iter={} | opacity_reset_interval={} | opacity_reset_mode={} | prune_mode={} | target_primitives={}",
         config.litegs.sh_degree,
@@ -389,14 +382,9 @@ pub(super) fn maybe_write_litegs_parity_report_with_manifest_dir(
     evaluation_summary: Option<&rustgs::SplatEvaluationSummary>,
     manifest_dir: &Path,
 ) -> anyhow::Result<()> {
-    if !config.litegs_mode {
-        return Ok(());
-    }
-
     let report_path = rustgs::default_parity_report_path(output);
     let fixture_id = rustgs::parity_fixture_id_for_input_path(input);
-    let mut report =
-        rustgs::ParityHarnessReport::new(fixture_id, config.litegs_mode, &config.litegs);
+    let mut report = rustgs::ParityHarnessReport::new(fixture_id, &config.litegs);
 
     report.topology.initialization_gaussians =
         inferred_initialization_gaussian_count(dataset, config);
@@ -558,11 +546,8 @@ mod tests {
             sampling_step: 0,
             max_frames: 0,
             frame_stride: 1,
+            frame_shuffle_seed: 0,
             render_scale: 0.5,
-            prune_interval: 100,
-            topology_warmup: 100,
-            topology_log_interval: 500,
-            litegs_mode: false,
             litegs_sh_degree: 3,
             litegs_tile_size: rustgs::LiteGsTileSize::new(8, 16),
             litegs_sparse_grad: false,

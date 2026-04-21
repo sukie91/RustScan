@@ -33,7 +33,7 @@
 
 - 纯 SoA 目标还没有完全走完：`render::Gaussian` 仍然作为 CPU renderer / 测试 / 局部兼容路径的 AoS 适配类型存在。
 - 评估与导出命名仍有少量 scene-era 术语残留，例如 `SceneMetadata`、`SceneEvaluationConfig`、`SceneEvaluationError`。
-- `LegacyMetal` profile 仍然是有效训练行为，不是兼容 API，但如果产品方向只保留 LiteGS，后续仍可考虑删掉这条 profile。
+- RustGS 训练主路径现在已经收口到 LiteGS 语义；legacy 残留点主要是已删除 flag 的 tombstone 测试与文档里的 removed-surface 说明，而不是活跃代码路径。
 - LiteGS parity gate、TUM PSNR 回归口径、scene-scale-aware normalization 仍然属于待开发任务。
 
 ## Next Priorities

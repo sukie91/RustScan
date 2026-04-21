@@ -40,20 +40,6 @@ impl StatisticsHelper {
         self.visible_count.len()
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.visible_count.is_empty()
-    }
-
-    /// Reset all statistics for a new densify/prune cycle.
-    pub fn reset(&mut self, gaussian_count: usize) {
-        self.visible_count = vec![0; gaussian_count];
-        self.mean2d_grad = vec![(0.0, 0.0); gaussian_count];
-        self.fragment_weight = vec![(0.0, 0.0); gaussian_count];
-        self.fragment_err = vec![(0.0, 0.0, 0.0); gaussian_count];
-        self.opacity = vec![0.0; gaussian_count];
-        self.max_scale = vec![0.0; gaussian_count];
-    }
-
     /// Resize to match new Gaussian count after topology changes.
     pub fn resize(&mut self, new_len: usize) {
         let old_len = self.len();
@@ -73,38 +59,6 @@ impl StatisticsHelper {
             self.fragment_err.truncate(new_len);
             self.opacity.truncate(new_len);
             self.max_scale.truncate(new_len);
-        }
-    }
-
-    /// Update mean2d_grad for a Gaussian (accumulates for mean computation).
-    pub fn update_mean2d_grad(&mut self, idx: usize, value: f32) {
-        if let Some((sum, count)) = self.mean2d_grad.get_mut(idx) {
-            *sum += value;
-            *count += 1.0;
-        }
-    }
-
-    /// Update fragment_weight for a Gaussian.
-    pub fn update_fragment_weight(&mut self, idx: usize, value: f32) {
-        if let Some((sum, count)) = self.fragment_weight.get_mut(idx) {
-            *sum += value;
-            *count += 1.0;
-        }
-    }
-
-    /// Update fragment_err for a Gaussian (accumulates for variance computation).
-    pub fn update_fragment_err(&mut self, idx: usize, value: f32) {
-        if let Some((sum, sq_sum, count)) = self.fragment_err.get_mut(idx) {
-            *sum += value;
-            *sq_sum += value * value;
-            *count += 1.0;
-        }
-    }
-
-    /// Increment visible count for a Gaussian.
-    pub fn increment_visible(&mut self, idx: usize) {
-        if let Some(count) = self.visible_count.get_mut(idx) {
-            *count = count.saturating_add(1);
         }
     }
 
@@ -130,36 +84,6 @@ impl StatisticsHelper {
         let count = self.visible_count.get(idx).copied().unwrap_or(0) as f32;
         weight_mean * count
     }
-
-    /// Get variance of fragment_err for a Gaussian.
-    /// var = square_sum / count - (sum / count)^2
-    pub fn get_fragment_err_var(&self, idx: usize) -> f32 {
-        self.fragment_err
-            .get(idx)
-            .map(|(sum, sq_sum, count)| {
-                if *count > 0.0 {
-                    let mean = sum / count;
-                    let sq_mean = sq_sum / count;
-                    (sq_mean - mean * mean).max(0.0)
-                } else {
-                    0.0
-                }
-            })
-            .unwrap_or(0.0)
-    }
-
-    /// Get fragment count for a Gaussian.
-    pub fn get_fragment_count(&self, idx: usize) -> f32 {
-        self.fragment_err
-            .get(idx)
-            .map(|(_, _, count)| *count)
-            .unwrap_or(0.0)
-    }
-
-    /// Get global culling mask (Gaussians that were never visible).
-    pub fn get_global_culling(&self) -> Vec<bool> {
-        self.visible_count.iter().map(|&c| c == 0).collect()
-    }
 }
 
 impl Default for StatisticsHelper {
@@ -179,8 +103,6 @@ pub struct DensityControllerConfig {
     pub percent_dense: f32,
     /// Screen extent for scale threshold computation.
     pub screen_extent: f32,
-    /// Maximum screen size for splitting.
-    pub screen_size_threshold: f32,
     /// Initial point count for budget calculations.
     pub init_points_num: usize,
     /// Target number of primitives (TamingGS mode).
@@ -191,10 +113,6 @@ pub struct DensityControllerConfig {
     pub densify_until: usize,
     /// Interval between densification steps.
     pub densification_interval: usize,
-    /// Interval between opacity resets.
-    pub opacity_reset_interval: usize,
-    /// Opacity reset mode: "decay" or "reset".
-    pub opacity_reset_mode: OpacityResetMode,
     /// Prune mode: "weight" or "threshold".
     pub prune_mode: PruneMode,
 }
@@ -206,26 +124,14 @@ impl Default for DensityControllerConfig {
             opacity_threshold: 0.005,
             percent_dense: 0.01,
             screen_extent: 1.0,
-            screen_size_threshold: 20.0,
             init_points_num: 0,
             target_primitives: 1_000_000,
             densify_from: 500,
             densify_until: 15000,
             densification_interval: 100,
-            opacity_reset_interval: 3000,
-            opacity_reset_mode: OpacityResetMode::Decay,
             prune_mode: PruneMode::Weight,
         }
     }
-}
-
-/// Opacity reset mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OpacityResetMode {
-    /// Multiply opacity by decay rate (default 0.5).
-    Decay,
-    /// Clamp opacity to max value (default 0.005).
-    Reset,
 }
 
 /// Prune mode.
@@ -235,19 +141,6 @@ pub enum PruneMode {
     Weight,
     /// Prune based on opacity threshold (Official).
     Threshold,
-}
-
-/// Result of a topology update operation.
-#[derive(Debug, Clone, Default)]
-pub struct TopologyUpdateResult {
-    /// Number of Gaussians added via clone.
-    pub clone_added: usize,
-    /// Number of Gaussians added via split.
-    pub split_added: usize,
-    /// Number of Gaussians pruned.
-    pub pruned: usize,
-    /// New Gaussian count after update.
-    pub new_count: usize,
 }
 
 /// Density controller implementing LiteGS parity.
@@ -277,13 +170,6 @@ impl DensityController {
         epoch >= self.config.densify_from
             && epoch < self.config.densify_until
             && epoch % self.config.densification_interval == 0
-    }
-
-    /// Check if opacity reset should happen at the given epoch.
-    pub fn should_reset_opacity(&self, epoch: usize) -> bool {
-        epoch >= self.config.densify_from
-            && epoch < self.config.densify_until
-            && epoch % self.config.opacity_reset_interval == 0
     }
 
     /// Get prune mask based on opacity and visibility.
@@ -370,29 +256,6 @@ impl DensityController {
         split_mask
     }
 
-    /// Compute densification score for TamingGS multinomial sampling.
-    ///
-    /// LiteGS TamingGS: score = variance * fragment_count * opacity^2
-    pub fn get_densify_score(&self, idx: usize) -> f32 {
-        let var = self.stats.get_fragment_err_var(idx);
-        let frag_count = self.stats.get_fragment_count(idx);
-        let opacity = self.stats.opacity.get(idx).copied().unwrap_or(0.0);
-
-        let score = var * frag_count * opacity * opacity;
-        if score.is_finite() && score > 0.0 {
-            score
-        } else {
-            0.0
-        }
-    }
-
-    /// Get all densification scores for multinomial sampling.
-    pub fn get_all_densify_scores(&self) -> Vec<f32> {
-        (0..self.stats.len())
-            .map(|i| self.get_densify_score(i))
-            .collect()
-    }
-
     /// Compute densify budget for TamingGS mode.
     ///
     /// LiteGS TamingGS:
@@ -424,69 +287,6 @@ impl DensityController {
         let deficit = cur_target.saturating_sub(current_count).max(1);
         deficit.saturating_add(prune_count).min(current_count)
     }
-
-    /// Multinomial sampling for densification candidates (TamingGS).
-    ///
-    /// Samples indices proportional to their scores without replacement,
-    /// matching LiteGS's `torch.multinomial(weights, num_samples, replacement=False)`.
-    pub fn sample_densify_candidates(&self, budget: usize) -> Vec<usize> {
-        let scores = self.get_all_densify_scores();
-
-        // Create (index, score) pairs for non-zero scores
-        let candidates: Vec<(usize, f32)> = scores
-            .iter()
-            .enumerate()
-            .filter(|(_, &s)| s > 0.0 && s.is_finite())
-            .map(|(i, &s)| (i, s))
-            .collect();
-
-        if candidates.is_empty() || budget == 0 {
-            return Vec::new();
-        }
-
-        let budget = budget.min(candidates.len());
-
-        // If budget equals or exceeds candidates, return all
-        if budget >= candidates.len() {
-            return candidates.into_iter().map(|(i, _)| i).collect();
-        }
-
-        // Multinomial sampling without replacement using the alias method
-        // (reservoir sampling with weighted probabilities)
-        //
-        // We implement weighted random sampling without replacement by:
-        // 1. Compute cumulative weights
-        // 2. Sample proportional to weights, removing selected items
-        //
-        // For efficiency with large budgets, we use Efraimidis-Spirakis algorithm:
-        // Assign each item a key = random^(1/weight), then take top-k by key.
-        // This gives weighted sampling without replacement in O(n log k) time.
-
-        use rand::Rng;
-        let mut rng = rand::thread_rng();
-
-        // Compute keys for Efraimidis-Spirakis sampling
-        // key = -ln(U) / weight where U ~ Uniform(0,1)
-        // This is equivalent to random^(1/weight) but numerically more stable
-        let mut keyed: Vec<(usize, f64)> = candidates
-            .iter()
-            .filter_map(|&(idx, score)| {
-                if score > 0.0 {
-                    let u: f64 = rng.gen_range(1e-10..1.0);
-                    let key = -u.ln() / (score as f64);
-                    Some((idx, key))
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        // Select items with smallest keys (equivalent to highest random^(1/weight))
-        keyed.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-        keyed.truncate(budget);
-
-        keyed.into_iter().map(|(i, _)| i).collect()
-    }
 }
 
 #[cfg(test)]
@@ -497,26 +297,11 @@ mod tests {
     fn test_statistics_helper_mean() {
         let mut stats = StatisticsHelper::new(3);
 
-        // Update mean2d_grad for index 1
-        stats.update_mean2d_grad(1, 0.1);
-        stats.update_mean2d_grad(1, 0.3);
+        stats.mean2d_grad[1] = (0.4, 2.0);
 
         // Mean should be 0.2
         assert!((stats.get_mean2d_grad(1) - 0.2).abs() < 1e-6);
         assert_eq!(stats.get_mean2d_grad(0), 0.0);
-    }
-
-    #[test]
-    fn test_statistics_helper_variance() {
-        let mut stats = StatisticsHelper::new(3);
-
-        // Update fragment_err for index 0: values 2.0, 4.0
-        stats.update_fragment_err(0, 2.0);
-        stats.update_fragment_err(0, 4.0);
-
-        // Mean = 3.0, Var = ((2-3)^2 + (4-3)^2) / 2 = 1.0
-        let var = stats.get_fragment_err_var(0);
-        assert!((var - 1.0).abs() < 1e-6);
     }
 
     #[test]
@@ -609,31 +394,6 @@ mod tests {
     }
 
     #[test]
-    fn test_densify_score() {
-        let config = DensityControllerConfig::default();
-        let mut controller = DensityController::new(config, true);
-
-        controller.stats.resize(2);
-
-        // Set up stats for score computation
-        // score = var * frag_count * opacity^2
-        controller.stats.fragment_err[0] = (6.0, 10.0, 2.0); // mean=3, sq_mean=5, var=5-9=-4->0
-                                                             // Recompute: sum=6, sq_sum=10, count=2
-                                                             // mean = 3, sq_mean = 5, var = 5 - 9 = -4 -> clamped to 0
-        controller.stats.opacity[0] = 0.5;
-
-        // Let's set up correctly for var = 1
-        // Values 2, 4: sum=6, sq_sum=4+16=20, count=2
-        // mean=3, sq_mean=10, var=10-9=1
-        controller.stats.fragment_err[0] = (6.0, 20.0, 2.0);
-        controller.stats.opacity[0] = 0.5; // opacity^2 = 0.25
-                                           // score = 1 * 2 * 0.25 = 0.5
-
-        let score = controller.get_densify_score(0);
-        assert!((score - 0.5).abs() < 1e-6);
-    }
-
-    #[test]
     fn test_densify_budget() {
         let config = DensityControllerConfig {
             init_points_num: 100,
@@ -649,65 +409,5 @@ mod tests {
         // budget = min(150 + prune(10), 400) = 160
         let budget = controller.compute_densify_budget(400, 10, 50);
         assert_eq!(budget, 160);
-    }
-
-    #[test]
-    fn test_sample_densify_candidates_multinomial() {
-        let config = DensityControllerConfig::default();
-        let mut controller = DensityController::new(config, true);
-
-        controller.stats.resize(5);
-
-        // Set scores with VERY different magnitudes to clearly test weighted sampling
-        controller.stats.fragment_err[0] = (0.0, 4.0, 1.0); // var=4
-        controller.stats.opacity[0] = 1.0; // score = 4
-        controller.stats.visible_count[0] = 1; // frag_count=1
-
-        controller.stats.fragment_err[1] = (0.0, 1.0, 1.0); // var=1
-        controller.stats.opacity[1] = 1.0; // score = 1
-        controller.stats.visible_count[1] = 1;
-
-        controller.stats.fragment_err[2] = (0.0, 100.0, 1.0); // var=100 (MUCH higher)
-        controller.stats.opacity[2] = 1.0; // score = 100
-        controller.stats.visible_count[2] = 1;
-
-        controller.stats.fragment_err[3] = (0.0, 0.0, 0.0); // var=0
-        controller.stats.opacity[3] = 1.0; // score = 0 (should never be selected)
-
-        // Debug: print actual scores
-        let scores = controller.get_all_densify_scores();
-        eprintln!("Scores: {:?}", scores);
-
-        // Run sampling multiple times to check statistical distribution
-        let mut counts = [0usize; 5];
-        for _ in 0..1000 {
-            let candidates = controller.sample_densify_candidates(2);
-            assert_eq!(candidates.len(), 2);
-            for &idx in &candidates {
-                counts[idx] += 1;
-            }
-        }
-
-        eprintln!("Counts: {:?}", counts);
-
-        // Key properties to verify:
-        // 1. Index 2 (highest score=100) should be selected most often
-        // 2. Index 0 (score=4) should be second most selected
-        // 3. Index 1 (score=1) should be third most selected
-        // 4. Index 3 (score=0) and 4 (no stats) should never be selected
-        assert!(
-            counts[2] > counts[0],
-            "Index 2 (score=100) should be selected more than index 0 (score=4): {} vs {}",
-            counts[2],
-            counts[0]
-        );
-        assert!(
-            counts[0] > counts[1],
-            "Index 0 (score=4) should be selected more than index 1 (score=1): {} vs {}",
-            counts[0],
-            counts[1]
-        );
-        assert_eq!(counts[3], 0, "Index 3 (score=0) should never be selected");
-        assert_eq!(counts[4], 0, "Index 4 (no stats) should never be selected");
     }
 }

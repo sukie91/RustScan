@@ -2,17 +2,19 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
 use image::{DynamicImage, GenericImageView, ImageReader};
 
+use super::frame_targets::resize_rgb_u8_to_f32;
 use crate::TrainingConfig;
 use crate::{TrainingDataset, TrainingError};
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct DecodedFrame {
     pub(crate) color_u8: Vec<u8>,
+    pub(crate) target_rgb: Option<Arc<Vec<f32>>>,
     pub(crate) depth: Vec<f32>,
     pub(crate) used_real_depth: bool,
 }
@@ -21,6 +23,7 @@ pub(crate) struct DecodedFrame {
 pub(crate) struct FrameLoaderOptions {
     pub(crate) cache_capacity: usize,
     pub(crate) prefetch_ahead: usize,
+    pub(crate) rgb_target_size: Option<(usize, usize)>,
 }
 
 impl Default for FrameLoaderOptions {
@@ -28,6 +31,7 @@ impl Default for FrameLoaderOptions {
         Self {
             cache_capacity: 8,
             prefetch_ahead: 4,
+            rgb_target_size: None,
         }
     }
 }
@@ -46,7 +50,7 @@ pub(crate) struct PrefetchFrameLoader {
     pending: HashSet<usize>,
     request_tx: Option<Sender<usize>>,
     result_rx: Receiver<(usize, Result<DecodedFrame, TrainingError>)>,
-    worker: Option<JoinHandle<()>>,
+    workers: Vec<JoinHandle<()>>,
 }
 
 #[derive(Debug, Clone)]
@@ -128,13 +132,30 @@ impl PrefetchFrameLoader {
         let use_synthetic_depth = config.use_synthetic_depth;
         let min_depth = config.min_depth;
         let max_depth = config.max_depth;
+        let rgb_target_size = options.rgb_target_size;
         let (request_tx, request_rx) = mpsc::channel();
         let (result_tx, result_rx) = mpsc::channel();
-        let worker_specs = Arc::clone(&specs);
-        let worker = thread::Builder::new()
-            .name("rustgs-frame-prefetch".to_string())
-            .spawn(move || {
-                while let Ok(frame_idx) = request_rx.recv() {
+        let request_rx = Arc::new(Mutex::new(request_rx));
+        let worker_count = frame_loader_worker_count(specs.len(), options);
+        let mut workers = Vec::with_capacity(worker_count);
+
+        for worker_idx in 0..worker_count {
+            let worker_specs = Arc::clone(&specs);
+            let worker_request_rx = Arc::clone(&request_rx);
+            let worker_result_tx = result_tx.clone();
+            let worker = thread::Builder::new()
+                .name(format!("rustgs-frame-prefetch-{worker_idx}"))
+                .spawn(move || loop {
+                    let frame_idx = {
+                        let request_rx = worker_request_rx
+                            .lock()
+                            .expect("frame prefetch receiver lock poisoned");
+                        match request_rx.recv() {
+                            Ok(frame_idx) => frame_idx,
+                            Err(_) => break,
+                        }
+                    };
+
                     let result = if let Some(spec) = worker_specs.get(frame_idx) {
                         let spec: &FrameLoadSpec = spec;
                         decode_frame(
@@ -142,6 +163,7 @@ impl PrefetchFrameLoader {
                             spec.depth_path.as_deref(),
                             width,
                             height,
+                            rgb_target_size,
                             depth_scale,
                             use_synthetic_depth,
                             min_depth,
@@ -152,16 +174,17 @@ impl PrefetchFrameLoader {
                             "frame index {frame_idx} is outside the dataset bounds"
                         )))
                     };
-                    if result_tx.send((frame_idx, result)).is_err() {
+                    if worker_result_tx.send((frame_idx, result)).is_err() {
                         break;
                     }
-                }
-            })
-            .map_err(|err| {
-                TrainingError::TrainingFailed(format!(
-                    "failed to start frame prefetch worker: {err}"
-                ))
-            })?;
+                })
+                .map_err(|err| {
+                    TrainingError::TrainingFailed(format!(
+                        "failed to start frame prefetch worker {worker_idx}: {err}"
+                    ))
+                })?;
+            workers.push(worker);
+        }
 
         Ok(Self {
             specs,
@@ -171,7 +194,7 @@ impl PrefetchFrameLoader {
             pending: HashSet::new(),
             request_tx: Some(request_tx),
             result_rx,
-            worker: Some(worker),
+            workers,
         })
     }
 
@@ -305,10 +328,18 @@ impl PrefetchFrameLoader {
 impl Drop for PrefetchFrameLoader {
     fn drop(&mut self) {
         self.request_tx.take();
-        if let Some(worker) = self.worker.take() {
+        for worker in self.workers.drain(..) {
             let _ = worker.join();
         }
     }
+}
+
+fn frame_loader_worker_count(frame_count: usize, options: FrameLoaderOptions) -> usize {
+    let parallelism = thread::available_parallelism().map_or(4, |count| count.get());
+    frame_count
+        .max(1)
+        .min(options.prefetch_ahead.max(1))
+        .min(parallelism.max(1))
 }
 
 pub(super) fn decode_frame(
@@ -316,6 +347,7 @@ pub(super) fn decode_frame(
     depth_path: Option<&Path>,
     width: usize,
     height: usize,
+    rgb_target_size: Option<(usize, usize)>,
     depth_scale: f32,
     use_synthetic_depth: bool,
     min_depth: f32,
@@ -332,6 +364,15 @@ pub(super) fn decode_frame(
             expected_color,
         )));
     }
+    let target_rgb = rgb_target_size.map(|(target_width, target_height)| {
+        Arc::new(resize_rgb_u8_to_f32(
+            &color_u8,
+            width,
+            height,
+            target_width,
+            target_height,
+        ))
+    });
 
     let (depth, used_real_depth) = match depth_path {
         Some(path) => (load_depth_image(path, width, height, depth_scale)?, true),
@@ -352,6 +393,7 @@ pub(super) fn decode_frame(
 
     Ok(DecodedFrame {
         color_u8,
+        target_rgb,
         depth,
         used_real_depth,
     })
@@ -622,9 +664,10 @@ mod tests {
         let image_path = dir.path().join("frame.rgb");
         fs::write(&image_path, [0u8, 0, 0, 255, 255, 255]).unwrap();
 
-        let frame = decode_frame(&image_path, None, 2, 1, 1.0, true, 0.1, 2.0).unwrap();
+        let frame = decode_frame(&image_path, None, 2, 1, None, 1.0, true, 0.1, 2.0).unwrap();
 
         assert_eq!(frame.color_u8.len(), 6);
+        assert!(frame.target_rgb.is_none());
         assert_eq!(frame.depth.len(), 2);
         assert!(!frame.used_real_depth);
         assert!(frame.depth[0] > frame.depth[1]);
@@ -681,6 +724,7 @@ mod tests {
             FrameLoaderOptions {
                 cache_capacity: 2,
                 prefetch_ahead: 3,
+                rgb_target_size: None,
             },
         )
         .unwrap();
@@ -702,5 +746,45 @@ mod tests {
         assert!(loader.cache_len() <= 2);
         assert!(!loader.is_cached(first));
         assert!(loader.is_cached(second) || loader.is_cached(third));
+    }
+
+    #[test]
+    fn worker_count_respects_prefetch_ahead_and_frame_count() {
+        assert_eq!(
+            super::frame_loader_worker_count(
+                1,
+                FrameLoaderOptions {
+                    cache_capacity: 8,
+                    prefetch_ahead: 8,
+                    rgb_target_size: None,
+                }
+            ),
+            1
+        );
+        assert_eq!(
+            super::frame_loader_worker_count(
+                3,
+                FrameLoaderOptions {
+                    cache_capacity: 8,
+                    prefetch_ahead: 2,
+                    rgb_target_size: None,
+                }
+            ),
+            2
+        );
+    }
+
+    #[test]
+    fn decode_frame_prepares_target_rgb_when_requested() {
+        let dir = tempdir().unwrap();
+        let image_path = dir.path().join("frame.rgb");
+        fs::write(&image_path, [0u8, 64, 255, 255, 128, 0]).unwrap();
+
+        let frame =
+            decode_frame(&image_path, None, 2, 1, Some((2, 1)), 1.0, false, 0.1, 2.0).unwrap();
+
+        let target_rgb = frame.target_rgb.expect("prepared target rgb");
+        assert_eq!(target_rgb.len(), 6);
+        assert!((target_rgb[1] - (64.0 / 255.0)).abs() < 1e-6);
     }
 }

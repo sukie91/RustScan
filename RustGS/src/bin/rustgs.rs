@@ -49,25 +49,13 @@ struct TrainArgs {
     #[arg(long, default_value = "1")]
     frame_stride: usize,
 
+    /// Deterministic shuffle seed for training frame sampling (0 preserves dataset order)
+    #[arg(long, default_value = "0")]
+    frame_shuffle_seed: u64,
+
     /// Relative render scale used by training
     #[arg(long, default_value = "0.5")]
     render_scale: f32,
-
-    /// Run prune scheduling every N iterations
-    #[arg(long, default_value = "100")]
-    prune_interval: usize,
-
-    /// Delay densify/prune topology work until after this many iterations
-    #[arg(long, default_value = "100")]
-    topology_warmup: usize,
-
-    /// Log topology scheduling/throughput diagnostics every N checks
-    #[arg(long, default_value = "500")]
-    topology_log_interval: usize,
-
-    /// Enable LiteGS-compatible SH and topology behavior
-    #[arg(long, default_value_t = false)]
-    litegs_mode: bool,
 
     /// LiteGS SH degree
     #[arg(long, default_value = "3")]
@@ -366,11 +354,11 @@ mod tests {
             "scene.ply",
         ]);
 
-        assert!(!args.litegs_mode);
         assert_eq!(args.render_scale, 0.5);
         assert_eq!(args.litegs_sh_degree, 3);
         assert_eq!(args.litegs_tile_size, rustgs::LiteGsTileSize::new(8, 16));
         assert!(!args.litegs_sparse_grad);
+        assert_eq!(args.frame_shuffle_seed, 0);
         assert!(!args.eval_after_train);
         assert_eq!(args.eval_render_scale, 0.25);
         assert_eq!(args.eval_max_frames, 180);
@@ -411,6 +399,73 @@ mod tests {
         .expect_err("removed chunk-size flag should fail");
 
         assert!(err.to_string().contains("--metal-gaussian-chunk-size"));
+    }
+
+    #[test]
+    fn train_command_rejects_removed_litegs_mode_flag() {
+        let err = Cli::try_parse_from([
+            "rustgs",
+            "train",
+            "--input",
+            "scene.json",
+            "--output",
+            "scene.ply",
+            "--litegs-mode",
+        ])
+        .expect_err("litegs mode flag should fail because LiteGS is now mandatory");
+
+        assert!(err.to_string().contains("--litegs-mode"));
+    }
+
+    #[test]
+    fn train_command_rejects_removed_prune_interval_flag() {
+        let err = Cli::try_parse_from([
+            "rustgs",
+            "train",
+            "--input",
+            "scene.json",
+            "--output",
+            "scene.ply",
+            "--prune-interval",
+            "100",
+        ])
+        .expect_err("prune interval flag should fail because LiteGS refine cadence is mandatory");
+
+        assert!(err.to_string().contains("--prune-interval"));
+    }
+
+    #[test]
+    fn train_command_rejects_removed_topology_warmup_flag() {
+        let err = Cli::try_parse_from([
+            "rustgs",
+            "train",
+            "--input",
+            "scene.json",
+            "--output",
+            "scene.ply",
+            "--topology-warmup",
+            "100",
+        ])
+        .expect_err("topology warmup flag should fail because LiteGS topology controls are nested");
+
+        assert!(err.to_string().contains("--topology-warmup"));
+    }
+
+    #[test]
+    fn train_command_rejects_removed_topology_log_interval_flag() {
+        let err = Cli::try_parse_from([
+            "rustgs",
+            "train",
+            "--input",
+            "scene.json",
+            "--output",
+            "scene.ply",
+            "--topology-log-interval",
+            "500",
+        ])
+        .expect_err("topology log interval flag should fail because the legacy scheduler is removed");
+
+        assert!(err.to_string().contains("--topology-log-interval"));
     }
 
     #[test]
@@ -475,7 +530,8 @@ mod tests {
             "scene.json",
             "--output",
             "scene.ply",
-            "--litegs-mode",
+            "--frame-shuffle-seed",
+            "42",
             "--litegs-sh-degree",
             "4",
             "--litegs-tile-size",
@@ -515,7 +571,6 @@ mod tests {
         ]);
         let config = build_training_config(&args).unwrap();
 
-        assert_eq!(config.litegs_mode, true);
         assert_eq!(config.litegs.sh_degree, 4);
         assert_eq!(config.litegs.tile_size, rustgs::LiteGsTileSize::new(16, 16));
         assert!(config.litegs.sparse_grad);
@@ -542,6 +597,7 @@ mod tests {
         assert_eq!(config.litegs.target_primitives, 200_000);
         assert!(config.litegs.learnable_viewproj);
         assert_eq!(config.litegs.lr_pose, 0.0002);
+        assert_eq!(config.frame_shuffle_seed, 42);
     }
 
     #[test]
@@ -556,10 +612,7 @@ mod tests {
             rustgs::TrainingDataset::new(rustgs::Intrinsics::from_focal(500.0, 32, 32));
         dataset.add_point([0.0, 0.0, 0.0], None);
         dataset.add_point([1.0, 0.0, 0.0], None);
-        let config = rustgs::TrainingConfig {
-            litegs_mode: true,
-            ..rustgs::TrainingConfig::default()
-        };
+        let config = rustgs::TrainingConfig::default();
 
         maybe_write_litegs_parity_report(
             input,
@@ -605,10 +658,7 @@ mod tests {
         let mut dataset =
             rustgs::TrainingDataset::new(rustgs::Intrinsics::from_focal(500.0, 32, 32));
         dataset.add_point([0.0, 0.0, 0.0], None);
-        let config = rustgs::TrainingConfig {
-            litegs_mode: true,
-            ..rustgs::TrainingConfig::default()
-        };
+        let config = rustgs::TrainingConfig::default();
         let telemetry = rustgs::LiteGsTrainingTelemetry {
             loss_terms: rustgs::ParityLossTerms {
                 l1: Some(0.1),
@@ -687,10 +737,7 @@ mod tests {
         let mut dataset =
             rustgs::TrainingDataset::new(rustgs::Intrinsics::from_focal(500.0, 32, 32));
         dataset.add_point([0.0, 0.0, 0.0], None);
-        let config = rustgs::TrainingConfig {
-            litegs_mode: true,
-            ..rustgs::TrainingConfig::default()
-        };
+        let config = rustgs::TrainingConfig::default();
         let evaluation_summary = rustgs::SplatEvaluationSummary {
             device: rustgs::EvaluationDevice::Cpu,
             render_scale: 0.25,
@@ -746,7 +793,6 @@ mod tests {
             rustgs::TrainingDataset::new(rustgs::Intrinsics::from_focal(500.0, 32, 32));
         dataset.add_point([0.0, 0.0, 0.0], None);
         let config = rustgs::TrainingConfig {
-            litegs_mode: true,
             litegs: rustgs::LiteGsConfig {
                 sparse_grad: true,
                 enable_depth: true,
@@ -826,7 +872,6 @@ mod tests {
 
         let mut reference_report = rustgs::ParityHarnessReport::new(
             rustgs::DEFAULT_CONVERGENCE_FIXTURE_ID,
-            true,
             &rustgs::LiteGsConfig::default(),
         );
         reference_report.loss_curve_samples = vec![
@@ -857,10 +902,7 @@ mod tests {
         let mut dataset =
             rustgs::TrainingDataset::new(rustgs::Intrinsics::from_focal(500.0, 32, 32));
         dataset.add_point([0.0, 0.0, 0.0], None);
-        let config = rustgs::TrainingConfig {
-            litegs_mode: true,
-            ..rustgs::TrainingConfig::default()
-        };
+        let config = rustgs::TrainingConfig::default();
         let telemetry = rustgs::LiteGsTrainingTelemetry {
             loss_terms: rustgs::ParityLossTerms {
                 depth: Some(0.4),
@@ -951,7 +993,6 @@ mod tests {
             ..Default::default()
         };
         let config = rustgs::TrainingConfig {
-            litegs_mode: true,
             iterations: 1,
             max_initial_gaussians: 2048,
             render_scale: 0.5,
@@ -1017,7 +1058,6 @@ mod tests {
         let report = rustgs::ParityHarnessReport::load_json(&report_path).unwrap();
 
         assert_eq!(report.fixture_id, rustgs::DEFAULT_CONVERGENCE_FIXTURE_ID);
-        assert!(report.litegs_mode);
         assert!(report.litegs.sparse_grad);
         assert!(report.litegs.enable_depth);
         assert_eq!(report.topology.export_outputs, 1);

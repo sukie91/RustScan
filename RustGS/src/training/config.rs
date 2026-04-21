@@ -243,8 +243,6 @@ pub struct TrainingConfig {
     ///
     /// RustGS now standardizes on the wgpu backend.
     pub backend: TrainingBackend,
-    /// Enable LiteGS-compatible SH and topology semantics.
-    pub litegs_mode: bool,
     /// Nested LiteGS-compatible configuration surface.
     pub litegs: LiteGsConfig,
     /// Number of training iterations
@@ -262,27 +260,6 @@ pub struct TrainingConfig {
     pub lr_opacity: f32,
     /// Learning rate for colors
     pub lr_color: f32,
-    /// Densification interval
-    pub densify_interval: usize,
-    /// Pruning interval for Metal topology updates.
-    pub prune_interval: usize,
-    /// Delay topology updates until after this many training iterations.
-    pub topology_warmup: usize,
-    /// Emit topology scheduling/throughput logs every N scheduled checks.
-    pub topology_log_interval: usize,
-    /// Pruning threshold
-    pub prune_threshold: f32,
-    /// Legacy Metal densify threshold used by the production Metal trainer path.
-    /// Kept explicit here so the runtime no longer depends on legacy/reference defaults.
-    pub legacy_densify_grad_threshold: f32,
-    /// Maximum Gaussian scale eligible for clone in the legacy topology path.
-    pub legacy_clone_scale_threshold: f32,
-    /// Minimum Gaussian scale eligible for split in the legacy topology path.
-    pub legacy_split_scale_threshold: f32,
-    /// Maximum Gaussian scale kept during legacy topology prune.
-    pub legacy_prune_scale_threshold: f32,
-    /// Maximum number of Gaussians the legacy topology path may add per update.
-    pub legacy_max_densify_per_update: usize,
     /// Maximum number of Gaussians created during initialization
     pub max_initial_gaussians: usize,
     /// Sampling step for frame-to-Gaussian initialization (0 = auto)
@@ -309,7 +286,6 @@ impl Default for TrainingConfig {
     fn default() -> Self {
         Self {
             backend: TrainingBackend::default(),
-            litegs_mode: false,
             litegs: LiteGsConfig::default(),
             iterations: 30000,
             lr_position: 0.00016,
@@ -318,16 +294,6 @@ impl Default for TrainingConfig {
             lr_rotation: 0.001,
             lr_opacity: 0.05,
             lr_color: 0.0025,
-            densify_interval: 100,
-            prune_interval: 100,
-            topology_warmup: 100,
-            topology_log_interval: 500,
-            prune_threshold: 0.005,
-            legacy_densify_grad_threshold: 0.0002,
-            legacy_clone_scale_threshold: 0.1,
-            legacy_split_scale_threshold: 0.3,
-            legacy_prune_scale_threshold: 0.5,
-            legacy_max_densify_per_update: 2_000,
             max_initial_gaussians: 100_000,
             sampling_step: 0,
             min_depth: 0.01,
@@ -365,20 +331,8 @@ mod tests {
         assert_eq!(TrainingBackend::default(), TrainingBackend::Wgpu);
         let config = TrainingConfig::default();
         assert_eq!(config.backend, TrainingBackend::Wgpu);
-        assert!(!config.litegs_mode);
         assert_eq!(config.render_scale, 0.5);
-        assert_eq!(config.prune_interval, 100);
         assert_eq!(config.litegs, LiteGsConfig::default());
-    }
-
-    #[test]
-    fn training_config_exposes_explicit_legacy_topology_defaults() {
-        let config = TrainingConfig::default();
-        assert_eq!(config.legacy_densify_grad_threshold, 0.0002);
-        assert_eq!(config.legacy_clone_scale_threshold, 0.1);
-        assert_eq!(config.legacy_split_scale_threshold, 0.3);
-        assert_eq!(config.legacy_prune_scale_threshold, 0.5);
-        assert_eq!(config.legacy_max_densify_per_update, 2_000);
     }
 
     #[test]

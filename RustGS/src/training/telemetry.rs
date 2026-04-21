@@ -1,4 +1,4 @@
-use super::parity_harness::{ParityLossCurveSample, ParityLossTerms, ParityTopologyMetrics};
+use super::metrics::{ParityLossCurveSample, ParityLossTerms, ParityTopologyMetrics};
 use std::sync::{Mutex, OnceLock};
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -47,7 +47,7 @@ mod tests {
         last_training_telemetry, store_last_training_telemetry, LiteGsOptimizerLrs,
         LiteGsTrainingTelemetry,
     };
-    use crate::training::parity_harness::{ParityLossTerms, ParityTopologyMetrics};
+    use crate::training::metrics::{ParityLossTerms, ParityTopologyMetrics};
 
     #[test]
     fn telemetry_store_round_trips_latest_snapshot() {
