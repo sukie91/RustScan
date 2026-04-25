@@ -1,20 +1,19 @@
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 
+use crate::TrainingError;
+
+const MIN_RENDER_SCALE: f32 = 0.0625;
+
 /// Training backend selection.
 ///
 /// RustGS training now standardizes on the wgpu backend. The enum is kept so
 /// existing config construction code does not break abruptly.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TrainingBackend {
     /// Burn + wgpu training path.
+    #[default]
     Wgpu,
-}
-
-impl Default for TrainingBackend {
-    fn default() -> Self {
-        Self::Wgpu
-    }
 }
 
 impl std::fmt::Display for TrainingBackend {
@@ -53,7 +52,7 @@ impl FromStr for LiteGsTileSize {
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         let token = value.trim();
         let parts: Vec<&str> = token
-            .split(|ch| matches!(ch, 'x' | 'X' | ',' | ':'))
+            .split(['x', 'X', ',', ':'])
             .filter(|part| !part.is_empty())
             .collect();
         if parts.len() != 2 {
@@ -78,17 +77,12 @@ impl FromStr for LiteGsTileSize {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum LiteGsOpacityResetMode {
+    #[default]
     Decay,
     Reset,
-}
-
-impl Default for LiteGsOpacityResetMode {
-    fn default() -> Self {
-        Self::Decay
-    }
 }
 
 impl std::fmt::Display for LiteGsOpacityResetMode {
@@ -114,17 +108,12 @@ impl FromStr for LiteGsOpacityResetMode {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum LiteGsPruneMode {
     Threshold,
+    #[default]
     Weight,
-}
-
-impl Default for LiteGsPruneMode {
-    fn default() -> Self {
-        Self::Weight
-    }
 }
 
 impl std::fmt::Display for LiteGsPruneMode {
@@ -307,6 +296,105 @@ impl Default for TrainingConfig {
     }
 }
 
+impl TrainingConfig {
+    pub fn validate(&self) -> Result<(), TrainingError> {
+        let mut invalid = Vec::new();
+
+        if self.iterations == 0 {
+            invalid.push("iterations must be >= 1".to_string());
+        }
+        if self.max_initial_gaussians == 0 {
+            invalid.push("max_initial_gaussians must be >= 1".to_string());
+        }
+        if !self.render_scale.is_finite() || !(MIN_RENDER_SCALE..=1.0).contains(&self.render_scale)
+        {
+            invalid.push(format!(
+                "render_scale must be finite and in [{MIN_RENDER_SCALE}, 1.0]"
+            ));
+        }
+        if self.frame_cache_capacity == 0 {
+            invalid.push("frame_cache_capacity must be >= 1".to_string());
+        }
+        if self.frame_prefetch_ahead == 0 {
+            invalid.push("frame_prefetch_ahead must be >= 1".to_string());
+        }
+        if !self.min_depth.is_finite() || self.min_depth < 0.0 {
+            invalid.push("min_depth must be finite and >= 0".to_string());
+        }
+        if !self.max_depth.is_finite() || self.max_depth <= self.min_depth {
+            invalid.push("max_depth must be finite and greater than min_depth".to_string());
+        }
+
+        validate_lr("lr_position", self.lr_position, true, &mut invalid);
+        validate_lr("lr_pos_final", self.lr_pos_final, false, &mut invalid);
+        validate_lr("lr_scale", self.lr_scale, true, &mut invalid);
+        validate_lr("lr_rotation", self.lr_rotation, false, &mut invalid);
+        validate_lr("lr_opacity", self.lr_opacity, true, &mut invalid);
+        validate_lr("lr_color", self.lr_color, true, &mut invalid);
+        validate_lr("litegs.lr_pose", self.litegs.lr_pose, false, &mut invalid);
+
+        if self.litegs.sh_degree == 0 {
+            invalid.push("litegs.sh_degree must be >= 1".to_string());
+        }
+        if self.litegs.tile_size.width == 0 || self.litegs.tile_size.height == 0 {
+            invalid.push("litegs.tile_size width and height must both be >= 1".to_string());
+        }
+        if self.litegs.refine_every == 0 {
+            invalid.push("litegs.refine_every must be >= 1".to_string());
+        }
+        if self.litegs.densification_interval == 0 {
+            invalid.push("litegs.densification_interval must be >= 1".to_string());
+        }
+        if !self.litegs.growth_grad_threshold.is_finite() || self.litegs.growth_grad_threshold < 0.0
+        {
+            invalid.push("litegs.growth_grad_threshold must be finite and >= 0".to_string());
+        }
+        if !self.litegs.growth_select_fraction.is_finite()
+            || !(0.0..=1.0).contains(&self.litegs.growth_select_fraction)
+        {
+            invalid.push("litegs.growth_select_fraction must be in [0, 1]".to_string());
+        }
+        if self.litegs.growth_stop_iter == 0 {
+            invalid.push("litegs.growth_stop_iter must be >= 1".to_string());
+        }
+        if self.litegs.opacity_reset_interval == 0 {
+            invalid.push("litegs.opacity_reset_interval must be >= 1".to_string());
+        }
+        if self.litegs.prune_min_age == 0 {
+            invalid.push("litegs.prune_min_age must be >= 1".to_string());
+        }
+        if self.litegs.prune_invisible_epochs == 0 {
+            invalid.push("litegs.prune_invisible_epochs must be >= 1".to_string());
+        }
+        if self.litegs.target_primitives == 0 {
+            invalid.push("litegs.target_primitives must be >= 1".to_string());
+        }
+        if !self.litegs.prune_scale_threshold.is_finite() || self.litegs.prune_scale_threshold < 0.0
+        {
+            invalid.push("litegs.prune_scale_threshold must be finite and >= 0".to_string());
+        }
+        if !self.litegs.reg_weight.is_finite() || self.litegs.reg_weight < 0.0 {
+            invalid.push("litegs.reg_weight must be finite and >= 0".to_string());
+        }
+
+        if invalid.is_empty() {
+            Ok(())
+        } else {
+            Err(TrainingError::InvalidInput(format!(
+                "invalid training config: {}",
+                invalid.join("; ")
+            )))
+        }
+    }
+}
+
+fn validate_lr(label: &str, value: f32, require_positive: bool, invalid: &mut Vec<String>) {
+    if !value.is_finite() || value < 0.0 || (require_positive && value == 0.0) {
+        let qualifier = if require_positive { "> 0" } else { ">= 0" };
+        invalid.push(format!("{label} must be finite and {qualifier}"));
+    }
+}
+
 /// Training result.
 #[derive(Debug, Clone)]
 pub struct TrainingResult {
@@ -388,5 +476,23 @@ mod tests {
     #[test]
     fn default_training_config_disables_synthetic_depth() {
         assert!(!TrainingConfig::default().use_synthetic_depth);
+    }
+
+    #[test]
+    fn training_config_validate_rejects_invalid_render_scale() {
+        let config = TrainingConfig {
+            render_scale: 0.0,
+            ..TrainingConfig::default()
+        };
+
+        let err = config
+            .validate()
+            .expect_err("render scale should be rejected");
+        assert!(err.to_string().contains("render_scale"));
+    }
+
+    #[test]
+    fn training_config_validate_accepts_defaults() {
+        TrainingConfig::default().validate().unwrap();
     }
 }

@@ -65,7 +65,7 @@ impl TrainingCheckpoint {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "gpu"))]
 mod tests {
     use super::TrainingCheckpoint;
     use crate::sh::rgb_to_sh0_value;

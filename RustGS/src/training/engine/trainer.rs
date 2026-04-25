@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments)]
+
 use std::sync::Arc;
 
 use burn::prelude::*;
@@ -8,9 +10,13 @@ use rand::{rngs::StdRng, Rng, SeedableRng};
 use crate::core::GaussianCamera;
 use crate::core::HostSplats;
 use crate::training::backward;
-use crate::training::topology::should_apply_topology_step;
+use crate::training::data::frame_loader::PrefetchFrameLoader;
+use crate::training::metrics::{ParityLossCurveSample, ParityTopologyMetrics};
+use crate::training::telemetry::{LiteGsOptimizerLrs, LiteGsTrainingTelemetry};
 use crate::training::topology::{apply_mutations, plan_mutations, snapshot_for_topology};
+use crate::training::topology::{apply_topology_metrics_delta, should_apply_topology_step};
 use crate::training::TrainingConfig;
+use crate::TrainingError;
 
 use super::backend::{GsBackendBase, GsDevice, GsDiffBackend};
 use super::loss::{combined_loss_with_kernel, gaussian_kernel_1d, SsimConfig};
@@ -20,9 +26,11 @@ use super::splats::{device_splats_to_host, DeviceSplats};
 #[derive(Debug, Clone, Default)]
 pub struct WgpuTrainingReport {
     pub final_loss: Option<f32>,
+    pub final_step_loss: Option<f32>,
     pub final_gaussian_count: usize,
     pub completed_iterations: usize,
     pub cancelled: bool,
+    pub telemetry: LiteGsTrainingTelemetry,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -59,6 +67,7 @@ pub struct WgpuTrainer {
     num_observations: Tensor<GsDiffBackend, 1, Int>,
     ssim_config: SsimConfig,
     ssim_kernel: Tensor<GsDiffBackend, 1>,
+    telemetry: LiteGsTrainingTelemetry,
 }
 
 #[derive(Clone)]
@@ -72,7 +81,10 @@ impl AsRef<[u8]> for SharedTargetImageBytes {
     }
 }
 
-fn target_image_tensor_data(target_image: &Arc<Vec<f32>>, image_dims: (usize, usize)) -> TensorData {
+fn target_image_tensor_data(
+    target_image: &Arc<Vec<f32>>,
+    image_dims: (usize, usize),
+) -> TensorData {
     let (width, height) = image_dims;
     let shared = SharedBytes::from_owner(SharedTargetImageBytes {
         data: Arc::clone(target_image),
@@ -130,6 +142,8 @@ impl WgpuTrainer {
         let ssim_config = SsimConfig::default();
         let ssim_kernel = gaussian_kernel_1d::<GsDiffBackend>(&ssim_config, &device);
 
+        let telemetry = initial_training_telemetry(&config, initial_splats);
+
         Self {
             config,
             optimizer,
@@ -139,6 +153,7 @@ impl WgpuTrainer {
             num_observations: Tensor::zeros([initial_splats], &device),
             ssim_config,
             ssim_kernel,
+            telemetry,
         }
     }
 
@@ -173,8 +188,10 @@ impl WgpuTrainer {
     ) -> Option<f32> {
         let (width, height) = image_dims;
         let background = [0.0, 0.0, 0.0];
-        let target_img =
-            Tensor::<GsDiffBackend, 3>::from_data(target_image_tensor_data(target_image, image_dims), &self.device);
+        let target_img = Tensor::<GsDiffBackend, 3>::from_data(
+            target_image_tensor_data(target_image, image_dims),
+            &self.device,
+        );
 
         let pred =
             backward::render_splats(splats, camera, (width as u32, height as u32), background)
@@ -217,7 +234,7 @@ impl WgpuTrainer {
 
         // Brush keeps a strong gradient-validation path; mirror that observability here
         // so we can quickly spot silent no-op training regressions.
-        let should_log_diagnostics = iteration <= 3 || iteration % 100 == 0;
+        let should_log_diagnostics = iteration <= 3 || iteration.is_multiple_of(100);
         let grad_transforms_for_diag = if should_log_diagnostics {
             Some(transforms_grad.clone())
         } else {
@@ -320,6 +337,7 @@ impl WgpuTrainer {
         loss_value
     }
 
+    #[cfg(test)]
     pub(crate) async fn train_with_observer(
         &mut self,
         splats: &mut DeviceSplats<GsDiffBackend>,
@@ -367,6 +385,13 @@ impl WgpuTrainer {
 
             if let Some(loss) = loss {
                 report.final_loss = Some(loss);
+                report.final_step_loss = Some(loss);
+                self.record_loss_sample(
+                    iteration_idx,
+                    sample_idx,
+                    loss,
+                    should_log_step || iteration_idx == num_iterations,
+                );
                 let metrics = TrainingIterationMetrics {
                     iteration: iteration_idx,
                     loss,
@@ -401,7 +426,120 @@ impl WgpuTrainer {
             }
         }
 
+        self.finish_report(&mut report);
         report
+    }
+
+    pub(crate) async fn train_with_frame_loader(
+        &mut self,
+        splats: &mut DeviceSplats<GsDiffBackend>,
+        cameras: &[GaussianCamera],
+        frame_order: &[usize],
+        frame_loader: &mut PrefetchFrameLoader,
+        image_dims: (usize, usize),
+        num_iterations: usize,
+        observer: &mut dyn TrainingLoopObserver,
+    ) -> Result<WgpuTrainingReport, TrainingError> {
+        if cameras.is_empty() || cameras.len() != frame_order.len() {
+            return Err(TrainingError::InvalidInput(format!(
+                "training frame order length ({}) must match camera count ({}) and be non-empty",
+                frame_order.len(),
+                cameras.len()
+            )));
+        }
+
+        let mut report = WgpuTrainingReport::default();
+        let mut rng = StdRng::seed_from_u64(self.config.frame_shuffle_seed);
+        self.telemetry.topology.total_epochs =
+            Some(training_epoch_count(num_iterations, cameras.len()));
+
+        for iteration in 0..num_iterations {
+            if observer.should_cancel() {
+                report.cancelled = true;
+                break;
+            }
+
+            let sample_idx = if cameras.len() == 1 {
+                0
+            } else {
+                rng.gen_range(0..cameras.len())
+            };
+            let frame_idx = frame_order[sample_idx];
+            frame_loader.prefetch_order_window(frame_order, sample_idx)?;
+            let decoded = frame_loader.get(frame_idx)?;
+            let target_image = decoded.target_rgb.clone().ok_or_else(|| {
+                TrainingError::TrainingFailed(format!(
+                    "frame loader did not prepare target_rgb for frame {frame_idx}"
+                ))
+            })?;
+
+            let iteration_idx = iteration + 1;
+            let emit_progress = observer.should_emit_progress(iteration_idx);
+            let emit_snapshot = observer.should_emit_snapshot(iteration_idx);
+            let should_log_step = iteration.is_multiple_of(100);
+            let should_read_loss = emit_progress
+                || emit_snapshot
+                || should_log_step
+                || iteration_idx == num_iterations;
+            let loss = self
+                .train_step(
+                    splats,
+                    &cameras[sample_idx],
+                    &target_image,
+                    image_dims,
+                    iteration_idx,
+                    cameras.len(),
+                    should_read_loss,
+                )
+                .await;
+            report.completed_iterations = iteration_idx;
+            report.final_gaussian_count = splats.num_splats();
+
+            if let Some(loss) = loss {
+                report.final_loss = Some(loss);
+                report.final_step_loss = Some(loss);
+                self.record_loss_sample(
+                    iteration_idx,
+                    frame_idx,
+                    loss,
+                    should_log_step || iteration_idx == num_iterations,
+                );
+                let metrics = TrainingIterationMetrics {
+                    iteration: iteration_idx,
+                    loss,
+                    gaussian_count: splats.num_splats(),
+                };
+                if emit_progress {
+                    observer.on_iteration(metrics);
+                }
+                if emit_snapshot {
+                    let host = device_splats_to_host(splats).await;
+                    observer.on_snapshot(metrics, host);
+                }
+                if should_log_step {
+                    log::info!(
+                        "WGPU training step {} | loss={:.6} | splats={}",
+                        iteration_idx,
+                        loss,
+                        splats.num_splats()
+                    );
+                }
+            } else if should_log_step {
+                log::info!(
+                    "WGPU training step {} | splats={}",
+                    iteration_idx,
+                    splats.num_splats()
+                );
+            }
+
+            if observer.should_cancel() {
+                report.cancelled = true;
+                break;
+            }
+        }
+
+        self.finish_report(&mut report);
+        Ok(report)
     }
 
     fn should_apply_topology(&self, iteration: usize, frame_count: usize) -> bool {
@@ -449,6 +587,7 @@ impl WgpuTrainer {
         )
         .await;
         let plan = plan_mutations(&snapshot, &self.config, iteration, frame_count);
+        apply_topology_metrics_delta(&mut self.telemetry.topology, plan.aftermath.metrics_delta);
         apply_mutations(splats, &snapshot.splats, &plan, &self.device);
         self.optimizer.reset();
         self.reset_accumulators(
@@ -491,6 +630,70 @@ impl WgpuTrainer {
         self.optimizer.set_opacity_scaling(opacity_scales);
         self.update_position_lr(self.position_lr_at(iteration.saturating_sub(1)));
     }
+
+    fn record_loss_sample(
+        &mut self,
+        iteration: usize,
+        frame_idx: usize,
+        loss: f32,
+        keep_curve_sample: bool,
+    ) {
+        self.telemetry.final_loss = Some(loss);
+        self.telemetry.final_step_loss = Some(loss);
+        self.telemetry.loss_terms.total = Some(loss);
+        if keep_curve_sample {
+            self.telemetry
+                .loss_curve_samples
+                .push(ParityLossCurveSample {
+                    iteration,
+                    frame_idx,
+                    l1: None,
+                    ssim: None,
+                    depth: None,
+                    total: Some(loss),
+                    depth_valid_pixels: self.telemetry.depth_valid_pixels,
+                });
+        }
+    }
+
+    fn finish_report(&mut self, report: &mut WgpuTrainingReport) {
+        self.telemetry.final_loss = report.final_loss;
+        self.telemetry.final_step_loss = report.final_loss;
+        self.telemetry.topology.final_gaussians = Some(report.final_gaussian_count);
+        report.telemetry = self.telemetry.clone();
+    }
+}
+
+fn initial_training_telemetry(
+    config: &TrainingConfig,
+    initial_splats: usize,
+) -> LiteGsTrainingTelemetry {
+    LiteGsTrainingTelemetry {
+        active_sh_degree: Some(config.litegs.sh_degree),
+        rotation_frozen: config.lr_rotation == 0.0,
+        learning_rates: LiteGsOptimizerLrs {
+            xyz: Some(config.lr_position),
+            sh_0: Some(config.lr_color),
+            sh_rest: Some(config.lr_color),
+            opacity: Some(config.lr_opacity),
+            scale: Some(config.lr_scale),
+            rot: Some(config.lr_rotation),
+        },
+        topology: ParityTopologyMetrics {
+            initialization_gaussians: Some(initial_splats),
+            topology_freeze_epoch: config.litegs.topology_freeze_after_epoch,
+            ..ParityTopologyMetrics::default()
+        },
+        ..LiteGsTrainingTelemetry::default()
+    }
+}
+
+fn training_epoch_count(iterations: usize, frame_count: usize) -> usize {
+    if frame_count == 0 {
+        0
+    } else {
+        (iterations / frame_count).max(1)
+    }
 }
 
 #[cfg(test)]
@@ -501,8 +704,7 @@ mod tests {
 
     use super::super::backend::{GsBackendBase, GsDevice};
     use super::{
-        target_image_tensor_data, target_image_tensor_data_owned, TrainingLoopObserver,
-        WgpuTrainer,
+        target_image_tensor_data, target_image_tensor_data_owned, TrainingLoopObserver, WgpuTrainer,
     };
     use crate::core::HostSplats;
     use crate::training::engine::{host_splats_to_device, GsDiffBackend};
@@ -510,10 +712,12 @@ mod tests {
 
     #[test]
     fn test_position_lr_decay() {
-        let mut config = TrainingConfig::default();
-        config.iterations = 1000;
-        config.lr_position = 1.6e-4_f32;
-        config.lr_pos_final = 1.6e-6_f32;
+        let config = TrainingConfig {
+            iterations: 1000,
+            lr_position: 1.6e-4_f32,
+            lr_pos_final: 1.6e-6_f32,
+            ..TrainingConfig::default()
+        };
 
         let trainer = WgpuTrainer::new(config.clone(), GsDevice::default(), 1, 1);
         let at_0 = trainer.position_lr_at(0);
@@ -543,8 +747,10 @@ mod tests {
             }
         }
 
-        let mut config = TrainingConfig::default();
-        config.iterations = 100;
+        let config = TrainingConfig {
+            iterations: 100,
+            ..TrainingConfig::default()
+        };
 
         let device = GsDevice::default();
         let host = HostSplats::default();
@@ -622,9 +828,7 @@ mod tests {
             .await
             .expect("owned upload readback");
 
-        let shared_values = shared_data
-            .as_slice::<f32>()
-            .expect("shared readback f32");
+        let shared_values = shared_data.as_slice::<f32>().expect("shared readback f32");
         let owned_values = owned_data.as_slice::<f32>().expect("owned readback f32");
         assert_eq!(shared_values, owned_values);
     }

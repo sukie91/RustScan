@@ -15,8 +15,7 @@ pub(crate) fn build_initial_splats(
     let sh_degree = config.litegs.sh_degree;
     let init_config = gaussian_init_config_for_training();
     let mut splats =
-        initialize_host_splats_from_points(&dataset.initial_points, &init_config, sh_degree)
-            .map_err(TrainingError::from)?;
+        initialize_host_splats_from_points(&dataset.initial_points, &init_config, sh_degree)?;
     let max_initial = config.max_initial_gaussians.max(1);
     if splats.len() > max_initial {
         log::warn!(

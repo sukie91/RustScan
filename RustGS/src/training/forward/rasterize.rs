@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments)]
+
 use burn::prelude::*;
 use burn::tensor::{Int, Tensor, TensorPrimitive};
 use burn_cubecl::cubecl::{prelude::KernelId, server::KernelArguments, CubeCount};

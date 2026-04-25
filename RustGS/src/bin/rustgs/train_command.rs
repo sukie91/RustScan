@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments)]
+
 use crate::TrainArgs;
 use anyhow::bail;
 use std::path::{Path, PathBuf};
@@ -251,44 +253,47 @@ pub(super) fn build_training_config(args: &TrainArgs) -> anyhow::Result<rustgs::
         bail!("--litegs-target-primitives must be >= 1");
     }
 
-    let mut config = rustgs::TrainingConfig::default();
-    config.iterations = args.iterations;
-    config.max_initial_gaussians = args.max_initial_gaussians;
-    config.sampling_step = args.sampling_step;
-    config.frame_shuffle_seed = args.frame_shuffle_seed;
-    config.render_scale = args.render_scale;
-    config.lr_position = args.lr_position;
-    config.lr_pos_final = args.lr_position_final;
-    config.lr_scale = args.lr_scale;
-    config.lr_rotation = args.lr_rotation;
-    config.lr_opacity = args.lr_opacity;
-    config.lr_color = args.lr_color;
-    config.litegs = rustgs::LiteGsConfig {
-        sh_degree: args.litegs_sh_degree,
-        tile_size: args.litegs_tile_size,
-        sparse_grad: args.litegs_sparse_grad,
-        reg_weight: args.litegs_reg_weight,
-        enable_transmittance: args.litegs_enable_transmittance,
-        enable_depth: args.litegs_enable_depth,
-        densify_from: args.litegs_densify_from,
-        densify_until: args.litegs_densify_until,
-        topology_freeze_after_epoch: args.litegs_topology_freeze_after_epoch,
-        refine_every: args.litegs_refine_every,
-        densification_interval: args.litegs_densification_interval,
-        growth_grad_threshold: args.litegs_growth_grad_threshold,
-        growth_select_fraction: args.litegs_growth_select_fraction,
-        growth_stop_iter: args.litegs_growth_stop_iter,
-        opacity_reset_interval: args.litegs_opacity_reset_interval,
-        opacity_reset_mode: args.litegs_opacity_reset_mode,
-        prune_mode: args.litegs_prune_mode,
-        prune_offset_epochs: args.litegs_prune_offset_epochs,
-        prune_min_age: args.litegs_prune_min_age,
-        prune_invisible_epochs: args.litegs_prune_invisible_epochs,
-        target_primitives: args.litegs_target_primitives,
-        learnable_viewproj: args.litegs_learnable_viewproj,
-        lr_pose: args.litegs_lr_pose,
-        prune_scale_threshold: args.litegs_prune_scale_threshold,
+    let config = rustgs::TrainingConfig {
+        iterations: args.iterations,
+        max_initial_gaussians: args.max_initial_gaussians,
+        sampling_step: args.sampling_step,
+        frame_shuffle_seed: args.frame_shuffle_seed,
+        render_scale: args.render_scale,
+        lr_position: args.lr_position,
+        lr_pos_final: args.lr_position_final,
+        lr_scale: args.lr_scale,
+        lr_rotation: args.lr_rotation,
+        lr_opacity: args.lr_opacity,
+        lr_color: args.lr_color,
+        litegs: rustgs::LiteGsConfig {
+            sh_degree: args.litegs_sh_degree,
+            tile_size: args.litegs_tile_size,
+            sparse_grad: args.litegs_sparse_grad,
+            reg_weight: args.litegs_reg_weight,
+            enable_transmittance: args.litegs_enable_transmittance,
+            enable_depth: args.litegs_enable_depth,
+            densify_from: args.litegs_densify_from,
+            densify_until: args.litegs_densify_until,
+            topology_freeze_after_epoch: args.litegs_topology_freeze_after_epoch,
+            refine_every: args.litegs_refine_every,
+            densification_interval: args.litegs_densification_interval,
+            growth_grad_threshold: args.litegs_growth_grad_threshold,
+            growth_select_fraction: args.litegs_growth_select_fraction,
+            growth_stop_iter: args.litegs_growth_stop_iter,
+            opacity_reset_interval: args.litegs_opacity_reset_interval,
+            opacity_reset_mode: args.litegs_opacity_reset_mode,
+            prune_mode: args.litegs_prune_mode,
+            prune_offset_epochs: args.litegs_prune_offset_epochs,
+            prune_min_age: args.litegs_prune_min_age,
+            prune_invisible_epochs: args.litegs_prune_invisible_epochs,
+            target_primitives: args.litegs_target_primitives,
+            learnable_viewproj: args.litegs_learnable_viewproj,
+            lr_pose: args.litegs_lr_pose,
+            prune_scale_threshold: args.litegs_prune_scale_threshold,
+        },
+        ..rustgs::TrainingConfig::default()
     };
+    config.validate()?;
 
     Ok(config)
 }
@@ -427,12 +432,12 @@ pub(super) fn maybe_write_litegs_parity_report_with_manifest_dir(
     report.timing.total_wall_clock_ms = Some(training_elapsed.as_millis() as u64);
 
     report.notes.push(
-        "LiteGsMacV1 now evaluates the active SH degree for view-dependent color during Metal training and can apply rotation-aware projection gradients when rotation learning is enabled."
+        "LiteGsMacV1 now evaluates the active SH degree for view-dependent color during wgpu training and can apply rotation-aware projection gradients when rotation learning is enabled."
             .to_string(),
     );
     if training_telemetry.is_none() {
         report.notes.push(
-            "Metal training telemetry was unavailable for this run, so the parity report fell back to config-level LiteGS metadata."
+            "Wgpu training telemetry was unavailable for this run, so the parity report fell back to config-level LiteGS metadata."
                 .to_string(),
         );
     }

@@ -1,14 +1,11 @@
 #[cfg_attr(not(test), allow(dead_code))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum SplatColorRepresentation {
+    #[default]
     Rgb,
-    SphericalHarmonics { degree: usize },
-}
-
-impl Default for SplatColorRepresentation {
-    fn default() -> Self {
-        Self::Rgb
-    }
+    SphericalHarmonics {
+        degree: usize,
+    },
 }
 
 #[cfg_attr(not(test), allow(dead_code))]

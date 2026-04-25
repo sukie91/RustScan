@@ -169,7 +169,7 @@ impl DensityController {
     pub fn is_densify_active(&self, epoch: usize) -> bool {
         epoch >= self.config.densify_from
             && epoch < self.config.densify_until
-            && epoch % self.config.densification_interval == 0
+            && epoch.is_multiple_of(self.config.densification_interval)
     }
 
     /// Get prune mask based on opacity and visibility.
@@ -186,7 +186,7 @@ impl DensityController {
         let n = self.stats.len();
         let mut prune_mask = vec![false; n];
 
-        for i in 0..n {
+        for (i, prune) in prune_mask.iter_mut().enumerate().take(n) {
             let opacity = self.stats.opacity.get(i).copied().unwrap_or(0.0);
             let visible = self.stats.visible_count.get(i).copied().unwrap_or(0) > 0;
 
@@ -195,12 +195,12 @@ impl DensityController {
                     // Official: prune if opacity < threshold or never visible
                     let transparent = opacity < self.config.opacity_threshold;
                     let invisible = !visible;
-                    prune_mask[i] = transparent || invisible;
+                    *prune = transparent || invisible;
                 }
                 PruneMode::Weight => {
                     // TamingGS: prune when weight_sum == 0
                     let weight_sum = self.stats.get_weight_sum(i);
-                    prune_mask[i] = weight_sum == 0.0;
+                    *prune = weight_sum == 0.0;
                 }
             }
         }
@@ -216,7 +216,7 @@ impl DensityController {
         let mut clone_mask = vec![false; n];
         let scale_threshold = self.config.percent_dense * self.config.screen_extent;
 
-        for i in 0..n {
+        for (i, clone) in clone_mask.iter_mut().enumerate().take(n) {
             let grad = self.stats.get_mean2d_grad(i);
             let max_scale = self.stats.max_scale.get(i).copied().unwrap_or(0.0);
             let opacity = self.stats.opacity.get(i).copied().unwrap_or(0.0);
@@ -226,7 +226,7 @@ impl DensityController {
             let tiny = max_scale <= scale_threshold;
             let has_opacity = opacity > self.config.opacity_threshold;
 
-            clone_mask[i] = abnormal && tiny && has_opacity;
+            *clone = abnormal && tiny && has_opacity;
         }
 
         clone_mask
@@ -240,7 +240,7 @@ impl DensityController {
         let mut split_mask = vec![false; n];
         let scale_threshold = self.config.percent_dense * self.config.screen_extent;
 
-        for i in 0..n {
+        for (i, split) in split_mask.iter_mut().enumerate().take(n) {
             let grad = self.stats.get_mean2d_grad(i);
             let max_scale = self.stats.max_scale.get(i).copied().unwrap_or(0.0);
             let opacity = self.stats.opacity.get(i).copied().unwrap_or(0.0);
@@ -250,7 +250,7 @@ impl DensityController {
             let large = max_scale > scale_threshold;
             let has_opacity = opacity > self.config.opacity_threshold;
 
-            split_mask[i] = abnormal && large && has_opacity;
+            *split = abnormal && large && has_opacity;
         }
 
         split_mask

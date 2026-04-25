@@ -4,6 +4,7 @@
 //! Based on:
 //! - "3D Gaussian Splatting for Real-Time Radiance Field Rendering"
 //! - RTG-SLAM: Real-time 3D Reconstruction
+#![allow(clippy::too_many_arguments)]
 
 #[cfg(feature = "gpu")]
 use crate::core::GaussianCamera;

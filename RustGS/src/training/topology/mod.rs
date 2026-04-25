@@ -819,7 +819,7 @@ fn topology_mutation_aftermath(
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
-pub(super) fn apply_topology_metrics_delta(
+pub(crate) fn apply_topology_metrics_delta(
     metrics: &mut ParityTopologyMetrics,
     delta: TopologyMetricsDelta,
 ) {

@@ -76,9 +76,11 @@ fn trains_directly_from_workspace_tum_directory() {
         eprintln!("skipping test: GPU unavailable in current environment");
         return;
     }
-    let mut config = TrainingConfig::default();
-    config.iterations = 1;
-    config.max_initial_gaussians = 10_000;
+    let config = TrainingConfig {
+        iterations: 1,
+        max_initial_gaussians: 10_000,
+        ..TrainingConfig::default()
+    };
     let dataset = load_training_dataset(
         &root,
         &TumRgbdConfig {
@@ -104,7 +106,7 @@ fn trains_directly_from_workspace_tum_directory() {
     )
     .unwrap();
 
-    assert!(splats.len() > 0);
+    assert!(!splats.is_empty());
 }
 
 #[cfg(feature = "gpu")]
@@ -129,9 +131,11 @@ fn tum_training_smoke_produces_post_train_evaluation_summary() {
     };
     let dataset = load_training_dataset(&root, &tum_config).unwrap();
 
-    let mut config = TrainingConfig::default();
-    config.iterations = 1;
-    config.max_initial_gaussians = 2_000;
+    let config = TrainingConfig {
+        iterations: 1,
+        max_initial_gaussians: 2_000,
+        ..TrainingConfig::default()
+    };
     if dataset.initial_points.is_empty() {
         eprintln!("skipping test: TUM fixture does not include sparse initialization points");
         return;

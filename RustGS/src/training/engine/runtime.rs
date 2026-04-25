@@ -14,6 +14,7 @@ use crate::training::events::{
     TrainingIterationProgress, TrainingPlanSelected, TrainingRun, TrainingRunCancelled,
     TrainingRunCompleted, TrainingRunReport, TrainingRunStarted, TrainingSnapshotReady,
 };
+use crate::training::telemetry::store_last_training_telemetry;
 use crate::training::TrainingConfig;
 use crate::{Intrinsics, TrainingDataset, TrainingError};
 
@@ -102,25 +103,15 @@ where
 
     let frame_order = ordered_frame_indices(dataset.poses.len(), 1, config.frame_shuffle_seed);
     let mut cameras = Vec::with_capacity(frame_order.len());
-    let mut target_images = Vec::with_capacity(frame_order.len());
 
-    for (cursor, &pose_idx) in frame_order.iter().enumerate() {
-        loader.prefetch_order_window(&frame_order, cursor)?;
+    for &pose_idx in &frame_order {
         let pose = &dataset.poses[pose_idx];
-        let decoded = loader.get(pose_idx)?;
-
         cameras.push(gaussian_camera_from_scene_pose(
             &pose.pose,
             dataset.intrinsics,
             target_width,
             target_height,
         ));
-        target_images.push(
-            decoded
-                .target_rgb
-                .clone()
-                .expect("frame loader should prepare target_rgb when rgb_target_size is set"),
-        );
     }
 
     tokio::runtime::Builder::new_current_thread()
@@ -147,15 +138,16 @@ where
                 on_event,
             };
             let report = trainer
-                .train_with_observer(
+                .train_with_frame_loader(
                     &mut device_splats,
                     &cameras,
-                    &target_images,
+                    &frame_order,
+                    &mut loader,
                     (target_width, target_height),
                     config.iterations,
                     &mut observer,
                 )
-                .await;
+                .await?;
             let splats = device_splats_to_host(&device_splats).await;
             Ok(build_training_run(splats, report, started_at.elapsed()))
         })
@@ -240,25 +232,28 @@ fn build_training_run(
         report.final_gaussian_count
     };
 
-    TrainingRun {
+    let run = TrainingRun {
         report: TrainingRunReport {
             elapsed,
             final_loss,
-            final_step_loss: final_loss,
+            final_step_loss: report.final_step_loss.or(final_loss),
             gaussian_count,
             sh_degree: splats.sh_degree(),
             completed_iterations: report.completed_iterations,
             cancelled: report.cancelled,
-            telemetry: None,
+            telemetry: Some(report.telemetry.clone()),
         },
         splats,
-    }
+    };
+    store_last_training_telemetry(run.report.telemetry.clone());
+    run
 }
 
 #[cfg(test)]
 mod tests {
     use super::super::trainer::TrainingLoopObserver;
     use super::*;
+    use crate::training::telemetry::{last_training_telemetry, LiteGsTrainingTelemetry};
 
     #[test]
     fn observer_emits_progress_and_snapshot_on_cadence() {
@@ -318,5 +313,29 @@ mod tests {
         assert!(!observer.should_cancel());
         control.request_cancel();
         assert!(observer.should_cancel());
+    }
+
+    #[test]
+    fn build_training_run_publishes_report_telemetry() {
+        let telemetry = LiteGsTrainingTelemetry {
+            final_loss: Some(0.25),
+            final_step_loss: Some(0.25),
+            ..LiteGsTrainingTelemetry::default()
+        };
+        let run = build_training_run(
+            HostSplats::default(),
+            WgpuTrainingReport {
+                final_loss: Some(0.25),
+                final_step_loss: Some(0.25),
+                final_gaussian_count: 0,
+                completed_iterations: 3,
+                cancelled: false,
+                telemetry: telemetry.clone(),
+            },
+            std::time::Duration::from_millis(12),
+        );
+
+        assert_eq!(run.report.telemetry, Some(telemetry.clone()));
+        assert_eq!(last_training_telemetry(), Some(telemetry));
     }
 }

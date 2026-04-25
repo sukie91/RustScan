@@ -110,6 +110,8 @@ pub fn train_splats_with_controlled_events<F>(
 where
     F: FnMut(TrainingEvent),
 {
+    telemetry::store_last_training_telemetry(None);
+    config.validate()?;
     validate_litegs_mac_v1_config(config)?;
     engine::train_splats_with_controlled_events(dataset, config, control, on_event)
 }

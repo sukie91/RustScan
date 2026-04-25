@@ -1,4 +1,5 @@
 //! Host-side splat export and import utilities (PLY).
+#![allow(clippy::too_many_arguments)]
 
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -248,8 +249,8 @@ fn parse_ply_header(bytes: &[u8], path: &Path) -> Result<(ParsedPlyHeader, usize
             continue;
         }
 
-        if trimmed.starts_with("format ") {
-            header.format = match trimmed["format ".len()..].trim() {
+        if let Some(rest) = trimmed.strip_prefix("format ") {
+            header.format = match rest.trim() {
                 "ascii 1.0" => PlyFormat::Ascii,
                 "binary_little_endian 1.0" => PlyFormat::BinaryLittleEndian,
                 other => {
@@ -261,37 +262,24 @@ fn parse_ply_header(bytes: &[u8], path: &Path) -> Result<(ParsedPlyHeader, usize
             continue;
         }
 
-        if trimmed.starts_with("comment iterations ") {
-            header.metadata.iterations = trimmed["comment iterations ".len()..]
-                .trim()
-                .parse()
-                .unwrap_or(0);
-        } else if trimmed.starts_with("comment final_loss ") {
-            header.metadata.final_loss = trimmed["comment final_loss ".len()..]
-                .trim()
-                .parse()
-                .unwrap_or(0.0);
-        } else if trimmed.starts_with("comment sh_degree ") {
-            header.metadata.sh_degree = trimmed["comment sh_degree ".len()..]
-                .trim()
-                .parse()
-                .unwrap_or(0);
+        if let Some(rest) = trimmed.strip_prefix("comment iterations ") {
+            header.metadata.iterations = rest.trim().parse().unwrap_or(0);
+        } else if let Some(rest) = trimmed.strip_prefix("comment final_loss ") {
+            header.metadata.final_loss = rest.trim().parse().unwrap_or(0.0);
+        } else if let Some(rest) = trimmed.strip_prefix("comment sh_degree ") {
+            header.metadata.sh_degree = rest.trim().parse().unwrap_or(0);
             header.has_explicit_sh_degree = true;
-        } else if trimmed.starts_with("comment SH degree: ") {
-            header.metadata.sh_degree = trimmed["comment SH degree: ".len()..]
-                .trim()
-                .parse()
-                .unwrap_or(header.metadata.sh_degree);
+        } else if let Some(rest) = trimmed.strip_prefix("comment SH degree: ") {
+            header.metadata.sh_degree = rest.trim().parse().unwrap_or(header.metadata.sh_degree);
             header.has_explicit_sh_degree = true;
-        } else if trimmed.starts_with("comment opacity_representation ") {
-            header.opacity_representation =
-                match trimmed["comment opacity_representation ".len()..].trim() {
-                    "probability" => Some(PlyOpacityRepresentation::Probability),
-                    "raw_logit" => Some(PlyOpacityRepresentation::RawLogit),
-                    _ => None,
-                };
-        } else if trimmed.starts_with("comment sh_coeff_layout ") {
-            header.sh_coeff_layout = match trimmed["comment sh_coeff_layout ".len()..].trim() {
+        } else if let Some(rest) = trimmed.strip_prefix("comment opacity_representation ") {
+            header.opacity_representation = match rest.trim() {
+                "probability" => Some(PlyOpacityRepresentation::Probability),
+                "raw_logit" => Some(PlyOpacityRepresentation::RawLogit),
+                _ => None,
+            };
+        } else if let Some(rest) = trimmed.strip_prefix("comment sh_coeff_layout ") {
+            header.sh_coeff_layout = match rest.trim() {
                 "interleaved" => Some(PlyShCoeffLayout::Interleaved),
                 "channel_major" => Some(PlyShCoeffLayout::ChannelMajor),
                 _ => None,
@@ -406,7 +394,7 @@ fn infer_sh_degree(
     if sh_rest_count == 0 {
         return Ok(0);
     }
-    if sh_rest_count % 3 != 0 {
+    if !sh_rest_count.is_multiple_of(3) {
         return Err(SceneIoError::InvalidFormat {
             message: format!(
                 "invalid f_rest property count {sh_rest_count}; expected a multiple of 3"
@@ -1026,7 +1014,19 @@ mod tests {
         );
 
         let mut row = vec![
-            1.0f32, 2.0, 3.0, -2.3025851, -1.609438, -1.2039728, 2.0, 1.0, 0.0, 0.0, 0.0, 0.1, 0.2,
+            1.0f32,
+            2.0,
+            3.0,
+            -std::f32::consts::LN_10,
+            -1.609438,
+            -1.2039728,
+            2.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.1,
+            0.2,
             0.3,
         ];
         row.extend((1..=45).map(|value| value as f32));

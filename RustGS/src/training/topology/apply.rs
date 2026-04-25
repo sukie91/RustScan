@@ -17,7 +17,7 @@ pub(crate) fn apply_mutations<B: Backend>(
         return;
     }
 
-    let rebuilt = rebuild_host_snapshot(&snapshot, plan);
+    let rebuilt = rebuild_host_snapshot(snapshot, plan);
     let updated = host_splats_to_device(&rebuilt, device);
 
     splats.transforms = Param::initialized(splats.transforms.id, updated.transforms.val());

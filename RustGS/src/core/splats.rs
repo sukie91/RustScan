@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::sh::{rgb_to_sh0_value, sh0_to_rgb_value, sh_coeff_count_for_degree};
 use crate::TrainingError;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HostSplats {
     pub(crate) positions: Vec<f32>,
     pub(crate) log_scales: Vec<f32>,
@@ -11,19 +11,6 @@ pub struct HostSplats {
     pub(crate) opacity_logits: Vec<f32>,
     pub(crate) sh_coeffs: Vec<f32>,
     pub(crate) sh_degree: usize,
-}
-
-impl Default for HostSplats {
-    fn default() -> Self {
-        Self {
-            positions: Vec::new(),
-            log_scales: Vec::new(),
-            rotations: Vec::new(),
-            opacity_logits: Vec::new(),
-            sh_coeffs: Vec::new(),
-            sh_degree: 0,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy)]

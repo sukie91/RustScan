@@ -171,7 +171,7 @@ pub fn summarize_psnr_samples(values: &[f32]) -> PsnrSummary {
     let mean = values.iter().copied().sum::<f32>() / values.len().max(1) as f32;
     let median = if sorted.is_empty() {
         0.0
-    } else if sorted.len() % 2 == 0 {
+    } else if sorted.len().is_multiple_of(2) {
         let hi = sorted.len() / 2;
         (sorted[hi - 1] + sorted[hi]) * 0.5
     } else {

@@ -1,5 +1,8 @@
+#![allow(clippy::too_many_arguments)]
+
 use super::super::metrics::{ParityLossCurveSample, ParityLossTerms, ParityTopologyMetrics};
 use super::super::LiteGsConfig;
+
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io;
@@ -343,8 +346,8 @@ impl ParityHarnessReport {
             || self.metrics.litegs_reference_psnr.is_some()
             || self.metrics.gaussian_count_delta_ratio.is_some();
 
-        if self.thresholds.require_no_nans {
-            if push_check(
+        if self.thresholds.require_no_nans
+            && push_check(
                 &mut checks,
                 "no_nans",
                 if self.metrics.had_nan {
@@ -357,13 +360,13 @@ impl ParityHarnessReport {
                 } else {
                     "no non-finite values were recorded".to_string()
                 },
-            ) {
-                failed_checks += 1;
-            }
+            )
+        {
+            failed_checks += 1;
         }
 
-        if self.thresholds.require_no_oom {
-            if push_check(
+        if self.thresholds.require_no_oom
+            && push_check(
                 &mut checks,
                 "no_oom",
                 if self.metrics.had_oom {
@@ -376,13 +379,13 @@ impl ParityHarnessReport {
                 } else {
                     "no out-of-memory event was recorded".to_string()
                 },
-            ) {
-                failed_checks += 1;
-            }
+            )
+        {
+            failed_checks += 1;
         }
 
-        if self.thresholds.require_deterministic_export_roundtrip {
-            if push_check(
+        if self.thresholds.require_deterministic_export_roundtrip
+            && push_check(
                 &mut checks,
                 "export_roundtrip",
                 if self.metrics.export_roundtrip_ok {
@@ -395,9 +398,9 @@ impl ParityHarnessReport {
                 } else {
                     "export round-trip diverged from the trained scene".to_string()
                 },
-            ) {
-                failed_checks += 1;
-            }
+            )
+        {
+            failed_checks += 1;
         }
 
         if reference_required && !reference_loaded {
@@ -637,7 +640,8 @@ mod tests {
     fn parity_report_round_trips_through_json() {
         let tempdir = tempdir().unwrap();
         let path = tempdir.path().join("parity/report.json");
-        let mut report = ParityHarnessReport::new(DEFAULT_TINY_FIXTURE_ID, &LiteGsConfig::default());
+        let mut report =
+            ParityHarnessReport::new(DEFAULT_TINY_FIXTURE_ID, &LiteGsConfig::default());
         report.metrics.final_psnr = Some(28.4);
         report.loss_curve_samples.push(ParityLossCurveSample {
             iteration: 4,

@@ -54,7 +54,7 @@ pub(super) fn schedule_topology(
     let refine = phase_iter > 0
         && !frozen
         && progress <= BRUSH_REFINE_PROGRESS_LIMIT
-        && phase_iter % refine_every == 0;
+        && phase_iter.is_multiple_of(refine_every);
     TopologySchedule {
         completed_epoch: Some(epoch),
         densify: refine,

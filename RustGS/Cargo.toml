@@ -12,6 +12,7 @@ path = "src/lib.rs"
 [[bin]]
 name = "rustgs"
 path = "src/bin/rustgs.rs"
+required-features = ["cli"]
 
 [dependencies]
 rustscan-types = { path = "../rustscan-types" }
@@ -33,11 +34,11 @@ env_logger = { version = "0.11", optional = true }
 anyhow = { version = "1", optional = true }
 
 # GPU dependencies
-burn = { git = "https://github.com/tracel-ai/burn", default-features = false, features = ["autodiff", "wgpu"], optional = true }
-burn-wgpu = { git = "https://github.com/tracel-ai/burn", default-features = false, features = ["exclusive-memory-only", "template", "cubecl-wgsl"], optional = true }
-burn-cubecl = { git = "https://github.com/tracel-ai/burn", default-features = false, features = ["template"], optional = true }
-burn-fusion = { git = "https://github.com/tracel-ai/burn", default-features = false, optional = true }
-burn-ir = { git = "https://github.com/tracel-ai/burn", default-features = false, optional = true }
+burn = { git = "https://github.com/tracel-ai/burn", rev = "c33867c60a99958aafd4d05df782c68d242a6510", default-features = false, features = ["autodiff", "wgpu"], optional = true }
+burn-wgpu = { git = "https://github.com/tracel-ai/burn", rev = "c33867c60a99958aafd4d05df782c68d242a6510", default-features = false, features = ["exclusive-memory-only", "template", "cubecl-wgsl"], optional = true }
+burn-cubecl = { git = "https://github.com/tracel-ai/burn", rev = "c33867c60a99958aafd4d05df782c68d242a6510", default-features = false, features = ["template"], optional = true }
+burn-fusion = { git = "https://github.com/tracel-ai/burn", rev = "c33867c60a99958aafd4d05df782c68d242a6510", default-features = false, optional = true }
+burn-ir = { git = "https://github.com/tracel-ai/burn", rev = "c33867c60a99958aafd4d05df782c68d242a6510", default-features = false, optional = true }
 wgpu = { version = "29", default-features = false, features = ["naga-ir"], optional = true }
 naga_oil = { version = "0.22", optional = true }
 bytemuck = { version = "1.20", features = ["derive"], optional = true }
@@ -62,3 +63,11 @@ cli = ["dep:clap", "dep:env_logger", "dep:anyhow"]
 
 [dev-dependencies]
 tempfile = "3"
+
+[[example]]
+name = "evaluate_psnr"
+required-features = ["gpu", "cli"]
+
+[[test]]
+name = "tum_training"
+required-features = ["gpu"]

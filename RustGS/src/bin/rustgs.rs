@@ -6,6 +6,9 @@
 
 #[cfg(not(feature = "gpu"))]
 use anyhow::bail;
+use anyhow::Context;
+#[cfg(feature = "gpu")]
+use serde::Deserialize;
 use std::path::PathBuf;
 
 #[path = "rustgs/train_command.rs"]
@@ -226,6 +229,7 @@ struct RenderArgs {
 }
 
 #[derive(Debug, clap::Subcommand)]
+#[allow(clippy::large_enum_variant)]
 enum Commands {
     /// Train a 3DGS scene from JSON input, a TUM RGB-D dataset directory, or a COLMAP directory
     Train(TrainArgs),
@@ -255,9 +259,54 @@ fn run_render_command(args: RenderArgs) -> anyhow::Result<()> {
     log::info!("Loaded {} Gaussians", splats.len());
     let _ = metadata;
 
-    let _ = args.output;
-    log::warn!("Render command not yet implemented");
+    let camera = load_render_camera(&args.camera)?;
+    let renderer = rustgs::GaussianRenderer::new(
+        camera.intrinsics.width as usize,
+        camera.intrinsics.height as usize,
+    );
+    let rendered = renderer.render_splats(&splats, &camera)?;
+    let image = image::RgbImage::from_raw(
+        rendered.width as u32,
+        rendered.height as u32,
+        rendered.color,
+    )
+    .context("renderer produced an invalid RGB buffer")?;
+    if let Some(parent) = args.output.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    image.save(&args.output)?;
+    log::info!(
+        "Rendered {}x{} image to {:?}",
+        rendered.width,
+        rendered.height,
+        args.output
+    );
     Ok(())
+}
+
+#[cfg(feature = "gpu")]
+#[derive(Debug, Deserialize)]
+struct RenderCameraFile {
+    intrinsics: rustgs::Intrinsics,
+    pose: rustgs::SE3,
+    #[serde(default)]
+    pose_is_world_to_camera: bool,
+}
+
+#[cfg(feature = "gpu")]
+fn load_render_camera(path: &std::path::Path) -> anyhow::Result<rustgs::GaussianCamera> {
+    let contents = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read camera JSON {}", path.display()))?;
+    let camera: RenderCameraFile = serde_json::from_str(&contents)
+        .with_context(|| format!("failed to parse camera JSON {}", path.display()))?;
+    let extrinsics = if camera.pose_is_world_to_camera {
+        camera.pose
+    } else {
+        camera.pose.inverse()
+    };
+    Ok(rustgs::GaussianCamera::new(camera.intrinsics, extrinsics))
 }
 
 #[cfg(not(feature = "gpu"))]
@@ -463,7 +512,9 @@ mod tests {
             "--topology-log-interval",
             "500",
         ])
-        .expect_err("topology log interval flag should fail because the legacy scheduler is removed");
+        .expect_err(
+            "topology log interval flag should fail because the legacy scheduler is removed",
+        );
 
         assert!(err.to_string().contains("--topology-log-interval"));
     }

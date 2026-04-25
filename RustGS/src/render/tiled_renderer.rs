@@ -8,6 +8,7 @@
 //! 2. Tiled rasterization
 //! 3. Depth sorting
 //! 4. Alpha blending
+#![allow(clippy::too_many_arguments)]
 
 #[cfg(feature = "gpu")]
 use crate::core::SplatView;
@@ -53,8 +54,8 @@ impl TiledRenderer {
     pub fn new(width: usize, height: usize) -> Self {
         let tile_width = 16;
         let tile_height = 16;
-        let num_tiles_x = (width + tile_width - 1) / tile_width;
-        let num_tiles_y = (height + tile_height - 1) / tile_height;
+        let num_tiles_x = width.div_ceil(tile_width);
+        let num_tiles_y = height.div_ceil(tile_height);
 
         Self {
             width,
@@ -138,9 +139,9 @@ impl TiledRenderer {
 
         // Convert to tile coordinates
         let tile_x_min = x_min / self.tile_width;
-        let tile_x_max = (x_max + self.tile_width - 1) / self.tile_width;
+        let tile_x_max = x_max.div_ceil(self.tile_width);
         let tile_y_min = y_min / self.tile_height;
-        let tile_y_max = (y_max + self.tile_height - 1) / self.tile_height;
+        let tile_y_max = y_max.div_ceil(self.tile_height);
 
         (tile_x_min, tile_x_max, tile_y_min, tile_y_max)
     }

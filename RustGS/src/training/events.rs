@@ -29,7 +29,7 @@ impl Default for TrainingEventCadence {
 impl TrainingEventCadence {
     pub fn should_emit_progress(&self, iteration: usize) -> bool {
         let every = self.progress_every.max(1);
-        iteration > 0 && iteration % every == 0
+        iteration > 0 && iteration.is_multiple_of(every)
     }
 
     pub fn should_emit_snapshot(&self, iteration: usize) -> bool {
@@ -37,7 +37,7 @@ impl TrainingEventCadence {
             return false;
         };
         let every = every.max(1);
-        iteration > 0 && iteration % every == 0
+        iteration > 0 && iteration.is_multiple_of(every)
     }
 }
 
@@ -136,6 +136,7 @@ pub struct TrainingRunCancelled {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+#[allow(clippy::large_enum_variant)]
 pub enum TrainingEvent {
     RunStarted(TrainingRunStarted),
     PlanSelected(TrainingPlanSelected),
