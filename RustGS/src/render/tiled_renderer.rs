@@ -11,11 +11,11 @@
 #![allow(clippy::too_many_arguments)]
 
 #[cfg(feature = "gpu")]
-use crate::core::SplatView;
+use crate::core::{GaussianCamera, SplatView};
 #[cfg(all(test, feature = "gpu"))]
 use crate::sh::rgb_to_sh0_value;
 #[cfg(feature = "gpu")]
-use crate::sh::sh0_to_rgb_value;
+use crate::sh::{evaluate_sh_rgb, sh0_to_rgb_value};
 
 /// 2D projected splat
 #[derive(Debug, Clone)]
@@ -73,8 +73,8 @@ impl TiledRenderer {
         splats: SplatView<'_>,
         fx: f32,
         fy: f32,
-        _cx: f32,
-        _cy: f32,
+        cx: f32,
+        cy: f32,
         rotation: &[[f32; 3]; 3],
         translation: &[f32; 3],
     ) -> Vec<ProjectedGaussian> {
@@ -111,6 +111,8 @@ impl TiledRenderer {
                 ],
                 fx,
                 fy,
+                cx,
+                cy,
                 rotation,
                 translation,
             ) {
@@ -163,6 +165,83 @@ impl TiledRenderer {
     /// 3. For each tile, sort Gaussians that overlap it
     /// 4. Render with alpha blending (front to back)
     #[cfg(feature = "gpu")]
+    pub fn render_camera_splats(
+        &self,
+        splats: SplatView<'_>,
+        camera: &GaussianCamera,
+        background: [f32; 3],
+    ) -> RenderBuffer {
+        let projected = self.project_camera_splats(splats, camera);
+        self.render_projected_with_background(projected, background)
+    }
+
+    #[cfg(feature = "gpu")]
+    fn project_camera_splats(
+        &self,
+        splats: SplatView<'_>,
+        camera: &GaussianCamera,
+    ) -> Vec<ProjectedGaussian> {
+        let rotation = camera_rotation_rows(camera);
+        let translation = camera.extrinsics.translation();
+        let camera_position = camera.position();
+        let camera_position = [camera_position.x, camera_position.y, camera_position.z];
+        let sh_row_width = ((splats.sh_degree + 1) * (splats.sh_degree + 1)) * 3;
+        let mut projected = Vec::with_capacity(splats.opacity_logits.len());
+
+        for idx in 0..splats.opacity_logits.len() {
+            let pos_base = idx * 3;
+            let rot_base = idx * 4;
+            let sh_base = idx * sh_row_width;
+            let position = [
+                splats.positions[pos_base],
+                splats.positions[pos_base + 1],
+                splats.positions[pos_base + 2],
+            ];
+            let viewdir = normalize3([
+                position[0] - camera_position[0],
+                position[1] - camera_position[1],
+                position[2] - camera_position[2],
+            ]);
+            let color = evaluate_sh_rgb(
+                splats
+                    .sh_coeffs
+                    .get(sh_base..sh_base + sh_row_width)
+                    .unwrap_or(&[]),
+                splats.sh_degree,
+                viewdir,
+            );
+
+            if let Some(projected_gaussian) = project_projected_gaussian(
+                idx,
+                position,
+                [
+                    splats.log_scales[pos_base].exp().abs(),
+                    splats.log_scales[pos_base + 1].exp().abs(),
+                    splats.log_scales[pos_base + 2].exp().abs(),
+                ],
+                [
+                    splats.rotations[rot_base],
+                    splats.rotations[rot_base + 1],
+                    splats.rotations[rot_base + 2],
+                    splats.rotations[rot_base + 3],
+                ],
+                1.0 / (1.0 + (-splats.opacity_logits[idx]).exp()),
+                color,
+                camera.intrinsics.fx,
+                camera.intrinsics.fy,
+                camera.intrinsics.cx,
+                camera.intrinsics.cy,
+                &rotation,
+                &translation,
+            ) {
+                projected.push(projected_gaussian);
+            }
+        }
+
+        projected
+    }
+
+    #[cfg(feature = "gpu")]
     pub fn render_splats(
         &self,
         splats: SplatView<'_>,
@@ -174,10 +253,19 @@ impl TiledRenderer {
         translation: &[f32; 3],
     ) -> RenderBuffer {
         let projected = self.project_splats(splats, fx, fy, cx, cy, rotation, translation);
-        self.render_projected(projected)
+        self.render_projected_with_background(projected, [0.0, 0.0, 0.0])
     }
 
+    #[cfg(test)]
     fn render_projected(&self, projected: Vec<ProjectedGaussian>) -> RenderBuffer {
+        self.render_projected_with_background(projected, [0.0, 0.0, 0.0])
+    }
+
+    fn render_projected_with_background(
+        &self,
+        projected: Vec<ProjectedGaussian>,
+        background: [f32; 3],
+    ) -> RenderBuffer {
         // Initialize output buffers
         let mut color_buf = vec![0.0f32; self.width * self.height * 3];
         let mut depth_buf = vec![f32::MAX; self.width * self.height];
@@ -242,8 +330,8 @@ impl TiledRenderer {
                                 continue;
                             }
 
-                            let dx = px as f32 - g.x;
-                            let dy = py as f32 - g.y;
+                            let dx = g.x - (px as f32 + 0.5);
+                            let dy = g.y - (py as f32 + 0.5);
                             let d_sq = (g.cov_yy * dx * dx - 2.0 * g.cov_xy * dx * dy
                                 + g.cov_xx * dy * dy)
                                 * inv_det;
@@ -271,9 +359,15 @@ impl TiledRenderer {
             }
         }
 
-        // Clamp colors to [0, 1]
-        for v in &mut color_buf {
-            *v = v.clamp(0.0, 1.0);
+        for idx in 0..alpha_buf.len() {
+            let transmittance = 1.0 - alpha_buf[idx];
+            color_buf[idx * 3] += background[0] * transmittance;
+            color_buf[idx * 3 + 1] += background[1] * transmittance;
+            color_buf[idx * 3 + 2] += background[2] * transmittance;
+        }
+
+        for value in &mut color_buf {
+            *value = value.clamp(0.0, 1.0);
         }
 
         RenderBuffer {
@@ -294,6 +388,8 @@ fn project_projected_gaussian(
     color: [f32; 3],
     fx: f32,
     fy: f32,
+    px_center_x: f32,
+    px_center_y: f32,
     camera_rotation: &[[f32; 3]; 3],
     translation: &[f32; 3],
 ) -> Option<ProjectedGaussian> {
@@ -309,8 +405,8 @@ fn project_projected_gaussian(
         return None;
     }
 
-    let px = fx * cx / cz;
-    let py = fy * cy / cz;
+    let px = fx * cx / cz + px_center_x;
+    let py = fy * cy / cz + px_center_y;
 
     let [qw, qx, qy, qz] = rotation_q;
     let r00 = 1.0 - 2.0 * (qy * qy + qz * qz);
@@ -359,9 +455,20 @@ fn project_projected_gaussian(
     let jx2 = -fx * cx * inv_z2;
     let jy1 = fy * inv_z;
     let jy2 = -fy * cy * inv_z2;
-    let cov_xx = jx0 * (cc00 * jx0 + cc02 * jx2) + jx2 * (cc02 * jx0 + cc22 * jx2);
+    let mut cov_xx = jx0 * (cc00 * jx0 + cc02 * jx2) + jx2 * (cc02 * jx0 + cc22 * jx2);
     let cov_xy = jx0 * (cc01 * jy1 + cc02 * jy2) + jx2 * (cc12 * jy1 + cc22 * jy2);
-    let cov_yy = jy1 * (cc11 * jy1 + cc12 * jy2) + jy2 * (cc12 * jy1 + cc22 * jy2);
+    let mut cov_yy = jy1 * (cc11 * jy1 + cc12 * jy2) + jy2 * (cc12 * jy1 + cc22 * jy2);
+    let det_raw = cov_xx * cov_yy - cov_xy * cov_xy;
+    cov_xx += 0.3;
+    cov_yy += 0.3;
+    let det_blurred = (cov_xx * cov_yy - cov_xy * cov_xy).max(1e-12);
+    if det_raw <= 0.0 {
+        return None;
+    }
+    let opacity = opacity * (det_raw / det_blurred).sqrt();
+    if opacity < 1.0 / 255.0 {
+        return None;
+    }
 
     Some(ProjectedGaussian {
         x: px,
@@ -374,6 +481,27 @@ fn project_projected_gaussian(
         color,
         orig_idx: idx,
     })
+}
+
+#[cfg(feature = "gpu")]
+fn camera_rotation_rows(camera: &GaussianCamera) -> [[f32; 3]; 3] {
+    let col0 = camera.extrinsics.transform_vector(&[1.0, 0.0, 0.0]);
+    let col1 = camera.extrinsics.transform_vector(&[0.0, 1.0, 0.0]);
+    let col2 = camera.extrinsics.transform_vector(&[0.0, 0.0, 1.0]);
+    [
+        [col0[0], col1[0], col2[0]],
+        [col0[1], col1[1], col2[1]],
+        [col0[2], col1[2], col2[2]],
+    ]
+}
+
+#[cfg(feature = "gpu")]
+fn normalize3(v: [f32; 3]) -> [f32; 3] {
+    let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+    if len <= 1e-12 {
+        return [0.0, 0.0, 1.0];
+    }
+    [v[0] / len, v[1] / len, v[2] / len]
 }
 
 /// Render output buffer

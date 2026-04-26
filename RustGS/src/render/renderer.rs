@@ -17,6 +17,9 @@ use crate::sh::sh0_to_rgb_value;
 #[cfg(feature = "gpu")]
 use crate::TrainingError;
 
+#[cfg(feature = "gpu")]
+use super::tiled_renderer::TiledRenderer;
+
 /// Output of rendering
 #[derive(Debug, Clone)]
 pub struct RenderOutput {
@@ -64,17 +67,21 @@ impl GaussianRenderer {
         splats: &HostSplats,
         camera: &GaussianCamera,
     ) -> Result<RenderOutput, TrainingError> {
-        let mut color = self.background_rgb_buffer();
-        let mut depth = vec![0.0f32; self.width * self.height];
-        let mut projected_splats = self.project_visible_splats(splats.as_view(), camera);
-
-        projected_splats.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-        for (gc, cam_depth, ux, uy, radius) in projected_splats {
-            self.render_gaussian(
-                &mut color, &mut depth, cam_depth, gc, ux as i32, uy as i32, radius,
-            );
-        }
+        let rendered = TiledRenderer::new(self.width, self.height).render_camera_splats(
+            splats.as_view(),
+            camera,
+            self.background,
+        );
+        let color = rendered
+            .color
+            .into_iter()
+            .map(|value| (value.clamp(0.0, 1.0) * 255.0) as u8)
+            .collect();
+        let depth = rendered
+            .depth
+            .into_iter()
+            .map(|value| if value == f32::MAX { 0.0 } else { value })
+            .collect();
 
         Ok(RenderOutput {
             color,
@@ -83,46 +90,6 @@ impl GaussianRenderer {
             width: self.width,
             height: self.height,
         })
-    }
-
-    /// Render a single Gaussian as a filled circle using camera-space depth
-    fn render_gaussian(
-        &self,
-        color: &mut [u8],
-        depth: &mut [f32],
-        cam_depth: f32,
-        gc: [u8; 3],
-        cx: i32,
-        cy: i32,
-        radius: f32,
-    ) {
-        let radius = radius.max(1.0);
-        let r_sq = radius * radius;
-
-        let min_x = ((cx as f32 - radius) as i32).max(0);
-        let max_x = ((cx as f32 + radius) as i32).min(self.width as i32 - 1);
-        let min_y = ((cy as f32 - radius) as i32).max(0);
-        let max_y = ((cy as f32 + radius) as i32).min(self.height as i32 - 1);
-
-        for y in min_y..=max_y {
-            for x in min_x..=max_x {
-                let dx = x as f32 - cx as f32;
-                let dy = y as f32 - cy as f32;
-                let dist_sq = dx * dx + dy * dy;
-
-                if dist_sq <= r_sq {
-                    let idx = y as usize * self.width + x as usize;
-
-                    // Keep minimum camera-space depth (nearest surface wins)
-                    if depth[idx] == 0.0 || cam_depth < depth[idx] {
-                        color[idx * 3] = gc[0];
-                        color[idx * 3 + 1] = gc[1];
-                        color[idx * 3 + 2] = gc[2];
-                        depth[idx] = cam_depth;
-                    }
-                }
-            }
-        }
     }
 
     /// Render depth directly from host-side splats.
@@ -227,15 +194,6 @@ impl GaussianRenderer {
                 }
             }
         }
-    }
-
-    fn background_rgb_buffer(&self) -> Vec<u8> {
-        let pixel = self.background_u8();
-        let mut color = vec![0u8; self.width * self.height * 3];
-        for rgb in color.chunks_exact_mut(3) {
-            rgb.copy_from_slice(&pixel);
-        }
-        color
     }
 
     fn background_color_buffer(&self) -> Vec<[u8; 3]> {
