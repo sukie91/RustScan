@@ -4,11 +4,11 @@ pub mod autodiff;
 pub mod project_bwd;
 pub mod rasterize_bwd;
 
-pub use autodiff::render_splats;
+pub(crate) use autodiff::render_splats_with_visibility;
 
 #[cfg(test)]
 mod tests {
-    use super::render_splats;
+    use super::autodiff::render_splats;
     use crate::core::GaussianCamera;
     use crate::core::HostSplats;
     use crate::sh::rgb_to_sh0_value;

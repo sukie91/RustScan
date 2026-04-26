@@ -77,6 +77,8 @@ pub(super) struct TopologyCandidateInfo {
     pub(super) opacity: f32,
     pub(super) mean2d_grad: f32,
     pub(super) visible_count: usize,
+    pub(super) age: usize,
+    pub(super) consecutive_invisible_epochs: usize,
     pub(super) prune_candidate: bool,
     pub(super) growth_candidate: bool,
 }
@@ -187,7 +189,10 @@ pub(crate) fn plan_topology_from_host_snapshot(
     splats: &HostSplats,
     grad_2d_accum: &[f32],
     grad_color_accum: &[f32],
-    num_observations: &[u32],
+    num_observations: &[f32],
+    visible_observations: &[f32],
+    splat_ages: &[usize],
+    invisible_windows: &[usize],
     iteration: usize,
     frame_count: usize,
 ) -> TopologyMutationPlan {
@@ -206,8 +211,11 @@ pub(crate) fn plan_topology_from_host_snapshot(
         grad_2d_accum,
         grad_color_accum,
         num_observations,
+        visible_observations,
+        splat_ages,
+        invisible_windows,
     );
-    let analysis = analyze_topology_candidates(&policy, &metrics, &stats);
+    let analysis = analyze_topology_candidates(&policy, &metrics, &stats, schedule.densify);
 
     let requested_additions = litegs_requested_additions(
         &analysis.infos,
@@ -248,6 +256,7 @@ pub(super) fn analyze_topology_candidates(
     policy: &TopologyPolicy,
     splats: &TopologySplatMetrics,
     stats: &[MetalGaussianStats],
+    opacity_prune_enabled: bool,
 ) -> TopologyAnalysis {
     let mut analysis = TopologyAnalysis {
         infos: Vec::with_capacity(splats.len()),
@@ -266,13 +275,13 @@ pub(super) fn analyze_topology_candidates(
         let gaussian_stats = stats.get(idx).copied().unwrap_or_default();
         let mean2d_grad = gaussian_stats.refine_weight_max;
         let growth_threshold = policy.litegs.growth_grad_threshold;
-        let growth_candidate = mean2d_grad.is_finite()
-            && mean2d_grad >= growth_threshold
-            && gaussian_stats.visible_count > 0;
+        let growth_candidate = mean2d_grad.is_finite() && mean2d_grad >= growth_threshold;
         let candidate_info = TopologyCandidateInfo {
             opacity,
             mean2d_grad,
             visible_count: gaussian_stats.visible_count,
+            age: gaussian_stats.age,
+            consecutive_invisible_epochs: gaussian_stats.consecutive_invisible_epochs,
             prune_candidate: false,
             growth_candidate,
         };
@@ -284,6 +293,7 @@ pub(super) fn analyze_topology_candidates(
             brush_center,
             brush_max_allowed_bounds,
             splats.retainable(idx),
+            opacity_prune_enabled,
         );
 
         analysis.infos.push(TopologyCandidateInfo {
@@ -388,11 +398,7 @@ fn litegs_select_densify_candidates_with_rng<R: Rng + ?Sized>(
         .iter()
         .enumerate()
         .filter_map(|(idx, info)| {
-            (!info.prune_candidate
-                && info.visible_count > 0
-                && info.opacity.is_finite()
-                && info.opacity > 0.0)
-                .then_some(idx)
+            (!info.prune_candidate && info.opacity.is_finite() && info.opacity > 0.0).then_some(idx)
         })
         .collect();
     let replacement_weights: Vec<f32> = replacement_sources
@@ -716,6 +722,10 @@ pub(crate) struct TopologyMutationPlan {
 }
 
 impl TopologyMutationPlan {
+    pub(crate) fn mutates_splats(&self) -> bool {
+        self.added > 0 || self.pruned > 0 || self.refine_decay.is_some()
+    }
+
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn origins(&self) -> Vec<Option<usize>> {
         self.rows
@@ -1014,9 +1024,22 @@ fn litegs_should_prune_candidate(
     center: [f32; 3],
     max_allowed_bounds: f32,
     retainable: bool,
+    opacity_prune_enabled: bool,
 ) -> bool {
     let opacity_threshold = policy.litegs.prune_opacity_threshold.max(BRUSH_MIN_OPACITY);
-    let opacity_prune = !info.opacity.is_finite() || info.opacity < opacity_threshold;
+    let old_enough = info.age >= policy.litegs.prune_min_age;
+    let opacity_prune =
+        old_enough && (!info.opacity.is_finite() || info.opacity < opacity_threshold);
+    let history_invisible_prune = old_enough
+        && info.visible_count == 0
+        && info.consecutive_invisible_epochs >= policy.litegs.prune_invisible_epochs;
+    let contribution_prune = match policy.litegs.prune_mode {
+        LiteGsPruneMode::Threshold => opacity_prune || history_invisible_prune,
+        LiteGsPruneMode::Weight => {
+            (opacity_prune_enabled && opacity_prune)
+                || (!opacity_prune_enabled && history_invisible_prune)
+        }
+    };
     let scale_small = scale
         .iter()
         .any(|value| !value.is_finite() || *value < BRUSH_MIN_SCALE);
@@ -1027,35 +1050,53 @@ fn litegs_should_prune_candidate(
         .iter()
         .zip(center.iter())
         .any(|(position, center)| (*position - *center).abs() > max_allowed_bounds);
-    opacity_prune || scale_small || scale_large || out_of_bounds || !retainable
+    contribution_prune || scale_small || scale_large || out_of_bounds || !retainable
 }
 
 fn build_host_snapshot_stats(
     len: usize,
     grad_2d_accum: &[f32],
     grad_color_accum: &[f32],
-    num_observations: &[u32],
+    num_observations: &[f32],
+    visible_observations: &[f32],
+    splat_ages: &[usize],
+    invisible_windows: &[usize],
 ) -> Vec<MetalGaussianStats> {
     (0..len)
         .map(|idx| {
-            let observations = num_observations.get(idx).copied().unwrap_or_default() as usize;
-            let denom = observations.max(1) as f32;
+            let observations = num_observations
+                .get(idx)
+                .copied()
+                .unwrap_or_default()
+                .max(0.0);
+            let denom = observations.max(1.0);
+            let visible_observations = visible_observations
+                .get(idx)
+                .copied()
+                .unwrap_or_default()
+                .max(0.0);
+            let visible_count = visible_observations.round().min(usize::MAX as f32) as usize;
             let grad_2d = grad_2d_accum.get(idx).copied().unwrap_or_default();
             let grad_color = grad_color_accum.get(idx).copied().unwrap_or_default();
+            let age = splat_ages.get(idx).copied().unwrap_or_default();
+            let consecutive_invisible_epochs =
+                invisible_windows.get(idx).copied().unwrap_or_default();
 
             MetalGaussianStats {
                 mean2d_grad: RunningMoments {
                     mean: grad_2d / denom,
                     m2: 0.0,
-                    count: observations,
+                    count: visible_count,
                 },
                 fragment_weight: RunningMoments {
                     mean: grad_color / denom,
                     m2: 0.0,
-                    count: observations,
+                    count: visible_count,
                 },
                 refine_weight_max: grad_2d / denom,
-                visible_count: observations,
+                visible_count,
+                age,
+                consecutive_invisible_epochs,
                 ..MetalGaussianStats::default()
             }
         })
@@ -1446,7 +1487,7 @@ mod tests {
         ];
 
         let metrics = TopologySplatMetrics::from_snapshot(&snapshot);
-        let analysis = analyze_topology_candidates(&policy, &metrics, &stats);
+        let analysis = analyze_topology_candidates(&policy, &metrics, &stats, true);
 
         assert_eq!(analysis.clone_candidates, 1);
         assert_eq!(analysis.prune_candidates, 1);
@@ -1460,6 +1501,7 @@ mod tests {
         let config = TrainingConfig {
             litegs: LiteGsConfig {
                 prune_opacity_threshold: 0.02,
+                prune_mode: crate::training::LiteGsPruneMode::Threshold,
                 prune_min_age: 1,
                 prune_invisible_epochs: 100,
                 ..LiteGsConfig::default()
@@ -1483,10 +1525,176 @@ mod tests {
         }];
 
         let metrics = TopologySplatMetrics::from_snapshot(&snapshot);
-        let analysis = analyze_topology_candidates(&policy, &metrics, &stats);
+        let analysis = analyze_topology_candidates(&policy, &metrics, &stats, true);
 
         assert_eq!(analysis.prune_candidates, 1);
         assert!(analysis.infos[0].prune_candidate);
+    }
+
+    #[test]
+    fn weight_pruning_keeps_visible_low_opacity_splats_after_growth_freeze() {
+        let config = TrainingConfig {
+            litegs: LiteGsConfig {
+                prune_opacity_threshold: 0.02,
+                prune_mode: crate::training::LiteGsPruneMode::Weight,
+                ..LiteGsConfig::default()
+            },
+            ..TrainingConfig::default()
+        };
+        let policy = TopologyPolicy::from_training_config(&config, 1.0);
+        let snapshot = test_snapshot(
+            vec![0.0, 0.0, 1.0],
+            vec![0.005f32.ln(), 0.005f32.ln(), 0.005f32.ln()],
+            vec![1.0, 0.0, 0.0, 0.0],
+            vec![(0.01f32 / 0.99f32).ln()],
+            vec![1.0, 0.0, 0.0],
+            Vec::new(),
+            SplatColorRepresentation::Rgb,
+        );
+        let stats = vec![MetalGaussianStats {
+            visible_count: 1,
+            age: 10,
+            ..Default::default()
+        }];
+
+        let metrics = TopologySplatMetrics::from_snapshot(&snapshot);
+        let analysis = analyze_topology_candidates(&policy, &metrics, &stats, false);
+
+        assert_eq!(analysis.prune_candidates, 0);
+        assert!(!analysis.infos[0].prune_candidate);
+    }
+
+    #[test]
+    fn weight_pruning_uses_opacity_during_growth() {
+        let config = TrainingConfig {
+            litegs: LiteGsConfig {
+                prune_opacity_threshold: 0.02,
+                prune_mode: crate::training::LiteGsPruneMode::Weight,
+                ..LiteGsConfig::default()
+            },
+            ..TrainingConfig::default()
+        };
+        let policy = TopologyPolicy::from_training_config(&config, 1.0);
+        let snapshot = test_snapshot(
+            vec![0.0, 0.0, 1.0],
+            vec![0.005f32.ln(), 0.005f32.ln(), 0.005f32.ln()],
+            vec![1.0, 0.0, 0.0, 0.0],
+            vec![(0.01f32 / 0.99f32).ln()],
+            vec![1.0, 0.0, 0.0],
+            Vec::new(),
+            SplatColorRepresentation::Rgb,
+        );
+        let stats = vec![MetalGaussianStats {
+            visible_count: 1,
+            age: 10,
+            ..Default::default()
+        }];
+
+        let metrics = TopologySplatMetrics::from_snapshot(&snapshot);
+        let analysis = analyze_topology_candidates(&policy, &metrics, &stats, true);
+
+        assert_eq!(analysis.prune_candidates, 1);
+        assert!(analysis.infos[0].prune_candidate);
+    }
+
+    #[test]
+    fn invisible_pruning_requires_configured_consecutive_windows() {
+        let config = TrainingConfig {
+            litegs: LiteGsConfig {
+                prune_min_age: 1,
+                prune_invisible_epochs: 3,
+                ..LiteGsConfig::default()
+            },
+            ..TrainingConfig::default()
+        };
+        let policy = TopologyPolicy::from_training_config(&config, 1.0);
+        let snapshot = test_snapshot(
+            vec![0.0, 0.0, 1.0, 1.0, 0.0, 1.0],
+            vec![
+                0.005f32.ln(),
+                0.005f32.ln(),
+                0.005f32.ln(),
+                0.005f32.ln(),
+                0.005f32.ln(),
+                0.005f32.ln(),
+            ],
+            vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+            vec![1.0, 1.0],
+            vec![1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            Vec::new(),
+            SplatColorRepresentation::Rgb,
+        );
+        let stats = vec![
+            MetalGaussianStats {
+                age: 10,
+                consecutive_invisible_epochs: 2,
+                ..Default::default()
+            },
+            MetalGaussianStats {
+                age: 10,
+                consecutive_invisible_epochs: 3,
+                ..Default::default()
+            },
+        ];
+
+        let metrics = TopologySplatMetrics::from_snapshot(&snapshot);
+        let analysis = analyze_topology_candidates(&policy, &metrics, &stats, false);
+
+        assert_eq!(analysis.prune_candidates, 1);
+        assert!(!analysis.infos[0].prune_candidate);
+        assert!(analysis.infos[1].prune_candidate);
+
+        let growth_analysis = analyze_topology_candidates(&policy, &metrics, &stats, true);
+        assert_eq!(growth_analysis.prune_candidates, 0);
+        assert!(!growth_analysis.infos[1].prune_candidate);
+    }
+
+    #[test]
+    fn opacity_pruning_respects_min_age() {
+        let config = TrainingConfig {
+            litegs: LiteGsConfig {
+                prune_min_age: 5,
+                prune_opacity_threshold: 0.02,
+                ..LiteGsConfig::default()
+            },
+            ..TrainingConfig::default()
+        };
+        let policy = TopologyPolicy::from_training_config(&config, 1.0);
+        let snapshot = test_snapshot(
+            vec![0.0, 0.0, 1.0, 1.0, 0.0, 1.0],
+            vec![
+                0.005f32.ln(),
+                0.005f32.ln(),
+                0.005f32.ln(),
+                0.005f32.ln(),
+                0.005f32.ln(),
+                0.005f32.ln(),
+            ],
+            vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+            vec![(0.01f32 / 0.99f32).ln(), (0.01f32 / 0.99f32).ln()],
+            vec![1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            Vec::new(),
+            SplatColorRepresentation::Rgb,
+        );
+        let stats = vec![
+            MetalGaussianStats {
+                visible_count: 1,
+                age: 4,
+                ..Default::default()
+            },
+            MetalGaussianStats {
+                visible_count: 1,
+                age: 5,
+                ..Default::default()
+            },
+        ];
+
+        let metrics = TopologySplatMetrics::from_snapshot(&snapshot);
+        let analysis = analyze_topology_candidates(&policy, &metrics, &stats, true);
+
+        assert_eq!(analysis.prune_candidates, 1);
+        assert!(!analysis.infos[0].prune_candidate);
+        assert!(analysis.infos[1].prune_candidate);
     }
 
     #[test]
@@ -1771,6 +1979,37 @@ mod tests {
     }
 
     #[test]
+    fn no_op_topology_plan_does_not_mutate_splats() {
+        let metrics = TopologySplatMetrics::from_snapshot(&test_snapshot(
+            vec![0.0, 0.0, 1.0],
+            vec![0.05f32.ln(), 0.05f32.ln(), 0.05f32.ln()],
+            vec![1.0, 0.0, 0.0, 0.0],
+            vec![2.0],
+            vec![1.0, 0.0, 0.0],
+            Vec::new(),
+            SplatColorRepresentation::Rgb,
+        ));
+        let infos = vec![candidate(false, false, 1, 0.9, 0.0)];
+        let plan = super::plan_topology_mutation(
+            &metrics,
+            TopologyMutationRequest {
+                should_densify: false,
+                should_reset_opacity: false,
+                refine_decay: None,
+                completed_epoch: Some(3),
+                late_stage: false,
+                infos: &infos,
+                litegs_selection: &LiteGsDensifySelection::default(),
+                random_seed: 0,
+            },
+        );
+
+        assert_eq!(plan.added, 0);
+        assert_eq!(plan.pruned, 0);
+        assert!(!plan.mutates_splats());
+    }
+
+    #[test]
     fn refine_decay_shrinks_existing_splats_without_structural_change() {
         let mut snapshot = test_snapshot(
             vec![0.0, 0.0, 1.0],
@@ -1823,6 +2062,8 @@ mod tests {
             opacity,
             mean2d_grad,
             visible_count,
+            age: 10,
+            consecutive_invisible_epochs: if visible_count == 0 { 10 } else { 0 },
             prune_candidate,
             growth_candidate,
         }

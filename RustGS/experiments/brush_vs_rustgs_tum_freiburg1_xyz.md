@@ -255,3 +255,55 @@ cargo run --release -p rustgs --bin rustgs -- train \
   --lr-color-final 0.00025 \
   --eval-after-train --eval-json --log-level info
 ```
+
+## Follow-up: Visibility-aware Topology Pruning
+
+Code change:
+
+- Added differentiable render output with the rasterizer visibility mask, so topology code can track per-splat visible observations.
+- Added splat age and consecutive invisible-window history to topology snapshots.
+- Kept default weight-mode training conservative: actual raster visibility is now only used for explicit `threshold` pruning mode. Default/stable freeze training records synthetic all-visible observations so growth and replacement selection do not drift.
+- Restored optimizer reset on every scheduled topology step. A 10k regression showed that skipping reset on no-op topology plans hurt the dynamic frame cluster even though sampled PSNR looked fine.
+
+Release-mode experiments on the same TUM COLMAP dataset:
+
+| Experiment | Iterations | Key settings | Splats | 6-view mean / worst | 180-view mean / worst | Decision |
+| --- | ---: | --- | ---: | ---: | ---: | --- |
+| Phase prune guard | 10000 | growth freeze epoch 4, prune until epoch 30, visibility prune | 76721 | 21.7085 / 16.1799 | 21.9047 / 12.6798 | Failed: frame 81 became much blurrier than stable baseline. |
+| Invisible history guard | 10000 | same, with age/invisible-window guard | 76957 | 21.6482 / 16.0943 | 21.8374 / 14.1330 | Improved but still below stable baseline on worst frames. |
+| Freeze epoch 5 | 10000 | topology freeze epoch 5, stabilized LR | 92513 | 21.4752 / 16.3357 | 21.8577 / 14.2226 | More splats did not improve fidelity; do not continue. |
+| Growth restored | 10000 | visibility stats kept but growth/replacement no longer required visibility | 76848 | 21.7117 / 16.0663 | 21.9483 / 13.3827 | Still hurt dynamic frames. |
+| Late visibility prune | 10000 | invisible pruning disabled during growth | 77036 | 21.8229 / 16.4493 | 21.9334 / 12.3644 | Sampled PSNR looked fine, full-view strip failed. |
+| Visibility gated, no no-op reset | 10000 | default freeze4 path, actual visibility disabled | 76736 | 21.7028 / 16.0054 | 21.8579 / 12.2421 | Failed: no-op optimizer reset change was enough to hurt frames 79-85. |
+| Visibility gated + reset restored | 10000 | default freeze4 path, synthetic visibility, topology reset restored | 76938 | 21.8063 / 16.3668 | 22.0522 / 14.4581 | Pass: mean recovered; worst close to old stable baseline. |
+| Growth-freeze prune + reset | 10000 | growth freeze epoch 4, prune until epoch 30, opacity threshold 0.01 | 76920 | 21.7268 / 15.9204 | 21.9288 / 12.7895 | Failed: pruned only 43 splats but damaged dynamic frames; not run to 30000. |
+| Final visibility-gated stable run | 30000 | topology freeze epoch 4, stabilized LR, synthetic visibility in weight mode | 77000 | 21.4714 / 16.6888 | 21.4375 / 15.1700 | Pass: current code meets the 30000-step target. |
+
+Final current-code command:
+
+```sh
+cargo run --release -p rustgs --bin rustgs -- train \
+  --input /Users/tfjiang/Projects/RustScan/test_data/tum_freiburg1_xyz_colmap \
+  --output output/experiments/tum_visual/stabilized_lr_freeze4_visibilitygated_reset_30000.ply \
+  --iterations 30000 \
+  --litegs-topology-freeze-after-epoch 4 \
+  --lr-decay-iterations 10000 \
+  --lr-scale-final 0.0005 \
+  --lr-rotation-final 0.0001 \
+  --lr-opacity-final 0.005 \
+  --lr-color-final 0.00025 \
+  --eval-after-train --eval-json --log-level info
+```
+
+Final current-code output:
+
+```text
+RustGS/output/experiments/tum_visual/stabilized_lr_freeze4_visibilitygated_reset_30000.ply
+RustGS/output/experiments/tum_visual/stabilized_lr_freeze4_visibilitygated_reset_30000_full_review/
+```
+
+Visual conclusion:
+
+The current code again meets the 30000-step PSNR target on all 180 training views. The rendered training-view strips remain aligned with the input views, and the worst frames are the known dynamic/person cluster around frames 78-90 rather than a global failure. The result is still visibly soft around the foreground monitor, keyboard, and moving person, so this does not solve the sharpness gap versus Brush.
+
+The pruning conclusion is negative but useful: simple opacity, scale, and naive visibility-history pruning are not good enough cleanup tools for this dataset. They either remove too little clutter or remove/perturb splats that support the dynamic frame cluster. Future cleanup should be contribution-aware in image space, for example pruning only splats with consistently low accumulated alpha/error contribution across many training views, then validating with full-view strips before any 30000-step run.

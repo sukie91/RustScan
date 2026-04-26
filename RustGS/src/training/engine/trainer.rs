@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use burn::prelude::*;
-use burn::tensor::{s, AllocationProperty, Bytes as BurnBytes, DType, Int, Shape, TensorData};
+use burn::tensor::{s, AllocationProperty, Bytes as BurnBytes, DType, Shape, TensorData};
 use bytes::Bytes as SharedBytes;
 use rand::{rngs::StdRng, Rng, SeedableRng};
 
@@ -13,9 +13,10 @@ use crate::training::backward;
 use crate::training::data::frame_loader::PrefetchFrameLoader;
 use crate::training::metrics::{ParityLossCurveSample, ParityTopologyMetrics};
 use crate::training::telemetry::{LiteGsOptimizerLrs, LiteGsTrainingTelemetry};
+use crate::training::topology::TopologyMutationPlan;
 use crate::training::topology::{apply_mutations, plan_mutations, snapshot_for_topology};
 use crate::training::topology::{apply_topology_metrics_delta, should_apply_topology_step};
-use crate::training::TrainingConfig;
+use crate::training::{LiteGsPruneMode, TrainingConfig};
 use crate::TrainingError;
 
 use super::backend::{GsBackendBase, GsDevice, GsDiffBackend};
@@ -64,7 +65,10 @@ pub struct WgpuTrainer {
     device: GsDevice,
     grad_2d_accum: Tensor<GsDiffBackend, 1>,
     grad_color_accum: Tensor<GsDiffBackend, 1>,
-    num_observations: Tensor<GsDiffBackend, 1, Int>,
+    num_observations: Tensor<GsDiffBackend, 1>,
+    visible_observations: Tensor<GsDiffBackend, 1>,
+    splat_birth_iterations: Vec<usize>,
+    splat_invisible_windows: Vec<usize>,
     ssim_config: SsimConfig,
     ssim_kernel: Tensor<GsDiffBackend, 1>,
     telemetry: LiteGsTrainingTelemetry,
@@ -151,6 +155,9 @@ impl WgpuTrainer {
             grad_2d_accum: Tensor::zeros([initial_splats], &device),
             grad_color_accum: Tensor::zeros([initial_splats], &device),
             num_observations: Tensor::zeros([initial_splats], &device),
+            visible_observations: Tensor::zeros([initial_splats], &device),
+            splat_birth_iterations: vec![0; initial_splats],
+            splat_invisible_windows: vec![0; initial_splats],
             ssim_config,
             ssim_kernel,
             telemetry,
@@ -248,10 +255,14 @@ impl WgpuTrainer {
             &self.device,
         );
 
-        let pred =
-            backward::render_splats(splats, camera, (width as u32, height as u32), background)
-                .await;
-        let pred_rgb = pred.slice(s![.., .., 0..3]);
+        let rendered = backward::render_splats_with_visibility(
+            splats,
+            camera,
+            (width as u32, height as u32),
+            background,
+        )
+        .await;
+        let pred_rgb = rendered.image.slice(s![.., .., 0..3]);
         let loss = combined_loss_with_kernel(
             pred_rgb,
             target_img,
@@ -325,7 +336,12 @@ impl WgpuTrainer {
             iteration.saturating_sub(1),
             splats.sh_coeffs.val().dims()[1],
         );
-        self.accumulate_gradients(&transforms_grad, &sh_grad);
+        self.accumulate_gradients(
+            &transforms_grad,
+            &sh_grad,
+            &rendered.visible,
+            self.uses_visibility_pruning(),
+        );
         self.optimizer
             .step_device_splats(splats, transforms_grad, sh_grad, opacity_grad);
 
@@ -607,6 +623,8 @@ impl WgpuTrainer {
         &mut self,
         transforms_grad: &Tensor<GsBackendBase, 2>,
         sh_grad: &Tensor<GsBackendBase, 3>,
+        visible: &Tensor<GsDiffBackend, 1>,
+        use_actual_visibility: bool,
     ) {
         let grad_2d = transforms_grad
             .clone()
@@ -627,7 +645,17 @@ impl WgpuTrainer {
 
         self.grad_2d_accum = self.grad_2d_accum.clone() + grad_2d;
         self.grad_color_accum = self.grad_color_accum.clone() + grad_color;
-        self.num_observations = self.num_observations.clone().add_scalar(1);
+        self.num_observations = self.num_observations.clone().add_scalar(1.0);
+        let visible_increment = if use_actual_visibility {
+            visible.clone()
+        } else {
+            Tensor::<GsDiffBackend, 1>::ones([visible.dims()[0]], &self.device)
+        };
+        self.visible_observations = self.visible_observations.clone() + visible_increment;
+    }
+
+    fn uses_visibility_pruning(&self) -> bool {
+        matches!(self.config.litegs.prune_mode, LiteGsPruneMode::Threshold)
     }
 
     async fn apply_topology_mutations(
@@ -636,16 +664,32 @@ impl WgpuTrainer {
         iteration: usize,
         frame_count: usize,
     ) {
-        let snapshot = snapshot_for_topology(
+        let mut snapshot = snapshot_for_topology(
             splats,
             &self.grad_2d_accum,
             &self.grad_color_accum,
             &self.num_observations,
+            &self.visible_observations,
         )
         .await;
+        self.update_topology_visibility_state(
+            snapshot.splats.len(),
+            &snapshot.visible_observations,
+            iteration,
+        );
+        snapshot.splat_ages = self.splat_ages_at(iteration, snapshot.splats.len());
+        snapshot.invisible_windows = self
+            .splat_invisible_windows
+            .iter()
+            .copied()
+            .take(snapshot.splats.len())
+            .collect();
         let plan = plan_mutations(&snapshot, &self.config, iteration, frame_count);
         apply_topology_metrics_delta(&mut self.telemetry.topology, plan.aftermath.metrics_delta);
-        apply_mutations(splats, &snapshot.splats, &plan, &self.device);
+        if plan.mutates_splats() {
+            apply_mutations(splats, &snapshot.splats, &plan, &self.device);
+            self.remap_topology_visibility_state(&plan, iteration);
+        }
         self.optimizer.reset();
         self.reset_accumulators(
             splats.num_splats(),
@@ -658,8 +702,79 @@ impl WgpuTrainer {
         self.grad_2d_accum = Tensor::zeros([num_splats], &self.device);
         self.grad_color_accum = Tensor::zeros([num_splats], &self.device);
         self.num_observations = Tensor::zeros([num_splats], &self.device);
+        self.visible_observations = Tensor::zeros([num_splats], &self.device);
 
         self.update_optimizer_lrs(iteration.saturating_sub(1), sh_coeffs);
+    }
+
+    fn update_topology_visibility_state(
+        &mut self,
+        num_splats: usize,
+        visible_observations: &[f32],
+        iteration: usize,
+    ) {
+        self.ensure_topology_visibility_state(num_splats, iteration);
+        for idx in 0..num_splats {
+            let visible = visible_observations
+                .get(idx)
+                .copied()
+                .is_some_and(|value| value.is_finite() && value > 0.0);
+            if visible {
+                self.splat_invisible_windows[idx] = 0;
+            } else {
+                self.splat_invisible_windows[idx] =
+                    self.splat_invisible_windows[idx].saturating_add(1);
+            }
+        }
+    }
+
+    fn ensure_topology_visibility_state(&mut self, num_splats: usize, iteration: usize) {
+        if self.splat_birth_iterations.len() < num_splats {
+            self.splat_birth_iterations.resize(num_splats, iteration);
+        } else {
+            self.splat_birth_iterations.truncate(num_splats);
+        }
+
+        if self.splat_invisible_windows.len() < num_splats {
+            self.splat_invisible_windows.resize(num_splats, 0);
+        } else {
+            self.splat_invisible_windows.truncate(num_splats);
+        }
+    }
+
+    fn splat_ages_at(&self, iteration: usize, num_splats: usize) -> Vec<usize> {
+        (0..num_splats)
+            .map(|idx| {
+                iteration.saturating_sub(
+                    self.splat_birth_iterations
+                        .get(idx)
+                        .copied()
+                        .unwrap_or(iteration),
+                )
+            })
+            .collect()
+    }
+
+    fn remap_topology_visibility_state(&mut self, plan: &TopologyMutationPlan, iteration: usize) {
+        let previous_birth_iterations = self.splat_birth_iterations.clone();
+        let previous_invisible_windows = self.splat_invisible_windows.clone();
+        let origins = plan.origins();
+        self.splat_birth_iterations = origins
+            .iter()
+            .map(|origin| {
+                origin
+                    .and_then(|idx| previous_birth_iterations.get(idx).copied())
+                    .unwrap_or(iteration)
+            })
+            .collect();
+        self.splat_invisible_windows = origins
+            .iter()
+            .map(|origin| {
+                origin
+                    .and_then(|idx| previous_invisible_windows.get(idx).copied())
+                    .unwrap_or(0)
+            })
+            .collect();
     }
 
     fn record_loss_sample(

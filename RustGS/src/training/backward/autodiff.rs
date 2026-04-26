@@ -69,6 +69,11 @@ pub(crate) struct RenderCheckpoint<B: Backend> {
     pub num_visible: usize,
 }
 
+pub(crate) struct RenderSplatsOutput<B: Backend> {
+    pub image: Tensor<B, 3>,
+    pub visible: Tensor<B, 1>,
+}
+
 #[derive(Debug)]
 struct RenderBackward;
 
@@ -133,7 +138,7 @@ async fn render_splats_impl<B, C>(
     camera: &GaussianCamera,
     img_size: (u32, u32),
     background: [f32; 3],
-) -> Tensor<Autodiff<B, C>, 3>
+) -> RenderSplatsOutput<Autodiff<B, C>>
 where
     B: RenderBackend,
     C: CheckpointStrategy,
@@ -167,8 +172,9 @@ where
     let device = inner_splats.transforms.val().device();
     let fwd_out =
         forward::render_forward::<B>(&inner_splats, camera, img_size, background, &device).await;
+    let visible = Tensor::<AD<B, C>, 1>::from_inner(fwd_out.visible.clone());
 
-    match RenderBackward
+    let image = match RenderBackward
         .prepare::<C>([
             transforms.into_primitive().tensor().node,
             sh_coeffs.into_primitive().tensor().node,
@@ -201,14 +207,28 @@ where
         OpsKind::UnTracked(prep) => Tensor::from_primitive(TensorPrimitive::Float(
             prep.finish(fwd_out.out_img.into_primitive().tensor()),
         )),
-    }
+    };
+
+    RenderSplatsOutput { image, visible }
 }
 
+#[cfg(test)]
 pub async fn render_splats(
     splats: &DeviceSplats<GsDiffBackend>,
     camera: &GaussianCamera,
     img_size: (u32, u32),
     background: [f32; 3],
 ) -> Tensor<GsDiffBackend, 3> {
+    render_splats_with_visibility(splats, camera, img_size, background)
+        .await
+        .image
+}
+
+pub(crate) async fn render_splats_with_visibility(
+    splats: &DeviceSplats<GsDiffBackend>,
+    camera: &GaussianCamera,
+    img_size: (u32, u32),
+    background: [f32; 3],
+) -> RenderSplatsOutput<GsDiffBackend> {
     render_splats_impl::<GsBackendBase, NoCheckpointing>(splats, camera, img_size, background).await
 }
