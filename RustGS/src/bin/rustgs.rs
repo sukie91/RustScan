@@ -116,6 +116,14 @@ struct TrainArgs {
     #[arg(long, default_value = "15000")]
     litegs_growth_stop_iter: usize,
 
+    /// LiteGS opacity decay applied after each refine step
+    #[arg(long, default_value = "0.0")]
+    litegs_opacity_decay: f32,
+
+    /// LiteGS scale decay applied after each refine step
+    #[arg(long, default_value = "0.0")]
+    litegs_scale_decay: f32,
+
     /// LiteGS opacity reset interval
     #[arg(long, default_value = "10")]
     litegs_opacity_reset_interval: usize,
@@ -164,21 +172,41 @@ struct TrainArgs {
     #[arg(long, default_value = "0.0000016")]
     lr_position_final: f32,
 
+    /// Learning-rate decay horizon in iterations (0 = use total iterations)
+    #[arg(long, default_value = "0")]
+    lr_decay_iterations: usize,
+
     /// Scale learning rate
     #[arg(long, default_value = "0.005")]
     lr_scale: f32,
+
+    /// Scale learning rate final value (0 = keep scale LR constant)
+    #[arg(long, default_value = "0")]
+    lr_scale_final: f32,
 
     /// Rotation learning rate
     #[arg(long, default_value = "0.001")]
     lr_rotation: f32,
 
+    /// Rotation learning rate final value (0 = keep rotation LR constant)
+    #[arg(long, default_value = "0")]
+    lr_rotation_final: f32,
+
     /// Opacity learning rate
     #[arg(long, default_value = "0.05")]
     lr_opacity: f32,
 
+    /// Opacity learning rate final value (0 = keep opacity LR constant)
+    #[arg(long, default_value = "0")]
+    lr_opacity_final: f32,
+
     /// Color/SH learning rate
     #[arg(long, default_value = "0.0025")]
     lr_color: f32,
+
+    /// Color/SH learning rate final value (0 = keep color LR constant)
+    #[arg(long, default_value = "0")]
+    lr_color_final: f32,
 
     /// Log level (trace, debug, info, warn, error)
     #[arg(long, default_value = "info")]
@@ -608,6 +636,10 @@ mod tests {
             "0.35",
             "--litegs-growth-stop-iter",
             "2400",
+            "--litegs-opacity-decay",
+            "0.003",
+            "--litegs-scale-decay",
+            "0.0015",
             "--litegs-opacity-reset-interval",
             "12",
             "--litegs-opacity-reset-mode",
@@ -619,6 +651,16 @@ mod tests {
             "--litegs-learnable-viewproj",
             "--litegs-lr-pose",
             "0.0002",
+            "--lr-decay-iterations",
+            "10000",
+            "--lr-scale-final",
+            "0.0005",
+            "--lr-rotation-final",
+            "0.0001",
+            "--lr-opacity-final",
+            "0.005",
+            "--lr-color-final",
+            "0.00025",
         ]);
         let config = build_training_config(&args).unwrap();
 
@@ -636,6 +678,8 @@ mod tests {
         assert_eq!(config.litegs.growth_grad_threshold, 0.0003);
         assert_eq!(config.litegs.growth_select_fraction, 0.35);
         assert_eq!(config.litegs.growth_stop_iter, 2_400);
+        assert_eq!(config.litegs.opacity_decay, 0.003);
+        assert_eq!(config.litegs.scale_decay, 0.0015);
         assert_eq!(config.litegs.opacity_reset_interval, 12);
         assert_eq!(
             config.litegs.opacity_reset_mode,
@@ -649,6 +693,11 @@ mod tests {
         assert!(config.litegs.learnable_viewproj);
         assert_eq!(config.litegs.lr_pose, 0.0002);
         assert_eq!(config.frame_shuffle_seed, 42);
+        assert_eq!(config.lr_decay_iterations, Some(10_000));
+        assert_eq!(config.lr_scale_final, 0.0005);
+        assert_eq!(config.lr_rotation_final, 0.0001);
+        assert_eq!(config.lr_opacity_final, 0.005);
+        assert_eq!(config.lr_color_final, 0.00025);
     }
 
     #[test]

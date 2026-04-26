@@ -157,23 +157,78 @@ impl WgpuTrainer {
         }
     }
 
-    fn position_lr_at(&self, iteration: usize) -> f32 {
-        let lr_init = self.config.lr_position;
-        let lr_final = self.config.lr_pos_final;
-        if lr_final <= 0.0 || lr_final >= lr_init || self.config.iterations == 0 {
-            return lr_init;
+    fn lr_at(&self, initial: f32, final_value: f32, iteration: usize) -> f32 {
+        if final_value <= 0.0 || final_value >= initial || self.config.iterations == 0 {
+            return initial;
         }
 
-        let t = (iteration.min(self.config.iterations) as f32) / (self.config.iterations as f32);
-        lr_init * ((lr_final / lr_init).ln() * t).exp()
+        let decay_iterations = self
+            .config
+            .lr_decay_iterations
+            .unwrap_or(self.config.iterations)
+            .max(1);
+        let t = (iteration.min(decay_iterations) as f32) / (decay_iterations as f32);
+        initial * ((final_value / initial).ln() * t).exp()
     }
 
-    fn update_position_lr(&mut self, lr: f32) {
-        let pos_cols =
-            Tensor::<GsBackendBase, 2>::from_data(TensorData::from([[lr, lr, lr]]), &self.device);
-        let rest = self.optimizer.transform_scaling().slice(s![.., 3..10]);
-        self.optimizer
-            .set_transform_scaling(Tensor::cat(vec![pos_cols, rest], 1));
+    fn position_lr_at(&self, iteration: usize) -> f32 {
+        self.lr_at(self.config.lr_position, self.config.lr_pos_final, iteration)
+    }
+
+    fn scale_lr_at(&self, iteration: usize) -> f32 {
+        self.lr_at(self.config.lr_scale, self.config.lr_scale_final, iteration)
+    }
+
+    fn rotation_lr_at(&self, iteration: usize) -> f32 {
+        self.lr_at(
+            self.config.lr_rotation,
+            self.config.lr_rotation_final,
+            iteration,
+        )
+    }
+
+    fn opacity_lr_at(&self, iteration: usize) -> f32 {
+        self.lr_at(
+            self.config.lr_opacity,
+            self.config.lr_opacity_final,
+            iteration,
+        )
+    }
+
+    fn color_lr_at(&self, iteration: usize) -> f32 {
+        self.lr_at(self.config.lr_color, self.config.lr_color_final, iteration)
+    }
+
+    fn update_optimizer_lrs(&mut self, iteration: usize, sh_coeffs: usize) {
+        let pos_lr = self.position_lr_at(iteration);
+        let rotation_lr = self.rotation_lr_at(iteration);
+        let scale_lr = self.scale_lr_at(iteration);
+        let transform_scales = Tensor::<GsBackendBase, 2>::from_data(
+            TensorData::from([[
+                pos_lr,
+                pos_lr,
+                pos_lr,
+                rotation_lr,
+                rotation_lr,
+                rotation_lr,
+                rotation_lr,
+                scale_lr,
+                scale_lr,
+                scale_lr,
+            ]]),
+            &self.device,
+        );
+        let sh_scale_values = vec![self.color_lr_at(iteration); sh_coeffs.max(1)];
+        let sh_scales = Tensor::<GsBackendBase, 3>::from_data(
+            TensorData::new(sh_scale_values, [1, sh_coeffs.max(1), 1]),
+            &self.device,
+        );
+        let opacity_scales =
+            Tensor::<GsBackendBase, 1>::from_floats([self.opacity_lr_at(iteration)], &self.device);
+
+        self.optimizer.set_transform_scaling(transform_scales);
+        self.optimizer.set_sh_scaling(sh_scales);
+        self.optimizer.set_opacity_scaling(opacity_scales);
     }
 
     pub async fn train_step(
@@ -266,8 +321,10 @@ impl WgpuTrainer {
             None
         };
 
-        let pos_lr = self.position_lr_at(iteration.saturating_sub(1));
-        self.update_position_lr(pos_lr);
+        self.update_optimizer_lrs(
+            iteration.saturating_sub(1),
+            splats.sh_coeffs.val().dims()[1],
+        );
         self.accumulate_gradients(&transforms_grad, &sh_grad);
         self.optimizer
             .step_device_splats(splats, transforms_grad, sh_grad, opacity_grad);
@@ -602,33 +659,7 @@ impl WgpuTrainer {
         self.grad_color_accum = Tensor::zeros([num_splats], &self.device);
         self.num_observations = Tensor::zeros([num_splats], &self.device);
 
-        let transform_scales = Tensor::<GsBackendBase, 2>::from_data(
-            TensorData::from([[
-                self.config.lr_position,
-                self.config.lr_position,
-                self.config.lr_position,
-                self.config.lr_rotation,
-                self.config.lr_rotation,
-                self.config.lr_rotation,
-                self.config.lr_rotation,
-                self.config.lr_scale,
-                self.config.lr_scale,
-                self.config.lr_scale,
-            ]]),
-            &self.device,
-        );
-        let sh_scale_values = vec![self.config.lr_color; sh_coeffs.max(1)];
-        let sh_scales = Tensor::<GsBackendBase, 3>::from_data(
-            TensorData::new(sh_scale_values, [1, sh_coeffs.max(1), 1]),
-            &self.device,
-        );
-        let opacity_scales =
-            Tensor::<GsBackendBase, 1>::from_floats([self.config.lr_opacity], &self.device);
-
-        self.optimizer.set_transform_scaling(transform_scales);
-        self.optimizer.set_sh_scaling(sh_scales);
-        self.optimizer.set_opacity_scaling(opacity_scales);
-        self.update_position_lr(self.position_lr_at(iteration.saturating_sub(1)));
+        self.update_optimizer_lrs(iteration.saturating_sub(1), sh_coeffs);
     }
 
     fn record_loss_sample(
@@ -736,6 +767,31 @@ mod tests {
             at_mid < config.lr_position && at_mid > config.lr_pos_final,
             "mid LR should be between bounds"
         );
+    }
+
+    #[test]
+    fn test_group_lr_decay_uses_configured_horizon() {
+        let config = TrainingConfig {
+            iterations: 30_000,
+            lr_decay_iterations: Some(10_000),
+            lr_scale: 5e-3,
+            lr_scale_final: 5e-4,
+            lr_rotation: 1e-3,
+            lr_rotation_final: 1e-4,
+            lr_opacity: 5e-2,
+            lr_opacity_final: 5e-3,
+            lr_color: 2.5e-3,
+            lr_color_final: 2.5e-4,
+            ..TrainingConfig::default()
+        };
+
+        let trainer = WgpuTrainer::new(config, GsDevice::default(), 1, 1);
+
+        assert!((trainer.scale_lr_at(10_000) - 5e-4).abs() < 1e-8);
+        assert!((trainer.rotation_lr_at(10_000) - 1e-4).abs() < 1e-8);
+        assert!((trainer.opacity_lr_at(10_000) - 5e-3).abs() < 1e-8);
+        assert!((trainer.color_lr_at(10_000) - 2.5e-4).abs() < 1e-8);
+        assert!((trainer.color_lr_at(30_000) - 2.5e-4).abs() < 1e-8);
     }
 
     #[tokio::test]

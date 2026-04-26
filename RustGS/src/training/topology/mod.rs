@@ -229,6 +229,11 @@ pub(crate) fn plan_topology_from_host_snapshot(
     let request = TopologyMutationRequest {
         should_densify: execution.should_densify,
         should_reset_opacity: execution.should_reset_opacity,
+        refine_decay: refine_decay_for_schedule(
+            config,
+            schedule.densify || schedule.prune,
+            iteration,
+        ),
         completed_epoch: execution.completed_epoch,
         late_stage: iteration >= config.iterations.saturating_mul(9) / 10,
         infos: &analysis.infos,
@@ -457,6 +462,27 @@ pub(super) fn requested_gaussian_cap(
         .max(current_len.saturating_add(litegs_requested_additions))
 }
 
+fn refine_decay_for_schedule(
+    config: &TrainingConfig,
+    should_refine: bool,
+    iteration: usize,
+) -> Option<TopologyRefineDecay> {
+    if !should_refine || (config.litegs.opacity_decay == 0.0 && config.litegs.scale_decay == 0.0) {
+        return None;
+    }
+
+    let train_t = if config.iterations == 0 {
+        1.0
+    } else {
+        iteration as f32 / config.iterations as f32
+    };
+    Some(TopologyRefineDecay {
+        opacity_decay: config.litegs.opacity_decay,
+        scale_decay: config.litegs.scale_decay,
+        train_t: train_t.clamp(0.0, 1.0),
+    })
+}
+
 #[cfg(test)]
 pub(super) fn densify_snapshot_litegs(
     policy: &TopologyPolicy,
@@ -546,6 +572,13 @@ pub(super) enum TopologyStatsAction {
     UseMutated,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(crate) struct TopologyRefineDecay {
+    pub(crate) opacity_decay: f32,
+    pub(crate) scale_decay: f32,
+    pub(crate) train_t: f32,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(super) struct TopologyMetricsDelta {
     pub(super) final_gaussians: usize,
@@ -586,6 +619,7 @@ impl Default for TopologyMutationAftermath {
 pub(super) struct TopologyMutationRequest<'a> {
     pub(super) should_densify: bool,
     pub(super) should_reset_opacity: bool,
+    pub(super) refine_decay: Option<TopologyRefineDecay>,
     pub(super) completed_epoch: Option<usize>,
     pub(super) late_stage: bool,
     pub(super) infos: &'a [TopologyCandidateInfo],
@@ -677,6 +711,7 @@ pub(crate) struct TopologyMutationPlan {
     pub(crate) rows: Vec<TopologyPlanRow>,
     pub(crate) added: usize,
     pub(crate) pruned: usize,
+    pub(crate) refine_decay: Option<TopologyRefineDecay>,
     pub(super) aftermath: TopologyMutationAftermath,
 }
 
@@ -760,6 +795,7 @@ fn plan_brush_refine_mutation(
         rows,
         added,
         pruned,
+        refine_decay: request.refine_decay,
         aftermath,
     }
 }
@@ -773,7 +809,11 @@ pub(super) fn apply_snapshot_mutations(
 ) -> TopologyMutationResult {
     let metrics = TopologySplatMetrics::from_snapshot(snapshot);
     let plan = plan_topology_mutation(&metrics, request);
-    if plan.added > 0 || plan.pruned > 0 || plan.rows.len() != snapshot.len() {
+    if plan.added > 0
+        || plan.pruned > 0
+        || plan.rows.len() != snapshot.len()
+        || plan.refine_decay.is_some()
+    {
         *snapshot = rebuild_snapshot_from_plan(snapshot, &metrics, &plan);
         *stats = plan.remap_stats(stats);
         *origins = plan.origins();
@@ -1031,10 +1071,13 @@ fn rebuild_snapshot_from_plan(
     for row in &plan.rows {
         let source_idx = row.source_idx();
         let position = row.position(metrics);
-        let scale = row.scale(metrics);
+        let mut scale = row.scale(metrics);
+        let mut opacity = row.opacity(metrics).clamp(1e-6, 1.0 - 1e-6);
+        if let Some(decay) = plan.refine_decay {
+            apply_refine_decay_for_test(&mut scale, &mut opacity, decay);
+        }
         let log_scale = scale.map(|value| value.max(1e-6).ln());
         let rotation = snapshot.rotation(source_idx);
-        let opacity = row.opacity(metrics).clamp(1e-6, 1.0 - 1e-6);
         let opacity_logit = (opacity / (1.0 - opacity)).ln();
         rebuilt.push(
             position,
@@ -1048,6 +1091,24 @@ fn rebuild_snapshot_from_plan(
 }
 
 #[cfg(test)]
+fn apply_refine_decay_for_test(
+    scale: &mut [f32; 3],
+    opacity: &mut f32,
+    decay: TopologyRefineDecay,
+) {
+    let shrink_strength = 1.0 - decay.train_t.clamp(0.0, 1.0);
+    if decay.scale_decay > 0.0 {
+        let scale_scaling = (1.0 - decay.scale_decay * shrink_strength).max(1e-6);
+        for value in scale {
+            *value = (*value * scale_scaling).max(1e-12);
+        }
+    }
+    if decay.opacity_decay > 0.0 {
+        *opacity = (*opacity - decay.opacity_decay * shrink_strength).clamp(1e-12, 1.0 - 1e-12);
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::reference::density_controller_reference_summary;
     use super::schedule::{schedule_topology, TopologyStepContext};
@@ -1057,7 +1118,7 @@ mod tests {
         densify_snapshot_litegs, litegs_requested_additions, litegs_select_densify_candidates,
         litegs_select_densify_candidates_seeded, should_apply_topology_step,
         LiteGsDensifySelection, MetalGaussianStats, RunningMoments, TopologyMutationRequest,
-        TopologyPolicy, TopologyStatsAction,
+        TopologyPolicy, TopologyRefineDecay, TopologyStatsAction,
     };
     use crate::core::HostSplats as Splats;
     use crate::sh::{rgb_to_sh0_value, sh_coeff_count_for_degree, SplatColorRepresentation};
@@ -1562,6 +1623,7 @@ mod tests {
             TopologyMutationRequest {
                 should_densify: true,
                 should_reset_opacity: false,
+                refine_decay: None,
                 completed_epoch: Some(2),
                 late_stage: true,
                 infos: &infos,
@@ -1618,6 +1680,7 @@ mod tests {
             TopologyMutationRequest {
                 should_densify: false,
                 should_reset_opacity: true,
+                refine_decay: None,
                 completed_epoch: Some(3),
                 late_stage: true,
                 infos: &infos,
@@ -1642,6 +1705,48 @@ mod tests {
         assert_eq!(metrics.opacity_reset_events, 1);
         assert_eq!(metrics.first_opacity_reset_epoch, Some(3));
         assert_eq!(metrics.late_stage_opacity_reset_events, 1);
+    }
+
+    #[test]
+    fn refine_decay_shrinks_existing_splats_without_structural_change() {
+        let mut snapshot = test_snapshot(
+            vec![0.0, 0.0, 1.0],
+            vec![0.1f32.ln(), 0.1f32.ln(), 0.1f32.ln()],
+            vec![1.0, 0.0, 0.0, 0.0],
+            vec![0.0],
+            vec![1.0, 0.0, 0.0],
+            Vec::new(),
+            SplatColorRepresentation::Rgb,
+        );
+        let mut stats = vec![MetalGaussianStats::default()];
+        let mut origins = vec![Some(0)];
+        let infos = vec![candidate(false, false, 1, 0.5, 0.0)];
+
+        let mutation = apply_snapshot_mutations(
+            &mut snapshot,
+            &mut stats,
+            &mut origins,
+            TopologyMutationRequest {
+                should_densify: false,
+                should_reset_opacity: false,
+                refine_decay: Some(TopologyRefineDecay {
+                    opacity_decay: 0.1,
+                    scale_decay: 0.2,
+                    train_t: 0.5,
+                }),
+                completed_epoch: Some(3),
+                late_stage: false,
+                infos: &infos,
+                litegs_selection: &LiteGsDensifySelection::default(),
+                random_seed: 0,
+            },
+        );
+
+        assert_eq!(mutation.added, 0);
+        assert_eq!(mutation.pruned, 0);
+        assert_eq!(snapshot.len(), 1);
+        assert!((snapshot.scale(0)[0] - 0.09).abs() < 1e-6);
+        assert!((snapshot.opacity(0) - 0.45).abs() < 1e-6);
     }
 
     fn candidate(

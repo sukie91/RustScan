@@ -149,6 +149,14 @@ fn validate_litegs_mac_v1_config(config: &TrainingConfig) -> Result<(), Training
     if config.litegs.growth_stop_iter == 0 {
         unsupported.push("growth_stop_iter must be >= 1".to_string());
     }
+    if !config.litegs.opacity_decay.is_finite()
+        || !(0.0..=1.0).contains(&config.litegs.opacity_decay)
+    {
+        unsupported.push("opacity_decay must be finite and in [0, 1]".to_string());
+    }
+    if !config.litegs.scale_decay.is_finite() || !(0.0..=1.0).contains(&config.litegs.scale_decay) {
+        unsupported.push("scale_decay must be finite and in [0, 1]".to_string());
+    }
     if config.litegs.opacity_reset_interval == 0 {
         unsupported.push("opacity_reset_interval must be >= 1".to_string());
     }

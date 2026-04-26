@@ -165,6 +165,10 @@ pub struct LiteGsConfig {
     pub growth_select_fraction: f32,
     /// Stop selecting additional growth candidates after this training iteration.
     pub growth_stop_iter: usize,
+    /// Brush-style opacity decay applied after each refine step.
+    pub opacity_decay: f32,
+    /// Brush-style scale decay applied after each refine step.
+    pub scale_decay: f32,
     pub opacity_reset_interval: usize,
     /// How many epochs to offset prune from densify.
     /// Default is 0 (densify and prune in same epoch, LiteGS semantics).
@@ -205,6 +209,8 @@ impl Default for LiteGsConfig {
             growth_grad_threshold: LITEGS_DEFAULT_GROWTH_GRAD_THRESHOLD,
             growth_select_fraction: 0.25,
             growth_stop_iter: 15_000,
+            opacity_decay: 0.0,
+            scale_decay: 0.0,
             opacity_reset_interval: 10,
             prune_offset_epochs: 0,
             prune_min_age: 5,
@@ -241,14 +247,25 @@ pub struct TrainingConfig {
     /// Learning rate for positions (final) – exponential decay target.
     /// Default is 1/100 of lr_position. Set to 0 to disable decay.
     pub lr_pos_final: f32,
+    /// Number of iterations used for exponential learning-rate decay.
+    /// Defaults to total iterations when unset.
+    pub lr_decay_iterations: Option<usize>,
     /// Learning rate for scales
     pub lr_scale: f32,
+    /// Scale learning-rate final value. Set to 0 to keep lr_scale constant.
+    pub lr_scale_final: f32,
     /// Learning rate for rotations
     pub lr_rotation: f32,
+    /// Rotation learning-rate final value. Set to 0 to keep lr_rotation constant.
+    pub lr_rotation_final: f32,
     /// Learning rate for opacities
     pub lr_opacity: f32,
+    /// Opacity learning-rate final value. Set to 0 to keep lr_opacity constant.
+    pub lr_opacity_final: f32,
     /// Learning rate for colors
     pub lr_color: f32,
+    /// Color learning-rate final value. Set to 0 to keep lr_color constant.
+    pub lr_color_final: f32,
     /// Maximum number of Gaussians created during initialization
     pub max_initial_gaussians: usize,
     /// Sampling step for frame-to-Gaussian initialization (0 = auto)
@@ -279,10 +296,15 @@ impl Default for TrainingConfig {
             iterations: 30000,
             lr_position: 0.00016,
             lr_pos_final: 0.0000016,
+            lr_decay_iterations: None,
             lr_scale: 0.005,
+            lr_scale_final: 0.0,
             lr_rotation: 0.001,
+            lr_rotation_final: 0.0,
             lr_opacity: 0.05,
+            lr_opacity_final: 0.0,
             lr_color: 0.0025,
+            lr_color_final: 0.0,
             max_initial_gaussians: 100_000,
             sampling_step: 0,
             min_depth: 0.01,
@@ -327,10 +349,27 @@ impl TrainingConfig {
 
         validate_lr("lr_position", self.lr_position, true, &mut invalid);
         validate_lr("lr_pos_final", self.lr_pos_final, false, &mut invalid);
+        if matches!(self.lr_decay_iterations, Some(0)) {
+            invalid.push("lr_decay_iterations must be >= 1 when set".to_string());
+        }
         validate_lr("lr_scale", self.lr_scale, true, &mut invalid);
+        validate_lr("lr_scale_final", self.lr_scale_final, false, &mut invalid);
         validate_lr("lr_rotation", self.lr_rotation, false, &mut invalid);
+        validate_lr(
+            "lr_rotation_final",
+            self.lr_rotation_final,
+            false,
+            &mut invalid,
+        );
         validate_lr("lr_opacity", self.lr_opacity, true, &mut invalid);
+        validate_lr(
+            "lr_opacity_final",
+            self.lr_opacity_final,
+            false,
+            &mut invalid,
+        );
         validate_lr("lr_color", self.lr_color, true, &mut invalid);
+        validate_lr("lr_color_final", self.lr_color_final, false, &mut invalid);
         validate_lr("litegs.lr_pose", self.litegs.lr_pose, false, &mut invalid);
 
         if self.litegs.sh_degree == 0 {
@@ -356,6 +395,14 @@ impl TrainingConfig {
         }
         if self.litegs.growth_stop_iter == 0 {
             invalid.push("litegs.growth_stop_iter must be >= 1".to_string());
+        }
+        if !self.litegs.opacity_decay.is_finite()
+            || !(0.0..=1.0).contains(&self.litegs.opacity_decay)
+        {
+            invalid.push("litegs.opacity_decay must be finite and in [0, 1]".to_string());
+        }
+        if !self.litegs.scale_decay.is_finite() || !(0.0..=1.0).contains(&self.litegs.scale_decay) {
+            invalid.push("litegs.scale_decay must be finite and in [0, 1]".to_string());
         }
         if self.litegs.opacity_reset_interval == 0 {
             invalid.push("litegs.opacity_reset_interval must be >= 1".to_string());
@@ -443,6 +490,8 @@ mod tests {
         );
         assert_eq!(litegs.growth_select_fraction, 0.25);
         assert_eq!(litegs.growth_stop_iter, 15_000);
+        assert_eq!(litegs.opacity_decay, 0.0);
+        assert_eq!(litegs.scale_decay, 0.0);
         assert_eq!(litegs.opacity_reset_interval, 10);
         assert_eq!(litegs.prune_offset_epochs, 0);
         assert_eq!(litegs.prune_min_age, 5);

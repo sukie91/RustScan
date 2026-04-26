@@ -5,7 +5,7 @@ use glam::{Quat, Vec3};
 use crate::core::HostSplats;
 use crate::training::engine::{host_splats_to_device, DeviceSplats};
 
-use super::{TopologyMutationPlan, TopologyPlanRow};
+use super::{TopologyMutationPlan, TopologyPlanRow, TopologyRefineDecay};
 
 pub(crate) fn apply_mutations<B: Backend>(
     splats: &mut DeviceSplats<B>,
@@ -69,6 +69,10 @@ fn rebuild_host_snapshot(snapshot: &HostSplats, plan: &TopologyMutationPlan) -> 
             }
         }
 
+        if let Some(decay) = plan.refine_decay {
+            apply_refine_decay(&mut log_scale, &mut opacity_logit, decay);
+        }
+
         positions.extend_from_slice(&position);
         log_scales.extend_from_slice(&log_scale);
         rotations.extend_from_slice(&rotation);
@@ -109,6 +113,26 @@ fn brush_refine_opacity_logit(opacity_logit: f32) -> f32 {
     let opacity = sigmoid_scalar(opacity_logit).clamp(1.0 / 255.0, 1.0 - 1.0 / 255.0);
     let refined = (1.0 - (1.0 - opacity).sqrt()).clamp(1.0 / 255.0, 1.0 - 1.0 / 255.0);
     (refined / (1.0 - refined)).ln()
+}
+
+fn apply_refine_decay(
+    log_scale: &mut [f32; 3],
+    opacity_logit: &mut f32,
+    decay: TopologyRefineDecay,
+) {
+    let shrink_strength = 1.0 - decay.train_t.clamp(0.0, 1.0);
+    if decay.scale_decay > 0.0 {
+        let scale_scaling = (1.0 - decay.scale_decay * shrink_strength).max(1e-6);
+        for value in log_scale {
+            *value = (value.exp() * scale_scaling).max(1e-12).ln();
+        }
+    }
+
+    if decay.opacity_decay > 0.0 {
+        let opacity = sigmoid_scalar(*opacity_logit);
+        let decayed = (opacity - decay.opacity_decay * shrink_strength).clamp(1e-12, 1.0 - 1e-12);
+        *opacity_logit = (decayed / (1.0 - decayed)).ln();
+    }
 }
 
 fn sigmoid_scalar(value: f32) -> f32 {
