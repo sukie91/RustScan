@@ -40,27 +40,38 @@ pub(super) fn schedule_topology(
         return TopologySchedule::default();
     };
     let phase_iter = step.iteration.saturating_sub(1);
-    let frozen = policy
+    let topology_frozen = policy
         .litegs
         .topology_freeze_after_epoch
         .map(|freeze_epoch| epoch >= freeze_epoch)
         .unwrap_or(false);
+    let growth_frozen = topology_frozen
+        || policy
+            .litegs
+            .growth_freeze_after_epoch
+            .map(|freeze_epoch| epoch >= freeze_epoch)
+            .unwrap_or(false);
     let refine_every = policy.litegs.refine_every.max(1);
     let progress = if policy.max_iterations == 0 {
         1.0
     } else {
         phase_iter as f32 / policy.max_iterations as f32
     };
-    let refine = phase_iter > 0
-        && !frozen
-        && progress <= BRUSH_REFINE_PROGRESS_LIMIT
-        && phase_iter.is_multiple_of(refine_every);
+    let on_refine_cadence = phase_iter > 0 && phase_iter.is_multiple_of(refine_every);
+    let growth_window = progress <= BRUSH_REFINE_PROGRESS_LIMIT;
+    let prune_window = policy
+        .litegs
+        .prune_until_epoch
+        .map(|until_epoch| epoch < until_epoch)
+        .unwrap_or(growth_window);
+    let densify = on_refine_cadence && !growth_frozen && growth_window;
+    let prune = on_refine_cadence && !topology_frozen && prune_window;
     TopologySchedule {
         completed_epoch: Some(epoch),
-        densify: refine,
-        prune: refine,
+        densify,
+        prune,
         reset_opacity: false,
-        allow_extra_growth: refine && phase_iter < policy.litegs.growth_stop_iter,
+        allow_extra_growth: densify && phase_iter < policy.litegs.growth_stop_iter,
     }
 }
 

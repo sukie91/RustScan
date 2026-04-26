@@ -1007,7 +1007,7 @@ fn record_topology_epoch(
 }
 
 fn litegs_should_prune_candidate(
-    _policy: &TopologyPolicy,
+    policy: &TopologyPolicy,
     info: &TopologyCandidateInfo,
     position: [f32; 3],
     scale: [f32; 3],
@@ -1015,7 +1015,8 @@ fn litegs_should_prune_candidate(
     max_allowed_bounds: f32,
     retainable: bool,
 ) -> bool {
-    let opacity_prune = !info.opacity.is_finite() || info.opacity < BRUSH_MIN_OPACITY;
+    let opacity_threshold = policy.litegs.prune_opacity_threshold.max(BRUSH_MIN_OPACITY);
+    let opacity_prune = !info.opacity.is_finite() || info.opacity < opacity_threshold;
     let scale_small = scale
         .iter()
         .any(|value| !value.is_finite() || *value < BRUSH_MIN_SCALE);
@@ -1208,6 +1209,34 @@ mod tests {
         assert!(!epoch4.densify);
         assert!(!epoch4.prune);
         assert!(!epoch4.reset_opacity);
+    }
+
+    #[test]
+    fn litegs_growth_freeze_still_allows_pruning() {
+        let config = TrainingConfig {
+            iterations: 30_000,
+            litegs: LiteGsConfig {
+                growth_freeze_after_epoch: Some(4),
+                prune_until_epoch: Some(30),
+                refine_every: 160,
+                ..LiteGsConfig::default()
+            },
+            ..TrainingConfig::default()
+        };
+        let policy = TopologyPolicy::from_training_config(&config, 1.0);
+
+        let after_growth_freeze = schedule_topology(
+            &policy,
+            TopologyStepContext {
+                iteration: 1_600 + 1,
+                frame_count: 180,
+            },
+        );
+
+        assert_eq!(after_growth_freeze.completed_epoch, Some(8));
+        assert!(!after_growth_freeze.densify);
+        assert!(after_growth_freeze.prune);
+        assert!(!after_growth_freeze.allow_extra_growth);
     }
 
     #[test]
@@ -1424,6 +1453,40 @@ mod tests {
         assert_eq!(analysis.growth_candidates, 1);
         assert!(analysis.infos[0].growth_candidate);
         assert!(analysis.infos[1].prune_candidate);
+    }
+
+    #[test]
+    fn analyze_topology_candidates_uses_configured_prune_opacity_threshold() {
+        let config = TrainingConfig {
+            litegs: LiteGsConfig {
+                prune_opacity_threshold: 0.02,
+                prune_min_age: 1,
+                prune_invisible_epochs: 100,
+                ..LiteGsConfig::default()
+            },
+            ..TrainingConfig::default()
+        };
+        let policy = TopologyPolicy::from_training_config(&config, 1.0);
+        let snapshot = test_snapshot(
+            vec![0.0, 0.0, 1.0],
+            vec![0.005f32.ln(), 0.005f32.ln(), 0.005f32.ln()],
+            vec![1.0, 0.0, 0.0, 0.0],
+            vec![(0.01f32 / 0.99f32).ln()],
+            vec![1.0, 0.0, 0.0],
+            Vec::new(),
+            SplatColorRepresentation::Rgb,
+        );
+        let stats = vec![MetalGaussianStats {
+            visible_count: 1,
+            age: 1,
+            ..Default::default()
+        }];
+
+        let metrics = TopologySplatMetrics::from_snapshot(&snapshot);
+        let analysis = analyze_topology_candidates(&policy, &metrics, &stats);
+
+        assert_eq!(analysis.prune_candidates, 1);
+        assert!(analysis.infos[0].prune_candidate);
     }
 
     #[test]

@@ -4,11 +4,9 @@
 //!   rustgs train --input <training_dataset_with_initial_points.json|colmap_dir> --output <scene.ply>
 //!   rustgs render --input <scene.ply> --camera <pose.json> --output <image.png>
 
-#[cfg(not(feature = "gpu"))]
-use anyhow::bail;
-use anyhow::Context;
+use anyhow::{bail, Context};
 #[cfg(feature = "gpu")]
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 #[path = "rustgs/train_command.rs"]
@@ -96,6 +94,10 @@ struct TrainArgs {
     #[arg(long)]
     litegs_topology_freeze_after_epoch: Option<usize>,
 
+    /// Freeze LiteGS growth/densification at or after this epoch while allowing pruning to continue
+    #[arg(long)]
+    litegs_growth_freeze_after_epoch: Option<usize>,
+
     /// LiteGS densification interval
     #[arg(long, default_value = "5")]
     litegs_densification_interval: usize,
@@ -147,6 +149,14 @@ struct TrainArgs {
     /// LiteGS prune invisible epochs - consecutive invisibility required before pruning
     #[arg(long, default_value = "10")]
     litegs_prune_invisible_epochs: usize,
+
+    /// LiteGS opacity threshold for pruning
+    #[arg(long, default_value = "0.0039215689")]
+    litegs_prune_opacity_threshold: f32,
+
+    /// Continue LiteGS pruning before this epoch even if growth is frozen
+    #[arg(long)]
+    litegs_prune_until_epoch: Option<usize>,
 
     /// LiteGS target primitive budget
     #[arg(long, default_value = "1000000")]
@@ -256,6 +266,49 @@ struct RenderArgs {
     output: PathBuf,
 }
 
+#[derive(Debug, Clone, clap::Args)]
+struct PruneSceneArgs {
+    /// Path to input scene PLY file
+    #[arg(short, long)]
+    input: PathBuf,
+
+    /// Output path for pruned scene PLY
+    #[arg(short, long)]
+    output: PathBuf,
+
+    /// Remove Gaussians with opacity below this value
+    #[arg(long, default_value = "0.0")]
+    min_opacity: f32,
+
+    /// Remove Gaussians with any scale below this value (0 disables)
+    #[arg(long, default_value = "0.0")]
+    min_scale: f32,
+
+    /// Remove Gaussians with any scale above this value (0 disables)
+    #[arg(long, default_value = "0.0")]
+    max_scale: f32,
+
+    /// Remove Gaussians farther than this absolute distance from the scene center (0 disables)
+    #[arg(long, default_value = "0.0")]
+    max_distance_from_center: f32,
+
+    /// Remove Gaussians farther than scene_extent * multiplier from the scene center (0 disables)
+    #[arg(long, default_value = "0.0")]
+    max_distance_extent_multiplier: f32,
+
+    /// Print summary without writing output
+    #[arg(long, default_value_t = false)]
+    dry_run: bool,
+
+    /// Print pruning summary as JSON
+    #[arg(long, default_value_t = false)]
+    json: bool,
+
+    /// Log level (trace, debug, info, warn, error)
+    #[arg(long, default_value = "info")]
+    log_level: String,
+}
+
 #[derive(Debug, clap::Subcommand)]
 #[allow(clippy::large_enum_variant)]
 enum Commands {
@@ -264,6 +317,9 @@ enum Commands {
 
     /// Render a scene from a given viewpoint
     Render(RenderArgs),
+
+    /// Remove low-quality splats from an existing scene PLY
+    PruneScene(PruneSceneArgs),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -272,9 +328,246 @@ fn main() -> anyhow::Result<()> {
     match cli.command {
         Commands::Train(args) => train_command::run_train_command(args)?,
         Commands::Render(args) => run_render_command(args)?,
+        Commands::PruneScene(args) => run_prune_scene_command(args)?,
     }
 
     Ok(())
+}
+
+#[cfg(feature = "gpu")]
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+struct PruneReasonCounts {
+    invalid: usize,
+    opacity: usize,
+    min_scale: usize,
+    max_scale: usize,
+    distance: usize,
+}
+
+#[cfg(feature = "gpu")]
+#[derive(Debug, Clone, Serialize)]
+struct PruneSceneSummary {
+    input_gaussians: usize,
+    output_gaussians: usize,
+    removed_gaussians: usize,
+    scene_center: [f32; 3],
+    scene_extent: f32,
+    max_distance_threshold: Option<f32>,
+    min_opacity: f32,
+    min_scale: Option<f32>,
+    max_scale: Option<f32>,
+    reasons: PruneReasonCounts,
+}
+
+#[cfg(feature = "gpu")]
+fn run_prune_scene_command(args: PruneSceneArgs) -> anyhow::Result<()> {
+    let _ = env_logger::Builder::new()
+        .parse_filters(&args.log_level)
+        .try_init();
+    let (splats, mut metadata) = rustgs::load_splats_ply(&args.input)?;
+    let (pruned, summary) = prune_splats(&splats, &args)?;
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&summary)?);
+    } else {
+        println!(
+            "Pruned scene: kept {} / {} Gaussians, removed {}",
+            summary.output_gaussians, summary.input_gaussians, summary.removed_gaussians
+        );
+    }
+
+    if args.dry_run {
+        return Ok(());
+    }
+
+    if pruned.is_empty() {
+        bail!("pruning removed every Gaussian; refusing to write empty scene");
+    }
+    if let Some(parent) = args.output.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    metadata.gaussian_count = pruned.len();
+    metadata.sh_degree = pruned.sh_degree();
+    rustgs::save_splats_ply(&args.output, &pruned, &metadata)?;
+    log::info!("Saved pruned scene to {:?}", args.output);
+    Ok(())
+}
+
+#[cfg(feature = "gpu")]
+fn prune_splats(
+    splats: &rustgs::HostSplats,
+    args: &PruneSceneArgs,
+) -> anyhow::Result<(rustgs::HostSplats, PruneSceneSummary)> {
+    if !args.min_opacity.is_finite() || !(0.0..=1.0).contains(&args.min_opacity) {
+        bail!("--min-opacity must be finite and in [0, 1]");
+    }
+    validate_non_negative("min-scale", args.min_scale)?;
+    validate_non_negative("max-scale", args.max_scale)?;
+    validate_non_negative("max-distance-from-center", args.max_distance_from_center)?;
+    validate_non_negative(
+        "max-distance-extent-multiplier",
+        args.max_distance_extent_multiplier,
+    )?;
+
+    let view = splats.as_view();
+    let row_count = splats.len();
+    let sh_row_width = ((view.sh_degree + 1) * (view.sh_degree + 1)) * 3;
+    let (center, extent) = scene_center_and_extent(&view);
+    let max_distance_threshold = if args.max_distance_from_center > 0.0 {
+        Some(args.max_distance_from_center)
+    } else if args.max_distance_extent_multiplier > 0.0 {
+        Some(extent * args.max_distance_extent_multiplier)
+    } else {
+        None
+    };
+
+    let mut kept_positions = Vec::with_capacity(view.positions.len());
+    let mut kept_log_scales = Vec::with_capacity(view.log_scales.len());
+    let mut kept_rotations = Vec::with_capacity(view.rotations.len());
+    let mut kept_opacities = Vec::with_capacity(view.opacity_logits.len());
+    let mut kept_sh_coeffs = Vec::with_capacity(view.sh_coeffs.len());
+    let mut reasons = PruneReasonCounts::default();
+
+    for idx in 0..row_count {
+        let pos_base = idx * 3;
+        let rot_base = idx * 4;
+        let sh_base = idx * sh_row_width;
+        let position = [
+            view.positions[pos_base],
+            view.positions[pos_base + 1],
+            view.positions[pos_base + 2],
+        ];
+        let log_scale = [
+            view.log_scales[pos_base],
+            view.log_scales[pos_base + 1],
+            view.log_scales[pos_base + 2],
+        ];
+        let rotation = [
+            view.rotations[rot_base],
+            view.rotations[rot_base + 1],
+            view.rotations[rot_base + 2],
+            view.rotations[rot_base + 3],
+        ];
+        let opacity_logit = view.opacity_logits[idx];
+        let scale = log_scale.map(f32::exp);
+
+        if position.iter().any(|value| !value.is_finite())
+            || log_scale.iter().any(|value| !value.is_finite())
+            || rotation.iter().any(|value| !value.is_finite())
+            || !opacity_logit.is_finite()
+            || scale.iter().any(|value| !value.is_finite())
+        {
+            reasons.invalid += 1;
+            continue;
+        }
+        if sigmoid(opacity_logit) < args.min_opacity {
+            reasons.opacity += 1;
+            continue;
+        }
+        if args.min_scale > 0.0 && scale.iter().any(|value| *value < args.min_scale) {
+            reasons.min_scale += 1;
+            continue;
+        }
+        if args.max_scale > 0.0 && scale.iter().any(|value| *value > args.max_scale) {
+            reasons.max_scale += 1;
+            continue;
+        }
+        if let Some(max_distance) = max_distance_threshold {
+            if distance(position, center) > max_distance {
+                reasons.distance += 1;
+                continue;
+            }
+        }
+
+        kept_positions.extend_from_slice(&position);
+        kept_log_scales.extend_from_slice(&log_scale);
+        kept_rotations.extend_from_slice(&rotation);
+        kept_opacities.push(opacity_logit);
+        kept_sh_coeffs.extend_from_slice(&view.sh_coeffs[sh_base..sh_base + sh_row_width]);
+    }
+
+    let pruned = rustgs::HostSplats::from_raw_parts(
+        kept_positions,
+        kept_log_scales,
+        kept_rotations,
+        kept_opacities,
+        kept_sh_coeffs,
+        view.sh_degree,
+    )?;
+    let summary = PruneSceneSummary {
+        input_gaussians: row_count,
+        output_gaussians: pruned.len(),
+        removed_gaussians: row_count.saturating_sub(pruned.len()),
+        scene_center: center,
+        scene_extent: extent,
+        max_distance_threshold,
+        min_opacity: args.min_opacity,
+        min_scale: (args.min_scale > 0.0).then_some(args.min_scale),
+        max_scale: (args.max_scale > 0.0).then_some(args.max_scale),
+        reasons,
+    };
+    Ok((pruned, summary))
+}
+
+#[cfg(feature = "gpu")]
+fn validate_non_negative(name: &str, value: f32) -> anyhow::Result<()> {
+    if !value.is_finite() || value < 0.0 {
+        bail!("--{name} must be finite and >= 0");
+    }
+    Ok(())
+}
+
+#[cfg(feature = "gpu")]
+fn sigmoid(value: f32) -> f32 {
+    1.0 / (1.0 + (-value).exp())
+}
+
+#[cfg(feature = "gpu")]
+fn scene_center_and_extent(view: &rustgs::SplatView<'_>) -> ([f32; 3], f32) {
+    let row_count = view.opacity_logits.len();
+    if row_count == 0 {
+        return ([0.0, 0.0, 0.0], 0.0);
+    }
+    let mut center = [0.0f32; 3];
+    for idx in 0..row_count {
+        let base = idx * 3;
+        center[0] += view.positions[base];
+        center[1] += view.positions[base + 1];
+        center[2] += view.positions[base + 2];
+    }
+    let inv_count = 1.0 / row_count as f32;
+    center[0] *= inv_count;
+    center[1] *= inv_count;
+    center[2] *= inv_count;
+
+    let mut extent = 0.0f32;
+    for idx in 0..row_count {
+        let base = idx * 3;
+        extent = extent.max(distance(
+            [
+                view.positions[base],
+                view.positions[base + 1],
+                view.positions[base + 2],
+            ],
+            center,
+        ));
+    }
+    (center, extent.max(1e-6))
+}
+
+#[cfg(feature = "gpu")]
+fn distance(a: [f32; 3], b: [f32; 3]) -> f32 {
+    let dx = a[0] - b[0];
+    let dy = a[1] - b[1];
+    let dz = a[2] - b[2];
+    (dx * dx + dy * dy + dz * dz).sqrt()
+}
+
+#[cfg(not(feature = "gpu"))]
+fn run_prune_scene_command(_args: PruneSceneArgs) -> anyhow::Result<()> {
+    bail!("prune-scene requires the gpu feature");
 }
 
 #[cfg(feature = "gpu")]
@@ -350,7 +643,7 @@ mod tests {
             load_training_dataset_for_training, maybe_write_litegs_parity_report,
             maybe_write_litegs_parity_report_with_manifest_dir,
         },
-        Cli, Commands, TrainArgs,
+        Cli, Commands, PruneSceneArgs, TrainArgs,
     };
     use clap::Parser;
     use std::path::PathBuf;
@@ -369,9 +662,23 @@ mod tests {
         args
     }
 
+    fn parse_prune_scene_args(args: &[&str]) -> PruneSceneArgs {
+        let cli = parse_cli(args);
+        let Commands::PruneScene(args) = cli.command else {
+            panic!("expected prune-scene command");
+        };
+        args
+    }
+
     #[cfg(feature = "gpu")]
     fn rgb_to_sh0_value(rgb: f32) -> f32 {
         (rgb - 0.5) / 0.282_094_8
+    }
+
+    #[cfg(feature = "gpu")]
+    fn opacity_to_logit(opacity: f32) -> f32 {
+        let clamped = opacity.clamp(1e-6, 1.0 - 1e-6);
+        (clamped / (1.0 - clamped)).ln()
     }
 
     #[cfg(feature = "gpu")]
@@ -443,6 +750,85 @@ mod tests {
         assert_eq!(args.eval_worst_frames, 5);
         assert_eq!(args.eval_device, "cpu");
         assert!(!args.eval_json);
+    }
+
+    #[test]
+    fn prune_scene_command_parses_cleanup_flags() {
+        let args = parse_prune_scene_args(&[
+            "rustgs",
+            "prune-scene",
+            "--input",
+            "in.ply",
+            "--output",
+            "out.ply",
+            "--min-opacity",
+            "0.01",
+            "--min-scale",
+            "0.0001",
+            "--max-scale",
+            "0.2",
+            "--max-distance-extent-multiplier",
+            "2.5",
+            "--dry-run",
+            "--json",
+        ]);
+
+        assert_eq!(args.input, PathBuf::from("in.ply"));
+        assert_eq!(args.output, PathBuf::from("out.ply"));
+        assert_eq!(args.min_opacity, 0.01);
+        assert_eq!(args.min_scale, 0.0001);
+        assert_eq!(args.max_scale, 0.2);
+        assert_eq!(args.max_distance_extent_multiplier, 2.5);
+        assert!(args.dry_run);
+        assert!(args.json);
+    }
+
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn prune_splats_filters_low_opacity_and_far_outliers() {
+        let splats = rustgs::HostSplats::from_raw_parts(
+            vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 20.0, 0.0, 0.0],
+            vec![0.01f32.ln(); 9],
+            vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+            vec![
+                opacity_to_logit(0.5),
+                opacity_to_logit(0.001),
+                opacity_to_logit(0.5),
+            ],
+            vec![
+                rgb_to_sh0_value(0.2),
+                rgb_to_sh0_value(0.3),
+                rgb_to_sh0_value(0.4),
+                rgb_to_sh0_value(0.5),
+                rgb_to_sh0_value(0.6),
+                rgb_to_sh0_value(0.7),
+                rgb_to_sh0_value(0.8),
+                rgb_to_sh0_value(0.7),
+                rgb_to_sh0_value(0.6),
+            ],
+            0,
+        )
+        .unwrap();
+        let args = PruneSceneArgs {
+            input: PathBuf::from("in.ply"),
+            output: PathBuf::from("out.ply"),
+            min_opacity: 0.01,
+            min_scale: 0.0,
+            max_scale: 0.0,
+            max_distance_from_center: 8.0,
+            max_distance_extent_multiplier: 0.0,
+            dry_run: false,
+            json: false,
+            log_level: "error".to_string(),
+        };
+
+        let (pruned, summary) = super::prune_splats(&splats, &args).unwrap();
+
+        assert_eq!(pruned.len(), 1);
+        assert_eq!(summary.input_gaussians, 3);
+        assert_eq!(summary.output_gaussians, 1);
+        assert_eq!(summary.reasons.opacity, 1);
+        assert_eq!(summary.reasons.distance, 1);
     }
 
     #[test]
@@ -626,6 +1012,8 @@ mod tests {
             "24",
             "--litegs-topology-freeze-after-epoch",
             "18",
+            "--litegs-growth-freeze-after-epoch",
+            "9",
             "--litegs-refine-every",
             "120",
             "--litegs-densification-interval",
@@ -646,6 +1034,10 @@ mod tests {
             "reset",
             "--litegs-prune-mode",
             "threshold",
+            "--litegs-prune-opacity-threshold",
+            "0.01",
+            "--litegs-prune-until-epoch",
+            "60",
             "--litegs-target-primitives",
             "200000",
             "--litegs-learnable-viewproj",
@@ -673,6 +1065,7 @@ mod tests {
         assert_eq!(config.litegs.densify_from, 6);
         assert_eq!(config.litegs.densify_until, Some(24));
         assert_eq!(config.litegs.topology_freeze_after_epoch, Some(18));
+        assert_eq!(config.litegs.growth_freeze_after_epoch, Some(9));
         assert_eq!(config.litegs.refine_every, 120);
         assert_eq!(config.litegs.densification_interval, 8);
         assert_eq!(config.litegs.growth_grad_threshold, 0.0003);
@@ -689,6 +1082,8 @@ mod tests {
         assert_eq!(config.litegs.prune_offset_epochs, 0); // default value
         assert_eq!(config.litegs.prune_min_age, 5); // default value
         assert_eq!(config.litegs.prune_invisible_epochs, 10); // default value
+        assert_eq!(config.litegs.prune_opacity_threshold, 0.01);
+        assert_eq!(config.litegs.prune_until_epoch, Some(60));
         assert_eq!(config.litegs.target_primitives, 200_000);
         assert!(config.litegs.learnable_viewproj);
         assert_eq!(config.litegs.lr_pose, 0.0002);

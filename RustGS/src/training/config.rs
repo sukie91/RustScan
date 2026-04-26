@@ -156,6 +156,9 @@ pub struct LiteGsConfig {
     /// Freeze all topology updates at or after this epoch.
     /// When set, later epochs only optimize Gaussian parameters.
     pub topology_freeze_after_epoch: Option<usize>,
+    /// Freeze only growth/densification at or after this epoch.
+    /// Pruning may continue according to prune_until_epoch.
+    pub growth_freeze_after_epoch: Option<usize>,
     /// Brush-style refine cadence in training iterations.
     pub refine_every: usize,
     pub densification_interval: usize,
@@ -180,6 +183,11 @@ pub struct LiteGsConfig {
     /// Number of consecutive invisible epochs required before pruning.
     /// Prevents pruning based on single-frame invisibility.
     pub prune_invisible_epochs: usize,
+    /// Prune Gaussians below this opacity during topology refinement.
+    pub prune_opacity_threshold: f32,
+    /// Continue pruning before this epoch even if growth is frozen.
+    /// When unset, pruning uses the normal refine progress window.
+    pub prune_until_epoch: Option<usize>,
     pub opacity_reset_mode: LiteGsOpacityResetMode,
     pub prune_mode: LiteGsPruneMode,
     pub target_primitives: usize,
@@ -204,6 +212,7 @@ impl Default for LiteGsConfig {
             densify_from: 3,
             densify_until: None,
             topology_freeze_after_epoch: None,
+            growth_freeze_after_epoch: None,
             refine_every: 160,
             densification_interval: 5,
             growth_grad_threshold: LITEGS_DEFAULT_GROWTH_GRAD_THRESHOLD,
@@ -215,6 +224,8 @@ impl Default for LiteGsConfig {
             prune_offset_epochs: 0,
             prune_min_age: 5,
             prune_invisible_epochs: 10,
+            prune_opacity_threshold: 1.0 / 255.0,
+            prune_until_epoch: None,
             opacity_reset_mode: LiteGsOpacityResetMode::Decay,
             prune_mode: LiteGsPruneMode::Weight,
             target_primitives: 1_000_000,
@@ -404,6 +415,11 @@ impl TrainingConfig {
         if !self.litegs.scale_decay.is_finite() || !(0.0..=1.0).contains(&self.litegs.scale_decay) {
             invalid.push("litegs.scale_decay must be finite and in [0, 1]".to_string());
         }
+        if !self.litegs.prune_opacity_threshold.is_finite()
+            || !(0.0..=1.0).contains(&self.litegs.prune_opacity_threshold)
+        {
+            invalid.push("litegs.prune_opacity_threshold must be finite and in [0, 1]".to_string());
+        }
         if self.litegs.opacity_reset_interval == 0 {
             invalid.push("litegs.opacity_reset_interval must be >= 1".to_string());
         }
@@ -482,6 +498,7 @@ mod tests {
         assert_eq!(litegs.densify_from, 3);
         assert_eq!(litegs.densify_until, None);
         assert_eq!(litegs.topology_freeze_after_epoch, None);
+        assert_eq!(litegs.growth_freeze_after_epoch, None);
         assert_eq!(litegs.refine_every, 160);
         assert_eq!(litegs.densification_interval, 5);
         assert_eq!(
@@ -496,6 +513,8 @@ mod tests {
         assert_eq!(litegs.prune_offset_epochs, 0);
         assert_eq!(litegs.prune_min_age, 5);
         assert_eq!(litegs.prune_invisible_epochs, 10);
+        assert_eq!(litegs.prune_opacity_threshold, 1.0 / 255.0);
+        assert_eq!(litegs.prune_until_epoch, None);
         assert_eq!(litegs.opacity_reset_mode, LiteGsOpacityResetMode::Decay);
         assert_eq!(litegs.prune_mode, LiteGsPruneMode::Weight);
         assert_eq!(litegs.target_primitives, 1_000_000);

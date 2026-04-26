@@ -203,3 +203,55 @@ On the shared six frames, the stabilized RustGS run is close to the earlier Brus
 | Mean | 21.0972 | 21.2892 | +0.1920 |
 
 Conclusion: the 30000-step RustGS target is met. Brush remains slightly sharper visually, but the final RustGS/Brush gap on the shared training views is now small enough that the next improvements should focus on renderer/detail fidelity rather than gross training instability.
+
+## Follow-up: Post-train Prune Sweep
+
+Code change:
+
+- Added `rustgs prune-scene` for post-training cleanup of existing PLY scenes.
+- Added `litegs.growth_freeze_after_epoch`, `litegs.prune_until_epoch`, and `litegs.prune_opacity_threshold`.
+- Training can now freeze growth while continuing scheduled pruning, instead of freezing all topology updates together.
+
+Baseline scene:
+
+```text
+RustGS/output/experiments/tum_visual/stabilized_lr_freeze4_30000.ply
+```
+
+Opacity-only post-prune sweep:
+
+| Prune rule | Splats kept | Removed | 6-view mean PSNR | Worst PSNR | Conclusion |
+| --- | ---: | ---: | ---: | ---: | --- |
+| `min_opacity=0.005` | 76885 | 96 | 21.0972 | 16.9482 | No meaningful visual or metric change. |
+| `min_opacity=0.01` | 76607 | 374 | 21.0974 | 16.9478 | Safe but too weak to clean visible clutter. |
+| `min_opacity=0.02` | 75731 | 1250 | 21.0939 | 16.9476 | Still safe; only small cleanup effect. |
+
+Scale-only post-prune sweep:
+
+| Prune rule | Splats kept | Removed | 6-view mean PSNR | Worst PSNR | Conclusion |
+| --- | ---: | ---: | ---: | ---: | --- |
+| `max_scale=0.05` | 76078 | 903 | 18.5788 | 10.3709 | Too destructive. |
+| `max_scale=0.1` | 76671 | 310 | 19.3115 | 11.4232 | Too destructive. |
+| `max_scale=0.2` | 76880 | 101 | 20.3366 | 12.8303 | Removes important frame-90 support. |
+
+Visual conclusion:
+
+Opacity thresholding is safe but does not remove enough visible clutter. Scale thresholding is not safe as a standalone cleanup rule: even very few large-scale removals can severely damage the monitor/person views. The next useful cleanup step should be contribution-aware or visibility-aware pruning, not a simple global max-scale cutoff.
+
+Recommended next training experiment:
+
+```sh
+cargo run --release -p rustgs --bin rustgs -- train \
+  --input /Users/tfjiang/Projects/RustScan/test_data/tum_freiburg1_xyz_colmap \
+  --output output/experiments/tum_visual/growth_freeze_prune_continue_30000.ply \
+  --iterations 30000 \
+  --litegs-growth-freeze-after-epoch 4 \
+  --litegs-prune-until-epoch 30 \
+  --litegs-prune-opacity-threshold 0.01 \
+  --lr-decay-iterations 10000 \
+  --lr-scale-final 0.0005 \
+  --lr-rotation-final 0.0001 \
+  --lr-opacity-final 0.005 \
+  --lr-color-final 0.00025 \
+  --eval-after-train --eval-json --log-level info
+```
