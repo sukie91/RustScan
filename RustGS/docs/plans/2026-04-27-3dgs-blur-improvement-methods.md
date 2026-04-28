@@ -3652,7 +3652,346 @@ cargo run --release --manifest-path RustGS/Cargo.toml --bin rustgs --features gp
    - PSNR / 主观锐度优先：保留 `--loss-l1-weight 0.8 --loss-ssim-weight 0.2 --litegs-growth-select-fraction 0.14`。
    - 效率优先：使用 `--loss-l1-weight 0.9 --loss-ssim-weight 0.1 --litegs-growth-select-fraction 0.14`。
 
-## 17. 参考资料
+## 17. 下一阶段开发和优化计划
+
+日期：2026-04-28
+
+依据：截至 `16.18` 的 TUM Freiburg1 XYZ 长训实验结果。
+
+### 17.1 当前判断
+
+当前已经不适合继续做无目标的参数扫描。原因：
+
+1. frame sampling 方向已经验证过 `prefix-only`、uniform stride、prefix oversample、多段连续窗口；除了“目标口径就是前 180 帧”以外，其它策略都没有稳定提升。
+2. topology score 方向已经实现 AbsGS / Pixel-GS / depth scale，但在当前数据 8000-step 长训里没有超过 baseline。
+3. loss 方向只找到一个效率优先 profile：`L1/SSIM=0.9/0.1`，它主要降低 splat 数，不是绝对质量提升。
+4. frame `76-93` 的 worst case 更像动态人 / 遮挡 / 非静态场景误差，不是继续调 blur、growth、prune threshold 能解决的问题。
+
+因此后续开发应分成两条线：
+
+- **工程固化线**：把已验证有效的 profile、评估命令、报告输出固化，避免优化结果不可复现。
+- **算法突破线**：只投入 dynamic / occlusion mask、visibility-aware prune、完整轨迹评估三类有明确机制收益的方向。
+
+### 17.2 推荐 profile 固化
+
+需要固化三档 profile，避免后续命令散落在文档里：
+
+| Profile | 目标 | 参数 | 预期结果 |
+|---|---|---|---|
+| `tum-prefix-quality` | 前 180 帧质量 / 锐度优先 | `--max-frames 180 --litegs-topology-freeze-after-epoch 18 --raster-cov-blur 0.3 --eval-raster-cov-blur 0.2` | full-180 `23.0782`，static-162 `23.6976`，`91859` splats |
+| `tum-prefix-compact` | 前 180 帧 PSNR / 体积折中 | 上一项加 `--litegs-growth-select-fraction 0.14` | full-180 `23.0013`，static-162 `23.6352`，`49648` splats |
+| `tum-prefix-efficient` | 前 180 帧效率优先 | compact 基础上加 `--loss-l1-weight 0.9 --loss-ssim-weight 0.1` | full-180 `22.9697`，static-162 `23.6060`，`41484` splats |
+
+开发内容：
+
+1. 新增实验 preset 或命令模板输出能力。可选实现方式：
+   - 保守方案：新增 `docs/commands/tum_freiburg1_xyz.md` 和 shell script，不改 CLI。
+   - 工程化方案：扩展 `--litegs-profile` 或新增 `--train-preset`，一次性填充 frame、loss、growth、blur、eval 参数。
+2. parity report 中记录 preset 名称、frame include/exclude、loss weights、eval blur。
+3. `evaluate_psnr` 输出中增加 `profile_hint` 或把完整命令写入 JSON，方便实验回溯。
+
+验收标准：
+
+- 三档 profile 使用单条命令可复现。
+- JSON report 中能看到完整训练/评估口径。
+- profile 固化不改变默认训练行为。
+- `cargo test --manifest-path RustGS/Cargo.toml --features gpu,cli` 通过。
+
+### 17.3 评估门禁与回归基准
+
+后续所有优化必须同时看四个口径，避免只优化某个局部指标：
+
+| 口径 | 命令关键参数 | 目的 |
+|---|---|---|
+| post-train 6-frame | 默认 `eval-after-train` | 快速 smoke / crop review |
+| full-180 | `--frame-stride 1 --max-frames 180` | 当前主目标 |
+| static-162 | `--frame-stride 1 --max-frames 180 --exclude-frame-ranges 76-93` | 静态背景质量 |
+| full trajectory stride-4 | `--frame-stride 4` | 防止只服务前缀导致全轨迹退化 |
+
+新增开发内容：
+
+1. 增加统一实验 runner，例如：
+
+```sh
+scripts/rustgs_eval_suite.sh \
+  --scene <ply> \
+  --dataset /Users/tfjiang/Projects/RustScan/test_data/tum_freiburg1_xyz_colmap \
+  --out <report_dir>
+```
+
+2. 生成单个 summary JSON / markdown 表格，包含：
+   - `psnr_mean_db`
+   - `psnr_min_db`
+   - `sharpness_grad_ratio_mean`
+   - `sharpness_lap_ratio_mean`
+   - `splat_count`
+   - 训练耗时
+   - worst frames
+   - fixed crop strip 路径
+3. 增加回归门禁：
+   - 质量 profile：full-180 PSNR 不低于 `23.05`，static-162 不低于 `23.65`。
+   - compact profile：full-180 PSNR 不低于 `22.95`，static-162 不低于 `23.58`，splats 不高于 `55k`。
+   - efficient profile：full-180 PSNR 不低于 `22.90`，static-162 不低于 `23.50`，splats 不高于 `43k`。
+
+### 17.4 算法方向 A：局部 dynamic / occlusion mask
+
+目标：解决 frame `76-93` 的动态人 / 遮挡污染，不再靠整帧排除或全局 residual downweight。
+
+为什么要做：
+
+- 硬排除 `76-93` 会损失视角约束，静态子集也下降。
+- soft outlier 全局降权能略微提升静态 mean，但动态 worst 更差。
+- 说明应只降权局部动态/遮挡区域，而保留同一帧里的静态背景监督。
+
+建议算法：
+
+对每帧维护低分辨率 residual EMA：
+
+$$
+r_t(\mathbf{u}) =
+\frac{1}{3}
+\left\|
+\hat{\mathbf{I}}_t(\mathbf{u}) -
+\mathbf{I}_t(\mathbf{u})
+\right\|_1
+$$
+
+$$
+\bar r_t(\mathbf{u}) =
+\beta \bar r_{t-1}(\mathbf{u}) +
+(1-\beta) r_t(\mathbf{u})
+$$
+
+生成 soft mask：
+
+$$
+w_t(\mathbf{u}) =
+\mathrm{clip}
+\left(
+\frac{\tau_{\mathrm{high}}-\bar r_t(\mathbf{u})}
+{\tau_{\mathrm{high}}-\tau_{\mathrm{low}}+\epsilon},
+w_{\min},
+1
+\right)
+$$
+
+只对重建残差项加权：
+
+$$
+\mathcal{L}_{\mathrm{masked}}
+=
+\frac{
+\sum_{\mathbf{u}} w_t(\mathbf{u})
+\left|\hat{\mathbf{I}}_t(\mathbf{u})-\mathbf{I}_t(\mathbf{u})\right|
+}{
+\sum_{\mathbf{u}} w_t(\mathbf{u})+\epsilon
+}
+$$
+
+实现步骤：
+
+1. 先做离线 mask 诊断：
+   - 用 baseline / compact 渲染前 180 帧。
+   - 保存 residual heatmap。
+   - 统计 frame `76-93` 是否形成局部连通高残差区域。
+2. 再做训练期 soft mask：
+   - 新增 `--loss-dynamic-mask-threshold-low`
+   - 新增 `--loss-dynamic-mask-threshold-high`
+   - 新增 `--loss-dynamic-mask-min-weight`
+   - 新增 `--loss-dynamic-mask-ema`
+3. 为避免早期误判，mask 只在 topology freeze 后启用：
+
+$$
+w_t(\mathbf{u}) = 1,\quad e < e_{\mathrm{mask\_start}}
+$$
+
+验收标准：
+
+- static-162 PSNR 高于 compact-best `23.6352`。
+- full-180 worst frames `81-85` 不低于 compact-best 的 min `16.3364`。
+- crop strip 中人的遮挡区域可被弱化，但桌面、显示器、墙面边缘不能变糊。
+- splats 不高于 compact-best `49648` 的 `+10%`。
+
+停止条件：
+
+- 若 mask 只提升 static mean 但 full-180 min 下降超过 `0.2 dB`，停止。
+- 若 mask 区域覆盖大量静态背景，停止并改为离线/语义 mask，不继续调阈值。
+
+### 17.5 算法方向 B：visibility / age aware prune
+
+目标：减少杂散 splat / floater，而不是继续提高 opacity threshold。
+
+背景：
+
+- `--litegs-prune-opacity-threshold 0.01` 只额外剪掉几十个 splat，质量还下降。
+- 很多 floater 可能不是低 opacity，而是低 visibility、近相机、高 scale 或长期只被少量视角解释。
+
+建议新增统计：
+
+$$
+v_i =
+\sum_t \mathbb{1}[\alpha_i^t > \tau_\alpha]
+$$
+
+$$
+\rho_i =
+\frac{v_i}
+{\mathrm{age}_i+\epsilon}
+$$
+
+近相机低可见 floater score：
+
+$$
+q_i =
+\mathbb{1}[z_i < z_{\mathrm{near}}]
+\cdot
+\mathbb{1}[\rho_i < \tau_{\mathrm{vis}}]
+\cdot
+\mathbb{1}[\max(\mathbf{s}_i) > \tau_s]
+$$
+
+保守 prune 条件：
+
+$$
+\mathrm{prune}(i) =
+\mathrm{age}_i > a_{\min}
+\land
+\rho_i < \tau_{\mathrm{vis}}
+\land
+\alpha_i < \tau_{\alpha,\mathrm{high}}
+$$
+
+开发内容：
+
+1. topology telemetry 中记录：
+   - low visibility splats
+   - near low visibility splats
+   - high opacity low visibility splats
+   - prune reasons 分布
+2. 实现只统计不 prune 的 dry-run 模式：
+   - `--litegs-prune-visibility-dry-run`
+3. dry-run 通过后再启用实验 prune：
+   - `--litegs-prune-mode visibility-weight`
+   - `--litegs-prune-visibility-threshold`
+   - `--litegs-prune-high-opacity-threshold`
+
+验收标准：
+
+- compact profile 的 splats 降低 `5%-15%`。
+- full-180 PSNR 下降不超过 `0.05 dB`。
+- static-162 PSNR 不下降。
+- crop 中近相机杂散点减少，静态边缘不被误删。
+
+### 17.6 算法方向 C：完整 798 帧训练 profile
+
+目标：不要只优化当前前 180 帧口径，给完整轨迹重建提供稳定 profile。
+
+当前结论：
+
+- `--max-frames 180` 不能作为完整重建默认。
+- uniform stride-4 / 多窗口 / prefix oversample 都不如 full baseline。
+- 完整 798 帧当前更稳的是全量训练 baseline。
+
+下一步：
+
+1. 固化 full-798 baseline profile：
+   - `--iterations 8000`
+   - `--litegs-topology-freeze-after-epoch 4`
+   - `--raster-cov-blur 0.3`
+   - `--eval-raster-cov-blur 0.2`
+2. 测试 full-798 的 `L1/SSIM=0.9/0.1`：
+   - 不能假设 prefix 结论能迁移。
+   - 必须以 full trajectory stride-4 和 post-train 6-frame 同时判断。
+3. 只在 full-798 profile 稳定后，再把 dynamic mask 用到完整轨迹。
+
+验收标准：
+
+- full trajectory stride-4 mean 高于 baseline `22.9422`，或在 PSNR 下降小于 `0.05 dB` 时 splats 降低超过 `15%`。
+- full-180 不低于 baseline `22.1698`。
+- 训练耗时不超过 baseline `+10%`。
+
+### 17.7 执行顺序
+
+| 顺序 | 工作项 | 类型 | 预期收益 | 是否立即做 |
+|---:|---|---|---|---|
+| 1 | 固化三档 prefix profile 和评估 suite | 工程 | 提高复现能力，避免实验漂移 | 是 |
+| 2 | full-798 baseline / efficient profile 对照 | 实验 | 给完整轨迹重建建立新基线 | 是 |
+| 3 | residual heatmap / dynamic mask 离线诊断 | 算法准备 | 明确动态遮挡是否可局部 mask | 是 |
+| 4 | 训练期 dynamic soft mask | 算法 | 可能提升静态质量和 worst frame | 诊断通过后做 |
+| 5 | visibility / age prune dry-run | 算法准备 | 判断 floater 是否可通过可见性剪枝 | 是 |
+| 6 | visibility prune 真正启用 | 算法 | 降 splat / floater | dry-run 通过后做 |
+| 7 | 继续调 AbsGS / Pixel-GS 阈值 | 参数扫描 | 当前收益弱 | 否 |
+| 8 | 继续扫 frame sampling / oversampling | 参数扫描 | 已验证负收益 | 否 |
+
+### 17.8 近期 sprint 拆分
+
+#### Sprint 1：Profile 和评估固化
+
+Story 1：新增 profile / preset 文档或 CLI preset。
+
+- 输出：三档 prefix profile 和一档 full-798 baseline profile。
+- 验收：命令可复现，report 中记录 profile。
+
+Story 2：新增 evaluation suite runner。
+
+- 输出：一个命令跑 6-frame、full-180、static-162、full stride-4。
+- 验收：自动生成 summary JSON 和 markdown 表。
+
+Story 3：把当前实验结果转成 baseline fixtures。
+
+- 输出：`tum-prefix-compact`、`tum-prefix-efficient`、`full-798-baseline` 三个基准。
+- 验收：回归门禁阈值能自动判断 pass / warn / fail。
+
+#### Sprint 2：Dynamic mask 诊断和第一版训练接入
+
+Story 1：离线 residual heatmap 工具。
+
+- 输出：frame `0,30,60,76-93,120,150` 的 residual heatmap 和 connected component 统计。
+- 验收：能证明高残差主要集中在动态人 / 遮挡区域，而不是全图错位。
+
+Story 2：masked L1 loss 第一版。
+
+- 输出：训练期 residual EMA + soft weight map。
+- 验收：mask 只在 freeze 后启用，默认关闭。
+
+Story 3：TUM A/B 实验。
+
+- 输出：compact vs compact+mask 的四口径评估。
+- 验收：static-162 提升且 full-180 worst 不退化。
+
+#### Sprint 3：Visibility / age prune
+
+Story 1：visibility telemetry。
+
+- 输出：每次 topology step 记录 low visibility / near low visibility / high opacity low visibility splats。
+- 验收：不改变训练结果。
+
+Story 2：visibility prune dry-run。
+
+- 输出：只报告会剪掉哪些 splat，不实际修改。
+- 验收：候选数量和位置可解释。
+
+Story 3：visibility prune 实验开关。
+
+- 输出：可启用的 conservative prune mode。
+- 验收：splat 数下降，PSNR 不明显下降。
+
+### 17.9 停止标准
+
+满足以下任一条件，就停止当前方向：
+
+- 连续两组长训没有超过当前对应 profile 的质量 / 效率 Pareto 前沿。
+- 只能提升 sharpness ratio，但 PSNR、crop、worst frame 同时变差。
+- 只能减少 splats，但 full-180 或 static-162 下降超过 `0.1 dB`。
+- 需要引入复杂依赖或重写核心 rasterizer，但没有离线诊断证据支撑。
+
+下一轮最建议先做：
+
+1. evaluation suite runner。
+2. full-798 的 `0.9/0.1` loss 对照。
+3. residual heatmap / dynamic mask 离线诊断。
+
+## 18. 参考资料
 
 - Pixel-GS: Density Control with Pixel-aware Gradient for 3D Gaussian Splatting, arXiv 2403.15530. <https://arxiv.org/abs/2403.15530>
 - AbsGS: Recovering Fine Details for 3D Gaussian Splatting, arXiv 2404.10484. <https://arxiv.org/abs/2404.10484>
