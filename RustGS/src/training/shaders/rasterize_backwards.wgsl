@@ -6,7 +6,8 @@
 @group(0) @binding(3) var<storage, read> output: array<vec4<f32>>;
 @group(0) @binding(4) var<storage, read> v_output: array<vec4<f32>>;
 @group(0) @binding(5) var<storage, read_write> v_splats: array<atomic<f32>>;
-@group(0) @binding(6) var<storage, read> uniforms: helpers::RasterizeUniforms;
+@group(0) @binding(6) var<storage, read_write> screen_grad_splats: array<atomic<f32>>;
+@group(0) @binding(7) var<storage, read> uniforms: helpers::RasterizeUniforms;
 
 var<workgroup> range_uniform: vec2<u32>;
 var<workgroup> local_batch: array<helpers::ProjectedSplat, helpers::TILE_SIZE>;
@@ -14,6 +15,10 @@ var<workgroup> local_gid: array<u32, helpers::TILE_SIZE>;
 
 fn write_grads_atomic(id: u32, grads: f32) {
     atomicAdd(&v_splats[id], grads);
+}
+
+fn write_screen_grad_atomic(id: u32, grads: f32) {
+    atomicAdd(&screen_grad_splats[id], grads);
 }
 
 @compute
@@ -148,6 +153,13 @@ fn main(
             write_grads_atomic(base + 7u, v_rgb.z);
             write_grads_atomic(base + 8u, v_alpha_term);
             write_grads_atomic(base + 9u, v_refine);
+
+            let screen_base = local_gid[t] * 5u;
+            write_screen_grad_atomic(screen_base + 0u, v_xy.x);
+            write_screen_grad_atomic(screen_base + 1u, v_xy.y);
+            write_screen_grad_atomic(screen_base + 2u, abs(v_xy.x));
+            write_screen_grad_atomic(screen_base + 3u, abs(v_xy.y));
+            write_screen_grad_atomic(screen_base + 4u, 1.0);
 
             pix_out.a = next_T;
         }

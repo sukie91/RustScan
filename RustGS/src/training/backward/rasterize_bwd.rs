@@ -50,7 +50,17 @@ pub(crate) trait RasterizeBwdBackend: Backend {
         img_size: (u32, u32),
         tile_bounds: (u32, u32),
         background: [f32; 3],
-    ) -> Self::FloatTensorPrimitive;
+    ) -> RasterizeBwdPrimitiveOutput<Self>;
+}
+
+pub(crate) struct RasterizeBwdPrimitiveOutput<B: Backend> {
+    pub(crate) v_splats: B::FloatTensorPrimitive,
+    pub(crate) screen_grad_splats: B::FloatTensorPrimitive,
+}
+
+pub(crate) struct RasterizeBwdOutput<B: Backend> {
+    pub(crate) v_splats: Tensor<B, 2>,
+    pub(crate) screen_grad_splats: Tensor<B, 2>,
 }
 
 impl<F, I, BT> RasterizeBwdBackend for CubeBackend<WgpuRuntime, F, I, BT>
@@ -69,7 +79,7 @@ where
         img_size: (u32, u32),
         tile_bounds: (u32, u32),
         background: [f32; 3],
-    ) -> Self::FloatTensorPrimitive {
+    ) -> RasterizeBwdPrimitiveOutput<Self> {
         let compact_gid_from_isect = into_contiguous(compact_gid_from_isect);
         let tile_offsets = into_contiguous(tile_offsets);
         let projected_splats = into_contiguous(projected_splats);
@@ -80,6 +90,11 @@ where
 
         let v_splats = <Self as FloatTensorOps<Self>>::float_zeros(
             [num_visible, 10].into(),
+            &device,
+            FloatDType::F32,
+        );
+        let screen_grad_splats = <Self as FloatTensorOps<Self>>::float_zeros(
+            [num_visible, 5].into(),
             &device,
             FloatDType::F32,
         );
@@ -108,13 +123,17 @@ where
                         out_img.handle.binding(),
                         v_output.handle.binding(),
                         v_splats.handle.clone().binding(),
+                        screen_grad_splats.handle.clone().binding(),
                         uniforms_handle.binding(),
                     ]),
                 );
             }
         }
 
-        v_splats
+        RasterizeBwdPrimitiveOutput {
+            v_splats,
+            screen_grad_splats,
+        }
     }
 }
 
@@ -130,8 +149,8 @@ pub(crate) fn rasterize_bwd<B: RasterizeBwdBackend>(
     tile_bounds: (u32, u32),
     background: [f32; 3],
     _device: &B::Device,
-) -> Tensor<B, 2> {
-    Tensor::from_primitive(TensorPrimitive::Float(B::rasterize_bwd_primitive(
+) -> RasterizeBwdOutput<B> {
+    let output = B::rasterize_bwd_primitive(
         compact_gid_from_isect.into_primitive(),
         tile_offsets.into_primitive(),
         projected_splats.into_primitive().tensor(),
@@ -141,7 +160,13 @@ pub(crate) fn rasterize_bwd<B: RasterizeBwdBackend>(
         img_size,
         tile_bounds,
         background,
-    )))
+    );
+    RasterizeBwdOutput {
+        v_splats: Tensor::from_primitive(TensorPrimitive::Float(output.v_splats)),
+        screen_grad_splats: Tensor::from_primitive(TensorPrimitive::Float(
+            output.screen_grad_splats,
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -165,7 +190,7 @@ mod tests {
         let out_img = Tensor::<GsBackendBase, 3>::ones([16, 16, 4], &device);
         let v_output = Tensor::<GsBackendBase, 3>::ones([16, 16, 4], &device);
 
-        let v_splats = rasterize_bwd::<GsBackendBase>(
+        let bwd = rasterize_bwd::<GsBackendBase>(
             compact_gid_from_isect,
             tile_offsets,
             projected_splats,
@@ -178,12 +203,26 @@ mod tests {
             &device,
         );
 
-        let data = v_splats.into_data();
+        let data = bwd.v_splats.into_data();
         let values = data.as_slice::<f32>().expect("v_splats should be f32");
         let mean_abs = values.iter().map(|v| v.abs()).sum::<f32>() / values.len() as f32;
         assert!(
             mean_abs > 1e-6,
             "expected rasterize_bwd kernel to produce non-zero grads, mean_abs={mean_abs:e}"
+        );
+
+        let stats = bwd.screen_grad_splats.into_data();
+        let values = stats
+            .as_slice::<f32>()
+            .expect("screen_grad_splats should be f32");
+        assert_eq!(values.len(), 5);
+        assert!(
+            values[2].abs() + values[3].abs() >= values[0].abs() + values[1].abs(),
+            "absolute screen-space stats should dominate signed stats: {values:?}"
+        );
+        assert!(
+            values[4] > 0.0,
+            "expected per-pixel coverage count to be positive: {values:?}"
         );
     }
 }

@@ -62,11 +62,15 @@ pub use events::{
     TrainingIterationProgress, TrainingPlanSelected, TrainingRun, TrainingRunCancelled,
     TrainingRunCompleted, TrainingRunReport, TrainingRunStarted, TrainingSnapshotReady,
 };
-pub use metrics::{ParityLossCurveSample, ParityLossTerms, ParityTopologyMetrics};
+pub use metrics::{
+    ParityFloatDistribution, ParityLossCurveSample, ParityLossTerms, ParityTopologyMetrics,
+    ParityTopologyStepSample,
+};
 
 pub use config::{
-    LiteGsConfig, LiteGsOpacityResetMode, LiteGsPruneMode, LiteGsTileSize, TrainingBackend,
-    TrainingConfig, TrainingResult,
+    LiteGsConfig, LiteGsOpacityResetMode, LiteGsPruneMode, LiteGsSplitScoreMode, LiteGsTileSize,
+    LiteGsTrainingProfile, TrainingBackend, TrainingConfig, TrainingResult,
+    DEFAULT_RASTER_COV_BLUR,
 };
 #[cfg(feature = "gpu")]
 pub use telemetry::{last_training_telemetry, LiteGsOptimizerLrs, LiteGsTrainingTelemetry};
@@ -140,6 +144,12 @@ fn validate_litegs_mac_v1_config(config: &TrainingConfig) -> Result<(), Training
     if !config.litegs.growth_grad_threshold.is_finite() || config.litegs.growth_grad_threshold < 0.0
     {
         unsupported.push("growth_grad_threshold must be finite and >= 0".to_string());
+    }
+    if !config.litegs.split_grad_threshold.is_finite() || config.litegs.split_grad_threshold < 0.0 {
+        unsupported.push("split_grad_threshold must be finite and >= 0".to_string());
+    }
+    if !config.litegs.depth_scale_gamma.is_finite() || config.litegs.depth_scale_gamma <= 0.0 {
+        unsupported.push("depth_scale_gamma must be finite and > 0".to_string());
     }
     if !config.litegs.growth_select_fraction.is_finite()
         || !(0.0..=1.0).contains(&config.litegs.growth_select_fraction)

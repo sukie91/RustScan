@@ -66,6 +66,7 @@ impl FromStr for EvaluationDevice {
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct SplatEvaluationConfig {
     pub render_scale: f32,
+    pub raster_cov_blur: f32,
     pub frame_stride: usize,
     pub max_frames: usize,
     pub worst_frame_count: usize,
@@ -75,6 +76,7 @@ impl Default for SplatEvaluationConfig {
     fn default() -> Self {
         Self {
             render_scale: 0.5,
+            raster_cov_blur: crate::training::DEFAULT_RASTER_COV_BLUR,
             frame_stride: 1,
             max_frames: 0,
             worst_frame_count: 5,
@@ -87,6 +89,10 @@ pub struct EvaluationFrameMetric {
     pub dataset_index: usize,
     pub frame_id: u64,
     pub psnr_db: f32,
+    #[serde(default)]
+    pub sharpness_grad_ratio: f32,
+    #[serde(default)]
+    pub sharpness_lap_ratio: f32,
     pub image_path: PathBuf,
 }
 
@@ -103,6 +109,8 @@ pub struct PsnrSummary {
 pub struct SplatEvaluationSummary {
     pub device: EvaluationDevice,
     pub render_scale: f32,
+    #[serde(default = "default_raster_cov_blur")]
+    pub raster_cov_blur: f32,
     pub render_width: usize,
     pub render_height: usize,
     pub frame_stride: usize,
@@ -120,7 +128,13 @@ pub struct SplatEvaluationSummary {
     pub psnr_min_db: f32,
     pub psnr_max_db: f32,
     pub psnr_std_db: f32,
+    #[serde(default)]
+    pub sharpness_grad_ratio_mean: f32,
+    #[serde(default)]
+    pub sharpness_lap_ratio_mean: f32,
     pub worst_frames: Vec<EvaluationFrameMetric>,
+    #[serde(default)]
+    pub crop_outputs: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -197,6 +211,14 @@ pub fn summarize_psnr_samples(values: &[f32]) -> PsnrSummary {
     }
 }
 
+fn mean_f32(values: &[f32]) -> f32 {
+    values.iter().copied().sum::<f32>() / values.len().max(1) as f32
+}
+
+fn default_raster_cov_blur() -> f32 {
+    crate::training::DEFAULT_RASTER_COV_BLUR
+}
+
 pub fn worst_frame_metrics(
     frame_metrics: &[EvaluationFrameMetric],
     count: usize,
@@ -235,6 +257,67 @@ pub fn compute_psnr_f32(rendered: &[f32], target: &[f32]) -> f32 {
     }
 }
 
+pub fn compute_gradient_sharpness_f32(rgb: &[f32], width: usize, height: usize) -> f32 {
+    if rgb.len() != width.saturating_mul(height).saturating_mul(3) || width < 2 || height < 2 {
+        return 0.0;
+    }
+
+    let mut sum = 0.0f32;
+    let mut count = 0usize;
+    for y in 0..height {
+        for x in 0..width {
+            let luminance = luminance_at(rgb, width, x, y);
+            if x + 1 < width {
+                sum += (luminance_at(rgb, width, x + 1, y) - luminance).abs();
+                count += 1;
+            }
+            if y + 1 < height {
+                sum += (luminance_at(rgb, width, x, y + 1) - luminance).abs();
+                count += 1;
+            }
+        }
+    }
+    sum / count.max(1) as f32
+}
+
+pub fn compute_laplacian_sharpness_f32(rgb: &[f32], width: usize, height: usize) -> f32 {
+    if rgb.len() != width.saturating_mul(height).saturating_mul(3) || width < 3 || height < 3 {
+        return 0.0;
+    }
+
+    let mut sum = 0.0f32;
+    let mut sum_sq = 0.0f32;
+    let mut count = 0usize;
+    for y in 1..height - 1 {
+        for x in 1..width - 1 {
+            let center = luminance_at(rgb, width, x, y);
+            let lap = -4.0 * center
+                + luminance_at(rgb, width, x - 1, y)
+                + luminance_at(rgb, width, x + 1, y)
+                + luminance_at(rgb, width, x, y - 1)
+                + luminance_at(rgb, width, x, y + 1);
+            sum += lap;
+            sum_sq += lap * lap;
+            count += 1;
+        }
+    }
+    let mean = sum / count.max(1) as f32;
+    (sum_sq / count.max(1) as f32 - mean * mean).max(0.0)
+}
+
+fn luminance_at(rgb: &[f32], width: usize, x: usize, y: usize) -> f32 {
+    let base = (y * width + x) * 3;
+    0.2126 * rgb[base] + 0.7152 * rgb[base + 1] + 0.0722 * rgb[base + 2]
+}
+
+fn sharpness_ratio(rendered: f32, target: f32) -> f32 {
+    if target <= 1e-12 {
+        0.0
+    } else {
+        rendered / target
+    }
+}
+
 pub fn scaled_dimensions(width: usize, height: usize, render_scale: f32) -> (usize, usize) {
     let scale = render_scale.clamp(MIN_RENDER_SCALE, 1.0);
     let scaled_width = ((width as f32) * scale).round().max(1.0) as usize;
@@ -268,9 +351,11 @@ impl SplatEvaluationRenderer {
         render_width: usize,
         render_height: usize,
         _device: EvaluationDevice,
+        raster_cov_blur: f32,
     ) -> Result<Self, SplatEvaluationError> {
         Ok(Self {
-            renderer: crate::GaussianRenderer::new(render_width, render_height),
+            renderer: crate::GaussianRenderer::new(render_width, render_height)
+                .with_raster_cov_blur(raster_cov_blur),
         })
     }
 
@@ -335,10 +420,13 @@ pub fn evaluate_splats(
         config.render_scale,
     );
     let runtime_splats = runtime_from_splats(splats, device)?;
-    let mut renderer = SplatEvaluationRenderer::new(render_width, render_height, *device)?;
+    let mut renderer =
+        SplatEvaluationRenderer::new(render_width, render_height, *device, config.raster_cov_blur)?;
 
     let start = Instant::now();
     let mut psnrs = Vec::with_capacity(dataset.poses.len());
+    let mut sharpness_grad_ratios = Vec::with_capacity(dataset.poses.len());
+    let mut sharpness_lap_ratios = Vec::with_capacity(dataset.poses.len());
     let mut frame_metrics = Vec::with_capacity(dataset.poses.len());
 
     for (idx, pose) in dataset.poses.iter().enumerate() {
@@ -352,11 +440,21 @@ pub fn evaluate_splats(
             &mut renderer,
         )?;
         let psnr_db = compute_psnr_f32(&rendered, &target);
+        let render_grad = compute_gradient_sharpness_f32(&rendered, render_width, render_height);
+        let target_grad = compute_gradient_sharpness_f32(&target, render_width, render_height);
+        let render_lap = compute_laplacian_sharpness_f32(&rendered, render_width, render_height);
+        let target_lap = compute_laplacian_sharpness_f32(&target, render_width, render_height);
+        let sharpness_grad_ratio = sharpness_ratio(render_grad, target_grad);
+        let sharpness_lap_ratio = sharpness_ratio(render_lap, target_lap);
         psnrs.push(psnr_db);
+        sharpness_grad_ratios.push(sharpness_grad_ratio);
+        sharpness_lap_ratios.push(sharpness_lap_ratio);
         frame_metrics.push(EvaluationFrameMetric {
             dataset_index: idx,
             frame_id: pose.frame_id,
             psnr_db,
+            sharpness_grad_ratio,
+            sharpness_lap_ratio,
             image_path: pose.image_path.clone(),
         });
     }
@@ -369,6 +467,7 @@ pub fn evaluate_splats(
     let summary = SplatEvaluationSummary {
         device: *device,
         render_scale: config.render_scale,
+        raster_cov_blur: config.raster_cov_blur,
         render_width,
         render_height,
         frame_stride: config.frame_stride,
@@ -384,7 +483,10 @@ pub fn evaluate_splats(
         psnr_min_db: psnr.min_db,
         psnr_max_db: psnr.max_db,
         psnr_std_db: psnr.stddev_db,
+        sharpness_grad_ratio_mean: mean_f32(&sharpness_grad_ratios),
+        sharpness_lap_ratio_mean: mean_f32(&sharpness_lap_ratios),
         worst_frames: worst_frame_metrics(&frame_metrics, config.worst_frame_count),
+        crop_outputs: Vec::new(),
     };
 
     Ok(SplatEvaluationResult {
@@ -490,8 +592,9 @@ fn resize_rgb_box(
 #[cfg(test)]
 mod tests {
     use super::{
-        select_evaluation_frames, summarize_psnr_samples, summarize_training_metrics,
-        worst_frame_metrics, EvaluationFrameMetric, FinalTrainingMetrics,
+        compute_gradient_sharpness_f32, compute_laplacian_sharpness_f32, select_evaluation_frames,
+        summarize_psnr_samples, summarize_training_metrics, worst_frame_metrics,
+        EvaluationFrameMetric, FinalTrainingMetrics,
     };
     use crate::{Intrinsics, ScenePose, TrainingDataset, SE3};
     use std::path::PathBuf;
@@ -519,24 +622,49 @@ mod tests {
     }
 
     #[test]
+    fn sharpness_metrics_detect_edges() {
+        let flat = vec![0.5f32; 4 * 4 * 3];
+        let mut edge = vec![0.0f32; 4 * 4 * 3];
+        for y in 0..4 {
+            for x in 2..4 {
+                let base = (y * 4 + x) * 3;
+                edge[base] = 1.0;
+                edge[base + 1] = 1.0;
+                edge[base + 2] = 1.0;
+            }
+        }
+
+        assert_eq!(compute_gradient_sharpness_f32(&flat, 4, 4), 0.0);
+        assert!(compute_gradient_sharpness_f32(&edge, 4, 4) > 0.0);
+        assert_eq!(compute_laplacian_sharpness_f32(&flat, 4, 4), 0.0);
+        assert!(compute_laplacian_sharpness_f32(&edge, 4, 4) > 0.0);
+    }
+
+    #[test]
     fn worst_frame_metrics_returns_low_psnr_prefix() {
         let metrics = vec![
             EvaluationFrameMetric {
                 dataset_index: 0,
                 frame_id: 0,
                 psnr_db: 9.0,
+                sharpness_grad_ratio: 0.9,
+                sharpness_lap_ratio: 0.7,
                 image_path: PathBuf::from("a.png"),
             },
             EvaluationFrameMetric {
                 dataset_index: 1,
                 frame_id: 1,
                 psnr_db: 3.0,
+                sharpness_grad_ratio: 0.9,
+                sharpness_lap_ratio: 0.7,
                 image_path: PathBuf::from("b.png"),
             },
             EvaluationFrameMetric {
                 dataset_index: 2,
                 frame_id: 2,
                 psnr_db: 6.0,
+                sharpness_grad_ratio: 0.9,
+                sharpness_lap_ratio: 0.7,
                 image_path: PathBuf::from("c.png"),
             },
         ];

@@ -155,6 +155,7 @@ fn tum_training_smoke_produces_post_train_evaluation_summary() {
         &metadata,
         &SplatEvaluationConfig {
             render_scale: 0.25,
+            raster_cov_blur: rustgs::DEFAULT_RASTER_COV_BLUR,
             frame_stride: 30,
             max_frames: 90,
             worst_frame_count: 2,

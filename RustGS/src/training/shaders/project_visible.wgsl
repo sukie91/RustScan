@@ -160,7 +160,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         uniforms.pixel_center,
         uniforms.viewmat,
     );
-    opacity *= helpers::compensate_cov2d(&cov2d);
+    opacity *= helpers::compensate_cov2d(&cov2d, uniforms.cov_blur);
 
     let conic = helpers::inverse2x2(cov2d);
     let mean2d = uniforms.focal * mean_c.xy * (1.0 / mean_c.z) + uniforms.pixel_center;

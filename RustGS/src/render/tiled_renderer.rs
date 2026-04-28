@@ -48,6 +48,7 @@ pub struct TiledRenderer {
     tile_height: usize,
     num_tiles_x: usize,
     num_tiles_y: usize,
+    raster_cov_blur: f32,
 }
 
 impl TiledRenderer {
@@ -64,7 +65,13 @@ impl TiledRenderer {
             tile_height,
             num_tiles_x,
             num_tiles_y,
+            raster_cov_blur: crate::training::DEFAULT_RASTER_COV_BLUR,
         }
+    }
+
+    pub fn with_raster_cov_blur(mut self, raster_cov_blur: f32) -> Self {
+        self.raster_cov_blur = raster_cov_blur.max(0.0);
+        self
     }
 
     #[cfg(feature = "gpu")]
@@ -115,6 +122,7 @@ impl TiledRenderer {
                 cy,
                 rotation,
                 translation,
+                self.raster_cov_blur,
             ) {
                 projected.push(projected_gaussian);
             }
@@ -233,6 +241,7 @@ impl TiledRenderer {
                 camera.intrinsics.cy,
                 &rotation,
                 &translation,
+                self.raster_cov_blur,
             ) {
                 projected.push(projected_gaussian);
             }
@@ -392,6 +401,7 @@ fn project_projected_gaussian(
     px_center_y: f32,
     camera_rotation: &[[f32; 3]; 3],
     translation: &[f32; 3],
+    raster_cov_blur: f32,
 ) -> Option<ProjectedGaussian> {
     let r = *camera_rotation;
     let wx = position[0];
@@ -459,8 +469,8 @@ fn project_projected_gaussian(
     let cov_xy = jx0 * (cc01 * jy1 + cc02 * jy2) + jx2 * (cc12 * jy1 + cc22 * jy2);
     let mut cov_yy = jy1 * (cc11 * jy1 + cc12 * jy2) + jy2 * (cc12 * jy1 + cc22 * jy2);
     let det_raw = cov_xx * cov_yy - cov_xy * cov_xy;
-    cov_xx += 0.3;
-    cov_yy += 0.3;
+    cov_xx += raster_cov_blur.max(0.0);
+    cov_yy += raster_cov_blur.max(0.0);
     let det_blurred = (cov_xx * cov_yy - cov_xy * cov_xy).max(1e-12);
     if det_raw <= 0.0 {
         return None;

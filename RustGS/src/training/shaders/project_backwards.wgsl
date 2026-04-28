@@ -6,6 +6,8 @@
 @group(0) @binding(3) var<storage, read_write> v_params: array<f32>;
 @group(0) @binding(4) var<storage, read_write> v_sh_coeffs: array<f32>;
 @group(0) @binding(5) var<storage, read> uniforms: helpers::ProjectUniforms;
+@group(0) @binding(6) var<storage, read> screen_grad_splats: array<f32>;
+@group(0) @binding(7) var<storage, read_write> screen_grad_stats: array<f32>;
 
 @compute @workgroup_size(256, 1, 1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -16,6 +18,22 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let global_gid = global_from_compact_gid[compact_gid];
     let rg_base = compact_gid * 10u;
+    let screen_compact_base = compact_gid * 5u;
+    let screen_global_base = global_gid * 7u;
+    let signed_screen_grad = vec2<f32>(
+        screen_grad_splats[screen_compact_base + 0u],
+        screen_grad_splats[screen_compact_base + 1u],
+    );
+    let abs_screen_grad = vec2<f32>(
+        screen_grad_splats[screen_compact_base + 2u],
+        screen_grad_splats[screen_compact_base + 3u],
+    );
+    let pixel_coverage = screen_grad_splats[screen_compact_base + 4u];
+
+    screen_grad_stats[screen_global_base + 0u] = signed_screen_grad.x;
+    screen_grad_stats[screen_global_base + 1u] = signed_screen_grad.y;
+    screen_grad_stats[screen_global_base + 2u] = abs_screen_grad.x;
+    screen_grad_stats[screen_global_base + 3u] = abs_screen_grad.y;
 
     let v_xy = vec2<f32>(v_splats[rg_base], v_splats[rg_base + 1u]);
     let v_conic = vec3<f32>(
@@ -81,9 +99,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         uniforms.pixel_center,
     );
     var cov2d = j * cov_cam * transpose(j);
-    let filter_comp = helpers::compensate_cov2d(&cov2d);
+    let filter_comp = helpers::compensate_cov2d(&cov2d, uniforms.cov_blur);
 
     let opac = helpers::sigmoid(params[t_base + 10u]);
+    let abs_score = length(abs_screen_grad);
+    screen_grad_stats[screen_global_base + 4u] = pixel_coverage * abs_score;
+    screen_grad_stats[screen_global_base + 5u] = pixel_coverage;
+    screen_grad_stats[screen_global_base + 6u] = pixel_coverage * mean_c.z;
+
     v_params[p_base + 10u] = filter_comp * v_color_a * opac * (1.0 - opac);
 
     let cov2d_inv = helpers::inverse2x2(cov2d);

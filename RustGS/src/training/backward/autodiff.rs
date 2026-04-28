@@ -61,6 +61,7 @@ pub(crate) struct RenderCheckpoint<B: Backend> {
     pub camera: GaussianCamera,
     pub img_size: (u32, u32),
     pub background: [f32; 3],
+    pub cov_blur: f32,
     pub out_img: Tensor<B, 3>,
     pub projected_splats: Tensor<B, 2>,
     pub global_from_compact_gid: Tensor<B, 1, Int>,
@@ -72,27 +73,29 @@ pub(crate) struct RenderCheckpoint<B: Backend> {
 pub(crate) struct RenderSplatsOutput<B: Backend> {
     pub image: Tensor<B, 3>,
     pub visible: Tensor<B, 1>,
+    pub screen_grad_stats: Tensor<B, 2>,
 }
 
 #[derive(Debug)]
 struct RenderBackward;
 
-impl<B: RenderBackend> Backward<B, 3> for RenderBackward {
+impl<B: RenderBackend> Backward<B, 4> for RenderBackward {
     type State = RenderCheckpoint<B>;
 
     fn backward(
         self,
-        ops: Ops<Self::State, 3>,
+        ops: Ops<Self::State, 4>,
         grads: &mut Gradients,
         _checkpointer: &mut Checkpointer,
     ) {
         let state = ops.state;
-        let [transforms_node, sh_coeffs_node, raw_opacities_node] = ops.parents;
+        let [transforms_node, sh_coeffs_node, raw_opacities_node, screen_grad_stats_node] =
+            ops.parents;
         let device = state.transforms.device();
         let v_output =
             Tensor::<B, 3>::from_primitive(TensorPrimitive::Float(grads.consume::<B>(&ops.node)));
 
-        let v_splats = rasterize_bwd::<B>(
+        let raster_bwd = rasterize_bwd::<B>(
             state.compact_gid_from_isect,
             state.tile_offsets,
             state.projected_splats.clone(),
@@ -114,11 +117,13 @@ impl<B: RenderBackend> Backward<B, 3> for RenderBackward {
         let bwd = project_bwd::<B>(
             &splats,
             state.global_from_compact_gid,
-            v_splats,
+            raster_bwd.v_splats,
+            raster_bwd.screen_grad_splats,
             &state.camera,
             state.img_size,
             state.num_visible,
             &device,
+            state.cov_blur,
         );
 
         if let Some(node) = transforms_node {
@@ -130,6 +135,9 @@ impl<B: RenderBackend> Backward<B, 3> for RenderBackward {
         if let Some(node) = raw_opacities_node {
             grads.register::<B>(node.id, bwd.v_raw_opacities.into_primitive().tensor());
         }
+        if let Some(node) = screen_grad_stats_node {
+            grads.register::<B>(node.id, bwd.screen_grad_stats.into_primitive().tensor());
+        }
     }
 }
 
@@ -138,6 +146,7 @@ async fn render_splats_impl<B, C>(
     camera: &GaussianCamera,
     img_size: (u32, u32),
     background: [f32; 3],
+    cov_blur: f32,
 ) -> RenderSplatsOutput<Autodiff<B, C>>
 where
     B: RenderBackend,
@@ -170,15 +179,26 @@ where
     };
 
     let device = inner_splats.transforms.val().device();
-    let fwd_out =
-        forward::render_forward::<B>(&inner_splats, camera, img_size, background, &device).await;
+    let fwd_out = forward::render_forward::<B>(
+        &inner_splats,
+        camera,
+        img_size,
+        background,
+        &device,
+        cov_blur,
+    )
+    .await;
     let visible = Tensor::<AD<B, C>, 1>::from_inner(fwd_out.visible.clone());
+    let screen_grad_stats =
+        Tensor::<AD<B, C>, 2>::from_inner(Tensor::<B, 2>::zeros([splats.num_splats(), 7], &device))
+            .require_grad();
 
     let image = match RenderBackward
         .prepare::<C>([
             transforms.into_primitive().tensor().node,
             sh_coeffs.into_primitive().tensor().node,
             raw_opacities.into_primitive().tensor().node,
+            screen_grad_stats.clone().into_primitive().tensor().node,
         ])
         .compute_bound()
         .stateful()
@@ -192,6 +212,7 @@ where
                 camera: camera.clone(),
                 img_size,
                 background,
+                cov_blur,
                 out_img: fwd_out.out_img.clone(),
                 projected_splats: fwd_out.projected_splats,
                 global_from_compact_gid: fwd_out.global_from_compact_gid,
@@ -209,19 +230,30 @@ where
         )),
     };
 
-    RenderSplatsOutput { image, visible }
+    RenderSplatsOutput {
+        image,
+        visible,
+        screen_grad_stats,
+    }
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 pub async fn render_splats(
     splats: &DeviceSplats<GsDiffBackend>,
     camera: &GaussianCamera,
     img_size: (u32, u32),
     background: [f32; 3],
 ) -> Tensor<GsDiffBackend, 3> {
-    render_splats_with_visibility(splats, camera, img_size, background)
-        .await
-        .image
+    render_splats_with_visibility(
+        splats,
+        camera,
+        img_size,
+        background,
+        crate::training::DEFAULT_RASTER_COV_BLUR,
+    )
+    .await
+    .image
 }
 
 pub(crate) async fn render_splats_with_visibility(
@@ -229,6 +261,10 @@ pub(crate) async fn render_splats_with_visibility(
     camera: &GaussianCamera,
     img_size: (u32, u32),
     background: [f32; 3],
+    cov_blur: f32,
 ) -> RenderSplatsOutput<GsDiffBackend> {
-    render_splats_impl::<GsBackendBase, NoCheckpointing>(splats, camera, img_size, background).await
+    render_splats_impl::<GsBackendBase, NoCheckpointing>(
+        splats, camera, img_size, background, cov_blur,
+    )
+    .await
 }

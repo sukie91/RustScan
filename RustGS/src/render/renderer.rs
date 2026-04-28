@@ -42,6 +42,8 @@ pub struct GaussianRenderer {
     height: usize,
     /// Background color (RGB)
     background: [f32; 3],
+    /// 2D covariance blur floor used during projection.
+    raster_cov_blur: f32,
 }
 
 impl GaussianRenderer {
@@ -51,12 +53,19 @@ impl GaussianRenderer {
             width,
             height,
             background: [0.0, 0.0, 0.0],
+            raster_cov_blur: crate::training::DEFAULT_RASTER_COV_BLUR,
         }
     }
 
     /// Set background color
     pub fn with_background(mut self, r: f32, g: f32, b: f32) -> Self {
         self.background = [r, g, b];
+        self
+    }
+
+    /// Set the 2D covariance blur floor used during projection.
+    pub fn with_raster_cov_blur(mut self, raster_cov_blur: f32) -> Self {
+        self.raster_cov_blur = raster_cov_blur.max(0.0);
         self
     }
 
@@ -67,11 +76,9 @@ impl GaussianRenderer {
         splats: &HostSplats,
         camera: &GaussianCamera,
     ) -> Result<RenderOutput, TrainingError> {
-        let rendered = TiledRenderer::new(self.width, self.height).render_camera_splats(
-            splats.as_view(),
-            camera,
-            self.background,
-        );
+        let rendered = TiledRenderer::new(self.width, self.height)
+            .with_raster_cov_blur(self.raster_cov_blur)
+            .render_camera_splats(splats.as_view(), camera, self.background);
         let color = rendered
             .color
             .into_iter()

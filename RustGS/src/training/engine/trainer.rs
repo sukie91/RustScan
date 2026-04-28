@@ -64,6 +64,11 @@ pub struct WgpuTrainer {
     optimizer: AdamScaled<GsBackendBase>,
     device: GsDevice,
     grad_2d_accum: Tensor<GsDiffBackend, 1>,
+    screen_grad_2d_accum: Tensor<GsDiffBackend, 1>,
+    abs_grad_2d_accum: Tensor<GsDiffBackend, 1>,
+    abs_pixel_grad_2d_accum: Tensor<GsDiffBackend, 1>,
+    pixel_coverage_accum: Tensor<GsDiffBackend, 1>,
+    camera_depth_accum: Tensor<GsDiffBackend, 1>,
     grad_color_accum: Tensor<GsDiffBackend, 1>,
     num_observations: Tensor<GsDiffBackend, 1>,
     visible_observations: Tensor<GsDiffBackend, 1>,
@@ -153,6 +158,11 @@ impl WgpuTrainer {
             optimizer,
             device: device.clone(),
             grad_2d_accum: Tensor::zeros([initial_splats], &device),
+            screen_grad_2d_accum: Tensor::zeros([initial_splats], &device),
+            abs_grad_2d_accum: Tensor::zeros([initial_splats], &device),
+            abs_pixel_grad_2d_accum: Tensor::zeros([initial_splats], &device),
+            pixel_coverage_accum: Tensor::zeros([initial_splats], &device),
+            camera_depth_accum: Tensor::zeros([initial_splats], &device),
             grad_color_accum: Tensor::zeros([initial_splats], &device),
             num_observations: Tensor::zeros([initial_splats], &device),
             visible_observations: Tensor::zeros([initial_splats], &device),
@@ -260,14 +270,19 @@ impl WgpuTrainer {
             camera,
             (width as u32, height as u32),
             background,
+            self.raster_cov_blur_at(iteration, frame_count),
         )
         .await;
         let pred_rgb = rendered.image.slice(s![.., .., 0..3]);
         let loss = combined_loss_with_kernel(
             pred_rgb,
             target_img,
-            0.8,
-            0.2,
+            self.config.loss_l1_weight as f64,
+            self.config.loss_ssim_weight as f64,
+            self.config.loss_gradient_weight as f64,
+            self.config.loss_robust_delta as f64,
+            self.config.loss_outlier_threshold as f64,
+            self.config.loss_outlier_weight as f64,
             &self.ssim_config,
             self.ssim_kernel.clone(),
         );
@@ -297,6 +312,12 @@ impl WgpuTrainer {
             .raw_opacities
             .grad_remove(&mut grads)
             .unwrap_or_else(|| splats.raw_opacities.val().inner().zeros_like());
+        let screen_grad_stats = rendered
+            .screen_grad_stats
+            .grad_remove(&mut grads)
+            .unwrap_or_else(|| {
+                Tensor::<GsBackendBase, 2>::zeros([splats.num_splats(), 7], &self.device)
+            });
 
         // Brush keeps a strong gradient-validation path; mirror that observability here
         // so we can quickly spot silent no-op training regressions.
@@ -338,6 +359,7 @@ impl WgpuTrainer {
         );
         self.accumulate_gradients(
             &transforms_grad,
+            &screen_grad_stats,
             &sh_grad,
             &rendered.visible,
             self.uses_visibility_pruning(),
@@ -622,15 +644,44 @@ impl WgpuTrainer {
     fn accumulate_gradients(
         &mut self,
         transforms_grad: &Tensor<GsBackendBase, 2>,
+        screen_grad_stats: &Tensor<GsBackendBase, 2>,
         sh_grad: &Tensor<GsBackendBase, 3>,
         visible: &Tensor<GsDiffBackend, 1>,
         use_actual_visibility: bool,
     ) {
+        // This is the post-projection transform gradient, not the per-pixel
+        // screen-space mean gradient required by AbsGS-style densification.
         let grad_2d = transforms_grad
             .clone()
             .slice(s![.., 0..3])
             .abs()
             .mean_dim(1)
+            .squeeze_dim::<1>(1);
+        let screen_grad_2d = screen_grad_stats
+            .clone()
+            .slice(s![.., 0..2])
+            .powi_scalar(2)
+            .sum_dim(1)
+            .sqrt()
+            .squeeze_dim::<1>(1);
+        let abs_grad_2d = screen_grad_stats
+            .clone()
+            .slice(s![.., 2..4])
+            .powi_scalar(2)
+            .sum_dim(1)
+            .sqrt()
+            .squeeze_dim::<1>(1);
+        let abs_pixel_grad_2d = screen_grad_stats
+            .clone()
+            .slice(s![.., 4..5])
+            .squeeze_dim::<1>(1);
+        let pixel_coverage = screen_grad_stats
+            .clone()
+            .slice(s![.., 5..6])
+            .squeeze_dim::<1>(1);
+        let camera_depth = screen_grad_stats
+            .clone()
+            .slice(s![.., 6..7])
             .squeeze_dim::<1>(1);
         let grad_color = sh_grad
             .clone()
@@ -641,9 +692,19 @@ impl WgpuTrainer {
             .squeeze_dim::<1>(1);
 
         let grad_2d = Tensor::<GsDiffBackend, 1>::from_inner(grad_2d);
+        let screen_grad_2d = Tensor::<GsDiffBackend, 1>::from_inner(screen_grad_2d);
+        let abs_grad_2d = Tensor::<GsDiffBackend, 1>::from_inner(abs_grad_2d);
+        let abs_pixel_grad_2d = Tensor::<GsDiffBackend, 1>::from_inner(abs_pixel_grad_2d);
+        let pixel_coverage = Tensor::<GsDiffBackend, 1>::from_inner(pixel_coverage);
+        let camera_depth = Tensor::<GsDiffBackend, 1>::from_inner(camera_depth);
         let grad_color = Tensor::<GsDiffBackend, 1>::from_inner(grad_color);
 
         self.grad_2d_accum = self.grad_2d_accum.clone() + grad_2d;
+        self.screen_grad_2d_accum = self.screen_grad_2d_accum.clone() + screen_grad_2d;
+        self.abs_grad_2d_accum = self.abs_grad_2d_accum.clone() + abs_grad_2d;
+        self.abs_pixel_grad_2d_accum = self.abs_pixel_grad_2d_accum.clone() + abs_pixel_grad_2d;
+        self.pixel_coverage_accum = self.pixel_coverage_accum.clone() + pixel_coverage;
+        self.camera_depth_accum = self.camera_depth_accum.clone() + camera_depth;
         self.grad_color_accum = self.grad_color_accum.clone() + grad_color;
         self.num_observations = self.num_observations.clone().add_scalar(1.0);
         let visible_increment = if use_actual_visibility {
@@ -658,6 +719,28 @@ impl WgpuTrainer {
         matches!(self.config.litegs.prune_mode, LiteGsPruneMode::Threshold)
     }
 
+    fn raster_cov_blur_at(&self, iteration: usize, frame_count: usize) -> f32 {
+        let Some(final_blur) = self.config.raster_cov_blur_final else {
+            return self.config.raster_cov_blur;
+        };
+        let Some(start_epoch) = self
+            .config
+            .raster_cov_blur_final_after_epoch
+            .or(self.config.litegs.topology_freeze_after_epoch)
+        else {
+            return self.config.raster_cov_blur;
+        };
+        if frame_count == 0 {
+            return self.config.raster_cov_blur;
+        }
+        let completed_epoch = iteration.saturating_sub(1) / frame_count;
+        if completed_epoch >= start_epoch {
+            final_blur
+        } else {
+            self.config.raster_cov_blur
+        }
+    }
+
     async fn apply_topology_mutations(
         &mut self,
         splats: &mut DeviceSplats<GsDiffBackend>,
@@ -667,6 +750,11 @@ impl WgpuTrainer {
         let mut snapshot = snapshot_for_topology(
             splats,
             &self.grad_2d_accum,
+            &self.screen_grad_2d_accum,
+            &self.abs_grad_2d_accum,
+            &self.abs_pixel_grad_2d_accum,
+            &self.pixel_coverage_accum,
+            &self.camera_depth_accum,
             &self.grad_color_accum,
             &self.num_observations,
             &self.visible_observations,
@@ -685,6 +773,22 @@ impl WgpuTrainer {
             .take(snapshot.splats.len())
             .collect();
         let plan = plan_mutations(&snapshot, &self.config, iteration, frame_count);
+        if let Some(sample) = plan.telemetry_sample.clone() {
+            log::info!(
+                "Topology diagnostics | iter={} | epoch={:?} | splats={} | growth={} | clone={} | split={} | prune={} | large_low_grad={}/{} ({:.3})",
+                sample.iteration,
+                sample.completed_epoch,
+                sample.gaussian_count,
+                sample.growth_candidates,
+                sample.clone_candidates,
+                sample.split_candidates,
+                sample.prune_candidates,
+                sample.large_low_grad_count,
+                sample.large_splat_count,
+                sample.large_low_grad_ratio.unwrap_or(0.0),
+            );
+            self.telemetry.topology.topology_step_samples.push(sample);
+        }
         apply_topology_metrics_delta(&mut self.telemetry.topology, plan.aftermath.metrics_delta);
         if plan.mutates_splats() {
             apply_mutations(splats, &snapshot.splats, &plan, &self.device);
@@ -700,6 +804,11 @@ impl WgpuTrainer {
 
     fn reset_accumulators(&mut self, num_splats: usize, sh_coeffs: usize, iteration: usize) {
         self.grad_2d_accum = Tensor::zeros([num_splats], &self.device);
+        self.screen_grad_2d_accum = Tensor::zeros([num_splats], &self.device);
+        self.abs_grad_2d_accum = Tensor::zeros([num_splats], &self.device);
+        self.abs_pixel_grad_2d_accum = Tensor::zeros([num_splats], &self.device);
+        self.pixel_coverage_accum = Tensor::zeros([num_splats], &self.device);
+        self.camera_depth_accum = Tensor::zeros([num_splats], &self.device);
         self.grad_color_accum = Tensor::zeros([num_splats], &self.device);
         self.num_observations = Tensor::zeros([num_splats], &self.device);
         self.visible_observations = Tensor::zeros([num_splats], &self.device);

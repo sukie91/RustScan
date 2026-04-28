@@ -116,15 +116,17 @@ pub(crate) fn project_forward<B: ProjectionBackend>(
     camera: &GaussianCamera,
     img_size: (u32, u32),
     _device: &B::Device,
+    cov_blur: f32,
 ) -> ProjectForwardOutput<B> {
     let tile_bounds = calc_tile_bounds(img_size);
-    let uniforms = ProjectUniforms::new(
+    let uniforms = ProjectUniforms::new_with_cov_blur(
         camera,
         img_size,
         tile_bounds,
         splats.sh_degree,
         splats.num_splats() as u32,
         splats.num_splats() as u32,
+        cov_blur,
     );
 
     B::project_forward_primitive(

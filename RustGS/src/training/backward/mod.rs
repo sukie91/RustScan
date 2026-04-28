@@ -8,7 +8,7 @@ pub(crate) use autodiff::render_splats_with_visibility;
 
 #[cfg(test)]
 mod tests {
-    use super::autodiff::render_splats;
+    use super::autodiff::render_splats_with_visibility;
     use crate::core::GaussianCamera;
     use crate::core::HostSplats;
     use crate::sh::rgb_to_sh0_value;
@@ -35,8 +35,15 @@ mod tests {
     async fn test_render_splats_autodiff() {
         let device = <GsDiffBackend as burn::tensor::backend::Backend>::Device::default();
         let splats = host_splats_to_device::<GsDiffBackend>(&test_splats(), &device);
-        let image = render_splats(&splats, &test_camera(), (64, 64), [0.0, 0.0, 0.0]).await;
-        let loss = image.mean();
+        let rendered = render_splats_with_visibility(
+            &splats,
+            &test_camera(),
+            (64, 64),
+            [0.0, 0.0, 0.0],
+            crate::training::DEFAULT_RASTER_COV_BLUR,
+        )
+        .await;
+        let loss = rendered.image.mean();
         let mut grads = loss.backward();
 
         let transforms = splats
@@ -51,6 +58,10 @@ mod tests {
             .raw_opacities
             .grad_remove(&mut grads)
             .expect("opacity grad missing");
+        let screen_grad_stats = rendered
+            .screen_grad_stats
+            .grad_remove(&mut grads)
+            .expect("screen-space grad stats missing");
 
         let transforms_mean = transforms
             .abs()
@@ -70,6 +81,12 @@ mod tests {
             .into_scalar_async()
             .await
             .expect("opacity mean scalar");
+        let screen_stats_mean = screen_grad_stats
+            .abs()
+            .mean()
+            .into_scalar_async()
+            .await
+            .expect("screen stats mean scalar");
 
         assert!(
             transforms_mean > 1e-9,
@@ -82,6 +99,10 @@ mod tests {
         assert!(
             opacity_mean > 1e-9,
             "expected non-zero opacity gradients, got {opacity_mean:e}"
+        );
+        assert!(
+            screen_stats_mean > 1e-9,
+            "expected non-zero screen-space gradient stats, got {screen_stats_mean:e}"
         );
     }
 }

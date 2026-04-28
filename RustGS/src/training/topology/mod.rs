@@ -20,8 +20,8 @@ pub(crate) use bridge::{plan_mutations, snapshot_for_topology};
 use self::density_controller::{DensityControllerConfig, PruneMode};
 use self::schedule::{plan_topology_execution, schedule_topology, TopologyStepContext};
 use self::splat_metrics::TopologySplatMetrics;
-use super::metrics::ParityTopologyMetrics;
-use super::{LiteGsConfig, LiteGsPruneMode, TrainingConfig};
+use super::metrics::{ParityFloatDistribution, ParityTopologyMetrics, ParityTopologyStepSample};
+use super::{LiteGsConfig, LiteGsPruneMode, LiteGsSplitScoreMode, TrainingConfig};
 use crate::core::HostSplats;
 #[cfg(test)]
 use crate::core::HostSplats as Splats;
@@ -65,6 +65,11 @@ pub(super) struct MetalGaussianStats {
     pub(super) fragment_weight: RunningMoments,
     pub(super) fragment_err: RunningMoments,
     pub(super) refine_weight_max: f32,
+    pub(super) screen_refine_weight_max: f32,
+    pub(super) abs_refine_weight_max: f32,
+    pub(super) abs_pixel_refine_weight_max: f32,
+    pub(super) pixel_coverage_mean: f32,
+    pub(super) camera_depth_mean: f32,
     pub(super) visible_count: usize,
     #[allow(dead_code)]
     pub(super) age: usize,
@@ -76,11 +81,21 @@ pub(super) struct MetalGaussianStats {
 pub(super) struct TopologyCandidateInfo {
     pub(super) opacity: f32,
     pub(super) mean2d_grad: f32,
+    pub(super) screen_mean2d_grad: f32,
+    pub(super) abs_mean2d_grad: f32,
+    pub(super) abs_pixel_mean2d_grad: f32,
+    pub(super) pixel_coverage: f32,
+    pub(super) camera_depth: f32,
+    pub(super) depth_scale: f32,
+    pub(super) split_score: f32,
+    pub(super) growth_weight: f32,
     pub(super) visible_count: usize,
     pub(super) age: usize,
     pub(super) consecutive_invisible_epochs: usize,
     pub(super) prune_candidate: bool,
     pub(super) growth_candidate: bool,
+    pub(super) split_candidate: bool,
+    pub(super) clone_candidate: bool,
 }
 
 #[derive(Debug, Default)]
@@ -188,6 +203,11 @@ pub(crate) fn plan_topology_from_host_snapshot(
     config: &TrainingConfig,
     splats: &HostSplats,
     grad_2d_accum: &[f32],
+    screen_grad_2d_accum: &[f32],
+    abs_grad_2d_accum: &[f32],
+    abs_pixel_grad_2d_accum: &[f32],
+    pixel_coverage_accum: &[f32],
+    camera_depth_accum: &[f32],
     grad_color_accum: &[f32],
     num_observations: &[f32],
     visible_observations: &[f32],
@@ -209,6 +229,11 @@ pub(crate) fn plan_topology_from_host_snapshot(
     let stats = build_host_snapshot_stats(
         metrics.len(),
         grad_2d_accum,
+        screen_grad_2d_accum,
+        abs_grad_2d_accum,
+        abs_pixel_grad_2d_accum,
+        pixel_coverage_accum,
+        camera_depth_accum,
         grad_color_accum,
         num_observations,
         visible_observations,
@@ -249,7 +274,15 @@ pub(crate) fn plan_topology_from_host_snapshot(
         random_seed: topology_seed,
     };
 
-    plan_topology_mutation(&metrics, request)
+    let mut plan = plan_topology_mutation(&metrics, request);
+    plan.telemetry_sample = Some(topology_step_sample(
+        &policy,
+        &metrics,
+        &analysis,
+        iteration,
+        schedule.completed_epoch,
+    ));
+    plan
 }
 
 pub(super) fn analyze_topology_candidates(
@@ -274,16 +307,87 @@ pub(super) fn analyze_topology_candidates(
         let opacity = splats.opacity(idx);
         let gaussian_stats = stats.get(idx).copied().unwrap_or_default();
         let mean2d_grad = gaussian_stats.refine_weight_max;
+        let screen_mean2d_grad = gaussian_stats.screen_refine_weight_max;
+        let abs_mean2d_grad = gaussian_stats.abs_refine_weight_max;
+        let abs_pixel_mean2d_grad = gaussian_stats.abs_pixel_refine_weight_max;
+        let pixel_coverage = gaussian_stats.pixel_coverage_mean;
+        let camera_depth = gaussian_stats.camera_depth_mean;
+        let depth_scale = depth_scale_factor(
+            camera_depth,
+            policy.litegs.depth_scale_gamma,
+            policy.scene_extent,
+        );
+        let split_score = match policy.litegs.split_score_mode {
+            LiteGsSplitScoreMode::Baseline => mean2d_grad,
+            LiteGsSplitScoreMode::Abs => abs_mean2d_grad,
+            LiteGsSplitScoreMode::AbsPixel => abs_pixel_mean2d_grad,
+            LiteGsSplitScoreMode::AbsPixelDepth => abs_pixel_mean2d_grad * depth_scale,
+        };
         let growth_threshold = policy.litegs.growth_grad_threshold;
-        let growth_candidate = mean2d_grad.is_finite() && mean2d_grad >= growth_threshold;
+        let split_threshold = match policy.litegs.split_score_mode {
+            LiteGsSplitScoreMode::Baseline => growth_threshold,
+            LiteGsSplitScoreMode::Abs
+            | LiteGsSplitScoreMode::AbsPixel
+            | LiteGsSplitScoreMode::AbsPixelDepth => policy.litegs.split_grad_threshold,
+        };
+        let clone_candidate = max_scale <= clone_scale_threshold
+            && mean2d_grad.is_finite()
+            && mean2d_grad >= growth_threshold;
+        let split_opacity_ready = opacity.is_finite() && opacity > BRUSH_MIN_OPACITY;
+        let baseline_split_candidate = max_scale > clone_scale_threshold
+            && mean2d_grad.is_finite()
+            && mean2d_grad >= growth_threshold;
+        let mode_uses_augmented_baseline = matches!(
+            policy.litegs.split_score_mode,
+            LiteGsSplitScoreMode::Abs | LiteGsSplitScoreMode::AbsPixel
+        );
+        let mode_uses_depth_scaled_score =
+            policy.litegs.split_score_mode == LiteGsSplitScoreMode::AbsPixelDepth;
+        let score_split_candidate = policy.litegs.split_score_mode
+            != LiteGsSplitScoreMode::Baseline
+            && split_score.is_finite()
+            && split_score >= split_threshold
+            && split_opacity_ready;
+        let split_candidate = max_scale > clone_scale_threshold
+            && if mode_uses_depth_scaled_score {
+                score_split_candidate
+            } else if mode_uses_augmented_baseline {
+                baseline_split_candidate || score_split_candidate
+            } else {
+                baseline_split_candidate
+            };
+        let growth_weight = if clone_candidate {
+            mean2d_grad.max(0.0)
+        } else if split_candidate {
+            match policy.litegs.split_score_mode {
+                LiteGsSplitScoreMode::Baseline => mean2d_grad.max(0.0),
+                LiteGsSplitScoreMode::Abs | LiteGsSplitScoreMode::AbsPixel => {
+                    split_score.max(mean2d_grad).max(0.0)
+                }
+                LiteGsSplitScoreMode::AbsPixelDepth => split_score.max(0.0),
+            }
+        } else {
+            0.0
+        };
+        let growth_candidate = clone_candidate || split_candidate;
         let candidate_info = TopologyCandidateInfo {
             opacity,
             mean2d_grad,
+            screen_mean2d_grad,
+            abs_mean2d_grad,
+            abs_pixel_mean2d_grad,
+            pixel_coverage,
+            camera_depth,
+            depth_scale,
+            split_score,
+            growth_weight,
             visible_count: gaussian_stats.visible_count,
             age: gaussian_stats.age,
             consecutive_invisible_epochs: gaussian_stats.consecutive_invisible_epochs,
             prune_candidate: false,
             growth_candidate,
+            split_candidate,
+            clone_candidate,
         };
         let prune_candidate = litegs_should_prune_candidate(
             policy,
@@ -316,9 +420,10 @@ pub(super) fn analyze_topology_candidates(
 
         if growth_candidate {
             analysis.growth_candidates += 1;
-            if max_scale <= clone_scale_threshold {
+            if candidate_info.clone_candidate {
                 analysis.clone_candidates += 1;
-            } else {
+            }
+            if candidate_info.split_candidate {
                 analysis.split_candidates += 1;
             }
         }
@@ -331,6 +436,116 @@ pub(super) fn analyze_topology_candidates(
         analysis.mean_grad = grad_sum / analysis.infos.len() as f32;
     }
     analysis
+}
+
+fn topology_step_sample(
+    policy: &TopologyPolicy,
+    splats: &TopologySplatMetrics,
+    analysis: &TopologyAnalysis,
+    iteration: usize,
+    completed_epoch: Option<usize>,
+) -> ParityTopologyStepSample {
+    let clone_scale_threshold = policy.litegs_clone_scale_threshold();
+    let growth_threshold = policy.litegs.growth_grad_threshold;
+    let mut max_scales = Vec::with_capacity(splats.len());
+    let mut opacities = Vec::with_capacity(splats.len());
+    let mut large_splat_count = 0usize;
+    let mut large_low_grad_count = 0usize;
+
+    for idx in 0..splats.len() {
+        let max_scale = splats.max_scale(idx);
+        let opacity = splats.opacity(idx);
+        max_scales.push(max_scale);
+        opacities.push(opacity);
+
+        if max_scale > clone_scale_threshold {
+            large_splat_count = large_splat_count.saturating_add(1);
+            let mean2d_grad = analysis
+                .infos
+                .get(idx)
+                .map(|info| info.mean2d_grad)
+                .unwrap_or_default();
+            if mean2d_grad.is_finite() && mean2d_grad < growth_threshold {
+                large_low_grad_count = large_low_grad_count.saturating_add(1);
+            }
+        }
+    }
+
+    let large_low_grad_ratio =
+        (large_splat_count > 0).then_some(large_low_grad_count as f32 / large_splat_count as f32);
+    ParityTopologyStepSample {
+        iteration,
+        completed_epoch,
+        gaussian_count: splats.len(),
+        clone_candidates: analysis.clone_candidates,
+        split_candidates: analysis.split_candidates,
+        prune_candidates: analysis.prune_candidates,
+        growth_candidates: analysis.growth_candidates,
+        active_grad_stats: analysis.active_grad_stats,
+        small_scale_stats: analysis.small_scale_stats,
+        opacity_ready_stats: analysis.opacity_ready_stats,
+        large_splat_count,
+        large_low_grad_count,
+        large_low_grad_ratio,
+        mean2d_grad: finite_distribution(analysis.infos.iter().map(|info| info.mean2d_grad)),
+        screen_mean2d_grad: finite_distribution(
+            analysis.infos.iter().map(|info| info.screen_mean2d_grad),
+        ),
+        abs_mean2d_grad: finite_distribution(
+            analysis.infos.iter().map(|info| info.abs_mean2d_grad),
+        ),
+        abs_pixel_mean2d_grad: finite_distribution(
+            analysis.infos.iter().map(|info| info.abs_pixel_mean2d_grad),
+        ),
+        pixel_coverage: finite_distribution(analysis.infos.iter().map(|info| info.pixel_coverage)),
+        camera_depth: finite_distribution(analysis.infos.iter().map(|info| info.camera_depth)),
+        depth_scale: finite_distribution(analysis.infos.iter().map(|info| info.depth_scale)),
+        split_score: finite_distribution(analysis.infos.iter().map(|info| info.split_score)),
+        max_scale: finite_distribution(max_scales),
+        opacity: finite_distribution(opacities),
+    }
+}
+
+fn depth_scale_factor(camera_depth: f32, gamma: f32, scene_radius: f32) -> f32 {
+    if !camera_depth.is_finite() || camera_depth <= 0.0 {
+        return 0.0;
+    }
+    let denom = (gamma * scene_radius.max(1e-6)).max(1e-6);
+    let ratio = camera_depth / denom;
+    (ratio * ratio).clamp(0.0, 1.0)
+}
+
+fn finite_distribution(values: impl IntoIterator<Item = f32>) -> ParityFloatDistribution {
+    let mut values: Vec<f32> = values
+        .into_iter()
+        .filter(|value| value.is_finite())
+        .collect();
+    if values.is_empty() {
+        return ParityFloatDistribution::default();
+    }
+
+    values.sort_by(|lhs, rhs| lhs.total_cmp(rhs));
+    let count = values.len();
+    let mean = values.iter().copied().sum::<f32>() / count as f32;
+    ParityFloatDistribution {
+        count,
+        min: values.first().copied(),
+        p10: percentile(&values, 0.10),
+        p50: percentile(&values, 0.50),
+        p90: percentile(&values, 0.90),
+        p99: percentile(&values, 0.99),
+        max: values.last().copied(),
+        mean: Some(mean),
+    }
+}
+
+fn percentile(sorted_values: &[f32], quantile: f32) -> Option<f32> {
+    if sorted_values.is_empty() {
+        return None;
+    }
+    let last = sorted_values.len().saturating_sub(1);
+    let idx = ((last as f32) * quantile.clamp(0.0, 1.0)).round() as usize;
+    sorted_values.get(idx.min(last)).copied()
 }
 
 pub(super) fn litegs_requested_additions(
@@ -441,7 +656,7 @@ fn litegs_select_densify_candidates_with_rng<R: Rng + ?Sized>(
                 .collect();
             let growth_weights: Vec<f32> = growth_sources
                 .iter()
-                .map(|&idx| infos[idx].mean2d_grad.max(0.0))
+                .map(|&idx| infos[idx].growth_weight.max(0.0))
                 .collect();
             for sampled in sample_weighted_indices(
                 &growth_weights,
@@ -718,6 +933,7 @@ pub(crate) struct TopologyMutationPlan {
     pub(crate) added: usize,
     pub(crate) pruned: usize,
     pub(crate) refine_decay: Option<TopologyRefineDecay>,
+    pub(crate) telemetry_sample: Option<ParityTopologyStepSample>,
     pub(super) aftermath: TopologyMutationAftermath,
 }
 
@@ -806,6 +1022,7 @@ fn plan_brush_refine_mutation(
         added,
         pruned,
         refine_decay: request.refine_decay,
+        telemetry_sample: None,
         aftermath,
     }
 }
@@ -1056,6 +1273,11 @@ fn litegs_should_prune_candidate(
 fn build_host_snapshot_stats(
     len: usize,
     grad_2d_accum: &[f32],
+    screen_grad_2d_accum: &[f32],
+    abs_grad_2d_accum: &[f32],
+    abs_pixel_grad_2d_accum: &[f32],
+    pixel_coverage_accum: &[f32],
+    camera_depth_accum: &[f32],
     grad_color_accum: &[f32],
     num_observations: &[f32],
     visible_observations: &[f32],
@@ -1076,11 +1298,25 @@ fn build_host_snapshot_stats(
                 .unwrap_or_default()
                 .max(0.0);
             let visible_count = visible_observations.round().min(usize::MAX as f32) as usize;
+            let visible_denom = visible_observations.max(1.0);
             let grad_2d = grad_2d_accum.get(idx).copied().unwrap_or_default();
+            let screen_grad_2d = screen_grad_2d_accum.get(idx).copied().unwrap_or_default();
+            let abs_grad_2d = abs_grad_2d_accum.get(idx).copied().unwrap_or_default();
+            let abs_pixel_grad_2d = abs_pixel_grad_2d_accum
+                .get(idx)
+                .copied()
+                .unwrap_or_default();
+            let pixel_coverage = pixel_coverage_accum
+                .get(idx)
+                .copied()
+                .unwrap_or_default()
+                .max(0.0);
+            let camera_depth = camera_depth_accum.get(idx).copied().unwrap_or_default();
             let grad_color = grad_color_accum.get(idx).copied().unwrap_or_default();
             let age = splat_ages.get(idx).copied().unwrap_or_default();
             let consecutive_invisible_epochs =
                 invisible_windows.get(idx).copied().unwrap_or_default();
+            let coverage_denom = pixel_coverage.max(1e-6);
 
             MetalGaussianStats {
                 mean2d_grad: RunningMoments {
@@ -1094,6 +1330,11 @@ fn build_host_snapshot_stats(
                     count: visible_count,
                 },
                 refine_weight_max: grad_2d / denom,
+                screen_refine_weight_max: screen_grad_2d / visible_denom,
+                abs_refine_weight_max: abs_grad_2d / visible_denom,
+                abs_pixel_refine_weight_max: abs_pixel_grad_2d / coverage_denom,
+                pixel_coverage_mean: pixel_coverage / visible_denom,
+                camera_depth_mean: camera_depth / coverage_denom,
                 visible_count,
                 age,
                 consecutive_invisible_epochs,
@@ -1158,14 +1399,14 @@ mod tests {
     use super::{
         analyze_topology_candidates, apply_snapshot_mutations, apply_topology_metrics_delta,
         densify_snapshot_litegs, litegs_requested_additions, litegs_select_densify_candidates,
-        litegs_select_densify_candidates_seeded, should_apply_topology_step,
+        litegs_select_densify_candidates_seeded, should_apply_topology_step, topology_step_sample,
         LiteGsDensifySelection, MetalGaussianStats, RunningMoments, TopologyMutationRequest,
         TopologyPolicy, TopologyRefineDecay, TopologyStatsAction,
     };
     use crate::core::HostSplats as Splats;
     use crate::sh::{rgb_to_sh0_value, sh_coeff_count_for_degree, SplatColorRepresentation};
     use crate::training::metrics::ParityTopologyMetrics;
-    use crate::training::{LiteGsConfig, TrainingConfig};
+    use crate::training::{LiteGsConfig, LiteGsSplitScoreMode, TrainingConfig};
 
     fn test_snapshot(
         positions: Vec<f32>,
@@ -1494,6 +1735,292 @@ mod tests {
         assert_eq!(analysis.growth_candidates, 1);
         assert!(analysis.infos[0].growth_candidate);
         assert!(analysis.infos[1].prune_candidate);
+    }
+
+    #[test]
+    fn topology_step_sample_records_distributions_and_large_low_grad_ratio() {
+        let config = TrainingConfig {
+            litegs: LiteGsConfig {
+                growth_grad_threshold: 0.5,
+                ..LiteGsConfig::default()
+            },
+            ..TrainingConfig::default()
+        };
+        let policy = TopologyPolicy::from_training_config(&config, 1.0);
+        let snapshot = test_snapshot(
+            vec![0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 2.0, 0.0, 1.0],
+            vec![
+                0.02f32.ln(),
+                0.02f32.ln(),
+                0.02f32.ln(),
+                0.02f32.ln(),
+                0.02f32.ln(),
+                0.02f32.ln(),
+                0.005f32.ln(),
+                0.005f32.ln(),
+                0.005f32.ln(),
+            ],
+            vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+            vec![1.0, 1.0, 1.0],
+            vec![1.0, 0.0, 0.0, 0.5, 0.5, 0.5, 0.0, 1.0, 0.0],
+            Vec::new(),
+            SplatColorRepresentation::Rgb,
+        );
+        let stats = vec![
+            MetalGaussianStats {
+                refine_weight_max: 0.1,
+                ..Default::default()
+            },
+            MetalGaussianStats {
+                refine_weight_max: 0.8,
+                ..Default::default()
+            },
+            MetalGaussianStats {
+                refine_weight_max: 0.7,
+                ..Default::default()
+            },
+        ];
+
+        let metrics = TopologySplatMetrics::from_snapshot(&snapshot);
+        let analysis = analyze_topology_candidates(&policy, &metrics, &stats, false);
+        let sample = topology_step_sample(&policy, &metrics, &analysis, 160, Some(2));
+
+        assert_eq!(sample.iteration, 160);
+        assert_eq!(sample.completed_epoch, Some(2));
+        assert_eq!(sample.gaussian_count, 3);
+        assert_eq!(sample.split_candidates, 1);
+        assert_eq!(sample.clone_candidates, 1);
+        assert_eq!(sample.large_splat_count, 2);
+        assert_eq!(sample.large_low_grad_count, 1);
+        assert_eq!(sample.large_low_grad_ratio, Some(0.5));
+        assert_eq!(sample.mean2d_grad.count, 3);
+        assert_eq!(sample.mean2d_grad.p50, Some(0.7));
+        assert_eq!(sample.max_scale.count, 3);
+        assert_eq!(sample.opacity.count, 3);
+    }
+
+    #[test]
+    fn abs_split_score_only_marks_large_split_candidates() {
+        let config = TrainingConfig {
+            litegs: LiteGsConfig {
+                growth_grad_threshold: 0.5,
+                split_score_mode: LiteGsSplitScoreMode::Abs,
+                split_grad_threshold: 0.5,
+                ..LiteGsConfig::default()
+            },
+            ..TrainingConfig::default()
+        };
+        let policy = TopologyPolicy::from_training_config(&config, 1.0);
+        let snapshot = test_snapshot(
+            vec![0.0, 0.0, 1.0, 1.0, 0.0, 1.0],
+            vec![
+                0.02f32.ln(),
+                0.02f32.ln(),
+                0.02f32.ln(),
+                0.005f32.ln(),
+                0.005f32.ln(),
+                0.005f32.ln(),
+            ],
+            vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+            vec![1.0, 1.0],
+            vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            Vec::new(),
+            SplatColorRepresentation::Rgb,
+        );
+        let stats = vec![
+            MetalGaussianStats {
+                refine_weight_max: 0.1,
+                abs_refine_weight_max: 0.8,
+                visible_count: 1,
+                ..Default::default()
+            },
+            MetalGaussianStats {
+                refine_weight_max: 0.1,
+                abs_refine_weight_max: 10.0,
+                visible_count: 1,
+                ..Default::default()
+            },
+        ];
+
+        let metrics = TopologySplatMetrics::from_snapshot(&snapshot);
+        let analysis = analyze_topology_candidates(&policy, &metrics, &stats, false);
+
+        assert_eq!(analysis.growth_candidates, 1);
+        assert_eq!(analysis.split_candidates, 1);
+        assert_eq!(analysis.clone_candidates, 0);
+        assert!(analysis.infos[0].split_candidate);
+        assert!(!analysis.infos[1].clone_candidate);
+        assert_eq!(analysis.infos[0].split_score, 0.8);
+    }
+
+    #[test]
+    fn abs_pixel_split_score_uses_coverage_weighted_score() {
+        let config = TrainingConfig {
+            litegs: LiteGsConfig {
+                growth_grad_threshold: 0.5,
+                split_score_mode: LiteGsSplitScoreMode::AbsPixel,
+                split_grad_threshold: 0.5,
+                ..LiteGsConfig::default()
+            },
+            ..TrainingConfig::default()
+        };
+        let policy = TopologyPolicy::from_training_config(&config, 1.0);
+        let snapshot = test_snapshot(
+            vec![0.0, 0.0, 1.0, 1.0, 0.0, 1.0],
+            vec![
+                0.02f32.ln(),
+                0.02f32.ln(),
+                0.02f32.ln(),
+                0.005f32.ln(),
+                0.005f32.ln(),
+                0.005f32.ln(),
+            ],
+            vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+            vec![1.0, 1.0],
+            vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            Vec::new(),
+            SplatColorRepresentation::Rgb,
+        );
+        let stats = vec![
+            MetalGaussianStats {
+                refine_weight_max: 0.1,
+                abs_refine_weight_max: 0.1,
+                abs_pixel_refine_weight_max: 0.8,
+                pixel_coverage_mean: 16.0,
+                visible_count: 1,
+                ..Default::default()
+            },
+            MetalGaussianStats {
+                refine_weight_max: 0.1,
+                abs_refine_weight_max: 10.0,
+                abs_pixel_refine_weight_max: 10.0,
+                pixel_coverage_mean: 1.0,
+                visible_count: 1,
+                ..Default::default()
+            },
+        ];
+
+        let metrics = TopologySplatMetrics::from_snapshot(&snapshot);
+        let analysis = analyze_topology_candidates(&policy, &metrics, &stats, false);
+
+        assert_eq!(analysis.growth_candidates, 1);
+        assert_eq!(analysis.split_candidates, 1);
+        assert_eq!(analysis.clone_candidates, 0);
+        assert!(analysis.infos[0].split_candidate);
+        assert!(!analysis.infos[1].clone_candidate);
+        assert_eq!(analysis.infos[0].split_score, 0.8);
+        assert_eq!(analysis.infos[0].pixel_coverage, 16.0);
+    }
+
+    #[test]
+    fn abs_pixel_split_score_augments_baseline_large_split_candidates() {
+        let config = TrainingConfig {
+            litegs: LiteGsConfig {
+                growth_grad_threshold: 0.5,
+                split_score_mode: LiteGsSplitScoreMode::AbsPixel,
+                split_grad_threshold: 0.5,
+                ..LiteGsConfig::default()
+            },
+            ..TrainingConfig::default()
+        };
+        let policy = TopologyPolicy::from_training_config(&config, 1.0);
+        let snapshot = test_snapshot(
+            vec![0.0, 0.0, 1.0, 1.0, 0.0, 1.0],
+            vec![
+                0.02f32.ln(),
+                0.02f32.ln(),
+                0.02f32.ln(),
+                0.02f32.ln(),
+                0.02f32.ln(),
+                0.02f32.ln(),
+            ],
+            vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+            vec![1.0, 1.0],
+            vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            Vec::new(),
+            SplatColorRepresentation::Rgb,
+        );
+        let stats = vec![
+            MetalGaussianStats {
+                refine_weight_max: 0.7,
+                abs_pixel_refine_weight_max: 0.1,
+                visible_count: 1,
+                ..Default::default()
+            },
+            MetalGaussianStats {
+                refine_weight_max: 0.1,
+                abs_pixel_refine_weight_max: 0.8,
+                visible_count: 1,
+                ..Default::default()
+            },
+        ];
+
+        let metrics = TopologySplatMetrics::from_snapshot(&snapshot);
+        let analysis = analyze_topology_candidates(&policy, &metrics, &stats, false);
+
+        assert_eq!(analysis.growth_candidates, 2);
+        assert_eq!(analysis.split_candidates, 2);
+        assert!(analysis.infos[0].split_candidate);
+        assert!(analysis.infos[1].split_candidate);
+    }
+
+    #[test]
+    fn abs_pixel_depth_score_suppresses_near_camera_large_split_candidates() {
+        let config = TrainingConfig {
+            litegs: LiteGsConfig {
+                growth_grad_threshold: 0.5,
+                split_score_mode: LiteGsSplitScoreMode::AbsPixelDepth,
+                split_grad_threshold: 0.5,
+                depth_scale_gamma: 1.0,
+                ..LiteGsConfig::default()
+            },
+            ..TrainingConfig::default()
+        };
+        let policy = TopologyPolicy::from_training_config(&config, 1.0);
+        let snapshot = test_snapshot(
+            vec![0.0, 0.0, 1.0, 1.0, 0.0, 1.0],
+            vec![
+                0.02f32.ln(),
+                0.02f32.ln(),
+                0.02f32.ln(),
+                0.02f32.ln(),
+                0.02f32.ln(),
+                0.02f32.ln(),
+            ],
+            vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+            vec![1.0, 1.0],
+            vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            Vec::new(),
+            SplatColorRepresentation::Rgb,
+        );
+        let stats = vec![
+            MetalGaussianStats {
+                refine_weight_max: 10.0,
+                abs_pixel_refine_weight_max: 1.0,
+                camera_depth_mean: 0.2,
+                visible_count: 1,
+                ..Default::default()
+            },
+            MetalGaussianStats {
+                refine_weight_max: 0.1,
+                abs_pixel_refine_weight_max: 1.0,
+                camera_depth_mean: 1.0,
+                visible_count: 1,
+                ..Default::default()
+            },
+        ];
+
+        let metrics = TopologySplatMetrics::from_snapshot(&snapshot);
+        let analysis = analyze_topology_candidates(&policy, &metrics, &stats, false);
+
+        assert_eq!(analysis.growth_candidates, 1);
+        assert_eq!(analysis.split_candidates, 1);
+        assert!(!analysis.infos[0].split_candidate);
+        assert_eq!(analysis.infos[0].depth_scale, 0.040000003);
+        assert_eq!(analysis.infos[0].split_score, 0.040000003);
+        assert!(analysis.infos[1].split_candidate);
+        assert_eq!(analysis.infos[1].depth_scale, 1.0);
+        assert_eq!(analysis.infos[1].split_score, 1.0);
     }
 
     #[test]
@@ -2061,11 +2588,21 @@ mod tests {
         super::TopologyCandidateInfo {
             opacity,
             mean2d_grad,
+            screen_mean2d_grad: mean2d_grad,
+            abs_mean2d_grad: mean2d_grad,
+            abs_pixel_mean2d_grad: mean2d_grad,
+            pixel_coverage: 1.0,
+            camera_depth: 1.0,
+            depth_scale: 1.0,
+            split_score: mean2d_grad,
+            growth_weight: mean2d_grad,
             visible_count,
             age: 10,
             consecutive_invisible_epochs: if visible_count == 0 { 10 } else { 0 },
             prune_candidate,
             growth_candidate,
+            split_candidate: growth_candidate,
+            clone_candidate: growth_candidate,
         }
     }
 }

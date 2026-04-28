@@ -97,15 +97,17 @@ pub(crate) fn project_visible<B: ProjectVisibleBackend>(
     camera: &GaussianCamera,
     img_size: (u32, u32),
     _device: &B::Device,
+    cov_blur: f32,
 ) -> Tensor<B, 2> {
     let tile_bounds = calc_tile_bounds(img_size);
-    let uniforms = ProjectUniforms::new(
+    let uniforms = ProjectUniforms::new_with_cov_blur(
         camera,
         img_size,
         tile_bounds,
         splats.sh_degree,
         splats.num_splats() as u32,
         num_visible as u32,
+        cov_blur,
     );
 
     Tensor::from_primitive(TensorPrimitive::Float(B::project_visible_primitive(

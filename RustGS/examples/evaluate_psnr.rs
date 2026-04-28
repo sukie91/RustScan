@@ -5,13 +5,24 @@ use rustgs::{
     evaluate_splats, evaluation_device, load_splats_ply, load_training_dataset,
     render_evaluation_frame, runtime_from_splats, select_evaluation_frames, EvaluationDevice,
     EvaluationFrameMetric, HostSplats, SplatEvaluationConfig, SplatEvaluationRenderer,
-    SplatEvaluationSummary, TumRgbdConfig,
+    SplatEvaluationSummary, TrainingDataset, TumRgbdConfig,
 };
 
 fn main() -> anyhow::Result<()> {
     let args = Args::parse()?;
 
-    let dataset = load_training_dataset(&args.dataset, &TumRgbdConfig::default())?;
+    let dataset = load_training_dataset(
+        &args.dataset,
+        &TumRgbdConfig {
+            max_frames: args.max_frames,
+            frame_stride: 1,
+            ..TumRgbdConfig::default()
+        },
+    )?;
+    let included_ranges = parse_frame_ranges(args.include_frame_ranges.as_deref())?;
+    let dataset = filter_dataset_to_frame_ranges(dataset, &included_ranges)?;
+    let excluded_ranges = parse_frame_ranges(args.exclude_frame_ranges.as_deref())?;
+    let dataset = filter_dataset_by_frame_ranges(dataset, &excluded_ranges)?;
     let (splats, metadata) = load_splats_ply(&args.scene)?;
     let eval_device = args
         .device
@@ -25,6 +36,7 @@ fn main() -> anyhow::Result<()> {
         &metadata,
         &SplatEvaluationConfig {
             render_scale: args.render_scale,
+            raster_cov_blur: args.raster_cov_blur,
             frame_stride: args.frame_stride,
             max_frames: args.max_frames,
             worst_frame_count: summary_worst_count(args.export_worst_k),
@@ -52,6 +64,7 @@ fn main() -> anyhow::Result<()> {
             &device,
             &export_dir,
             args.render_scale,
+            args.raster_cov_blur,
         )?;
         println!("worst_frames_export_dir={}", export_dir.display());
     }
@@ -63,11 +76,14 @@ struct Args {
     scene: PathBuf,
     dataset: PathBuf,
     render_scale: f32,
+    raster_cov_blur: f32,
     frame_stride: usize,
     max_frames: usize,
     device: String,
     export_worst_k: usize,
     export_dir: Option<PathBuf>,
+    include_frame_ranges: Option<String>,
+    exclude_frame_ranges: Option<String>,
     json: bool,
 }
 
@@ -76,11 +92,14 @@ impl Args {
         let mut scene = None;
         let mut dataset = None;
         let mut render_scale = 0.5f32;
+        let mut raster_cov_blur = rustgs::DEFAULT_RASTER_COV_BLUR;
         let mut frame_stride = 1usize;
         let mut max_frames = 0usize;
         let mut device = String::from("cpu");
         let mut export_worst_k = 0usize;
         let mut export_dir = None;
+        let mut include_frame_ranges = None;
+        let mut exclude_frame_ranges = None;
         let mut json = false;
 
         let mut it = std::env::args().skip(1);
@@ -90,6 +109,9 @@ impl Args {
                 "--dataset" => dataset = Some(PathBuf::from(next_value(&mut it, "--dataset")?)),
                 "--render-scale" => {
                     render_scale = next_value(&mut it, "--render-scale")?.parse()?
+                }
+                "--raster-cov-blur" => {
+                    raster_cov_blur = next_value(&mut it, "--raster-cov-blur")?.parse()?
                 }
                 "--frame-stride" => {
                     frame_stride = next_value(&mut it, "--frame-stride")?.parse()?
@@ -101,6 +123,12 @@ impl Args {
                 }
                 "--export-dir" => {
                     export_dir = Some(PathBuf::from(next_value(&mut it, "--export-dir")?))
+                }
+                "--include-frame-ranges" => {
+                    include_frame_ranges = Some(next_value(&mut it, "--include-frame-ranges")?)
+                }
+                "--exclude-frame-ranges" => {
+                    exclude_frame_ranges = Some(next_value(&mut it, "--exclude-frame-ranges")?)
                 }
                 "--json" => json = true,
                 "--help" | "-h" => {
@@ -121,6 +149,9 @@ impl Args {
         if !(0.0625..=1.0).contains(&render_scale) {
             return Err(anyhow::anyhow!("--render-scale must be in [0.0625, 1.0]"));
         }
+        if !raster_cov_blur.is_finite() || raster_cov_blur < 0.0 {
+            return Err(anyhow::anyhow!("--raster-cov-blur must be finite and >= 0"));
+        }
         device
             .parse::<EvaluationDevice>()
             .map_err(anyhow::Error::msg)?;
@@ -129,11 +160,14 @@ impl Args {
             scene,
             dataset,
             render_scale,
+            raster_cov_blur,
             frame_stride,
             max_frames,
             device,
             export_worst_k,
             export_dir,
+            include_frame_ranges,
+            exclude_frame_ranges,
             json,
         })
     }
@@ -150,13 +184,113 @@ fn print_help() {
   --scene <scene.ply> \
   --dataset <training_dataset.json> \
   [--render-scale 0.5] \
+  [--raster-cov-blur 0.3] \
   [--frame-stride 1] \
   [--max-frames 0] \
   [--device cpu] \
   [--json] \
   [--export-worst-k 5] \
-  [--export-dir output/psnr_review]"
+  [--export-dir output/psnr_review] \
+  [--include-frame-ranges 0-179,240-299] \
+  [--exclude-frame-ranges 76-93,155]"
     );
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FrameIdRange {
+    start: u64,
+    end: u64,
+}
+
+impl FrameIdRange {
+    fn contains(&self, frame_id: u64) -> bool {
+        self.start <= frame_id && frame_id <= self.end
+    }
+}
+
+fn parse_frame_ranges(value: Option<&str>) -> anyhow::Result<Vec<FrameIdRange>> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let mut ranges = Vec::new();
+    for raw_token in value.split(',') {
+        let token = raw_token.trim();
+        if token.is_empty() {
+            continue;
+        }
+        let (start, end) = if let Some((start, end)) = token.split_once("..") {
+            (start.trim(), end.trim())
+        } else if let Some((start, end)) = token.split_once('-') {
+            (start.trim(), end.trim())
+        } else {
+            (token, token)
+        };
+        if start.is_empty() || end.is_empty() {
+            anyhow::bail!("frame range '{token}' must be <frame_id> or <start>-<end>");
+        }
+        let start = start
+            .parse::<u64>()
+            .map_err(|_| anyhow::anyhow!("invalid frame range start in '{token}'"))?;
+        let end = end
+            .parse::<u64>()
+            .map_err(|_| anyhow::anyhow!("invalid frame range end in '{token}'"))?;
+        if start > end {
+            anyhow::bail!("frame range '{token}' has start greater than end");
+        }
+        ranges.push(FrameIdRange { start, end });
+    }
+    Ok(ranges)
+}
+
+fn filter_dataset_by_frame_ranges(
+    dataset: TrainingDataset,
+    excluded_ranges: &[FrameIdRange],
+) -> anyhow::Result<TrainingDataset> {
+    if excluded_ranges.is_empty() {
+        return Ok(dataset);
+    }
+
+    let mut filtered =
+        TrainingDataset::new(dataset.intrinsics).with_depth_scale(dataset.depth_scale);
+    filtered.initial_points = dataset.initial_points.clone();
+    for pose in dataset.poses {
+        if excluded_ranges
+            .iter()
+            .any(|range| range.contains(pose.frame_id))
+        {
+            continue;
+        }
+        filtered.add_pose(pose);
+    }
+    if filtered.poses.is_empty() {
+        anyhow::bail!("--exclude-frame-ranges removed all frames");
+    }
+    Ok(filtered)
+}
+
+fn filter_dataset_to_frame_ranges(
+    dataset: TrainingDataset,
+    included_ranges: &[FrameIdRange],
+) -> anyhow::Result<TrainingDataset> {
+    if included_ranges.is_empty() {
+        return Ok(dataset);
+    }
+
+    let mut filtered =
+        TrainingDataset::new(dataset.intrinsics).with_depth_scale(dataset.depth_scale);
+    filtered.initial_points = dataset.initial_points.clone();
+    for pose in dataset.poses {
+        if included_ranges
+            .iter()
+            .any(|range| range.contains(pose.frame_id))
+        {
+            filtered.add_pose(pose);
+        }
+    }
+    if filtered.poses.is_empty() {
+        anyhow::bail!("--include-frame-ranges selected no frames");
+    }
+    Ok(filtered)
 }
 
 fn summary_worst_count(export_worst_k: usize) -> usize {
@@ -172,8 +306,9 @@ fn print_human_summary(args: &Args, summary: &SplatEvaluationSummary) {
     println!("dataset={}", args.dataset.display());
     println!("device={}", summary.device);
     println!(
-        "render_scale={:.3} resolution={}x{} frames={} stride={} max_frames={}",
+        "render_scale={:.3} raster_cov_blur={:.3} resolution={}x{} frames={} stride={} max_frames={}",
         summary.render_scale,
+        summary.raster_cov_blur,
         summary.render_width,
         summary.render_height,
         summary.frame_count,
@@ -232,6 +367,7 @@ fn export_worst_frames(
     device: &EvaluationDevice,
     export_dir: &std::path::Path,
     render_scale: f32,
+    raster_cov_blur: f32,
 ) -> anyhow::Result<()> {
     std::fs::create_dir_all(export_dir)?;
 
@@ -241,7 +377,8 @@ fn export_worst_frames(
         render_scale,
     );
     let trainable = runtime_from_splats(splats, device)?;
-    let mut renderer = SplatEvaluationRenderer::new(render_width, render_height, *device)?;
+    let mut renderer =
+        SplatEvaluationRenderer::new(render_width, render_height, *device, raster_cov_blur)?;
     let worst = rustgs::worst_frame_metrics(frame_metrics, export_worst_k);
 
     let mut summary = String::from("rank\tdataset_index\tframe_id\tpsnr_db\timage_path\n");

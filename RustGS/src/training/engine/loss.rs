@@ -2,6 +2,7 @@ use burn::prelude::*;
 use burn::tensor::{
     module::conv2d,
     ops::{ConvOptions, PadMode},
+    s,
 };
 
 #[derive(Debug, Clone)]
@@ -80,11 +81,26 @@ pub fn combined_loss<B: Backend>(
     target: Tensor<B, 3>,
     l1_weight: f64,
     ssim_weight: f64,
+    gradient_weight: f64,
+    robust_delta: f64,
+    outlier_threshold: f64,
+    outlier_weight: f64,
     ssim_config: &SsimConfig,
     device: &B::Device,
 ) -> Tensor<B, 1> {
     let kernel = gaussian_kernel_1d::<B>(ssim_config, device);
-    combined_loss_with_kernel(pred, target, l1_weight, ssim_weight, ssim_config, kernel)
+    combined_loss_with_kernel(
+        pred,
+        target,
+        l1_weight,
+        ssim_weight,
+        gradient_weight,
+        robust_delta,
+        outlier_threshold,
+        outlier_weight,
+        ssim_config,
+        kernel,
+    )
 }
 
 pub fn combined_loss_with_kernel<B: Backend>(
@@ -92,12 +108,76 @@ pub fn combined_loss_with_kernel<B: Backend>(
     target: Tensor<B, 3>,
     l1_weight: f64,
     ssim_weight: f64,
+    gradient_weight: f64,
+    robust_delta: f64,
+    outlier_threshold: f64,
+    outlier_weight: f64,
     ssim_config: &SsimConfig,
     ssim_kernel: Tensor<B, 1>,
 ) -> Tensor<B, 1> {
-    let l1 = (pred.clone() - target.clone()).abs().mean().reshape([1]);
+    let l1 = reconstruction_residual_loss(
+        pred.clone(),
+        target.clone(),
+        robust_delta as f32,
+        outlier_threshold as f32,
+        outlier_weight as f32,
+    );
+    let gradient = gradient_difference_loss(pred.clone(), target.clone());
     let ssim = ssim_loss_with_kernel(to_nchw(pred), to_nchw(target), ssim_kernel, ssim_config);
-    l1.mul_scalar(l1_weight as f32) + ssim.mul_scalar(ssim_weight as f32)
+    l1.mul_scalar(l1_weight as f32)
+        + ssim.mul_scalar(ssim_weight as f32)
+        + gradient.mul_scalar(gradient_weight as f32)
+}
+
+fn reconstruction_residual_loss<B: Backend>(
+    pred: Tensor<B, 3>,
+    target: Tensor<B, 3>,
+    robust_delta: f32,
+    outlier_threshold: f32,
+    outlier_weight: f32,
+) -> Tensor<B, 1> {
+    let abs_residual = (pred - target).abs();
+    let loss = if robust_delta.is_finite() && robust_delta > 0.0 {
+        // Saturating L1: behaves like L1 near zero but reduces the influence
+        // of large residuals from dynamic objects, occlusion changes, or bad pixels.
+        let delta = robust_delta.max(1e-6);
+        abs_residual.clone().mul_scalar(delta) / (abs_residual + delta)
+    } else if outlier_threshold.is_finite()
+        && outlier_threshold > 0.0
+        && outlier_weight.is_finite()
+        && outlier_weight < 1.0
+    {
+        // Soft outlier weighting: preserves near-L1 behavior for small residuals
+        // while retaining a configurable gradient floor for high-residual pixels.
+        let threshold = outlier_threshold.max(1e-6);
+        let floor = outlier_weight.clamp(0.0, 1.0);
+        let adaptive_weight = abs_residual.clone().mul_scalar(0.0).add_scalar(floor)
+            + (abs_residual
+                .clone()
+                .mul_scalar(0.0)
+                .add_scalar(1.0 - floor)
+                .mul_scalar(threshold)
+                / (abs_residual.clone() + threshold));
+        abs_residual * adaptive_weight
+    } else {
+        abs_residual
+    };
+    loss.mean().reshape([1])
+}
+
+fn gradient_difference_loss<B: Backend>(pred: Tensor<B, 3>, target: Tensor<B, 3>) -> Tensor<B, 1> {
+    let [height, width, _channels] = pred.dims();
+    debug_assert_eq!(pred.dims(), target.dims());
+    let dx_pred =
+        pred.clone().slice(s![.., 1..width, ..]) - pred.clone().slice(s![.., 0..width - 1, ..]);
+    let dx_target =
+        target.clone().slice(s![.., 1..width, ..]) - target.clone().slice(s![.., 0..width - 1, ..]);
+    let dy_pred = pred.clone().slice(s![1..height, .., ..]) - pred.slice(s![0..height - 1, .., ..]);
+    let dy_target =
+        target.clone().slice(s![1..height, .., ..]) - target.slice(s![0..height - 1, .., ..]);
+    let dx = (dx_pred - dx_target).abs().mean();
+    let dy = (dy_pred - dy_target).abs().mean();
+    (dx + dy).mul_scalar(0.5).reshape([1])
 }
 
 fn to_nchw<B: Backend>(tensor: Tensor<B, 3>) -> Tensor<B, 4> {
@@ -151,7 +231,10 @@ fn separable_blur<B: Backend>(tensor: Tensor<B, 4>, kernel: Tensor<B, 1>) -> Ten
 
 #[cfg(test)]
 mod tests {
-    use super::{combined_loss, ssim_loss, SsimConfig};
+    use super::{
+        combined_loss, gradient_difference_loss, reconstruction_residual_loss, ssim_loss,
+        SsimConfig,
+    };
     use crate::training::engine::GsBackendBase;
     use burn::prelude::Backend;
     use burn::tensor::{ops::PadMode, s, Tensor, TensorData};
@@ -245,15 +328,101 @@ mod tests {
         let pred = Tensor::<GsBackendBase, 3>::zeros([16, 16, 3], &device);
         let target = Tensor::<GsBackendBase, 3>::ones([16, 16, 3], &device);
 
-        let loss = combined_loss(pred, target, 1.0, 1.0, &SsimConfig::default(), &device)
-            .into_scalar_async()
-            .await
-            .expect("combined loss scalar");
+        let loss = combined_loss(
+            pred,
+            target,
+            1.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            &SsimConfig::default(),
+            &device,
+        )
+        .into_scalar_async()
+        .await
+        .expect("combined loss scalar");
 
         assert!(
             loss > 0.5,
             "expected positive image mismatch loss, got {loss}"
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_robust_residual_loss_downweights_large_errors() {
+        let device = device();
+        let pred = Tensor::<GsBackendBase, 3>::zeros([1, 2, 3], &device);
+        let target = Tensor::<GsBackendBase, 3>::from_data(
+            TensorData::new(vec![0.1, 0.1, 0.1, 1.0, 1.0, 1.0], [1, 2, 3]),
+            &device,
+        );
+
+        let exact = reconstruction_residual_loss(pred.clone(), target.clone(), 0.0, 0.0, 1.0)
+            .into_scalar_async()
+            .await
+            .expect("exact residual loss");
+        let robust = reconstruction_residual_loss(pred, target, 0.1, 0.0, 1.0)
+            .into_scalar_async()
+            .await
+            .expect("robust residual loss");
+
+        assert!(robust < exact, "robust loss should downweight outliers");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_soft_outlier_loss_preserves_gradient_floor() {
+        let device = device();
+        let pred = Tensor::<GsBackendBase, 3>::zeros([1, 2, 3], &device);
+        let target = Tensor::<GsBackendBase, 3>::from_data(
+            TensorData::new(vec![0.1, 0.1, 0.1, 1.0, 1.0, 1.0], [1, 2, 3]),
+            &device,
+        );
+
+        let exact = reconstruction_residual_loss(pred.clone(), target.clone(), 0.0, 0.0, 1.0)
+            .into_scalar_async()
+            .await
+            .expect("exact residual loss");
+        let weighted = reconstruction_residual_loss(pred, target, 0.0, 0.25, 0.25)
+            .into_scalar_async()
+            .await
+            .expect("soft outlier residual loss");
+
+        assert!(
+            weighted < exact,
+            "soft outlier loss should downweight large residuals"
+        );
+        assert!(
+            weighted > 0.0,
+            "soft outlier loss should retain a gradient floor"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_gradient_difference_loss_detects_edge_mismatch() {
+        let device = device();
+        let pred = Tensor::<GsBackendBase, 3>::zeros([4, 4, 3], &device);
+        let mut target_values = vec![0.0f32; 4 * 4 * 3];
+        for y in 0..4 {
+            for x in 2..4 {
+                let base = (y * 4 + x) * 3;
+                target_values[base] = 1.0;
+                target_values[base + 1] = 1.0;
+                target_values[base + 2] = 1.0;
+            }
+        }
+        let target = Tensor::<GsBackendBase, 3>::from_data(
+            TensorData::new(target_values, [4, 4, 3]),
+            &device,
+        );
+
+        let loss = gradient_difference_loss(pred, target)
+            .into_scalar_async()
+            .await
+            .expect("gradient loss scalar");
+
+        assert!(loss > 0.0, "expected edge mismatch gradient loss");
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -3,7 +3,6 @@
 const TILE_WIDTH: u32 = 16u;
 const TILE_SIZE: u32 = 256u;
 const SH_C0: f32 = 0.28209479177387814;
-const COV_BLUR: f32 = 0.3;
 
 struct ProjectUniforms {
     viewmat: mat4x4<f32>,
@@ -15,7 +14,7 @@ struct ProjectUniforms {
     sh_degree: u32,
     total_splats: u32,
     num_visible: u32,
-    pad_a: u32,
+    cov_blur: f32,
 }
 
 struct RasterizeUniforms {
@@ -168,11 +167,11 @@ fn calc_cov2d(
     return j * covar_cam * transpose(j);
 }
 
-fn compensate_cov2d(cov2d: ptr<function, mat2x2<f32>>) -> f32 {
+fn compensate_cov2d(cov2d: ptr<function, mat2x2<f32>>, cov_blur: f32) -> f32 {
     let cov_start = *cov2d;
     var cov_end = *cov2d;
-    cov_end[0][0] += COV_BLUR;
-    cov_end[1][1] += COV_BLUR;
+    cov_end[0][0] += cov_blur;
+    cov_end[1][1] += cov_blur;
     *cov2d = cov_end;
 
     let det_raw = max(determinant(cov_start), 0.0);

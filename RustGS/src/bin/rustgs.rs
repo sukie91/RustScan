@@ -50,6 +50,22 @@ struct TrainArgs {
     #[arg(long, default_value = "1")]
     frame_stride: usize,
 
+    /// Comma-separated frame ids or inclusive ranges to include for training, e.g. 0-179,240-299
+    #[arg(long)]
+    include_frame_ranges: Option<String>,
+
+    /// Comma-separated frame ids or inclusive ranges to exclude from training, e.g. 76-93,155
+    #[arg(long)]
+    exclude_frame_ranges: Option<String>,
+
+    /// Comma-separated frame ids or inclusive ranges to repeat during training, e.g. 0-179
+    #[arg(long)]
+    oversample_frame_ranges: Option<String>,
+
+    /// Total repeat count for --oversample-frame-ranges (1 = disabled)
+    #[arg(long, default_value = "1")]
+    oversample_frame_repeat: usize,
+
     /// Deterministic shuffle seed for training frame sampling (0 preserves dataset order)
     #[arg(long, default_value = "0")]
     frame_shuffle_seed: u64,
@@ -58,9 +74,25 @@ struct TrainArgs {
     #[arg(long, default_value = "0.5")]
     render_scale: f32,
 
+    /// Rasterizer 2D covariance blur floor. Lower is sharper but can alias.
+    #[arg(long, default_value_t = rustgs::DEFAULT_RASTER_COV_BLUR)]
+    raster_cov_blur: f32,
+
+    /// Optional late-training covariance blur floor. Defaults to disabled.
+    #[arg(long)]
+    raster_cov_blur_final: Option<f32>,
+
+    /// Epoch at which --raster-cov-blur-final becomes active. Defaults to topology freeze epoch.
+    #[arg(long)]
+    raster_cov_blur_final_after_epoch: Option<usize>,
+
     /// LiteGS SH degree
     #[arg(long, default_value = "3")]
     litegs_sh_degree: usize,
+
+    /// LiteGS experiment profile: baseline, abs-split, abs-pixel, abs-pixel-depth
+    #[arg(long, default_value_t = rustgs::LiteGsTrainingProfile::Baseline)]
+    litegs_profile: rustgs::LiteGsTrainingProfile,
 
     /// LiteGS tile size, e.g. 8x16 or 8,16
     #[arg(long, default_value_t = rustgs::LiteGsTileSize::new(8, 16))]
@@ -109,6 +141,18 @@ struct TrainArgs {
     /// LiteGS xy-gradient threshold for growth candidates
     #[arg(long, default_value = "0.00014")]
     litegs_growth_grad_threshold: f32,
+
+    /// LiteGS split score mode for large Gaussians: baseline, abs, abs-pixel, abs-pixel-depth
+    #[arg(long, default_value_t = rustgs::LiteGsSplitScoreMode::Baseline)]
+    litegs_split_score: rustgs::LiteGsSplitScoreMode,
+
+    /// LiteGS split score threshold used by --litegs-split-score abs
+    #[arg(long, default_value = "0.00014")]
+    litegs_split_grad_threshold: f32,
+
+    /// Pixel-GS gamma for abs-pixel-depth near-camera split suppression
+    #[arg(long, default_value = "0.37")]
+    litegs_depth_scale_gamma: f32,
 
     /// LiteGS fraction of above-threshold candidates selected for extra growth
     #[arg(long, default_value = "0.25")]
@@ -218,6 +262,30 @@ struct TrainArgs {
     #[arg(long, default_value = "0")]
     lr_color_final: f32,
 
+    /// L1 image reconstruction loss weight
+    #[arg(long, default_value = "0.8")]
+    loss_l1_weight: f32,
+
+    /// D-SSIM image reconstruction loss weight
+    #[arg(long, default_value = "0.2")]
+    loss_ssim_weight: f32,
+
+    /// Image-gradient reconstruction loss weight for edge/detail preservation
+    #[arg(long, default_value = "0.0")]
+    loss_gradient_weight: f32,
+
+    /// Robust residual delta for saturating L1 reconstruction loss (0 = exact L1)
+    #[arg(long, default_value = "0.0")]
+    loss_robust_delta: f32,
+
+    /// Soft outlier residual threshold for high-residual pixel downweighting (0 = disabled)
+    #[arg(long, default_value = "0.0")]
+    loss_outlier_threshold: f32,
+
+    /// Gradient floor for high-residual pixels when --loss-outlier-threshold is enabled
+    #[arg(long, default_value = "1.0")]
+    loss_outlier_weight: f32,
+
     /// Log level (trace, debug, info, warn, error)
     #[arg(long, default_value = "info")]
     log_level: String,
@@ -230,6 +298,10 @@ struct TrainArgs {
     #[arg(long, default_value = "0.25")]
     eval_render_scale: f32,
 
+    /// Evaluation-only rasterizer covariance blur floor. Defaults to --raster-cov-blur.
+    #[arg(long)]
+    eval_raster_cov_blur: Option<f32>,
+
     /// Maximum number of frames considered during post-training evaluation (0 = all)
     #[arg(long, default_value = "180")]
     eval_max_frames: usize,
@@ -237,6 +309,14 @@ struct TrainArgs {
     /// Keep every Nth frame during post-training evaluation
     #[arg(long, default_value = "30")]
     eval_frame_stride: usize,
+
+    /// Comma-separated frame ids or inclusive ranges to include during post-training evaluation
+    #[arg(long)]
+    eval_include_frame_ranges: Option<String>,
+
+    /// Comma-separated frame ids or inclusive ranges to exclude from post-training evaluation
+    #[arg(long)]
+    eval_exclude_frame_ranges: Option<String>,
 
     /// Number of lowest-PSNR frames to keep in the evaluation summary
     #[arg(long, default_value = "5")]
@@ -249,6 +329,18 @@ struct TrainArgs {
     /// Print the post-training evaluation summary as JSON
     #[arg(long, default_value_t = false)]
     eval_json: bool,
+
+    /// Directory for post-training target/render/diff crop exports
+    #[arg(long)]
+    eval_crop_output_dir: Option<PathBuf>,
+
+    /// Comma-separated frame ids to export crops for; defaults to worst evaluated frames
+    #[arg(long)]
+    eval_crop_frames: Option<String>,
+
+    /// Crop rectangle in evaluation pixels as x,y,width,height; defaults to full frame
+    #[arg(long)]
+    eval_crop_rect: Option<String>,
 }
 
 #[derive(Debug, Clone, clap::Args)]
@@ -264,6 +356,10 @@ struct RenderArgs {
     /// Output image path
     #[arg(short, long)]
     output: PathBuf,
+
+    /// Rasterizer 2D covariance blur floor. Lower is sharper but can alias.
+    #[arg(long, default_value_t = rustgs::DEFAULT_RASTER_COV_BLUR)]
+    raster_cov_blur: f32,
 }
 
 #[derive(Debug, Clone, clap::Args)]
@@ -572,9 +668,13 @@ fn run_prune_scene_command(_args: PruneSceneArgs) -> anyhow::Result<()> {
 
 #[cfg(feature = "gpu")]
 fn run_render_command(args: RenderArgs) -> anyhow::Result<()> {
+    if !args.raster_cov_blur.is_finite() || args.raster_cov_blur < 0.0 {
+        bail!("--raster-cov-blur must be finite and >= 0");
+    }
     log::info!("Rendering scene from {:?}", args.input);
     log::info!("Camera: {:?}", args.camera);
     log::info!("Output: {:?}", args.output);
+    log::info!("Raster covariance blur: {:.3}", args.raster_cov_blur);
 
     let (splats, metadata) = rustgs::load_splats_ply(&args.input)?;
     log::info!("Loaded {} Gaussians", splats.len());
@@ -584,7 +684,8 @@ fn run_render_command(args: RenderArgs) -> anyhow::Result<()> {
     let renderer = rustgs::GaussianRenderer::new(
         camera.intrinsics.width as usize,
         camera.intrinsics.height as usize,
-    );
+    )
+    .with_raster_cov_blur(args.raster_cov_blur);
     let rendered = renderer.render_splats(&splats, &camera)?;
     let image = image::RgbImage::from_raw(
         rendered.width as u32,
@@ -739,17 +840,78 @@ mod tests {
         ]);
 
         assert_eq!(args.render_scale, 0.5);
+        assert_eq!(args.include_frame_ranges, None);
+        assert_eq!(args.exclude_frame_ranges, None);
+        assert_eq!(args.oversample_frame_ranges, None);
+        assert_eq!(args.oversample_frame_repeat, 1);
+        assert_eq!(args.raster_cov_blur, rustgs::DEFAULT_RASTER_COV_BLUR);
+        assert_eq!(args.raster_cov_blur_final, None);
+        assert_eq!(args.raster_cov_blur_final_after_epoch, None);
         assert_eq!(args.litegs_sh_degree, 3);
+        assert_eq!(args.litegs_profile, rustgs::LiteGsTrainingProfile::Baseline);
         assert_eq!(args.litegs_tile_size, rustgs::LiteGsTileSize::new(8, 16));
         assert!(!args.litegs_sparse_grad);
         assert_eq!(args.frame_shuffle_seed, 0);
         assert!(!args.eval_after_train);
         assert_eq!(args.eval_render_scale, 0.25);
+        assert_eq!(args.eval_raster_cov_blur, None);
         assert_eq!(args.eval_max_frames, 180);
         assert_eq!(args.eval_frame_stride, 30);
+        assert_eq!(args.eval_include_frame_ranges, None);
+        assert_eq!(args.eval_exclude_frame_ranges, None);
         assert_eq!(args.eval_worst_frames, 5);
         assert_eq!(args.eval_device, "cpu");
         assert!(!args.eval_json);
+        assert_eq!(args.eval_crop_output_dir, None);
+        assert_eq!(args.eval_crop_frames, None);
+        assert_eq!(args.eval_crop_rect, None);
+        assert_eq!(args.loss_l1_weight, 0.8);
+        assert_eq!(args.loss_ssim_weight, 0.2);
+        assert_eq!(args.loss_gradient_weight, 0.0);
+        assert_eq!(args.loss_robust_delta, 0.0);
+        assert_eq!(args.loss_outlier_threshold, 0.0);
+        assert_eq!(args.loss_outlier_weight, 1.0);
+    }
+
+    #[test]
+    fn train_command_parses_litegs_profile() {
+        let args = parse_train_args(&[
+            "rustgs",
+            "train",
+            "--input",
+            "scene.json",
+            "--output",
+            "scene.ply",
+            "--litegs-profile",
+            "abs-pixel",
+        ]);
+
+        assert_eq!(args.litegs_profile, rustgs::LiteGsTrainingProfile::AbsPixel);
+    }
+
+    #[test]
+    fn litegs_profile_applies_stable_experimental_split_defaults() {
+        let args = parse_train_args(&[
+            "rustgs",
+            "train",
+            "--input",
+            "scene.json",
+            "--output",
+            "scene.ply",
+            "--litegs-profile",
+            "abs-pixel",
+        ]);
+        let config = build_training_config(&args).unwrap();
+
+        assert_eq!(
+            config.litegs.training_profile,
+            rustgs::LiteGsTrainingProfile::AbsPixel
+        );
+        assert_eq!(
+            config.litegs.split_score_mode,
+            rustgs::LiteGsSplitScoreMode::AbsPixel
+        );
+        assert_eq!(config.litegs.split_grad_threshold, 0.00001);
     }
 
     #[test]
@@ -942,27 +1104,57 @@ mod tests {
             "scene.json",
             "--output",
             "scene.ply",
+            "--include-frame-ranges",
+            "0-179",
+            "--oversample-frame-ranges",
+            "0-179",
+            "--oversample-frame-repeat",
+            "3",
             "--eval-after-train",
             "--eval-render-scale",
             "0.125",
+            "--eval-raster-cov-blur",
+            "0.2",
             "--eval-max-frames",
             "60",
             "--eval-frame-stride",
             "10",
+            "--eval-include-frame-ranges",
+            "0-179,240-299",
+            "--eval-exclude-frame-ranges",
+            "76-93,155",
             "--eval-worst-frames",
             "3",
             "--eval-device",
             "cpu",
             "--eval-json",
+            "--eval-crop-output-dir",
+            "crops",
+            "--eval-crop-frames",
+            "0,90,120",
+            "--eval-crop-rect",
+            "16,12,64,48",
         ]);
 
         assert!(args.eval_after_train);
+        assert_eq!(args.include_frame_ranges.as_deref(), Some("0-179"));
+        assert_eq!(args.oversample_frame_ranges.as_deref(), Some("0-179"));
+        assert_eq!(args.oversample_frame_repeat, 3);
         assert_eq!(args.eval_render_scale, 0.125);
+        assert_eq!(args.eval_raster_cov_blur, Some(0.2));
         assert_eq!(args.eval_max_frames, 60);
         assert_eq!(args.eval_frame_stride, 10);
+        assert_eq!(
+            args.eval_include_frame_ranges.as_deref(),
+            Some("0-179,240-299")
+        );
+        assert_eq!(args.eval_exclude_frame_ranges.as_deref(), Some("76-93,155"));
         assert_eq!(args.eval_worst_frames, 3);
         assert_eq!(args.eval_device, "cpu");
         assert!(args.eval_json);
+        assert_eq!(args.eval_crop_output_dir, Some(PathBuf::from("crops")));
+        assert_eq!(args.eval_crop_frames.as_deref(), Some("0,90,120"));
+        assert_eq!(args.eval_crop_rect.as_deref(), Some("16,12,64,48"));
     }
 
     #[test]
@@ -1236,6 +1428,7 @@ mod tests {
         let evaluation_summary = rustgs::SplatEvaluationSummary {
             device: rustgs::EvaluationDevice::Cpu,
             render_scale: 0.25,
+            raster_cov_blur: rustgs::DEFAULT_RASTER_COV_BLUR,
             render_width: 16,
             render_height: 16,
             frame_stride: 30,
@@ -1251,7 +1444,10 @@ mod tests {
             psnr_min_db: 6.8,
             psnr_max_db: 7.6,
             psnr_std_db: 0.3,
+            sharpness_grad_ratio_mean: 0.8,
+            sharpness_lap_ratio_mean: 0.6,
             worst_frames: Vec::new(),
+            crop_outputs: Vec::new(),
         };
 
         maybe_write_litegs_parity_report(

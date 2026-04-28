@@ -38,17 +38,18 @@ pub(crate) struct ProjectUniforms {
     pub sh_degree: u32,
     pub total_splats: u32,
     pub num_visible: u32,
-    pub pad_a: u32,
+    pub cov_blur: f32,
 }
 
 impl ProjectUniforms {
-    pub(crate) fn new(
+    pub(crate) fn new_with_cov_blur(
         camera: &GaussianCamera,
         img_size: (u32, u32),
         tile_bounds: (u32, u32),
         sh_degree: u32,
         total_splats: u32,
         num_visible: u32,
+        cov_blur: f32,
     ) -> Self {
         let camera_position = camera.position();
         Self {
@@ -61,7 +62,7 @@ impl ProjectUniforms {
             sh_degree,
             total_splats,
             num_visible,
-            pad_a: 0,
+            cov_blur: cov_blur.max(0.0),
         }
     }
 }
@@ -158,6 +159,7 @@ pub(crate) async fn render_forward<B>(
     img_size: (u32, u32),
     background: [f32; 3],
     device: &B::Device,
+    cov_blur: f32,
 ) -> RenderOutput<B>
 where
     B: projection::ProjectionBackend
@@ -168,7 +170,7 @@ where
         + PrefixSumBackend
         + RadixSortBackend,
 {
-    let proj_out = project_forward(splats, camera, img_size, device);
+    let proj_out = project_forward(splats, camera, img_size, device, cov_blur);
     let projection::ProjectForwardOutput {
         global_from_presort_gid,
         depths,
@@ -221,6 +223,7 @@ where
         camera,
         img_size,
         device,
+        cov_blur,
     );
 
     if num_intersections == 0 {
@@ -325,6 +328,7 @@ mod tests {
             (64, 64),
             [0.0, 0.0, 0.0],
             &device,
+            crate::training::DEFAULT_RASTER_COV_BLUR,
         )
         .await;
 

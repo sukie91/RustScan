@@ -4,6 +4,7 @@ use std::str::FromStr;
 use crate::TrainingError;
 
 const MIN_RENDER_SCALE: f32 = 0.0625;
+pub const DEFAULT_RASTER_COV_BLUR: f32 = 0.3;
 
 /// Training backend selection.
 ///
@@ -139,6 +140,80 @@ impl FromStr for LiteGsPruneMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum LiteGsSplitScoreMode {
+    #[default]
+    Baseline,
+    Abs,
+    AbsPixel,
+    AbsPixelDepth,
+}
+
+impl std::fmt::Display for LiteGsSplitScoreMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Baseline => write!(f, "baseline"),
+            Self::Abs => write!(f, "abs"),
+            Self::AbsPixel => write!(f, "abs-pixel"),
+            Self::AbsPixelDepth => write!(f, "abs-pixel-depth"),
+        }
+    }
+}
+
+impl FromStr for LiteGsSplitScoreMode {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match normalize_config_token(value).as_str() {
+            "baseline" => Ok(Self::Baseline),
+            "abs" => Ok(Self::Abs),
+            "abs-pixel" => Ok(Self::AbsPixel),
+            "abs-pixel-depth" => Ok(Self::AbsPixelDepth),
+            other => Err(format!(
+                "unsupported LiteGS split score mode '{other}'. Expected one of: baseline, abs, abs-pixel, abs-pixel-depth"
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum LiteGsTrainingProfile {
+    #[default]
+    Baseline,
+    AbsSplit,
+    AbsPixel,
+    AbsPixelDepth,
+}
+
+impl std::fmt::Display for LiteGsTrainingProfile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Baseline => write!(f, "baseline"),
+            Self::AbsSplit => write!(f, "abs-split"),
+            Self::AbsPixel => write!(f, "abs-pixel"),
+            Self::AbsPixelDepth => write!(f, "abs-pixel-depth"),
+        }
+    }
+}
+
+impl FromStr for LiteGsTrainingProfile {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match normalize_config_token(value).as_str() {
+            "baseline" => Ok(Self::Baseline),
+            "abs-split" => Ok(Self::AbsSplit),
+            "abs-pixel" => Ok(Self::AbsPixel),
+            "abs-pixel-depth" => Ok(Self::AbsPixelDepth),
+            other => Err(format!(
+                "unsupported LiteGS profile '{other}'. Expected one of: baseline, abs-split, abs-pixel, abs-pixel-depth"
+            )),
+        }
+    }
+}
+
 /// Nested LiteGS-compatible configuration surface.
 ///
 /// The defaults are chosen for the phased Apple Silicon parity plan:
@@ -151,6 +226,8 @@ pub struct LiteGsConfig {
     pub reg_weight: f32,
     pub enable_transmittance: bool,
     pub enable_depth: bool,
+    #[serde(default)]
+    pub training_profile: LiteGsTrainingProfile,
     pub densify_from: usize,
     pub densify_until: Option<usize>,
     /// Freeze all topology updates at or after this epoch.
@@ -164,6 +241,12 @@ pub struct LiteGsConfig {
     pub densification_interval: usize,
     /// Brush-style xy-gradient threshold for growth candidates.
     pub growth_grad_threshold: f32,
+    /// Score used for large-Gaussian split candidates.
+    pub split_score_mode: LiteGsSplitScoreMode,
+    /// Threshold for split_score_mode=abs. Baseline mode ignores this field.
+    pub split_grad_threshold: f32,
+    /// Gamma used by abs-pixel-depth to suppress near-camera split growth.
+    pub depth_scale_gamma: f32,
     /// Fraction of above-threshold candidates selected for additional growth.
     pub growth_select_fraction: f32,
     /// Stop selecting additional growth candidates after this training iteration.
@@ -209,6 +292,7 @@ impl Default for LiteGsConfig {
             reg_weight: 0.0,
             enable_transmittance: false,
             enable_depth: false,
+            training_profile: LiteGsTrainingProfile::Baseline,
             densify_from: 3,
             densify_until: None,
             topology_freeze_after_epoch: None,
@@ -216,6 +300,9 @@ impl Default for LiteGsConfig {
             refine_every: 160,
             densification_interval: 5,
             growth_grad_threshold: LITEGS_DEFAULT_GROWTH_GRAD_THRESHOLD,
+            split_score_mode: LiteGsSplitScoreMode::Baseline,
+            split_grad_threshold: LITEGS_DEFAULT_GROWTH_GRAD_THRESHOLD,
+            depth_scale_gamma: 0.37,
             growth_select_fraction: 0.25,
             growth_stop_iter: 15_000,
             opacity_decay: 0.0,
@@ -277,6 +364,20 @@ pub struct TrainingConfig {
     pub lr_color: f32,
     /// Color learning-rate final value. Set to 0 to keep lr_color constant.
     pub lr_color_final: f32,
+    /// L1 image reconstruction loss weight.
+    pub loss_l1_weight: f32,
+    /// D-SSIM image reconstruction loss weight.
+    pub loss_ssim_weight: f32,
+    /// Image-gradient reconstruction loss weight. Disabled by default.
+    pub loss_gradient_weight: f32,
+    /// Saturating robust residual delta for the L1 reconstruction term.
+    /// Set to 0 to use the exact L1 loss.
+    pub loss_robust_delta: f32,
+    /// Residual threshold for soft high-residual pixel downweighting.
+    /// Set to 0 to disable.
+    pub loss_outlier_threshold: f32,
+    /// Gradient floor for high-residual pixels when loss_outlier_threshold is enabled.
+    pub loss_outlier_weight: f32,
     /// Maximum number of Gaussians created during initialization
     pub max_initial_gaussians: usize,
     /// Sampling step for frame-to-Gaussian initialization (0 = auto)
@@ -297,6 +398,17 @@ pub struct TrainingConfig {
     pub frame_shuffle_seed: u64,
     /// Render scale used by the wgpu backend (relative to input resolution).
     pub render_scale: f32,
+    /// 2D covariance blur floor used by the rasterizer. Lower values are sharper but can alias.
+    pub raster_cov_blur: f32,
+    /// Optional late-training 2D covariance blur floor.
+    ///
+    /// When set, training uses `raster_cov_blur` before the configured switch epoch and
+    /// `raster_cov_blur_final` after it. Evaluation/rendering still use their own config.
+    pub raster_cov_blur_final: Option<f32>,
+    /// Epoch at which the training raster blur switches to `raster_cov_blur_final`.
+    ///
+    /// If unset, the switch follows `litegs.topology_freeze_after_epoch` when available.
+    pub raster_cov_blur_final_after_epoch: Option<usize>,
 }
 
 impl Default for TrainingConfig {
@@ -316,6 +428,12 @@ impl Default for TrainingConfig {
             lr_opacity_final: 0.0,
             lr_color: 0.0025,
             lr_color_final: 0.0,
+            loss_l1_weight: 0.8,
+            loss_ssim_weight: 0.2,
+            loss_gradient_weight: 0.0,
+            loss_robust_delta: 0.0,
+            loss_outlier_threshold: 0.0,
+            loss_outlier_weight: 1.0,
             max_initial_gaussians: 100_000,
             sampling_step: 0,
             min_depth: 0.01,
@@ -325,6 +443,9 @@ impl Default for TrainingConfig {
             frame_prefetch_ahead: 4,
             frame_shuffle_seed: 0,
             render_scale: 0.5,
+            raster_cov_blur: DEFAULT_RASTER_COV_BLUR,
+            raster_cov_blur_final: None,
+            raster_cov_blur_final_after_epoch: None,
         }
     }
 }
@@ -344,6 +465,14 @@ impl TrainingConfig {
             invalid.push(format!(
                 "render_scale must be finite and in [{MIN_RENDER_SCALE}, 1.0]"
             ));
+        }
+        if !self.raster_cov_blur.is_finite() || self.raster_cov_blur < 0.0 {
+            invalid.push("raster_cov_blur must be finite and >= 0".to_string());
+        }
+        if let Some(raster_cov_blur_final) = self.raster_cov_blur_final {
+            if !raster_cov_blur_final.is_finite() || raster_cov_blur_final < 0.0 {
+                invalid.push("raster_cov_blur_final must be finite and >= 0".to_string());
+            }
         }
         if self.frame_cache_capacity == 0 {
             invalid.push("frame_cache_capacity must be >= 1".to_string());
@@ -382,6 +511,30 @@ impl TrainingConfig {
         validate_lr("lr_color", self.lr_color, true, &mut invalid);
         validate_lr("lr_color_final", self.lr_color_final, false, &mut invalid);
         validate_lr("litegs.lr_pose", self.litegs.lr_pose, false, &mut invalid);
+        validate_loss_weight("loss_l1_weight", self.loss_l1_weight, &mut invalid);
+        validate_loss_weight("loss_ssim_weight", self.loss_ssim_weight, &mut invalid);
+        validate_loss_weight(
+            "loss_gradient_weight",
+            self.loss_gradient_weight,
+            &mut invalid,
+        );
+        validate_loss_weight("loss_robust_delta", self.loss_robust_delta, &mut invalid);
+        validate_loss_weight(
+            "loss_outlier_threshold",
+            self.loss_outlier_threshold,
+            &mut invalid,
+        );
+        validate_unit_interval(
+            "loss_outlier_weight",
+            self.loss_outlier_weight,
+            &mut invalid,
+        );
+        if self.loss_l1_weight == 0.0
+            && self.loss_ssim_weight == 0.0
+            && self.loss_gradient_weight == 0.0
+        {
+            invalid.push("at least one image loss weight must be > 0".to_string());
+        }
 
         if self.litegs.sh_degree == 0 {
             invalid.push("litegs.sh_degree must be >= 1".to_string());
@@ -398,6 +551,12 @@ impl TrainingConfig {
         if !self.litegs.growth_grad_threshold.is_finite() || self.litegs.growth_grad_threshold < 0.0
         {
             invalid.push("litegs.growth_grad_threshold must be finite and >= 0".to_string());
+        }
+        if !self.litegs.split_grad_threshold.is_finite() || self.litegs.split_grad_threshold < 0.0 {
+            invalid.push("litegs.split_grad_threshold must be finite and >= 0".to_string());
+        }
+        if !self.litegs.depth_scale_gamma.is_finite() || self.litegs.depth_scale_gamma <= 0.0 {
+            invalid.push("litegs.depth_scale_gamma must be finite and > 0".to_string());
         }
         if !self.litegs.growth_select_fraction.is_finite()
             || !(0.0..=1.0).contains(&self.litegs.growth_select_fraction)
@@ -458,6 +617,18 @@ fn validate_lr(label: &str, value: f32, require_positive: bool, invalid: &mut Ve
     }
 }
 
+fn validate_loss_weight(label: &str, value: f32, invalid: &mut Vec<String>) {
+    if !value.is_finite() || value < 0.0 {
+        invalid.push(format!("{label} must be finite and >= 0"));
+    }
+}
+
+fn validate_unit_interval(label: &str, value: f32, invalid: &mut Vec<String>) {
+    if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+        invalid.push(format!("{label} must be finite and in [0, 1]"));
+    }
+}
+
 /// Training result.
 #[derive(Debug, Clone)]
 pub struct TrainingResult {
@@ -472,8 +643,9 @@ pub struct TrainingResult {
 #[cfg(test)]
 mod tests {
     use super::{
-        LiteGsConfig, LiteGsOpacityResetMode, LiteGsPruneMode, LiteGsTileSize, TrainingBackend,
-        TrainingConfig, LITEGS_DEFAULT_GROWTH_GRAD_THRESHOLD,
+        LiteGsConfig, LiteGsOpacityResetMode, LiteGsPruneMode, LiteGsSplitScoreMode,
+        LiteGsTileSize, LiteGsTrainingProfile, TrainingBackend, TrainingConfig,
+        DEFAULT_RASTER_COV_BLUR, LITEGS_DEFAULT_GROWTH_GRAD_THRESHOLD,
     };
     use std::str::FromStr;
 
@@ -483,6 +655,15 @@ mod tests {
         let config = TrainingConfig::default();
         assert_eq!(config.backend, TrainingBackend::Wgpu);
         assert_eq!(config.render_scale, 0.5);
+        assert_eq!(config.raster_cov_blur, DEFAULT_RASTER_COV_BLUR);
+        assert_eq!(config.raster_cov_blur_final, None);
+        assert_eq!(config.raster_cov_blur_final_after_epoch, None);
+        assert_eq!(config.loss_l1_weight, 0.8);
+        assert_eq!(config.loss_ssim_weight, 0.2);
+        assert_eq!(config.loss_gradient_weight, 0.0);
+        assert_eq!(config.loss_robust_delta, 0.0);
+        assert_eq!(config.loss_outlier_threshold, 0.0);
+        assert_eq!(config.loss_outlier_weight, 1.0);
         assert_eq!(config.litegs, LiteGsConfig::default());
     }
 
@@ -495,6 +676,7 @@ mod tests {
         assert_eq!(litegs.reg_weight, 0.0);
         assert!(!litegs.enable_transmittance);
         assert!(!litegs.enable_depth);
+        assert_eq!(litegs.training_profile, LiteGsTrainingProfile::Baseline);
         assert_eq!(litegs.densify_from, 3);
         assert_eq!(litegs.densify_until, None);
         assert_eq!(litegs.topology_freeze_after_epoch, None);
@@ -505,6 +687,12 @@ mod tests {
             litegs.growth_grad_threshold,
             LITEGS_DEFAULT_GROWTH_GRAD_THRESHOLD
         );
+        assert_eq!(litegs.split_score_mode, LiteGsSplitScoreMode::Baseline);
+        assert_eq!(
+            litegs.split_grad_threshold,
+            LITEGS_DEFAULT_GROWTH_GRAD_THRESHOLD
+        );
+        assert_eq!(litegs.depth_scale_gamma, 0.37);
         assert_eq!(litegs.growth_select_fraction, 0.25);
         assert_eq!(litegs.growth_stop_iter, 15_000);
         assert_eq!(litegs.opacity_decay, 0.0);
@@ -538,6 +726,22 @@ mod tests {
         assert_eq!(
             LiteGsPruneMode::from_str("threshold").unwrap(),
             LiteGsPruneMode::Threshold
+        );
+        assert_eq!(
+            LiteGsSplitScoreMode::from_str("abs").unwrap(),
+            LiteGsSplitScoreMode::Abs
+        );
+        assert_eq!(
+            LiteGsSplitScoreMode::from_str("abs_pixel").unwrap(),
+            LiteGsSplitScoreMode::AbsPixel
+        );
+        assert_eq!(
+            LiteGsSplitScoreMode::from_str("abs_pixel_depth").unwrap(),
+            LiteGsSplitScoreMode::AbsPixelDepth
+        );
+        assert_eq!(
+            LiteGsTrainingProfile::from_str("abs_pixel").unwrap(),
+            LiteGsTrainingProfile::AbsPixel
         );
     }
 

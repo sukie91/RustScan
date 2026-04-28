@@ -11,6 +11,52 @@ pub struct ParityLossTerms {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct ParityFloatDistribution {
+    pub count: usize,
+    pub min: Option<f32>,
+    pub p10: Option<f32>,
+    pub p50: Option<f32>,
+    pub p90: Option<f32>,
+    pub p99: Option<f32>,
+    pub max: Option<f32>,
+    pub mean: Option<f32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct ParityTopologyStepSample {
+    pub iteration: usize,
+    pub completed_epoch: Option<usize>,
+    pub gaussian_count: usize,
+    pub clone_candidates: usize,
+    pub split_candidates: usize,
+    pub prune_candidates: usize,
+    pub growth_candidates: usize,
+    pub active_grad_stats: usize,
+    pub small_scale_stats: usize,
+    pub opacity_ready_stats: usize,
+    pub large_splat_count: usize,
+    pub large_low_grad_count: usize,
+    pub large_low_grad_ratio: Option<f32>,
+    pub mean2d_grad: ParityFloatDistribution,
+    #[serde(default)]
+    pub screen_mean2d_grad: ParityFloatDistribution,
+    #[serde(default)]
+    pub abs_mean2d_grad: ParityFloatDistribution,
+    #[serde(default)]
+    pub abs_pixel_mean2d_grad: ParityFloatDistribution,
+    #[serde(default)]
+    pub pixel_coverage: ParityFloatDistribution,
+    #[serde(default)]
+    pub camera_depth: ParityFloatDistribution,
+    #[serde(default)]
+    pub depth_scale: ParityFloatDistribution,
+    #[serde(default)]
+    pub split_score: ParityFloatDistribution,
+    pub max_scale: ParityFloatDistribution,
+    pub opacity: ParityFloatDistribution,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct ParityTopologyMetrics {
     pub initialization_gaussians: Option<usize>,
     pub final_gaussians: Option<usize>,
@@ -34,6 +80,8 @@ pub struct ParityTopologyMetrics {
     pub first_opacity_reset_epoch: Option<usize>,
     pub last_opacity_reset_epoch: Option<usize>,
     pub late_stage_opacity_reset_events: usize,
+    #[serde(default)]
+    pub topology_step_samples: Vec<ParityTopologyStepSample>,
     pub export_outputs: usize,
     pub checkpoint_roundtrips: usize,
 }
