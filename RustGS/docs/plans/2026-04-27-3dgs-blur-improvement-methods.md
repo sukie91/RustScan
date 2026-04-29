@@ -6,14 +6,15 @@
 
 ## 结论先行
 
-2026-04-28 基于 `/Users/tfjiang/Projects/RustScan/test_data/tum_freiburg1_xyz_colmap` 的长训实测后，当前推荐先不要把 AbsGS / Pixel-GS 设为默认训练策略。它们已经作为实验开关实现，但在 8000-step 长训中没有超过 baseline。当前更可靠的配置是：
+截至 2026-04-29，基于 `/Users/tfjiang/Projects/RustScan/test_data/tum_freiburg1_xyz_colmap` 的长训实测后，当前推荐先不要把 AbsGS / Pixel-GS 设为默认训练策略。它们已经作为实验开关实现，但在 8000-step 长训中没有超过 baseline。当前更可靠的配置是：
 
 | 目标 | 推荐训练参数 | 推荐导出/评估 blur | 实测结果摘要 |
 |---|---|---:|---|
 | 当前前 180 帧质量优先 | `--iterations 8000 --max-frames 180 --litegs-topology-freeze-after-epoch 18 --raster-cov-blur 0.3` | `0.2` 稳定评估，`0.15` 主观锐化导出 | full-180 PSNR mean `23.0782`，static-162 mean `23.6976`，`91859` splats |
 | 当前前 180 帧 PSNR/体积折中 | 上一项基础上加 `--litegs-growth-select-fraction 0.14` | `0.2` 稳定评估，`0.15` 主观锐化导出 | full-180 PSNR mean `23.0013`，static-162 mean `23.6352`，`49648` splats |
 | 当前前 180 帧效率优先 | 上一项基础上加 `--loss-l1-weight 0.9 --loss-ssim-weight 0.1` | `0.2` 稳定评估，`0.15` 主观锐化导出 | full-180 PSNR mean `22.9697`，static-162 mean `23.6060`，`41484` splats |
-| 完整 798 帧训练折中 | `--iterations 8000 --lr-decay-iterations 8000 --raster-cov-blur 0.3 --litegs-topology-freeze-after-epoch 4` | `0.2` | PSNR mean `21.9221`，训练约 `314s` |
+| 完整 798 帧质量基线 | `--iterations 8000 --lr-decay-iterations 8000 --raster-cov-blur 0.3 --litegs-topology-freeze-after-epoch 4` | `0.2` | full-trajectory stride-4 mean `22.9422`，full-180 mean `22.1698`，`77746` splats |
+| 完整 798 帧效率优先 | 上一项基础上显式加 `--loss-l1-weight 0.9 --loss-ssim-weight 0.1`，不要和 `--train-preset` 混用 | `0.2` | full-trajectory stride-4 mean `22.9148`，full-180 mean `22.1906`，`57921` splats；PSNR 小降但 splats 减少约 `25.5%` |
 
 明确不推荐作为当前默认：
 
@@ -24,6 +25,8 @@
 - 硬排除动态帧 `76-93`：完整和静态子集 PSNR 都下降，不建议作为当前训练默认。
 - 全轨迹 `--frame-stride 4` 或简单把前 180 帧 oversample 到全轨迹训练中：都没有超过当前 baseline / prefix-180 compact，不建议继续作为主线。
 - `L1-only` 搭配较大增长预算，例如 `--loss-l1-weight 1.0 --loss-ssim-weight 0.0 --litegs-growth-select-fraction 0.25`：会出现局部帧严重崩塌。
+- full-798 继续加重到 `--loss-l1-weight 0.95 --loss-ssim-weight 0.05`：splats 更少，但 full trajectory stride-4 mean 降到 `22.8037`，超过可接受损失。
+- `--litegs-prune-mode visibility-weight` 不建议作为 prefix-180 默认。`threshold=0.03` 是一个可选 compact 候选，但收益只有约 `1.9%` splat，且 full-180 worst frame 从 `16.3364` 降到 `15.9988`；`0.02`、`0.05` 和 `high_opacity=0.40` 都没有通过 compact gate。
 - `--max-frames 180` 不能作为完整轨迹重建的通用默认；它只适用于目标就是前 180 帧或当前默认评估口径的实验。
 
 这些论文里的方法不能简单全部叠加。它们解决的是不同来源的“糊”：
@@ -37,7 +40,7 @@
 | 输入图片本身有相机运动模糊，或 COLMAP pose 明显偏 | Deblur-GS / BAD-GS / BSGS | 中低 | 只在确认输入模糊后做 |
 | 训练输入是低分辨率，希望输出高分辨率细节 | SRGS / 3DGS SR 系列 | 低到中 | 只在低分辨率训练场景做 |
 
-对当前 RustGS，最现实的第一步是做 **AbsGS + Pixel-GS 风格的 densification score**，因为它直接对应当前 topology 逻辑：
+对当前 RustGS，最初最现实的第一步是做 **AbsGS + Pixel-GS 风格的 densification score**，因为它直接对应当前 topology 逻辑。该方向已经实现为实验开关并完成 8000-step 长训验证；目前结论是保留开关，但不作为默认 profile：
 
 - 当前 `Trainer::accumulate_gradients` 只累计每个 splat 的平均梯度强度。
 - `analyze_topology_candidates` 只用 `mean2d_grad >= growth_grad_threshold` 决定增长候选。
@@ -3652,11 +3655,83 @@ cargo run --release --manifest-path RustGS/Cargo.toml --bin rustgs --features gp
    - PSNR / 主观锐度优先：保留 `--loss-l1-weight 0.8 --loss-ssim-weight 0.2 --litegs-growth-select-fraction 0.14`。
    - 效率优先：使用 `--loss-l1-weight 0.9 --loss-ssim-weight 0.1 --litegs-growth-select-fraction 0.14`。
 
+### 16.19 2026-04-29 prefix-180 visibility-weight prune 实验
+
+本方向目标：把 17.5 中的 visibility / age aware prune 从 dry-run 推进到真实剪枝，验证它是否能在 prefix-180 compact 上减少 floater / splat，同时不伤害 full-180 和 static-162。
+
+固定设置：
+
+- `--train-preset tum-prefix-compact`
+- `--litegs-prune-mode visibility-weight`
+- `--litegs-prune-high-opacity-threshold` 除特别说明外为 `0.80`
+- 使用 `scripts/rustgs_eval_suite.sh` 跑 post-train 6-frame、full-180、static-162、full trajectory stride-4，并用 `--gate-profile tum-prefix-compact` 判断。
+
+前 180 帧完整评估：
+
+| 模型 | visibility threshold | high opacity protect | splats | PSNR mean | PSNR min | grad sharpness | lap sharpness | Gate | 结论 |
+|---|---:|---:|---:|---:|---:|---:|---:|---|---|
+| prefix-180 compact-best | off | off | 49648 | 23.0013 | 16.3364 | 0.8766 | 0.5551 | - | 当前 compact 基线 |
+| visweight t=0.02 | 0.02 | 0.80 | 48623 | 22.8767 | 15.6046 | 0.8776 | 0.5599 | Failed | 保守阈值反而降 PSNR，不推荐 |
+| visweight t=0.03 | 0.03 | 0.80 | 48717 | 23.0120 | 15.9988 | 0.8727 | 0.5568 | Passed | 可选候选：mean 略升、splats 略降，但 worst frame 下降 |
+| visweight t=0.05 | 0.05 | 0.80 | 48895 | 22.9242 | 15.3792 | 0.8744 | 0.5563 | Failed | 过激，full-180 未过 gate |
+| visweight t=0.03 hi=0.40 | 0.03 | 0.40 | 49808 | 22.9057 | 14.6910 | 0.8772 | 0.5605 | Failed | 保护高 opacity 低可见点没有帮助 |
+
+静态子集评估，固定排除 `76-93`，共 162 帧：
+
+| 模型 | visibility threshold | high opacity protect | splats | PSNR mean | PSNR min | grad sharpness | lap sharpness | 结论 |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| prefix-180 compact-best | off | off | 49648 | 23.6352 | 17.9498 | 0.8753 | 0.5543 | 当前 compact 基线 |
+| visweight t=0.02 | 0.02 | 0.80 | 48623 | 23.5438 | 17.8980 | 0.8764 | 0.5588 | 静态 mean 也下降 |
+| visweight t=0.03 | 0.03 | 0.80 | 48717 | 23.6569 | 18.1334 | 0.8712 | 0.5558 | 静态 mean/min 略升 |
+| visweight t=0.05 | 0.05 | 0.80 | 48895 | 23.5978 | 18.0371 | 0.8730 | 0.5550 | 静态过线但 full-180 不过线 |
+| visweight t=0.03 hi=0.40 | 0.03 | 0.40 | 49808 | 23.6342 | 18.0597 | 0.8751 | 0.5601 | splats 更多且 full-180 下降 |
+
+当前结论：
+
+1. `threshold=0.03, high_opacity=0.80` 是唯一通过 compact gate 的 visibility prune 真实剪枝结果：相对 compact-best，splats 从 `49648` 降到 `48717`，减少约 `1.9%`；full-180 mean 从 `23.0013` 升到 `23.0120`，static-162 mean 从 `23.6352` 升到 `23.6569`。
+2. 但该候选的 full-180 worst frame 从 `16.3364` 降到 `15.9988`，主要风险仍集中在 frame `81` 一类动态/遮挡困难帧。因此它只能作为“更紧凑、mean 略优”的候选，不能替换默认 compact profile。
+3. `threshold=0.02` 没有形成更保守的好点：full-180 mean `22.8767`、static-162 mean `23.5438` 都低于 compact gate，说明该剪枝逻辑对早期 topology 动态敏感，不是阈值越低越安全。
+4. `threshold=0.05` 和 `high_opacity=0.40` 都失败；后者还把 splats 提高到 `49808`，说明简单保护更多高 opacity 低可见点不能修复误删或欠拟合。
+5. 本方向停止继续扫阈值。若后续要重启，应该先做空间可视化和 crop review，确认被剪掉的点确实是 floater，而不是再跑 `0.025/0.035` 这类纯参数扫描。
+
+### 16.20 2026-04-29 full-798 loss 迁移实验
+
+本方向目标：验证 prefix-180 的 `L1/SSIM=0.9/0.1` 效率结论能否迁移到完整 798 帧训练。注意：本实验必须显式写完整参数，不使用 `--train-preset tum-full-798-baseline` 后再追加 loss 参数，因为当前 preset 会覆盖 CLI loss 默认值，容易把实验误跑成 `0.8/0.2`。
+
+固定设置：
+
+- `--iterations 8000`
+- `--max-frames 0`
+- `--frame-stride 1`
+- `--litegs-topology-freeze-after-epoch 4`
+- `--litegs-growth-select-fraction 0.25`
+- `--lr-decay-iterations 8000`
+- `--raster-cov-blur 0.3`
+- `--eval-raster-cov-blur 0.2`
+- 使用 `scripts/rustgs_eval_suite.sh` 跑四口径评估。
+
+完整轨迹评估：
+
+| 模型 | loss L1/SSIM | splats | train time | post-train 6-frame mean/min | full-180 mean/min | static-162 mean/min | full stride-4 mean/min | 结论 |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| full-798 baseline | `0.8 / 0.2` | 77746 | ~314s | 21.9221 / 16.4191 | 22.1698 / 13.0054 | 22.9664 / 17.5597 | 22.9422 / 13.2810 | 当前 full-798 质量基线 |
+| full-798 efficient | `0.9 / 0.1` | 57921 | 278.63s | 21.9151 / 16.5345 | 22.1906 / 12.9475 | 22.9744 / 17.6969 | 22.9148 / 13.2320 | 通过验收：PSNR 小降、splats 大幅下降 |
+| full-798 over-compressed | `0.95 / 0.05` | 47733 | 309.32s | 21.7428 / 16.1163 | 22.0009 / 12.2005 | 22.8450 / 17.5821 | 22.8037 / 12.4533 | 过度压缩，不推荐 |
+
+当前结论：
+
+1. `L1/SSIM=0.9/0.1` 可以迁移到 full-798，并且是本轮最有价值的完整轨迹效率 profile：相对 baseline，splats 从 `77746` 降到 `57921`，减少约 `25.5%`；full trajectory stride-4 mean 只从 `22.9422` 降到 `22.9148`，下降 `0.0274 dB`，满足“PSNR 下降小于 `0.05 dB` 且 splats 减少超过 `15%`”的验收条件。
+2. `0.9/0.1` 的 full-180 mean 从 `22.1698` 升到 `22.1906`，static-162 mean 从 `22.9664` 升到 `22.9744`；但 sharpness ratio 全面低于 baseline，说明它更像“压缩/效率 profile”，不是主观锐化 profile。
+3. `0.95/0.05` 虽然把 splats 压到 `47733`，但 full trajectory stride-4 mean 降到 `22.8037`，相比 baseline 下降 `0.1385 dB`，超过验收边界；full-180 worst 也降到 `12.2005`，不再继续往 `1.0/0.0` 或更低 SSIM 扫。
+4. 当前 full-798 推荐拆成两档：
+   - 质量基线：`0.8 / 0.2`，`77746` splats，sharpness 更高。
+   - 效率优先：`0.9 / 0.1`，`57921` splats，完整轨迹 PSNR 损失很小。
+
 ## 17. 下一阶段开发和优化计划
 
-日期：2026-04-28
+日期：2026-04-29
 
-依据：截至 `16.18` 的 TUM Freiburg1 XYZ 长训实验结果。
+依据：截至 `16.20` 的 TUM Freiburg1 XYZ 长训实验结果。
 
 ### 17.1 当前判断
 
@@ -3664,23 +3739,28 @@ cargo run --release --manifest-path RustGS/Cargo.toml --bin rustgs --features gp
 
 1. frame sampling 方向已经验证过 `prefix-only`、uniform stride、prefix oversample、多段连续窗口；除了“目标口径就是前 180 帧”以外，其它策略都没有稳定提升。
 2. topology score 方向已经实现 AbsGS / Pixel-GS / depth scale，但在当前数据 8000-step 长训里没有超过 baseline。
-3. loss 方向只找到一个效率优先 profile：`L1/SSIM=0.9/0.1`，它主要降低 splat 数，不是绝对质量提升。
+3. loss 方向只找到效率优先 profile：prefix-180 和 full-798 的 `L1/SSIM=0.9/0.1` 都能明显降低 splat 数，但不是绝对质量 / 锐度提升；full-798 继续推到 `0.95/0.05` 已经越界。
 4. frame `76-93` 的 worst case 更像动态人 / 遮挡 / 非静态场景误差，不是继续调 blur、growth、prune threshold 能解决的问题。
+5. visibility-weight prune 真实启用后只找到一个很窄的候选点 `threshold=0.03`，收益不足且 worst frame 变差，不适合继续做盲目阈值扫描。
 
-因此后续开发应分成两条线：
+因此后续开发不应继续无目标扫参，应分成两条线：
 
 - **工程固化线**：把已验证有效的 profile、评估命令、报告输出固化，避免优化结果不可复现。
 - **算法突破线**：只投入 dynamic / occlusion mask、visibility-aware prune、完整轨迹评估三类有明确机制收益的方向。
 
 ### 17.2 推荐 profile 固化
 
-需要固化三档 profile，避免后续命令散落在文档里：
+需要固化已通过的 profile，避免后续命令散落在文档里：
 
 | Profile | 目标 | 参数 | 预期结果 |
 |---|---|---|---|
 | `tum-prefix-quality` | 前 180 帧质量 / 锐度优先 | `--max-frames 180 --litegs-topology-freeze-after-epoch 18 --raster-cov-blur 0.3 --eval-raster-cov-blur 0.2` | full-180 `23.0782`，static-162 `23.6976`，`91859` splats |
 | `tum-prefix-compact` | 前 180 帧 PSNR / 体积折中 | 上一项加 `--litegs-growth-select-fraction 0.14` | full-180 `23.0013`，static-162 `23.6352`，`49648` splats |
 | `tum-prefix-efficient` | 前 180 帧效率优先 | compact 基础上加 `--loss-l1-weight 0.9 --loss-ssim-weight 0.1` | full-180 `22.9697`，static-162 `23.6060`，`41484` splats |
+| `tum-full-798-baseline` | 完整 798 帧质量基线 | `--max-frames 0 --litegs-topology-freeze-after-epoch 4 --raster-cov-blur 0.3 --eval-raster-cov-blur 0.2` | full stride-4 `22.9422`，full-180 `22.1698`，`77746` splats |
+| `tum-full-798-efficient` | 完整 798 帧效率优先 | baseline 基础上加 `--loss-l1-weight 0.9 --loss-ssim-weight 0.1` | full stride-4 `22.9148`，full-180 `22.1906`，`57921` splats |
+
+备注：截至 2026-04-29，`tum-full-798-efficient` 是实验结论中的待固化 profile，还没有作为 CLI `--train-preset` 落地；复现实验时应显式写完整参数，避免 preset 覆盖 loss 权重。
 
 开发内容：
 
@@ -3692,7 +3772,7 @@ cargo run --release --manifest-path RustGS/Cargo.toml --bin rustgs --features gp
 
 验收标准：
 
-- 三档 profile 使用单条命令可复现。
+- 已通过 profile 使用单条命令可复现。
 - JSON report 中能看到完整训练/评估口径。
 - profile 固化不改变默认训练行为。
 - `cargo test --manifest-path RustGS/Cargo.toml --features gpu,cli` 通过。
@@ -3882,6 +3962,12 @@ $$
 - static-162 PSNR 不下降。
 - crop 中近相机杂散点减少，静态边缘不被误删。
 
+2026-04-29 实测状态：
+
+- 已真实启用 `--litegs-prune-mode visibility-weight` 并测试 `threshold=0.02/0.03/0.05` 与 `high_opacity=0.40/0.80`。
+- 只有 `threshold=0.03, high_opacity=0.80` 通过 compact gate，但 splat 只减少约 `1.9%`，低于原定 `5%-15%` 目标，且 full-180 worst frame 下降。
+- 本方向停止继续扫阈值；若后续重启，需要先做被剪 splat 的空间可视化和 crop review。
+
 ### 17.6 算法方向 C：完整 798 帧训练 profile
 
 目标：不要只优化当前前 180 帧口径，给完整轨迹重建提供稳定 profile。
@@ -3890,7 +3976,7 @@ $$
 
 - `--max-frames 180` 不能作为完整重建默认。
 - uniform stride-4 / 多窗口 / prefix oversample 都不如 full baseline。
-- 完整 798 帧当前更稳的是全量训练 baseline。
+- 完整 798 帧质量基线仍是全量训练 baseline；效率优先可使用 `L1/SSIM=0.9/0.1`。
 
 下一步：
 
@@ -3899,10 +3985,12 @@ $$
    - `--litegs-topology-freeze-after-epoch 4`
    - `--raster-cov-blur 0.3`
    - `--eval-raster-cov-blur 0.2`
-2. 测试 full-798 的 `L1/SSIM=0.9/0.1`：
-   - 不能假设 prefix 结论能迁移。
-   - 必须以 full trajectory stride-4 和 post-train 6-frame 同时判断。
-3. 只在 full-798 profile 稳定后，再把 dynamic mask 用到完整轨迹。
+2. 固化 full-798 efficient profile：
+   - `--loss-l1-weight 0.9`
+   - `--loss-ssim-weight 0.1`
+   - full trajectory stride-4 mean `22.9148`
+   - `57921` splats
+3. 暂不把 dynamic mask 用到完整轨迹。prefix-180 的 residual mask 已经证明会误伤静态边缘，完整轨迹只会扩大风险。
 
 验收标准：
 
@@ -3914,12 +4002,12 @@ $$
 
 | 顺序 | 工作项 | 类型 | 预期收益 | 是否立即做 |
 |---:|---|---|---|---|
-| 1 | 固化三档 prefix profile 和评估 suite | 工程 | 提高复现能力，避免实验漂移 | 是 |
-| 2 | full-798 baseline / efficient profile 对照 | 实验 | 给完整轨迹重建建立新基线 | 是 |
-| 3 | residual heatmap / dynamic mask 离线诊断 | 算法准备 | 明确动态遮挡是否可局部 mask | 是 |
-| 4 | 训练期 dynamic soft mask | 算法 | 可能提升静态质量和 worst frame | 诊断通过后做 |
-| 5 | visibility / age prune dry-run | 算法准备 | 判断 floater 是否可通过可见性剪枝 | 是 |
-| 6 | visibility prune 真正启用 | 算法 | 降 splat / floater | dry-run 通过后做 |
+| 1 | 固化三档 prefix profile 和评估 suite | 工程 | 提高复现能力，避免实验漂移 | 已完成 |
+| 2 | full-798 baseline / efficient profile 对照 | 实验 | 给完整轨迹重建建立新基线 | 已完成，`0.9/0.1` 通过 |
+| 3 | residual heatmap / dynamic mask 离线诊断 | 算法准备 | 明确动态遮挡是否可局部 mask | 已完成，纯 residual 风险高 |
+| 4 | 训练期 dynamic soft mask | 算法 | 可能提升静态质量和 worst frame | 已完成，失败并停止 |
+| 5 | visibility / age prune dry-run | 算法准备 | 判断 floater 是否可通过可见性剪枝 | 已完成 |
+| 6 | visibility prune 真正启用 | 算法 | 降 splat / floater | 已完成，只有窄候选，不默认 |
 | 7 | 继续调 AbsGS / Pixel-GS 阈值 | 参数扫描 | 当前收益弱 | 否 |
 | 8 | 继续扫 frame sampling / oversampling | 参数扫描 | 已验证负收益 | 否 |
 
@@ -3943,7 +4031,8 @@ Story 3：把当前实验结果转成 baseline fixtures。
 
 - 输出：`tum-prefix-compact`、`tum-prefix-efficient`、`full-798-baseline` 三个基准。
 - 验收：回归门禁阈值能自动判断 pass / warn / fail。
-- 进展（2026-04-28）：已在 evaluation suite 中接入 `--gate-profile tum-prefix-quality|tum-prefix-compact|tum-prefix-efficient`，但还没有把 full-798 baseline 的实测结果固化成 fixture。
+- 进展（2026-04-28）：已在 evaluation suite 中接入 `--gate-profile tum-prefix-quality|tum-prefix-compact|tum-prefix-efficient`。
+- 进展（2026-04-29）：已用 evaluation suite 固化 full-798 baseline 和 full-798 efficient 实测结果；full-798 gate 还未做成 CLI fixture，后续可只做工程整理，不需要再跑新算法实验。
 
 #### Sprint 2：Dynamic mask 诊断和第一版训练接入
 
@@ -4019,7 +4108,26 @@ Story 3：visibility prune 实验开关。
 
 - 输出：可启用的 conservative prune mode。
 - 验收：splat 数下降，PSNR 不明显下降。
-- 进展（2026-04-28）：未启用。需要先用 dry-run 统计确认候选数量和空间位置合理，再实现真实 `visibility-weight` prune。
+- 进展（2026-04-28）：已实现真实 `visibility-weight` prune 开关。
+- 结果（2026-04-29）：真实剪枝不作为默认优化。
+  - `threshold=0.03 high_opacity=0.80`：full-180 `23.0120`，static-162 `23.6569`，`48717` splats，通过 compact gate，但 full-180 worst 从 `16.3364` 降到 `15.9988`，且 splat 只减少约 `1.9%`。
+  - `threshold=0.02 high_opacity=0.80`：full-180 `22.8767`，static-162 `23.5438`，`48623` splats，失败。
+  - `threshold=0.05 high_opacity=0.80`：full-180 `22.9242`，static-162 `23.5978`，`48895` splats，失败。
+  - `threshold=0.03 high_opacity=0.40`：full-180 `22.9057`，static-162 `23.6342`，`49808` splats，失败。
+- 判断：该方向收益太窄，不继续扫阈值；只保留 `0.03/0.80` 作为需要 crop review 的实验候选。
+
+#### Sprint 4：Full-798 profile 收尾
+
+Story 1：full-798 baseline suite。
+
+- 输出：baseline 的四口径 summary。
+- 结果（2026-04-29）：`77746` splats；post-train 6-frame `21.9221`；full-180 `22.1698`；static-162 `22.9664`；full trajectory stride-4 `22.9422`。
+
+Story 2：full-798 efficient loss 迁移。
+
+- 输出：`0.9/0.1` 和边界 `0.95/0.05` 对照。
+- 结果（2026-04-29）：`0.9/0.1` 通过，`57921` splats，full trajectory stride-4 `22.9148`，相对 baseline 只降 `0.0274 dB`；`0.95/0.05` 失败，`47733` splats，full trajectory stride-4 降到 `22.8037`。
+- 判断：full-798 的可用效率点已经找到，停止继续加重 L1 或继续降低 growth 的压缩实验。
 
 ### 17.9 停止标准
 
@@ -4030,11 +4138,19 @@ Story 3：visibility prune 实验开关。
 - 只能减少 splats，但 full-180 或 static-162 下降超过 `0.1 dB`。
 - 需要引入复杂依赖或重写核心 rasterizer，但没有离线诊断证据支撑。
 
-下一轮最建议先做：
+截至 2026-04-29 的停止判断：
 
-1. 转向 visibility / age prune dry-run，判断 floater 是否可以通过可见性统计剪掉。
-2. 用 `--train-preset tum-full-798-baseline` 跑完整 798 帧 baseline，并用 evaluation suite 固化结果。
-3. 跑 full-798 的 `0.9/0.1` loss 对照，判断 prefix-efficient 是否能迁移。
+1. 已完成 visibility / age prune dry-run 和真实剪枝。真实剪枝只有 `threshold=0.03 high_opacity=0.80` 形成窄候选，但没有达到原定 `5%-15%` splat 降低目标，且 worst frame 变差。
+2. 已完成 full-798 baseline 与 `0.9/0.1`、`0.95/0.05` loss 对照。`0.9/0.1` 是可用效率点，`0.95/0.05` 已越界，因此不继续往更重 L1 扫。
+3. residual dynamic mask、frame sampling、blur schedule、robust loss、opacity threshold、AbsGS / Pixel-GS 长训阈值都已给出负结论或只保留为非默认实验开关。
+4. 当前没有新的低风险、可用现有评估闭环验证的优化方向。后续若继续投入，应先补新的诊断证据，而不是继续参数网格搜索。
+
+后续只建议做工程收尾：
+
+1. 把 `tum-full-798-efficient` 固化为 CLI preset 或命令模板。
+2. 给 full-798 baseline / efficient 加 evaluation suite gate fixture。
+3. 若要重启动态遮挡方向，优先做离线/语义/几何 mask 诊断；不要再用纯 residual soft mask 直接训练。
+4. 若要重启 visibility prune，先做被剪 splat 的空间可视化和 crop review；不要继续盲扫 `0.02-0.05` 附近阈值。
 
 ## 18. 参考资料
 
