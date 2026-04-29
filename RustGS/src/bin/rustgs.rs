@@ -8,6 +8,7 @@ use anyhow::{bail, Context};
 #[cfg(feature = "gpu")]
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::str::FromStr;
 
 #[path = "rustgs/train_command.rs"]
 mod train_command;
@@ -29,6 +30,10 @@ struct TrainArgs {
     /// Output path for trained scene (PLY)
     #[arg(short, long)]
     output: PathBuf,
+
+    /// Reproducible RustGS training preset, e.g. tum-prefix-compact or tum-full-798-baseline
+    #[arg(long)]
+    train_preset: Option<TrainPreset>,
 
     /// Number of training iterations
     #[arg(long, default_value = "30000")]
@@ -198,6 +203,18 @@ struct TrainArgs {
     #[arg(long, default_value = "0.0039215689")]
     litegs_prune_opacity_threshold: f32,
 
+    /// Report visibility-aware prune candidates without pruning them
+    #[arg(long, default_value_t = false)]
+    litegs_prune_visibility_dry_run: bool,
+
+    /// Actual visibility ratio below which a Gaussian is considered low-visibility
+    #[arg(long, default_value = "0.05")]
+    litegs_prune_visibility_threshold: f32,
+
+    /// Opacity ceiling for conservative visibility-prune dry-run candidates
+    #[arg(long, default_value = "0.80")]
+    litegs_prune_high_opacity_threshold: f32,
+
     /// Continue LiteGS pruning before this epoch even if growth is frozen
     #[arg(long)]
     litegs_prune_until_epoch: Option<usize>,
@@ -286,6 +303,22 @@ struct TrainArgs {
     #[arg(long, default_value = "1.0")]
     loss_outlier_weight: f32,
 
+    /// Low residual threshold for late-training dynamic/occlusion soft masking (0 = disabled)
+    #[arg(long, default_value = "0.0")]
+    loss_dynamic_mask_threshold_low: f32,
+
+    /// High residual threshold for late-training dynamic/occlusion soft masking (0 = disabled)
+    #[arg(long, default_value = "0.0")]
+    loss_dynamic_mask_threshold_high: f32,
+
+    /// Minimum L1 weight for high-residual dynamic/occlusion mask pixels
+    #[arg(long, default_value = "1.0")]
+    loss_dynamic_mask_min_weight: f32,
+
+    /// Epoch when dynamic/occlusion masking starts; defaults to topology freeze epoch
+    #[arg(long)]
+    loss_dynamic_mask_start_epoch: Option<usize>,
+
     /// Log level (trace, debug, info, warn, error)
     #[arg(long, default_value = "info")]
     log_level: String,
@@ -341,6 +374,105 @@ struct TrainArgs {
     /// Crop rectangle in evaluation pixels as x,y,width,height; defaults to full frame
     #[arg(long)]
     eval_crop_rect: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TrainPreset {
+    TumPrefixQuality,
+    TumPrefixCompact,
+    TumPrefixEfficient,
+    TumFull798Baseline,
+}
+
+impl TrainPreset {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::TumPrefixQuality => "tum-prefix-quality",
+            Self::TumPrefixCompact => "tum-prefix-compact",
+            Self::TumPrefixEfficient => "tum-prefix-efficient",
+            Self::TumFull798Baseline => "tum-full-798-baseline",
+        }
+    }
+
+    fn apply_to(self, args: &mut TrainArgs) {
+        args.iterations = 8_000;
+        args.frame_stride = 1;
+        args.include_frame_ranges = None;
+        args.exclude_frame_ranges = None;
+        args.oversample_frame_ranges = None;
+        args.oversample_frame_repeat = 1;
+        args.frame_shuffle_seed = 0;
+        args.render_scale = 0.5;
+        args.lr_decay_iterations = 8_000;
+        args.lr_scale_final = 0.0005;
+        args.lr_rotation_final = 0.0001;
+        args.lr_opacity_final = 0.005;
+        args.lr_color_final = 0.00025;
+        args.raster_cov_blur = 0.3;
+        args.raster_cov_blur_final = None;
+        args.raster_cov_blur_final_after_epoch = None;
+        args.litegs_profile = rustgs::LiteGsTrainingProfile::Baseline;
+        args.litegs_topology_freeze_after_epoch = Some(match self {
+            Self::TumFull798Baseline => 4,
+            Self::TumPrefixQuality | Self::TumPrefixCompact | Self::TumPrefixEfficient => 18,
+        });
+        args.litegs_growth_freeze_after_epoch = None;
+        args.litegs_growth_select_fraction = match self {
+            Self::TumPrefixQuality | Self::TumFull798Baseline => 0.25,
+            Self::TumPrefixCompact | Self::TumPrefixEfficient => 0.14,
+        };
+        args.loss_l1_weight = match self {
+            Self::TumPrefixEfficient => 0.9,
+            Self::TumPrefixQuality | Self::TumPrefixCompact | Self::TumFull798Baseline => 0.8,
+        };
+        args.loss_ssim_weight = match self {
+            Self::TumPrefixEfficient => 0.1,
+            Self::TumPrefixQuality | Self::TumPrefixCompact | Self::TumFull798Baseline => 0.2,
+        };
+        args.loss_gradient_weight = 0.0;
+        args.loss_robust_delta = 0.0;
+        args.loss_outlier_threshold = 0.0;
+        args.loss_outlier_weight = 1.0;
+        args.loss_dynamic_mask_threshold_low = 0.0;
+        args.loss_dynamic_mask_threshold_high = 0.0;
+        args.loss_dynamic_mask_min_weight = 1.0;
+        args.loss_dynamic_mask_start_epoch = None;
+        args.max_frames = match self {
+            Self::TumFull798Baseline => 0,
+            Self::TumPrefixQuality | Self::TumPrefixCompact | Self::TumPrefixEfficient => 180,
+        };
+        args.eval_after_train = true;
+        args.eval_render_scale = 0.25;
+        args.eval_raster_cov_blur = Some(0.2);
+        args.eval_max_frames = 180;
+        args.eval_frame_stride = 30;
+        args.eval_include_frame_ranges = None;
+        args.eval_exclude_frame_ranges = None;
+        args.eval_worst_frames = 5;
+        args.eval_device = "cpu".to_string();
+    }
+}
+
+impl std::fmt::Display for TrainPreset {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for TrainPreset {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "tum-prefix-quality" => Ok(Self::TumPrefixQuality),
+            "tum-prefix-compact" => Ok(Self::TumPrefixCompact),
+            "tum-prefix-efficient" => Ok(Self::TumPrefixEfficient),
+            "tum-full-798-baseline" | "tum-full-baseline" => Ok(Self::TumFull798Baseline),
+            other => Err(format!(
+                "unsupported RustGS train preset '{other}'. Expected one of: tum-prefix-quality, tum-prefix-compact, tum-prefix-efficient, tum-full-798-baseline"
+            )),
+        }
+    }
 }
 
 #[derive(Debug, Clone, clap::Args)]
@@ -740,11 +872,11 @@ fn run_render_command(_args: RenderArgs) -> anyhow::Result<()> {
 mod tests {
     use super::{
         train_command::{
-            build_training_config, evaluation_dataset_load_params,
+            build_training_config, effective_train_args, evaluation_dataset_load_params,
             load_training_dataset_for_training, maybe_write_litegs_parity_report,
             maybe_write_litegs_parity_report_with_manifest_dir,
         },
-        Cli, Commands, PruneSceneArgs, TrainArgs,
+        Cli, Commands, PruneSceneArgs, TrainArgs, TrainPreset,
     };
     use clap::Parser;
     use std::path::PathBuf;
@@ -840,6 +972,7 @@ mod tests {
         ]);
 
         assert_eq!(args.render_scale, 0.5);
+        assert_eq!(args.train_preset, None);
         assert_eq!(args.include_frame_ranges, None);
         assert_eq!(args.exclude_frame_ranges, None);
         assert_eq!(args.oversample_frame_ranges, None);
@@ -871,6 +1004,10 @@ mod tests {
         assert_eq!(args.loss_robust_delta, 0.0);
         assert_eq!(args.loss_outlier_threshold, 0.0);
         assert_eq!(args.loss_outlier_weight, 1.0);
+        assert_eq!(args.loss_dynamic_mask_threshold_low, 0.0);
+        assert_eq!(args.loss_dynamic_mask_threshold_high, 0.0);
+        assert_eq!(args.loss_dynamic_mask_min_weight, 1.0);
+        assert_eq!(args.loss_dynamic_mask_start_epoch, None);
     }
 
     #[test]
@@ -887,6 +1024,102 @@ mod tests {
         ]);
 
         assert_eq!(args.litegs_profile, rustgs::LiteGsTrainingProfile::AbsPixel);
+    }
+
+    #[test]
+    fn train_command_parses_visibility_weight_prune_mode() {
+        let args = parse_train_args(&[
+            "rustgs",
+            "train",
+            "--input",
+            "scene.json",
+            "--output",
+            "scene.ply",
+            "--litegs-prune-mode",
+            "visibility-weight",
+        ]);
+        let config = build_training_config(&args).unwrap();
+
+        assert_eq!(
+            config.litegs.prune_mode,
+            rustgs::LiteGsPruneMode::VisibilityWeight
+        );
+    }
+
+    #[test]
+    fn train_command_applies_tum_prefix_compact_preset() {
+        let args = parse_train_args(&[
+            "rustgs",
+            "train",
+            "--input",
+            "scene.json",
+            "--output",
+            "scene.ply",
+            "--train-preset",
+            "tum-prefix-compact",
+        ]);
+        let args = effective_train_args(args);
+        let config = build_training_config(&args).unwrap();
+
+        assert_eq!(args.train_preset, Some(TrainPreset::TumPrefixCompact));
+        assert_eq!(args.iterations, 8_000);
+        assert_eq!(args.lr_decay_iterations, 8_000);
+        assert_eq!(args.lr_scale_final, 0.0005);
+        assert_eq!(args.lr_rotation_final, 0.0001);
+        assert_eq!(args.lr_opacity_final, 0.005);
+        assert_eq!(args.lr_color_final, 0.00025);
+        assert_eq!(args.max_frames, 180);
+        assert_eq!(args.frame_stride, 1);
+        assert!(args.eval_after_train);
+        assert_eq!(args.eval_raster_cov_blur, Some(0.2));
+        assert_eq!(config.raster_cov_blur, 0.3);
+        assert_eq!(config.litegs.topology_freeze_after_epoch, Some(18));
+        assert_eq!(config.litegs.growth_select_fraction, 0.14);
+        assert_eq!(config.loss_l1_weight, 0.8);
+        assert_eq!(config.loss_ssim_weight, 0.2);
+    }
+
+    #[test]
+    fn train_command_applies_tum_prefix_efficient_loss_preset() {
+        let args = parse_train_args(&[
+            "rustgs",
+            "train",
+            "--input",
+            "scene.json",
+            "--output",
+            "scene.ply",
+            "--train-preset",
+            "tum-prefix-efficient",
+        ]);
+        let args = effective_train_args(args);
+        let config = build_training_config(&args).unwrap();
+
+        assert_eq!(config.litegs.growth_select_fraction, 0.14);
+        assert_eq!(config.loss_l1_weight, 0.9);
+        assert_eq!(config.loss_ssim_weight, 0.1);
+    }
+
+    #[test]
+    fn train_command_applies_tum_full_798_baseline_preset() {
+        let args = parse_train_args(&[
+            "rustgs",
+            "train",
+            "--input",
+            "scene.json",
+            "--output",
+            "scene.ply",
+            "--train-preset",
+            "tum-full-798-baseline",
+        ]);
+        let args = effective_train_args(args);
+        let config = build_training_config(&args).unwrap();
+
+        assert_eq!(args.max_frames, 0);
+        assert_eq!(args.frame_stride, 1);
+        assert_eq!(config.litegs.topology_freeze_after_epoch, Some(4));
+        assert_eq!(config.litegs.growth_select_fraction, 0.25);
+        assert_eq!(config.loss_l1_weight, 0.8);
+        assert_eq!(config.loss_ssim_weight, 0.2);
     }
 
     #[test]
@@ -1134,6 +1367,14 @@ mod tests {
             "0,90,120",
             "--eval-crop-rect",
             "16,12,64,48",
+            "--loss-dynamic-mask-threshold-low",
+            "0.12",
+            "--loss-dynamic-mask-threshold-high",
+            "0.32",
+            "--loss-dynamic-mask-min-weight",
+            "0.35",
+            "--loss-dynamic-mask-start-epoch",
+            "18",
         ]);
 
         assert!(args.eval_after_train);
@@ -1155,6 +1396,10 @@ mod tests {
         assert_eq!(args.eval_crop_output_dir, Some(PathBuf::from("crops")));
         assert_eq!(args.eval_crop_frames.as_deref(), Some("0,90,120"));
         assert_eq!(args.eval_crop_rect.as_deref(), Some("16,12,64,48"));
+        assert_eq!(args.loss_dynamic_mask_threshold_low, 0.12);
+        assert_eq!(args.loss_dynamic_mask_threshold_high, 0.32);
+        assert_eq!(args.loss_dynamic_mask_min_weight, 0.35);
+        assert_eq!(args.loss_dynamic_mask_start_epoch, Some(18));
     }
 
     #[test]
@@ -1228,6 +1473,11 @@ mod tests {
             "threshold",
             "--litegs-prune-opacity-threshold",
             "0.01",
+            "--litegs-prune-visibility-dry-run",
+            "--litegs-prune-visibility-threshold",
+            "0.07",
+            "--litegs-prune-high-opacity-threshold",
+            "0.2",
             "--litegs-prune-until-epoch",
             "60",
             "--litegs-target-primitives",
@@ -1275,6 +1525,9 @@ mod tests {
         assert_eq!(config.litegs.prune_min_age, 5); // default value
         assert_eq!(config.litegs.prune_invisible_epochs, 10); // default value
         assert_eq!(config.litegs.prune_opacity_threshold, 0.01);
+        assert!(config.litegs.prune_visibility_dry_run);
+        assert_eq!(config.litegs.prune_visibility_threshold, 0.07);
+        assert_eq!(config.litegs.prune_high_opacity_threshold, 0.2);
         assert_eq!(config.litegs.prune_until_epoch, Some(60));
         assert_eq!(config.litegs.target_primitives, 200_000);
         assert!(config.litegs.learnable_viewproj);
@@ -1285,6 +1538,58 @@ mod tests {
         assert_eq!(config.lr_rotation_final, 0.0001);
         assert_eq!(config.lr_opacity_final, 0.005);
         assert_eq!(config.lr_color_final, 0.00025);
+    }
+
+    #[test]
+    fn train_command_builds_dynamic_mask_config() {
+        let args = parse_train_args(&[
+            "rustgs",
+            "train",
+            "--input",
+            "scene.json",
+            "--output",
+            "scene.ply",
+            "--loss-dynamic-mask-threshold-low",
+            "0.12",
+            "--loss-dynamic-mask-threshold-high",
+            "0.32",
+            "--loss-dynamic-mask-min-weight",
+            "0.35",
+        ]);
+        let config = build_training_config(&args).unwrap();
+
+        assert_eq!(config.loss_dynamic_mask_threshold_low, 0.12);
+        assert_eq!(config.loss_dynamic_mask_threshold_high, 0.32);
+        assert_eq!(config.loss_dynamic_mask_min_weight, 0.35);
+        assert_eq!(config.loss_dynamic_mask_start_epoch, None);
+    }
+
+    #[test]
+    fn train_preset_preserves_dynamic_mask_override() {
+        let args = parse_train_args(&[
+            "rustgs",
+            "train",
+            "--input",
+            "scene.json",
+            "--output",
+            "scene.ply",
+            "--train-preset",
+            "tum-prefix-compact",
+            "--loss-dynamic-mask-threshold-low",
+            "0.12",
+            "--loss-dynamic-mask-threshold-high",
+            "0.32",
+            "--loss-dynamic-mask-min-weight",
+            "0.35",
+        ]);
+        let args = effective_train_args(args);
+        let config = build_training_config(&args).unwrap();
+
+        assert_eq!(args.max_frames, 180);
+        assert_eq!(config.litegs.growth_select_fraction, 0.14);
+        assert_eq!(config.loss_dynamic_mask_threshold_low, 0.12);
+        assert_eq!(config.loss_dynamic_mask_threshold_high, 0.32);
+        assert_eq!(config.loss_dynamic_mask_min_weight, 0.35);
     }
 
     #[test]

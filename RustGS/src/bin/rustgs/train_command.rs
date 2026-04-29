@@ -9,6 +9,7 @@ use std::time::Duration;
 
 #[cfg(feature = "gpu")]
 pub(super) fn run_train_command(args: TrainArgs) -> anyhow::Result<()> {
+    let args = effective_train_args(args);
     env_logger::Builder::new()
         .parse_filters(&args.log_level)
         .init();
@@ -22,6 +23,9 @@ pub(super) fn run_train_command(args: TrainArgs) -> anyhow::Result<()> {
             "--sampling-step={} is ignored because training now initializes strictly from dataset sparse points",
             args.sampling_step
         );
+    }
+    if let Some(preset) = args.train_preset {
+        log::info!("Applied RustGS train preset: {}", preset);
     }
 
     let (dataset, source) =
@@ -99,11 +103,40 @@ pub(super) fn run_train_command(args: TrainArgs) -> anyhow::Result<()> {
 
 #[cfg(not(feature = "gpu"))]
 pub(super) fn run_train_command(args: TrainArgs) -> anyhow::Result<()> {
+    let args = effective_train_args(args);
     env_logger::Builder::new()
         .parse_filters(&args.log_level)
         .init();
     log::error!("GPU feature is required for training. Rebuild with --features gpu");
     std::process::exit(1);
+}
+
+pub(super) fn effective_train_args(mut args: TrainArgs) -> TrainArgs {
+    let dynamic_mask_override = (dynamic_mask_configured(&args)).then(|| {
+        (
+            args.loss_dynamic_mask_threshold_low,
+            args.loss_dynamic_mask_threshold_high,
+            args.loss_dynamic_mask_min_weight,
+            args.loss_dynamic_mask_start_epoch,
+        )
+    });
+    if let Some(preset) = args.train_preset {
+        preset.apply_to(&mut args);
+    }
+    if let Some((low, high, min_weight, start_epoch)) = dynamic_mask_override {
+        args.loss_dynamic_mask_threshold_low = low;
+        args.loss_dynamic_mask_threshold_high = high;
+        args.loss_dynamic_mask_min_weight = min_weight;
+        args.loss_dynamic_mask_start_epoch = start_epoch;
+    }
+    args
+}
+
+fn dynamic_mask_configured(args: &TrainArgs) -> bool {
+    args.loss_dynamic_mask_threshold_low > 0.0
+        || args.loss_dynamic_mask_threshold_high > 0.0
+        || args.loss_dynamic_mask_min_weight < 1.0
+        || args.loss_dynamic_mask_start_epoch.is_some()
 }
 
 pub(super) fn load_training_dataset_for_training(
@@ -747,6 +780,10 @@ pub(super) fn build_training_config(args: &TrainArgs) -> anyhow::Result<rustgs::
         loss_robust_delta: args.loss_robust_delta,
         loss_outlier_threshold: args.loss_outlier_threshold,
         loss_outlier_weight: args.loss_outlier_weight,
+        loss_dynamic_mask_threshold_low: args.loss_dynamic_mask_threshold_low,
+        loss_dynamic_mask_threshold_high: args.loss_dynamic_mask_threshold_high,
+        loss_dynamic_mask_min_weight: args.loss_dynamic_mask_min_weight,
+        loss_dynamic_mask_start_epoch: args.loss_dynamic_mask_start_epoch,
         litegs: rustgs::LiteGsConfig {
             sh_degree: args.litegs_sh_degree,
             tile_size: args.litegs_tile_size,
@@ -776,6 +813,9 @@ pub(super) fn build_training_config(args: &TrainArgs) -> anyhow::Result<rustgs::
             prune_min_age: args.litegs_prune_min_age,
             prune_invisible_epochs: args.litegs_prune_invisible_epochs,
             prune_opacity_threshold: args.litegs_prune_opacity_threshold,
+            prune_visibility_dry_run: args.litegs_prune_visibility_dry_run,
+            prune_visibility_threshold: args.litegs_prune_visibility_threshold,
+            prune_high_opacity_threshold: args.litegs_prune_high_opacity_threshold,
             prune_until_epoch: args.litegs_prune_until_epoch,
             target_primitives: args.litegs_target_primitives,
             learnable_viewproj: args.litegs_learnable_viewproj,
@@ -816,7 +856,7 @@ fn litegs_profile_overrides(args: &TrainArgs) -> (rustgs::LiteGsSplitScoreMode, 
 
 fn log_litegs_training_config(config: &rustgs::TrainingConfig) {
     log::info!(
-        "LiteGS profile config | profile={} | sh_degree={} | tile_size={} | sparse_grad={} | reg_weight={:.4} | enable_transmittance={} | enable_depth={} | learnable_viewproj={} | lr_pose={:.6} | densify_from={} | densify_until={:?} | topology_freeze_after_epoch={:?} | growth_freeze_after_epoch={:?} | refine_every={} | densification_interval={} | growth_grad_threshold={:.6} | split_score={} | split_grad_threshold={:.6} | depth_scale_gamma={:.3} | growth_select_fraction={:.3} | growth_stop_iter={} | opacity_decay={:.6} | scale_decay={:.6} | opacity_reset_interval={} | opacity_reset_mode={} | prune_mode={} | prune_opacity_threshold={:.6} | prune_until_epoch={:?} | target_primitives={} | lr_decay_iterations={:?} | lr_final(scale={:.6}, rot={:.6}, opacity={:.6}, color={:.6}) | raster_cov_blur={:.3} | raster_cov_blur_final={:?} | raster_cov_blur_final_after_epoch={:?} | loss_weights(l1={:.3}, ssim={:.3}, gradient={:.3}, robust_delta={:.3}, outlier_threshold={:.3}, outlier_weight={:.3})",
+        "LiteGS profile config | profile={} | sh_degree={} | tile_size={} | sparse_grad={} | reg_weight={:.4} | enable_transmittance={} | enable_depth={} | learnable_viewproj={} | lr_pose={:.6} | densify_from={} | densify_until={:?} | topology_freeze_after_epoch={:?} | growth_freeze_after_epoch={:?} | refine_every={} | densification_interval={} | growth_grad_threshold={:.6} | split_score={} | split_grad_threshold={:.6} | depth_scale_gamma={:.3} | growth_select_fraction={:.3} | growth_stop_iter={} | opacity_decay={:.6} | scale_decay={:.6} | opacity_reset_interval={} | opacity_reset_mode={} | prune_mode={} | prune_opacity_threshold={:.6} | prune_visibility_dry_run={} | prune_visibility_threshold={:.3} | prune_high_opacity_threshold={:.3} | prune_until_epoch={:?} | target_primitives={} | lr_decay_iterations={:?} | lr_final(scale={:.6}, rot={:.6}, opacity={:.6}, color={:.6}) | raster_cov_blur={:.3} | raster_cov_blur_final={:?} | raster_cov_blur_final_after_epoch={:?} | loss_weights(l1={:.3}, ssim={:.3}, gradient={:.3}, robust_delta={:.3}, outlier_threshold={:.3}, outlier_weight={:.3}, dynamic_mask_low={:.3}, dynamic_mask_high={:.3}, dynamic_mask_min_weight={:.3}, dynamic_mask_start_epoch={:?})",
         config.litegs.training_profile,
         config.litegs.sh_degree,
         config.litegs.tile_size,
@@ -844,6 +884,9 @@ fn log_litegs_training_config(config: &rustgs::TrainingConfig) {
         config.litegs.opacity_reset_mode,
         config.litegs.prune_mode,
         config.litegs.prune_opacity_threshold,
+        config.litegs.prune_visibility_dry_run,
+        config.litegs.prune_visibility_threshold,
+        config.litegs.prune_high_opacity_threshold,
         config.litegs.prune_until_epoch,
         config.litegs.target_primitives,
         config.lr_decay_iterations,
@@ -861,6 +904,10 @@ fn log_litegs_training_config(config: &rustgs::TrainingConfig) {
         config.loss_robust_delta,
         config.loss_outlier_threshold,
         config.loss_outlier_weight,
+        config.loss_dynamic_mask_threshold_low,
+        config.loss_dynamic_mask_threshold_high,
+        config.loss_dynamic_mask_min_weight,
+        config.loss_dynamic_mask_start_epoch,
     );
 }
 
@@ -1093,6 +1140,7 @@ mod tests {
         let args = TrainArgs {
             input: PathBuf::from("missing-dataset"),
             output: PathBuf::from("scene.ply"),
+            train_preset: None,
             iterations: 1,
             max_initial_gaussians: 16,
             sampling_step: 0,
@@ -1135,6 +1183,9 @@ mod tests {
             litegs_prune_min_age: 5,
             litegs_prune_invisible_epochs: 10,
             litegs_prune_opacity_threshold: 1.0 / 255.0,
+            litegs_prune_visibility_dry_run: false,
+            litegs_prune_visibility_threshold: 0.05,
+            litegs_prune_high_opacity_threshold: 0.80,
             litegs_prune_until_epoch: None,
             litegs_target_primitives: 300_000,
             litegs_learnable_viewproj: false,
@@ -1157,6 +1208,10 @@ mod tests {
             loss_robust_delta: 0.0,
             loss_outlier_threshold: 0.0,
             loss_outlier_weight: 1.0,
+            loss_dynamic_mask_threshold_low: 0.0,
+            loss_dynamic_mask_threshold_high: 0.0,
+            loss_dynamic_mask_min_weight: 1.0,
+            loss_dynamic_mask_start_epoch: None,
             log_level: "error".to_string(),
             eval_after_train: false,
             eval_render_scale: 0.25,

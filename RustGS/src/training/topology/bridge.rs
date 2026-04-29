@@ -17,6 +17,7 @@ pub(crate) struct TopologySnapshot {
     pub grad_color_accum: Vec<f32>,
     pub num_observations: Vec<f32>,
     pub visible_observations: Vec<f32>,
+    pub actual_visible_observations: Vec<f32>,
     pub splat_ages: Vec<usize>,
     pub invisible_windows: Vec<usize>,
 }
@@ -32,9 +33,10 @@ pub(crate) async fn snapshot_for_topology<B: Backend>(
     grad_color_accum: &Tensor<B, 1>,
     num_observations: &Tensor<B, 1>,
     visible_observations: &Tensor<B, 1>,
+    actual_visible_observations: Option<&Tensor<B, 1>>,
 ) -> TopologySnapshot {
     let splats_host = device_splats_to_host(splats).await;
-    let data = Transaction::default()
+    let transaction = Transaction::default()
         .register(grad_2d_accum.clone())
         .register(screen_grad_2d_accum.clone())
         .register(abs_grad_2d_accum.clone())
@@ -43,10 +45,16 @@ pub(crate) async fn snapshot_for_topology<B: Backend>(
         .register(camera_depth_accum.clone())
         .register(grad_color_accum.clone())
         .register(num_observations.clone())
-        .register(visible_observations.clone())
-        .execute_async()
-        .await
-        .expect("topology accumulator readback");
+        .register(visible_observations.clone());
+    let data = if let Some(actual_visible_observations) = actual_visible_observations {
+        transaction
+            .register(actual_visible_observations.clone())
+            .execute_async()
+            .await
+    } else {
+        transaction.execute_async().await
+    }
+    .expect("topology accumulator readback");
 
     let grad_2d_accum = data[0]
         .clone()
@@ -102,6 +110,23 @@ pub(crate) async fn snapshot_for_topology<B: Backend>(
             }
         })
         .collect();
+    let actual_visible_observations = if actual_visible_observations.is_some() {
+        data[9]
+            .clone()
+            .into_vec::<f32>()
+            .expect("topology actual_visible_observations: expected f32 scalar tensor")
+            .into_iter()
+            .map(|value| {
+                if value.is_finite() {
+                    value.max(0.0)
+                } else {
+                    0.0
+                }
+            })
+            .collect()
+    } else {
+        vec![0.0; splats_host.len()]
+    };
 
     TopologySnapshot {
         splat_ages: vec![0; splats_host.len()],
@@ -116,6 +141,7 @@ pub(crate) async fn snapshot_for_topology<B: Backend>(
         grad_color_accum,
         num_observations,
         visible_observations,
+        actual_visible_observations,
     }
 }
 
@@ -137,6 +163,7 @@ pub(crate) fn plan_mutations(
         &snapshot.grad_color_accum,
         &snapshot.num_observations,
         &snapshot.visible_observations,
+        &snapshot.actual_visible_observations,
         &snapshot.splat_ages,
         &snapshot.invisible_windows,
         iteration,

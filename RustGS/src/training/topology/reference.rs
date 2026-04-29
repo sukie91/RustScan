@@ -126,5 +126,8 @@ pub(super) fn density_controller_reference_summary(
 
 #[cfg_attr(not(test), allow(dead_code))]
 fn density_controller_taming_mode(policy: &TopologyPolicy) -> bool {
-    matches!(policy.litegs.prune_mode, LiteGsPruneMode::Weight)
+    matches!(
+        policy.litegs.prune_mode,
+        LiteGsPruneMode::Weight | LiteGsPruneMode::VisibilityWeight
+    )
 }

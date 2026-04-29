@@ -3931,16 +3931,19 @@ Story 1：新增 profile / preset 文档或 CLI preset。
 
 - 输出：三档 prefix profile 和一档 full-798 baseline profile。
 - 验收：命令可复现，report 中记录 profile。
+- 进展（2026-04-28）：已新增 `rustgs train --train-preset`，支持 `tum-prefix-quality`、`tum-prefix-compact`、`tum-prefix-efficient`、`tum-full-798-baseline`。命令模板记录在 `RustGS/docs/commands/tum_freiburg1_xyz.md`。
 
 Story 2：新增 evaluation suite runner。
 
 - 输出：一个命令跑 6-frame、full-180、static-162、full stride-4。
 - 验收：自动生成 summary JSON 和 markdown 表。
+- 进展（2026-04-28）：已新增 `RustGS/examples/rustgs_eval_suite.rs` 和 `scripts/rustgs_eval_suite.sh`。suite 会生成 `summary.json`、`summary.md`，并可选导出每个评估口径的 worst-frame strip。
 
 Story 3：把当前实验结果转成 baseline fixtures。
 
 - 输出：`tum-prefix-compact`、`tum-prefix-efficient`、`full-798-baseline` 三个基准。
 - 验收：回归门禁阈值能自动判断 pass / warn / fail。
+- 进展（2026-04-28）：已在 evaluation suite 中接入 `--gate-profile tum-prefix-quality|tum-prefix-compact|tum-prefix-efficient`，但还没有把 full-798 baseline 的实测结果固化成 fixture。
 
 #### Sprint 2：Dynamic mask 诊断和第一版训练接入
 
@@ -3948,16 +3951,28 @@ Story 1：离线 residual heatmap 工具。
 
 - 输出：frame `0,30,60,76-93,120,150` 的 residual heatmap 和 connected component 统计。
 - 验收：能证明高残差主要集中在动态人 / 遮挡区域，而不是全图错位。
+- 进展（2026-04-28）：已新增 `RustGS/examples/rustgs_residual_heatmap.rs` 和 `scripts/rustgs_residual_heatmap.sh`，输出每帧 residual heatmap、target/render/heatmap strip、P95/P99 residual、high-residual ratio 和连通域统计。
+- 诊断结果（2026-04-28）：compact profile 在 frame `79-85` 的 high-residual ratio 约 `0.24-0.32`，明显高于普通帧 `30/60/120/150` 的 `0.03-0.06`；但 heatmap 同时覆盖大量显示器、键盘、物体边缘，不是干净的人体局部 mask。因此纯 residual mask 有较高误伤静态边缘风险。
 
 Story 2：masked L1 loss 第一版。
 
 - 输出：训练期 residual EMA + soft weight map。
 - 验收：mask 只在 freeze 后启用，默认关闭。
+- 进展（2026-04-28）：已新增默认关闭的动态残差 mask 参数：
+  - `--loss-dynamic-mask-threshold-low`
+  - `--loss-dynamic-mask-threshold-high`
+  - `--loss-dynamic-mask-min-weight`
+  - `--loss-dynamic-mask-start-epoch`
+- 实现取舍：第一版没有维护跨 step EMA，而是使用 late-training soft residual weight；若未设置 start epoch，则跟随 topology freeze epoch 启用。
 
 Story 3：TUM A/B 实验。
 
 - 输出：compact vs compact+mask 的四口径评估。
 - 验收：static-162 提升且 full-180 worst 不退化。
+- 结果（2026-04-28）：失败，不作为默认优化。
+  - `low=0.12 high=0.32 min_weight=0.35`：full-180 `22.2099`，static-162 `22.7643`，`47569` splats，低于 compact gate。
+  - `low=0.35 high=0.60 min_weight=0.70`：full-180 `21.9033`，static-162 `22.4929`，`47509` splats，低于 compact gate。
+- 判断：该方向会削弱高频静态边缘监督，导致整体变糊；停止继续扫 residual-mask 阈值。后续若要处理动态遮挡，应优先考虑离线/语义/几何 mask，而不是从训练 residual 直接生成权重。
 
 #### Sprint 3：Visibility / age prune
 
@@ -3965,16 +3980,46 @@ Story 1：visibility telemetry。
 
 - 输出：每次 topology step 记录 low visibility / near low visibility / high opacity low visibility splats。
 - 验收：不改变训练结果。
+- 进展（2026-04-28）：已新增独立的 actual visibility accumulator，不复用现有 `visible_observations` 剪枝输入，因此默认 `weight` prune 行为不变。每个 topology step 现在会在 telemetry 中记录：
+  - `low_visibility_splats`
+  - `near_low_visibility_splats`
+  - `high_opacity_low_visibility_splats`
+  - `actual_visible_count`
+  - `actual_visibility_ratio`
 
 Story 2：visibility prune dry-run。
 
 - 输出：只报告会剪掉哪些 splat，不实际修改。
 - 验收：候选数量和位置可解释。
+- 进展（2026-04-28）：已新增默认关闭的 dry-run 开关和阈值：
+  - `--litegs-prune-visibility-dry-run`
+  - `--litegs-prune-visibility-threshold`
+  - `--litegs-prune-high-opacity-threshold`，默认 `0.80`，用于把高 opacity 低可见 splat 单独统计出来，并保护它们不进入保守 dry-run 候选。
+- 当前 dry-run 条件是保守候选：
+
+$$
+\mathrm{dryrun}(i) =
+\mathrm{age}_i \ge a_{\min}
+\land
+\rho_i < \tau_{\mathrm{vis}}
+\land
+\alpha_i < \tau_{\alpha,\mathrm{high}}
+$$
+
+其中：
+
+$$
+\rho_i =
+\frac{v_i^{\mathrm{actual}}}{n_i+\epsilon}
+$$
+
+这个计数只写入 `visibility_prune_dry_run_candidates`，不会改 `prune_candidate`，也不会改最终 splat 数。
 
 Story 3：visibility prune 实验开关。
 
 - 输出：可启用的 conservative prune mode。
 - 验收：splat 数下降，PSNR 不明显下降。
+- 进展（2026-04-28）：未启用。需要先用 dry-run 统计确认候选数量和空间位置合理，再实现真实 `visibility-weight` prune。
 
 ### 17.9 停止标准
 
@@ -3987,9 +4032,9 @@ Story 3：visibility prune 实验开关。
 
 下一轮最建议先做：
 
-1. evaluation suite runner。
-2. full-798 的 `0.9/0.1` loss 对照。
-3. residual heatmap / dynamic mask 离线诊断。
+1. 转向 visibility / age prune dry-run，判断 floater 是否可以通过可见性统计剪掉。
+2. 用 `--train-preset tum-full-798-baseline` 跑完整 798 帧 baseline，并用 evaluation suite 固化结果。
+3. 跑 full-798 的 `0.9/0.1` loss 对照，判断 prefix-efficient 是否能迁移。
 
 ## 18. 参考资料
 

@@ -172,6 +172,16 @@ fn validate_litegs_mac_v1_config(config: &TrainingConfig) -> Result<(), Training
     {
         unsupported.push("prune_opacity_threshold must be finite and in [0, 1]".to_string());
     }
+    if !config.litegs.prune_visibility_threshold.is_finite()
+        || !(0.0..=1.0).contains(&config.litegs.prune_visibility_threshold)
+    {
+        unsupported.push("prune_visibility_threshold must be finite and in [0, 1]".to_string());
+    }
+    if !config.litegs.prune_high_opacity_threshold.is_finite()
+        || !(0.0..=1.0).contains(&config.litegs.prune_high_opacity_threshold)
+    {
+        unsupported.push("prune_high_opacity_threshold must be finite and in [0, 1]".to_string());
+    }
     if config.litegs.opacity_reset_interval == 0 {
         unsupported.push("opacity_reset_interval must be >= 1".to_string());
     }

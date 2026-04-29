@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd "${script_dir}/.." && pwd)"
+
+exec cargo run --release \
+  --manifest-path "${repo_root}/RustGS/Cargo.toml" \
+  --example rustgs_residual_heatmap \
+  --features gpu,cli \
+  -- "$@"

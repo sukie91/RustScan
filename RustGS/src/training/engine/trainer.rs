@@ -72,6 +72,7 @@ pub struct WgpuTrainer {
     grad_color_accum: Tensor<GsDiffBackend, 1>,
     num_observations: Tensor<GsDiffBackend, 1>,
     visible_observations: Tensor<GsDiffBackend, 1>,
+    actual_visible_observations: Tensor<GsDiffBackend, 1>,
     splat_birth_iterations: Vec<usize>,
     splat_invisible_windows: Vec<usize>,
     ssim_config: SsimConfig,
@@ -166,6 +167,7 @@ impl WgpuTrainer {
             grad_color_accum: Tensor::zeros([initial_splats], &device),
             num_observations: Tensor::zeros([initial_splats], &device),
             visible_observations: Tensor::zeros([initial_splats], &device),
+            actual_visible_observations: Tensor::zeros([initial_splats], &device),
             splat_birth_iterations: vec![0; initial_splats],
             splat_invisible_windows: vec![0; initial_splats],
             ssim_config,
@@ -274,6 +276,7 @@ impl WgpuTrainer {
         )
         .await;
         let pred_rgb = rendered.image.slice(s![.., .., 0..3]);
+        let dynamic_mask = self.dynamic_loss_mask_at(iteration, frame_count);
         let loss = combined_loss_with_kernel(
             pred_rgb,
             target_img,
@@ -283,6 +286,9 @@ impl WgpuTrainer {
             self.config.loss_robust_delta as f64,
             self.config.loss_outlier_threshold as f64,
             self.config.loss_outlier_weight as f64,
+            dynamic_mask.map(|mask| mask.0).unwrap_or(0.0) as f64,
+            dynamic_mask.map(|mask| mask.1).unwrap_or(0.0) as f64,
+            dynamic_mask.map(|mask| mask.2).unwrap_or(1.0) as f64,
             &self.ssim_config,
             self.ssim_kernel.clone(),
         );
@@ -363,6 +369,7 @@ impl WgpuTrainer {
             &sh_grad,
             &rendered.visible,
             self.uses_visibility_pruning(),
+            self.collects_actual_visibility_diagnostics(),
         );
         self.optimizer
             .step_device_splats(splats, transforms_grad, sh_grad, opacity_grad);
@@ -648,6 +655,7 @@ impl WgpuTrainer {
         sh_grad: &Tensor<GsBackendBase, 3>,
         visible: &Tensor<GsDiffBackend, 1>,
         use_actual_visibility: bool,
+        collect_actual_visibility_diagnostics: bool,
     ) {
         // This is the post-projection transform gradient, not the per-pixel
         // screen-space mean gradient required by AbsGS-style densification.
@@ -707,6 +715,10 @@ impl WgpuTrainer {
         self.camera_depth_accum = self.camera_depth_accum.clone() + camera_depth;
         self.grad_color_accum = self.grad_color_accum.clone() + grad_color;
         self.num_observations = self.num_observations.clone().add_scalar(1.0);
+        if collect_actual_visibility_diagnostics {
+            self.actual_visible_observations =
+                self.actual_visible_observations.clone() + visible.clone().detach();
+        }
         let visible_increment = if use_actual_visibility {
             visible.clone()
         } else {
@@ -717,6 +729,15 @@ impl WgpuTrainer {
 
     fn uses_visibility_pruning(&self) -> bool {
         matches!(self.config.litegs.prune_mode, LiteGsPruneMode::Threshold)
+    }
+
+    fn collects_actual_visibility_diagnostics(&self) -> bool {
+        self.config.litegs.prune_visibility_dry_run
+            || self.uses_visibility_pruning()
+            || matches!(
+                self.config.litegs.prune_mode,
+                LiteGsPruneMode::VisibilityWeight
+            )
     }
 
     fn raster_cov_blur_at(&self, iteration: usize, frame_count: usize) -> f32 {
@@ -741,6 +762,33 @@ impl WgpuTrainer {
         }
     }
 
+    fn dynamic_loss_mask_at(
+        &self,
+        iteration: usize,
+        frame_count: usize,
+    ) -> Option<(f32, f32, f32)> {
+        if self.config.loss_dynamic_mask_threshold_high
+            <= self.config.loss_dynamic_mask_threshold_low
+            || self.config.loss_dynamic_mask_min_weight >= 1.0
+            || frame_count == 0
+        {
+            return None;
+        }
+        let start_epoch = self
+            .config
+            .loss_dynamic_mask_start_epoch
+            .or(self.config.litegs.topology_freeze_after_epoch)?;
+        let completed_epoch = iteration.saturating_sub(1) / frame_count;
+        if completed_epoch < start_epoch {
+            return None;
+        }
+        Some((
+            self.config.loss_dynamic_mask_threshold_low,
+            self.config.loss_dynamic_mask_threshold_high,
+            self.config.loss_dynamic_mask_min_weight,
+        ))
+    }
+
     async fn apply_topology_mutations(
         &mut self,
         splats: &mut DeviceSplats<GsDiffBackend>,
@@ -758,6 +806,8 @@ impl WgpuTrainer {
             &self.grad_color_accum,
             &self.num_observations,
             &self.visible_observations,
+            self.collects_actual_visibility_diagnostics()
+                .then_some(&self.actual_visible_observations),
         )
         .await;
         self.update_topology_visibility_state(
@@ -775,7 +825,7 @@ impl WgpuTrainer {
         let plan = plan_mutations(&snapshot, &self.config, iteration, frame_count);
         if let Some(sample) = plan.telemetry_sample.clone() {
             log::info!(
-                "Topology diagnostics | iter={} | epoch={:?} | splats={} | growth={} | clone={} | split={} | prune={} | large_low_grad={}/{} ({:.3})",
+                "Topology diagnostics | iter={} | epoch={:?} | splats={} | growth={} | clone={} | split={} | prune={} | large_low_grad={}/{} ({:.3}) | low_vis={} | near_low_vis={} | high_opacity_low_vis={} | vis_prune_dry_run={}",
                 sample.iteration,
                 sample.completed_epoch,
                 sample.gaussian_count,
@@ -786,6 +836,10 @@ impl WgpuTrainer {
                 sample.large_low_grad_count,
                 sample.large_splat_count,
                 sample.large_low_grad_ratio.unwrap_or(0.0),
+                sample.low_visibility_splats,
+                sample.near_low_visibility_splats,
+                sample.high_opacity_low_visibility_splats,
+                sample.visibility_prune_dry_run_candidates,
             );
             self.telemetry.topology.topology_step_samples.push(sample);
         }
@@ -812,6 +866,7 @@ impl WgpuTrainer {
         self.grad_color_accum = Tensor::zeros([num_splats], &self.device);
         self.num_observations = Tensor::zeros([num_splats], &self.device);
         self.visible_observations = Tensor::zeros([num_splats], &self.device);
+        self.actual_visible_observations = Tensor::zeros([num_splats], &self.device);
 
         self.update_optimizer_lrs(iteration.saturating_sub(1), sh_coeffs);
     }

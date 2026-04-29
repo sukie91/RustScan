@@ -85,6 +85,9 @@ pub fn combined_loss<B: Backend>(
     robust_delta: f64,
     outlier_threshold: f64,
     outlier_weight: f64,
+    dynamic_mask_threshold_low: f64,
+    dynamic_mask_threshold_high: f64,
+    dynamic_mask_min_weight: f64,
     ssim_config: &SsimConfig,
     device: &B::Device,
 ) -> Tensor<B, 1> {
@@ -98,6 +101,9 @@ pub fn combined_loss<B: Backend>(
         robust_delta,
         outlier_threshold,
         outlier_weight,
+        dynamic_mask_threshold_low,
+        dynamic_mask_threshold_high,
+        dynamic_mask_min_weight,
         ssim_config,
         kernel,
     )
@@ -112,6 +118,9 @@ pub fn combined_loss_with_kernel<B: Backend>(
     robust_delta: f64,
     outlier_threshold: f64,
     outlier_weight: f64,
+    dynamic_mask_threshold_low: f64,
+    dynamic_mask_threshold_high: f64,
+    dynamic_mask_min_weight: f64,
     ssim_config: &SsimConfig,
     ssim_kernel: Tensor<B, 1>,
 ) -> Tensor<B, 1> {
@@ -121,6 +130,9 @@ pub fn combined_loss_with_kernel<B: Backend>(
         robust_delta as f32,
         outlier_threshold as f32,
         outlier_weight as f32,
+        dynamic_mask_threshold_low as f32,
+        dynamic_mask_threshold_high as f32,
+        dynamic_mask_min_weight as f32,
     );
     let gradient = gradient_difference_loss(pred.clone(), target.clone());
     let ssim = ssim_loss_with_kernel(to_nchw(pred), to_nchw(target), ssim_kernel, ssim_config);
@@ -135,6 +147,9 @@ fn reconstruction_residual_loss<B: Backend>(
     robust_delta: f32,
     outlier_threshold: f32,
     outlier_weight: f32,
+    dynamic_mask_threshold_low: f32,
+    dynamic_mask_threshold_high: f32,
+    dynamic_mask_min_weight: f32,
 ) -> Tensor<B, 1> {
     let abs_residual = (pred - target).abs();
     let loss = if robust_delta.is_finite() && robust_delta > 0.0 {
@@ -162,7 +177,38 @@ fn reconstruction_residual_loss<B: Backend>(
     } else {
         abs_residual
     };
-    loss.mean().reshape([1])
+    if dynamic_mask_threshold_high.is_finite()
+        && dynamic_mask_threshold_low.is_finite()
+        && dynamic_mask_threshold_high > dynamic_mask_threshold_low
+        && dynamic_mask_min_weight.is_finite()
+        && dynamic_mask_min_weight < 1.0
+    {
+        let weight = dynamic_residual_mask(
+            loss.clone(),
+            dynamic_mask_threshold_low,
+            dynamic_mask_threshold_high,
+            dynamic_mask_min_weight,
+        );
+        ((loss * weight.clone()).mean() / weight.mean().clamp_min(1e-6_f32)).reshape([1])
+    } else {
+        loss.mean().reshape([1])
+    }
+}
+
+fn dynamic_residual_mask<B: Backend>(
+    residual: Tensor<B, 3>,
+    threshold_low: f32,
+    threshold_high: f32,
+    min_weight: f32,
+) -> Tensor<B, 3> {
+    let denom = (threshold_high - threshold_low).max(1e-6);
+    let residual_mean = residual.mean_dim(2).repeat_dim(2, 3);
+    residual_mean
+        .mul_scalar(-1.0)
+        .add_scalar(threshold_high)
+        .div_scalar(denom)
+        .clamp_min(min_weight.clamp(0.0, 1.0))
+        .clamp_max(1.0)
 }
 
 fn gradient_difference_loss<B: Backend>(pred: Tensor<B, 3>, target: Tensor<B, 3>) -> Tensor<B, 1> {
@@ -337,6 +383,9 @@ mod tests {
             0.0,
             0.0,
             1.0,
+            0.0,
+            0.0,
+            1.0,
             &SsimConfig::default(),
             &device,
         )
@@ -359,11 +408,20 @@ mod tests {
             &device,
         );
 
-        let exact = reconstruction_residual_loss(pred.clone(), target.clone(), 0.0, 0.0, 1.0)
-            .into_scalar_async()
-            .await
-            .expect("exact residual loss");
-        let robust = reconstruction_residual_loss(pred, target, 0.1, 0.0, 1.0)
+        let exact = reconstruction_residual_loss(
+            pred.clone(),
+            target.clone(),
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+        )
+        .into_scalar_async()
+        .await
+        .expect("exact residual loss");
+        let robust = reconstruction_residual_loss(pred, target, 0.1, 0.0, 1.0, 0.0, 0.0, 1.0)
             .into_scalar_async()
             .await
             .expect("robust residual loss");
@@ -380,11 +438,20 @@ mod tests {
             &device,
         );
 
-        let exact = reconstruction_residual_loss(pred.clone(), target.clone(), 0.0, 0.0, 1.0)
-            .into_scalar_async()
-            .await
-            .expect("exact residual loss");
-        let weighted = reconstruction_residual_loss(pred, target, 0.0, 0.25, 0.25)
+        let exact = reconstruction_residual_loss(
+            pred.clone(),
+            target.clone(),
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+        )
+        .into_scalar_async()
+        .await
+        .expect("exact residual loss");
+        let weighted = reconstruction_residual_loss(pred, target, 0.0, 0.25, 0.25, 0.0, 0.0, 1.0)
             .into_scalar_async()
             .await
             .expect("soft outlier residual loss");
@@ -396,6 +463,43 @@ mod tests {
         assert!(
             weighted > 0.0,
             "soft outlier loss should retain a gradient floor"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_dynamic_residual_mask_downweights_high_residual_pixels() {
+        let device = device();
+        let pred = Tensor::<GsBackendBase, 3>::zeros([1, 2, 3], &device);
+        let target = Tensor::<GsBackendBase, 3>::from_data(
+            TensorData::new(vec![0.1, 0.1, 0.1, 1.0, 1.0, 1.0], [1, 2, 3]),
+            &device,
+        );
+
+        let exact = reconstruction_residual_loss(
+            pred.clone(),
+            target.clone(),
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+        )
+        .into_scalar_async()
+        .await
+        .expect("exact residual loss");
+        let masked = reconstruction_residual_loss(pred, target, 0.0, 0.0, 1.0, 0.2, 0.8, 0.25)
+            .into_scalar_async()
+            .await
+            .expect("masked residual loss");
+
+        assert!(
+            masked < exact,
+            "dynamic residual mask should downweight high residual pixels"
+        );
+        assert!(
+            masked > 0.0,
+            "dynamic residual mask should retain a gradient floor"
         );
     }
 

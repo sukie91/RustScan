@@ -37,6 +37,14 @@ pub struct ParityTopologyStepSample {
     pub large_splat_count: usize,
     pub large_low_grad_count: usize,
     pub large_low_grad_ratio: Option<f32>,
+    #[serde(default)]
+    pub low_visibility_splats: usize,
+    #[serde(default)]
+    pub near_low_visibility_splats: usize,
+    #[serde(default)]
+    pub high_opacity_low_visibility_splats: usize,
+    #[serde(default)]
+    pub visibility_prune_dry_run_candidates: usize,
     pub mean2d_grad: ParityFloatDistribution,
     #[serde(default)]
     pub screen_mean2d_grad: ParityFloatDistribution,
@@ -52,6 +60,10 @@ pub struct ParityTopologyStepSample {
     pub depth_scale: ParityFloatDistribution,
     #[serde(default)]
     pub split_score: ParityFloatDistribution,
+    #[serde(default)]
+    pub actual_visible_count: ParityFloatDistribution,
+    #[serde(default)]
+    pub actual_visibility_ratio: ParityFloatDistribution,
     pub max_scale: ParityFloatDistribution,
     pub opacity: ParityFloatDistribution,
 }

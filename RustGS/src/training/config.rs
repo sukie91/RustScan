@@ -115,6 +115,7 @@ pub enum LiteGsPruneMode {
     Threshold,
     #[default]
     Weight,
+    VisibilityWeight,
 }
 
 impl std::fmt::Display for LiteGsPruneMode {
@@ -122,6 +123,7 @@ impl std::fmt::Display for LiteGsPruneMode {
         match self {
             Self::Threshold => write!(f, "threshold"),
             Self::Weight => write!(f, "weight"),
+            Self::VisibilityWeight => write!(f, "visibility-weight"),
         }
     }
 }
@@ -133,8 +135,9 @@ impl FromStr for LiteGsPruneMode {
         match normalize_config_token(value).as_str() {
             "threshold" => Ok(Self::Threshold),
             "weight" => Ok(Self::Weight),
+            "visibility-weight" | "visibility_weight" => Ok(Self::VisibilityWeight),
             other => Err(format!(
-                "unsupported LiteGS prune mode '{other}'. Expected one of: threshold, weight"
+                "unsupported LiteGS prune mode '{other}'. Expected one of: threshold, weight, visibility-weight"
             )),
         }
     }
@@ -268,6 +271,12 @@ pub struct LiteGsConfig {
     pub prune_invisible_epochs: usize,
     /// Prune Gaussians below this opacity during topology refinement.
     pub prune_opacity_threshold: f32,
+    /// Collect visibility-aware prune candidates without applying them.
+    pub prune_visibility_dry_run: bool,
+    /// Minimum actual visibility ratio before a Gaussian is considered low visibility.
+    pub prune_visibility_threshold: f32,
+    /// Opacity ceiling used by conservative visibility-prune dry-run candidates.
+    pub prune_high_opacity_threshold: f32,
     /// Continue pruning before this epoch even if growth is frozen.
     /// When unset, pruning uses the normal refine progress window.
     pub prune_until_epoch: Option<usize>,
@@ -312,6 +321,9 @@ impl Default for LiteGsConfig {
             prune_min_age: 5,
             prune_invisible_epochs: 10,
             prune_opacity_threshold: 1.0 / 255.0,
+            prune_visibility_dry_run: false,
+            prune_visibility_threshold: 0.05,
+            prune_high_opacity_threshold: 0.80,
             prune_until_epoch: None,
             opacity_reset_mode: LiteGsOpacityResetMode::Decay,
             prune_mode: LiteGsPruneMode::Weight,
@@ -378,6 +390,15 @@ pub struct TrainingConfig {
     pub loss_outlier_threshold: f32,
     /// Gradient floor for high-residual pixels when loss_outlier_threshold is enabled.
     pub loss_outlier_weight: f32,
+    /// Low residual threshold for late-training dynamic/occlusion soft masking.
+    /// Set both dynamic mask thresholds to 0 to disable.
+    pub loss_dynamic_mask_threshold_low: f32,
+    /// High residual threshold for late-training dynamic/occlusion soft masking.
+    pub loss_dynamic_mask_threshold_high: f32,
+    /// Minimum L1 weight for pixels above the high dynamic-mask threshold.
+    pub loss_dynamic_mask_min_weight: f32,
+    /// Epoch when dynamic/occlusion masking starts. Defaults to topology freeze epoch.
+    pub loss_dynamic_mask_start_epoch: Option<usize>,
     /// Maximum number of Gaussians created during initialization
     pub max_initial_gaussians: usize,
     /// Sampling step for frame-to-Gaussian initialization (0 = auto)
@@ -434,6 +455,10 @@ impl Default for TrainingConfig {
             loss_robust_delta: 0.0,
             loss_outlier_threshold: 0.0,
             loss_outlier_weight: 1.0,
+            loss_dynamic_mask_threshold_low: 0.0,
+            loss_dynamic_mask_threshold_high: 0.0,
+            loss_dynamic_mask_min_weight: 1.0,
+            loss_dynamic_mask_start_epoch: None,
             max_initial_gaussians: 100_000,
             sampling_step: 0,
             min_depth: 0.01,
@@ -529,6 +554,33 @@ impl TrainingConfig {
             self.loss_outlier_weight,
             &mut invalid,
         );
+        validate_loss_weight(
+            "loss_dynamic_mask_threshold_low",
+            self.loss_dynamic_mask_threshold_low,
+            &mut invalid,
+        );
+        validate_loss_weight(
+            "loss_dynamic_mask_threshold_high",
+            self.loss_dynamic_mask_threshold_high,
+            &mut invalid,
+        );
+        validate_unit_interval(
+            "loss_dynamic_mask_min_weight",
+            self.loss_dynamic_mask_min_weight,
+            &mut invalid,
+        );
+        let dynamic_mask_configured = self.loss_dynamic_mask_threshold_low > 0.0
+            || self.loss_dynamic_mask_threshold_high > 0.0
+            || self.loss_dynamic_mask_min_weight < 1.0
+            || self.loss_dynamic_mask_start_epoch.is_some();
+        if dynamic_mask_configured
+            && self.loss_dynamic_mask_threshold_high <= self.loss_dynamic_mask_threshold_low
+        {
+            invalid.push(
+                "loss_dynamic_mask_threshold_high must be greater than loss_dynamic_mask_threshold_low when dynamic masking is configured"
+                    .to_string(),
+            );
+        }
         if self.loss_l1_weight == 0.0
             && self.loss_ssim_weight == 0.0
             && self.loss_gradient_weight == 0.0
@@ -578,6 +630,19 @@ impl TrainingConfig {
             || !(0.0..=1.0).contains(&self.litegs.prune_opacity_threshold)
         {
             invalid.push("litegs.prune_opacity_threshold must be finite and in [0, 1]".to_string());
+        }
+        if !self.litegs.prune_visibility_threshold.is_finite()
+            || !(0.0..=1.0).contains(&self.litegs.prune_visibility_threshold)
+        {
+            invalid
+                .push("litegs.prune_visibility_threshold must be finite and in [0, 1]".to_string());
+        }
+        if !self.litegs.prune_high_opacity_threshold.is_finite()
+            || !(0.0..=1.0).contains(&self.litegs.prune_high_opacity_threshold)
+        {
+            invalid.push(
+                "litegs.prune_high_opacity_threshold must be finite and in [0, 1]".to_string(),
+            );
         }
         if self.litegs.opacity_reset_interval == 0 {
             invalid.push("litegs.opacity_reset_interval must be >= 1".to_string());
@@ -664,6 +729,10 @@ mod tests {
         assert_eq!(config.loss_robust_delta, 0.0);
         assert_eq!(config.loss_outlier_threshold, 0.0);
         assert_eq!(config.loss_outlier_weight, 1.0);
+        assert_eq!(config.loss_dynamic_mask_threshold_low, 0.0);
+        assert_eq!(config.loss_dynamic_mask_threshold_high, 0.0);
+        assert_eq!(config.loss_dynamic_mask_min_weight, 1.0);
+        assert_eq!(config.loss_dynamic_mask_start_epoch, None);
         assert_eq!(config.litegs, LiteGsConfig::default());
     }
 
@@ -702,6 +771,9 @@ mod tests {
         assert_eq!(litegs.prune_min_age, 5);
         assert_eq!(litegs.prune_invisible_epochs, 10);
         assert_eq!(litegs.prune_opacity_threshold, 1.0 / 255.0);
+        assert!(!litegs.prune_visibility_dry_run);
+        assert_eq!(litegs.prune_visibility_threshold, 0.05);
+        assert_eq!(litegs.prune_high_opacity_threshold, 0.80);
         assert_eq!(litegs.prune_until_epoch, None);
         assert_eq!(litegs.opacity_reset_mode, LiteGsOpacityResetMode::Decay);
         assert_eq!(litegs.prune_mode, LiteGsPruneMode::Weight);
@@ -726,6 +798,14 @@ mod tests {
         assert_eq!(
             LiteGsPruneMode::from_str("threshold").unwrap(),
             LiteGsPruneMode::Threshold
+        );
+        assert_eq!(
+            LiteGsPruneMode::from_str("visibility-weight").unwrap(),
+            LiteGsPruneMode::VisibilityWeight
+        );
+        assert_eq!(
+            LiteGsPruneMode::from_str("visibility_weight").unwrap(),
+            LiteGsPruneMode::VisibilityWeight
         );
         assert_eq!(
             LiteGsSplitScoreMode::from_str("abs").unwrap(),

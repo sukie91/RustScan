@@ -71,6 +71,8 @@ pub(super) struct MetalGaussianStats {
     pub(super) pixel_coverage_mean: f32,
     pub(super) camera_depth_mean: f32,
     pub(super) visible_count: usize,
+    pub(super) actual_visible_count: usize,
+    pub(super) actual_visibility_ratio: f32,
     #[allow(dead_code)]
     pub(super) age: usize,
     #[allow(dead_code)]
@@ -90,6 +92,8 @@ pub(super) struct TopologyCandidateInfo {
     pub(super) split_score: f32,
     pub(super) growth_weight: f32,
     pub(super) visible_count: usize,
+    pub(super) actual_visible_count: usize,
+    pub(super) actual_visibility_ratio: f32,
     pub(super) age: usize,
     pub(super) consecutive_invisible_epochs: usize,
     pub(super) prune_candidate: bool,
@@ -108,6 +112,10 @@ pub(super) struct TopologyAnalysis {
     pub(super) active_grad_stats: usize,
     pub(super) small_scale_stats: usize,
     pub(super) opacity_ready_stats: usize,
+    pub(super) low_visibility_splats: usize,
+    pub(super) near_low_visibility_splats: usize,
+    pub(super) high_opacity_low_visibility_splats: usize,
+    pub(super) visibility_prune_dry_run_candidates: usize,
     pub(super) max_grad: f32,
     pub(super) mean_grad: f32,
 }
@@ -211,6 +219,7 @@ pub(crate) fn plan_topology_from_host_snapshot(
     grad_color_accum: &[f32],
     num_observations: &[f32],
     visible_observations: &[f32],
+    actual_visible_observations: &[f32],
     splat_ages: &[usize],
     invisible_windows: &[usize],
     iteration: usize,
@@ -237,6 +246,7 @@ pub(crate) fn plan_topology_from_host_snapshot(
         grad_color_accum,
         num_observations,
         visible_observations,
+        actual_visible_observations,
         splat_ages,
         invisible_windows,
     );
@@ -312,6 +322,7 @@ pub(super) fn analyze_topology_candidates(
         let abs_pixel_mean2d_grad = gaussian_stats.abs_pixel_refine_weight_max;
         let pixel_coverage = gaussian_stats.pixel_coverage_mean;
         let camera_depth = gaussian_stats.camera_depth_mean;
+        let actual_visibility_ratio = gaussian_stats.actual_visibility_ratio;
         let depth_scale = depth_scale_factor(
             camera_depth,
             policy.litegs.depth_scale_gamma,
@@ -382,6 +393,8 @@ pub(super) fn analyze_topology_candidates(
             split_score,
             growth_weight,
             visible_count: gaussian_stats.visible_count,
+            actual_visible_count: gaussian_stats.actual_visible_count,
+            actual_visibility_ratio,
             age: gaussian_stats.age,
             consecutive_invisible_epochs: gaussian_stats.consecutive_invisible_epochs,
             prune_candidate: false,
@@ -413,6 +426,20 @@ pub(super) fn analyze_topology_candidates(
         if opacity > LITEGS_OPACITY_THRESHOLD {
             analysis.opacity_ready_stats += 1;
         }
+        if is_low_visibility(policy, &candidate_info) {
+            analysis.low_visibility_splats += 1;
+            if is_near_camera_low_visibility(policy, &candidate_info) {
+                analysis.near_low_visibility_splats += 1;
+            }
+            if candidate_info.opacity >= policy.litegs.prune_high_opacity_threshold {
+                analysis.high_opacity_low_visibility_splats += 1;
+            }
+            if policy.litegs.prune_visibility_dry_run
+                && candidate_info.opacity < policy.litegs.prune_high_opacity_threshold
+            {
+                analysis.visibility_prune_dry_run_candidates += 1;
+            }
+        }
         if mean2d_grad.is_finite() {
             analysis.max_grad = analysis.max_grad.max(mean2d_grad);
             grad_sum += mean2d_grad;
@@ -436,6 +463,29 @@ pub(super) fn analyze_topology_candidates(
         analysis.mean_grad = grad_sum / analysis.infos.len() as f32;
     }
     analysis
+}
+
+fn is_low_visibility(policy: &TopologyPolicy, info: &TopologyCandidateInfo) -> bool {
+    collects_actual_visibility_diagnostics(policy)
+        && info.age >= policy.litegs.prune_min_age
+        && info.actual_visibility_ratio.is_finite()
+        && info.actual_visibility_ratio < policy.litegs.prune_visibility_threshold
+}
+
+fn collects_actual_visibility_diagnostics(policy: &TopologyPolicy) -> bool {
+    policy.litegs.prune_visibility_dry_run
+        || matches!(
+            policy.litegs.prune_mode,
+            LiteGsPruneMode::Threshold | LiteGsPruneMode::VisibilityWeight
+        )
+}
+
+fn is_near_camera_low_visibility(policy: &TopologyPolicy, info: &TopologyCandidateInfo) -> bool {
+    let near_depth = policy.scene_extent.max(1e-6) * policy.litegs.depth_scale_gamma;
+    is_low_visibility(policy, info)
+        && info.camera_depth.is_finite()
+        && info.camera_depth > 0.0
+        && info.camera_depth < near_depth
 }
 
 fn topology_step_sample(
@@ -487,6 +537,10 @@ fn topology_step_sample(
         large_splat_count,
         large_low_grad_count,
         large_low_grad_ratio,
+        low_visibility_splats: analysis.low_visibility_splats,
+        near_low_visibility_splats: analysis.near_low_visibility_splats,
+        high_opacity_low_visibility_splats: analysis.high_opacity_low_visibility_splats,
+        visibility_prune_dry_run_candidates: analysis.visibility_prune_dry_run_candidates,
         mean2d_grad: finite_distribution(analysis.infos.iter().map(|info| info.mean2d_grad)),
         screen_mean2d_grad: finite_distribution(
             analysis.infos.iter().map(|info| info.screen_mean2d_grad),
@@ -501,6 +555,18 @@ fn topology_step_sample(
         camera_depth: finite_distribution(analysis.infos.iter().map(|info| info.camera_depth)),
         depth_scale: finite_distribution(analysis.infos.iter().map(|info| info.depth_scale)),
         split_score: finite_distribution(analysis.infos.iter().map(|info| info.split_score)),
+        actual_visible_count: finite_distribution(
+            analysis
+                .infos
+                .iter()
+                .map(|info| info.actual_visible_count as f32),
+        ),
+        actual_visibility_ratio: finite_distribution(
+            analysis
+                .infos
+                .iter()
+                .map(|info| info.actual_visibility_ratio),
+        ),
         max_scale: finite_distribution(max_scales),
         opacity: finite_distribution(opacities),
     }
@@ -1138,7 +1204,7 @@ pub(crate) fn apply_topology_metrics_delta(
 fn density_controller_prune_mode(mode: LiteGsPruneMode) -> PruneMode {
     match mode {
         LiteGsPruneMode::Threshold => PruneMode::Threshold,
-        LiteGsPruneMode::Weight => PruneMode::Weight,
+        LiteGsPruneMode::Weight | LiteGsPruneMode::VisibilityWeight => PruneMode::Weight,
     }
 }
 
@@ -1256,6 +1322,15 @@ fn litegs_should_prune_candidate(
             (opacity_prune_enabled && opacity_prune)
                 || (!opacity_prune_enabled && history_invisible_prune)
         }
+        LiteGsPruneMode::VisibilityWeight => {
+            let visibility_prune = old_enough
+                && info.actual_visibility_ratio.is_finite()
+                && info.actual_visibility_ratio < policy.litegs.prune_visibility_threshold
+                && info.opacity < policy.litegs.prune_high_opacity_threshold;
+            (opacity_prune_enabled && opacity_prune)
+                || (!opacity_prune_enabled && history_invisible_prune)
+                || visibility_prune
+        }
     };
     let scale_small = scale
         .iter()
@@ -1281,6 +1356,7 @@ fn build_host_snapshot_stats(
     grad_color_accum: &[f32],
     num_observations: &[f32],
     visible_observations: &[f32],
+    actual_visible_observations: &[f32],
     splat_ages: &[usize],
     invisible_windows: &[usize],
 ) -> Vec<MetalGaussianStats> {
@@ -1299,6 +1375,18 @@ fn build_host_snapshot_stats(
                 .max(0.0);
             let visible_count = visible_observations.round().min(usize::MAX as f32) as usize;
             let visible_denom = visible_observations.max(1.0);
+            let actual_visible_observations = actual_visible_observations
+                .get(idx)
+                .copied()
+                .unwrap_or_default()
+                .max(0.0);
+            let actual_visible_count =
+                actual_visible_observations.round().min(usize::MAX as f32) as usize;
+            let actual_visibility_ratio = if observations > 0.0 {
+                (actual_visible_observations / observations).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
             let grad_2d = grad_2d_accum.get(idx).copied().unwrap_or_default();
             let screen_grad_2d = screen_grad_2d_accum.get(idx).copied().unwrap_or_default();
             let abs_grad_2d = abs_grad_2d_accum.get(idx).copied().unwrap_or_default();
@@ -1336,6 +1424,8 @@ fn build_host_snapshot_stats(
                 pixel_coverage_mean: pixel_coverage / visible_denom,
                 camera_depth_mean: camera_depth / coverage_denom,
                 visible_count,
+                actual_visible_count,
+                actual_visibility_ratio,
                 age,
                 consecutive_invisible_epochs,
                 ..MetalGaussianStats::default()
@@ -1797,6 +1887,178 @@ mod tests {
         assert_eq!(sample.mean2d_grad.p50, Some(0.7));
         assert_eq!(sample.max_scale.count, 3);
         assert_eq!(sample.opacity.count, 3);
+    }
+
+    #[test]
+    fn topology_step_sample_records_visibility_prune_dry_run_counts() {
+        let config = TrainingConfig {
+            litegs: LiteGsConfig {
+                prune_min_age: 1,
+                prune_visibility_dry_run: true,
+                prune_visibility_threshold: 0.2,
+                prune_high_opacity_threshold: 0.4,
+                depth_scale_gamma: 1.0,
+                ..LiteGsConfig::default()
+            },
+            ..TrainingConfig::default()
+        };
+        let policy = TopologyPolicy::from_training_config(&config, 1.0);
+        let opacity_logit = |opacity: f32| (opacity / (1.0 - opacity)).ln();
+        let snapshot = test_snapshot(
+            vec![0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 2.0, 0.0, 1.0],
+            vec![
+                0.02f32.ln(),
+                0.02f32.ln(),
+                0.02f32.ln(),
+                0.02f32.ln(),
+                0.02f32.ln(),
+                0.02f32.ln(),
+                0.02f32.ln(),
+                0.02f32.ln(),
+                0.02f32.ln(),
+            ],
+            vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+            vec![opacity_logit(0.3), opacity_logit(0.6), opacity_logit(0.3)],
+            vec![1.0, 0.0, 0.0, 0.5, 0.5, 0.5, 0.0, 1.0, 0.0],
+            Vec::new(),
+            SplatColorRepresentation::Rgb,
+        );
+        let stats = vec![
+            MetalGaussianStats {
+                actual_visible_count: 1,
+                actual_visibility_ratio: 0.1,
+                camera_depth_mean: 0.2,
+                age: 10,
+                ..Default::default()
+            },
+            MetalGaussianStats {
+                actual_visible_count: 1,
+                actual_visibility_ratio: 0.1,
+                camera_depth_mean: 0.2,
+                age: 10,
+                ..Default::default()
+            },
+            MetalGaussianStats {
+                actual_visible_count: 5,
+                actual_visibility_ratio: 0.5,
+                camera_depth_mean: 2.0,
+                age: 10,
+                ..Default::default()
+            },
+        ];
+
+        let metrics = TopologySplatMetrics::from_snapshot(&snapshot);
+        let analysis = analyze_topology_candidates(&policy, &metrics, &stats, false);
+        let sample = topology_step_sample(&policy, &metrics, &analysis, 160, Some(2));
+
+        assert_eq!(sample.low_visibility_splats, 2);
+        assert_eq!(sample.near_low_visibility_splats, 2);
+        assert_eq!(sample.high_opacity_low_visibility_splats, 1);
+        assert_eq!(sample.visibility_prune_dry_run_candidates, 1);
+        assert_eq!(sample.actual_visible_count.count, 3);
+        assert_eq!(sample.actual_visibility_ratio.p50, Some(0.1));
+        assert_eq!(analysis.prune_candidates, 0);
+    }
+
+    #[test]
+    fn visibility_weight_pruning_prunes_low_visibility_low_opacity_splats() {
+        let config = TrainingConfig {
+            litegs: LiteGsConfig {
+                prune_mode: crate::training::LiteGsPruneMode::VisibilityWeight,
+                prune_min_age: 1,
+                prune_visibility_threshold: 0.2,
+                prune_high_opacity_threshold: 0.4,
+                depth_scale_gamma: 1.0,
+                ..LiteGsConfig::default()
+            },
+            ..TrainingConfig::default()
+        };
+        let policy = TopologyPolicy::from_training_config(&config, 1.0);
+        let opacity_logit = |opacity: f32| (opacity / (1.0 - opacity)).ln();
+        let snapshot = test_snapshot(
+            vec![0.0, 0.0, 1.0, 1.0, 0.0, 1.0],
+            vec![
+                0.02f32.ln(),
+                0.02f32.ln(),
+                0.02f32.ln(),
+                0.02f32.ln(),
+                0.02f32.ln(),
+                0.02f32.ln(),
+            ],
+            vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+            vec![opacity_logit(0.3), opacity_logit(0.6)],
+            vec![1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            Vec::new(),
+            SplatColorRepresentation::Rgb,
+        );
+        let stats = vec![
+            MetalGaussianStats {
+                actual_visible_count: 1,
+                actual_visibility_ratio: 0.1,
+                camera_depth_mean: 0.2,
+                age: 10,
+                ..Default::default()
+            },
+            MetalGaussianStats {
+                actual_visible_count: 1,
+                actual_visibility_ratio: 0.1,
+                camera_depth_mean: 0.2,
+                age: 10,
+                ..Default::default()
+            },
+        ];
+
+        let metrics = TopologySplatMetrics::from_snapshot(&snapshot);
+        let analysis = analyze_topology_candidates(&policy, &metrics, &stats, false);
+        let sample = topology_step_sample(&policy, &metrics, &analysis, 160, Some(2));
+
+        assert_eq!(sample.low_visibility_splats, 2);
+        assert_eq!(sample.high_opacity_low_visibility_splats, 1);
+        assert_eq!(sample.visibility_prune_dry_run_candidates, 0);
+        assert_eq!(analysis.prune_candidates, 1);
+        assert!(analysis.infos[0].prune_candidate);
+        assert!(!analysis.infos[1].prune_candidate);
+    }
+
+    #[test]
+    fn topology_step_sample_ignores_low_visibility_when_diagnostics_disabled() {
+        let config = TrainingConfig {
+            litegs: LiteGsConfig {
+                prune_min_age: 1,
+                prune_visibility_threshold: 0.2,
+                prune_high_opacity_threshold: 0.4,
+                depth_scale_gamma: 1.0,
+                ..LiteGsConfig::default()
+            },
+            ..TrainingConfig::default()
+        };
+        let policy = TopologyPolicy::from_training_config(&config, 1.0);
+        let opacity_logit = |opacity: f32| (opacity / (1.0 - opacity)).ln();
+        let snapshot = test_snapshot(
+            vec![0.0, 0.0, 1.0],
+            vec![0.02f32.ln(), 0.02f32.ln(), 0.02f32.ln()],
+            vec![1.0, 0.0, 0.0, 0.0],
+            vec![opacity_logit(0.3)],
+            vec![1.0, 0.0, 0.0],
+            Vec::new(),
+            SplatColorRepresentation::Rgb,
+        );
+        let stats = vec![MetalGaussianStats {
+            actual_visible_count: 1,
+            actual_visibility_ratio: 0.1,
+            camera_depth_mean: 0.2,
+            age: 10,
+            ..Default::default()
+        }];
+
+        let metrics = TopologySplatMetrics::from_snapshot(&snapshot);
+        let analysis = analyze_topology_candidates(&policy, &metrics, &stats, false);
+        let sample = topology_step_sample(&policy, &metrics, &analysis, 160, Some(2));
+
+        assert_eq!(sample.low_visibility_splats, 0);
+        assert_eq!(sample.near_low_visibility_splats, 0);
+        assert_eq!(sample.high_opacity_low_visibility_splats, 0);
+        assert_eq!(sample.visibility_prune_dry_run_candidates, 0);
     }
 
     #[test]
@@ -2597,6 +2859,8 @@ mod tests {
             split_score: mean2d_grad,
             growth_weight: mean2d_grad,
             visible_count,
+            actual_visible_count: visible_count,
+            actual_visibility_ratio: if visible_count == 0 { 0.0 } else { 1.0 },
             age: 10,
             consecutive_invisible_epochs: if visible_count == 0 { 10 } else { 0 },
             prune_candidate,
