@@ -35,7 +35,7 @@ pub(super) fn run_train_command(args: TrainArgs) -> anyhow::Result<()> {
     log::info!("Frame shuffle seed: {}", config.frame_shuffle_seed);
     log_litegs_training_config(&config);
 
-    let training_run = rustgs::train_splats_with_report(&dataset, &config)?;
+    let training_run = rustgs::train_splats(&dataset, &config, rustgs::TrainingOptions::default())?;
     let rustgs::TrainingRun {
         splats,
         report: training_report,
@@ -359,6 +359,9 @@ fn ensure_sparse_initialization_points(
         }
         rustgs::TrainingInputKind::Colmap => {
             "the COLMAP input is missing sparse points3D output; make sure points3D.bin or points3D.txt exists"
+        }
+        rustgs::TrainingInputKind::Nerfstudio => {
+            "the Nerfstudio input is missing an initialization point cloud; add ply_file_path or sparse_pc.ply with xyz/rgb vertices"
         }
         rustgs::TrainingInputKind::TrainingDatasetJson => {
             "the TrainingDataset JSON did not contain any initial_points; export it from a COLMAP sparse reconstruction first"

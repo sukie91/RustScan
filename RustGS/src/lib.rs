@@ -14,7 +14,7 @@
 //! # Example
 //!
 //! ```no_run
-//! use rustgs::{train_splats, TrainingConfig, TrainingDataset};
+//! use rustgs::{train_splats, TrainingConfig, TrainingDataset, TrainingOptions};
 //! use std::path::PathBuf;
 //!
 //! fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -25,12 +25,12 @@
 //!
 //! // Train 3DGS splats.
 //! let config = TrainingConfig::default();
-//! let splats = train_splats(&dataset, &config)?;
+//! let run = train_splats(&dataset, &config, TrainingOptions::default())?;
 //!
 //! // Save the trained splats.
 //! rustgs::save_splats_ply(
 //!     "scene.ply".as_ref(),
-//!     &splats,
+//!     &run.splats,
 //!     &rustgs::SplatMetadata::default(),
 //! )?;
 //! # Ok(())
@@ -80,13 +80,14 @@ pub use crate::training::{
     evaluate_splats, evaluation_device, last_training_telemetry, render_evaluation_frame,
     runtime_from_splats, LiteGsOptimizerLrs, LiteGsTrainingTelemetry, TrainingControl,
     TrainingEvent, TrainingEventCadence, TrainingEventRoute, TrainingIterationProgress,
-    TrainingPlanSelected, TrainingRun, TrainingRunCancelled, TrainingRunCompleted,
+    TrainingOptions, TrainingPlanSelected, TrainingRun, TrainingRunCancelled, TrainingRunCompleted,
     TrainingRunReport, TrainingRunStarted, TrainingSnapshotReady,
 };
 pub use crate::training::{TrainingBackend, TrainingConfig, TrainingResult};
 
 // Re-export IO types
 pub use crate::io::colmap_dataset::{load_colmap_dataset, ColmapConfig};
+pub use crate::io::nerfstudio_dataset::{load_nerfstudio_dataset, NerfstudioConfig};
 #[cfg(feature = "gpu")]
 pub use crate::io::scene_io::{load_splats_ply, save_splats_ply};
 pub use crate::io::scene_io::{SceneIoError, SplatMetadata};
@@ -110,11 +111,12 @@ pub fn gpu_available() -> bool {
 }
 
 /// Load a training dataset from a TUM RGB-D directory, a COLMAP directory,
-/// or a serialized `TrainingDataset` JSON file.
+/// a Nerfstudio transforms directory, or a serialized `TrainingDataset` JSON file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrainingInputKind {
     TumRgbd,
     Colmap,
+    Nerfstudio,
     TrainingDatasetJson,
 }
 
@@ -123,6 +125,7 @@ impl std::fmt::Display for TrainingInputKind {
         match self {
             Self::TumRgbd => write!(f, "TUM RGB-D dataset"),
             Self::Colmap => write!(f, "COLMAP dataset"),
+            Self::Nerfstudio => write!(f, "Nerfstudio dataset"),
             Self::TrainingDatasetJson => write!(f, "TrainingDataset JSON"),
         }
     }
@@ -138,6 +141,17 @@ pub fn load_training_dataset_with_source(
         if io::colmap_dataset::resolve_colmap_sparse_dir(input).is_ok() {
             return load_colmap_dataset(input, colmap_config)
                 .map(|dataset| (dataset, TrainingInputKind::Colmap));
+        }
+
+        if io::nerfstudio_dataset::looks_like_nerfstudio_dataset(input) {
+            return load_nerfstudio_dataset(
+                input,
+                &NerfstudioConfig {
+                    max_frames: colmap_config.max_frames,
+                    frame_stride: colmap_config.frame_stride,
+                },
+            )
+            .map(|dataset| (dataset, TrainingInputKind::Nerfstudio));
         }
 
         return load_tum_rgbd_dataset(input, tum_config)
@@ -157,7 +171,7 @@ pub fn load_training_dataset_with_source(
 }
 
 /// Load a training dataset from a TUM RGB-D directory, a COLMAP directory,
-/// or a serialized `TrainingDataset` JSON file.
+/// a Nerfstudio transforms directory, or a serialized `TrainingDataset` JSON file.
 pub fn load_training_dataset(
     input: &Path,
     tum_config: &TumRgbdConfig,
@@ -170,102 +184,14 @@ pub fn load_training_dataset(
     load_training_dataset_with_source(input, tum_config, &colmap_config).map(|(dataset, _)| dataset)
 }
 
-/// Train 3DGS splats directly from a prepared training dataset.
+/// Train 3DGS splats from a prepared training dataset.
 #[cfg(feature = "gpu")]
 pub fn train_splats(
     dataset: &TrainingDataset,
     config: &TrainingConfig,
-) -> Result<HostSplats, TrainingError> {
-    training::train_splats(dataset, config)
-}
-
-/// Train 3DGS splats and return a structured report for downstream consumers.
-#[cfg(feature = "gpu")]
-pub fn train_splats_with_report(
-    dataset: &TrainingDataset,
-    config: &TrainingConfig,
+    options: TrainingOptions<'_>,
 ) -> Result<TrainingRun, TrainingError> {
-    training::train_splats_with_report(dataset, config)
-}
-
-/// Train 3DGS splats while emitting structured training events.
-#[cfg(feature = "gpu")]
-pub fn train_splats_with_events<F>(
-    dataset: &TrainingDataset,
-    config: &TrainingConfig,
-    on_event: F,
-) -> Result<TrainingRun, TrainingError>
-where
-    F: FnMut(TrainingEvent),
-{
-    training::train_splats_with_events(dataset, config, on_event)
-}
-
-/// Train 3DGS splats while emitting structured training events and honoring training control.
-#[cfg(feature = "gpu")]
-pub fn train_splats_with_controlled_events<F>(
-    dataset: &TrainingDataset,
-    config: &TrainingConfig,
-    control: TrainingControl,
-    on_event: F,
-) -> Result<TrainingRun, TrainingError>
-where
-    F: FnMut(TrainingEvent),
-{
-    training::train_splats_with_controlled_events(dataset, config, control, on_event)
-}
-
-/// Compatibility adapter for path-based dataset loading that returns the host-side splat artifact.
-#[cfg(feature = "gpu")]
-pub fn train_splats_from_path(
-    input: &Path,
-    tum_config: &TumRgbdConfig,
-    config: &TrainingConfig,
-) -> Result<HostSplats, TrainingError> {
-    let dataset = load_training_dataset(input, tum_config)?;
-    training::train_splats(&dataset, config)
-}
-
-/// Compatibility adapter for path-based dataset loading that returns training artifacts and report.
-#[cfg(feature = "gpu")]
-pub fn train_splats_from_path_with_report(
-    input: &Path,
-    tum_config: &TumRgbdConfig,
-    config: &TrainingConfig,
-) -> Result<TrainingRun, TrainingError> {
-    let dataset = load_training_dataset(input, tum_config)?;
-    training::train_splats_with_report(&dataset, config)
-}
-
-/// Path-based training entry point with structured event emission.
-#[cfg(feature = "gpu")]
-pub fn train_splats_from_path_with_events<F>(
-    input: &Path,
-    tum_config: &TumRgbdConfig,
-    config: &TrainingConfig,
-    on_event: F,
-) -> Result<TrainingRun, TrainingError>
-where
-    F: FnMut(TrainingEvent),
-{
-    let dataset = load_training_dataset(input, tum_config)?;
-    training::train_splats_with_events(&dataset, config, on_event)
-}
-
-/// Path-based training entry point with structured event emission and training control.
-#[cfg(feature = "gpu")]
-pub fn train_splats_from_path_with_controlled_events<F>(
-    input: &Path,
-    tum_config: &TumRgbdConfig,
-    config: &TrainingConfig,
-    control: TrainingControl,
-    on_event: F,
-) -> Result<TrainingRun, TrainingError>
-where
-    F: FnMut(TrainingEvent),
-{
-    let dataset = load_training_dataset(input, tum_config)?;
-    training::train_splats_with_controlled_events(&dataset, config, control, on_event)
+    training::train_splats(dataset, config, options)
 }
 
 #[cfg(test)]
@@ -312,6 +238,63 @@ mod tests {
         assert_eq!(source, TrainingInputKind::Colmap);
         assert_eq!(dataset.poses.len(), 1);
         assert_eq!(dataset.initial_points.len(), 1);
+    }
+
+    #[test]
+    fn test_load_training_dataset_with_source_detects_nerfstudio_directory() {
+        let temp = tempdir().unwrap();
+        std::fs::write(temp.path().join("frame.png"), []).unwrap();
+        std::fs::write(
+            temp.path().join("sparse_pc.ply"),
+            "ply\n\
+format ascii 1.0\n\
+element vertex 1\n\
+property float x\n\
+property float y\n\
+property float z\n\
+property uchar red\n\
+property uchar green\n\
+property uchar blue\n\
+end_header\n\
+0.0 0.0 1.0 255 128 0\n",
+        )
+        .unwrap();
+        std::fs::write(
+            temp.path().join("transforms.json"),
+            r#"{
+                "fl_x": 500.0,
+                "fl_y": 505.0,
+                "cx": 320.0,
+                "cy": 240.0,
+                "w": 640,
+                "h": 480,
+                "frames": [
+                    {
+                        "file_path": "frame.png",
+                        "transform_matrix": [
+                            [1.0, 0.0, 0.0, 1.0],
+                            [0.0, 1.0, 0.0, 2.0],
+                            [0.0, 0.0, 1.0, 3.0],
+                            [0.0, 0.0, 0.0, 1.0]
+                        ]
+                    }
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        let (dataset, source) = load_training_dataset_with_source(
+            temp.path(),
+            &TumRgbdConfig::default(),
+            &ColmapConfig::default(),
+        )
+        .unwrap();
+
+        assert_eq!(source, TrainingInputKind::Nerfstudio);
+        assert_eq!(dataset.poses.len(), 1);
+        assert_eq!(dataset.initial_points.len(), 1);
+        assert_eq!(dataset.initial_points[0].0, [0.0, 0.0, 1.0]);
+        assert_eq!(dataset.initial_points[0].1, Some([1.0, 128.0 / 255.0, 0.0]));
     }
 }
 

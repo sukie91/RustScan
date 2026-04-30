@@ -1,7 +1,7 @@
 //! RustGS CLI - 3D Gaussian Splatting Training
 //!
 //! Usage:
-//!   rustgs train --input <training_dataset_with_initial_points.json|colmap_dir> --output <scene.ply>
+//!   rustgs train --input <training_dataset_with_initial_points.json|colmap_dir|nerfstudio_dir> --output <scene.ply>
 //!   rustgs render --input <scene.ply> --camera <pose.json> --output <image.png>
 
 use anyhow::{bail, Context};
@@ -22,7 +22,7 @@ struct Cli {
 
 #[derive(Debug, Clone, clap::Args)]
 struct TrainArgs {
-    /// Path to a COLMAP directory or a TrainingDataset JSON that already contains initial_points
+    /// Path to a COLMAP, Nerfstudio, TUM RGB-D directory, or a TrainingDataset JSON that already contains initial_points
     #[arg(short, long)]
     input: PathBuf,
 
@@ -312,7 +312,7 @@ struct PruneSceneArgs {
 #[derive(Debug, clap::Subcommand)]
 #[allow(clippy::large_enum_variant)]
 enum Commands {
-    /// Train a 3DGS scene from JSON input, a TUM RGB-D dataset directory, or a COLMAP directory
+    /// Train a 3DGS scene from JSON input, a TUM RGB-D, Nerfstudio, or COLMAP directory
     Train(TrainArgs),
 
     /// Render a scene from a given viewpoint
@@ -1519,7 +1519,8 @@ mod tests {
             return;
         }
 
-        let training_run = rustgs::train_splats_with_report(&dataset, &config).unwrap();
+        let training_run =
+            rustgs::train_splats(&dataset, &config, rustgs::TrainingOptions::default()).unwrap();
         let training_elapsed = training_run.report.elapsed;
         let final_loss = training_run.report.metadata_final_loss_or(0.0);
         let training_telemetry = training_run.report.telemetry.clone();

@@ -19,6 +19,7 @@
 | [../RustGS/docs/plans/2026-04-09-rustgs-soa-splat-architecture-proposal.md](../RustGS/docs/plans/2026-04-09-rustgs-soa-splat-architecture-proposal.md) | RustGS 当前唯一的 splat 表示设计文档与收口状态 |
 | [plans/2026-04-05-litegs-parity-roadmap-refresh.md](plans/2026-04-05-litegs-parity-roadmap-refresh.md) | 当前剩余 LiteGS parity 工作与优先级 |
 | [RustGS-TUM-Profile-Comparison-2026-04-06.md](RustGS-TUM-Profile-Comparison-2026-04-06.md) | 当前有效的 TUM 训练对照记录与 topology-freeze 决策依据 |
+| [rustgs-benchmark-datasets.md](rustgs-benchmark-datasets.md) | RustGS 下一批公开训练/评测数据集、准备脚本与运行口径 |
 
 ## Retention Rule
 

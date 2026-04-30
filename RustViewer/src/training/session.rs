@@ -4,9 +4,9 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use rustgs::{
-    train_splats_with_controlled_events, HostSplats, TrainingConfig, TrainingControl,
-    TrainingDataset, TrainingError, TrainingEvent, TrainingEventCadence, TrainingIterationProgress,
-    TrainingRun, TrainingRunReport, TrainingSnapshotReady,
+    train_splats, HostSplats, TrainingConfig, TrainingControl, TrainingDataset, TrainingError,
+    TrainingEvent, TrainingEventCadence, TrainingIterationProgress, TrainingOptions, TrainingRun,
+    TrainingRunReport, TrainingSnapshotReady,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -116,7 +116,13 @@ impl TrainingRunner for RustGsTrainingRunner {
         control: TrainingControl,
         on_event: &mut dyn FnMut(TrainingEvent),
     ) -> Result<TrainingRun, TrainingError> {
-        train_splats_with_controlled_events(dataset, config, control, on_event)
+        train_splats(
+            dataset,
+            config,
+            TrainingOptions::new()
+                .with_control(control)
+                .with_event_sink(on_event),
+        )
     }
 }
 
@@ -666,7 +672,6 @@ mod tests {
             on_event: &mut dyn FnMut(TrainingEvent),
         ) -> Result<TrainingRun, TrainingError> {
             on_event(TrainingEvent::RunStarted(TrainingRunStarted {
-                litegs_mode: config.litegs_mode,
                 iterations: config.iterations,
                 frame_count: 1,
                 input_point_count: 1,
@@ -707,7 +712,6 @@ mod tests {
             on_event: &mut dyn FnMut(TrainingEvent),
         ) -> Result<TrainingRun, TrainingError> {
             on_event(TrainingEvent::RunStarted(TrainingRunStarted {
-                litegs_mode: config.litegs_mode,
                 iterations: config.iterations,
                 frame_count: 1,
                 input_point_count: 1,

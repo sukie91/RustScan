@@ -204,7 +204,6 @@ impl ViewerApp {
         let mut config = TrainingConfig::default();
         config.iterations = self.ui_state.training_controls.iterations;
         config.render_scale = self.ui_state.training_controls.render_scale;
-        config.litegs_mode = self.ui_state.training_controls.litegs_mode;
 
         let options = TrainingControlOptions {
             progress_every: self.ui_state.training_controls.progress_every,

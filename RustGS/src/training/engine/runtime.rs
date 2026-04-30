@@ -11,8 +11,9 @@ use crate::training::data::init_map::build_initial_splats;
 use crate::training::evaluation::scaled_dimensions;
 use crate::training::events::{
     emit_training_event, TrainingControl, TrainingEvent, TrainingEventCadence, TrainingEventRoute,
-    TrainingIterationProgress, TrainingPlanSelected, TrainingRun, TrainingRunCancelled,
-    TrainingRunCompleted, TrainingRunReport, TrainingRunStarted, TrainingSnapshotReady,
+    TrainingIterationProgress, TrainingOptions, TrainingPlanSelected, TrainingRun,
+    TrainingRunCancelled, TrainingRunCompleted, TrainingRunReport, TrainingRunStarted,
+    TrainingSnapshotReady,
 };
 use crate::training::telemetry::store_last_training_telemetry;
 use crate::training::TrainingConfig;
@@ -24,17 +25,18 @@ use super::trainer::{
     TrainingIterationMetrics, TrainingLoopObserver, WgpuTrainer, WgpuTrainingReport,
 };
 
-pub fn train_splats_with_controlled_events<F>(
+pub fn train_splats(
     dataset: &TrainingDataset,
     config: &TrainingConfig,
-    control: TrainingControl,
-    mut on_event: F,
-) -> Result<TrainingRun, TrainingError>
-where
-    F: FnMut(TrainingEvent),
-{
+    mut options: TrainingOptions<'_>,
+) -> Result<TrainingRun, TrainingError> {
+    let control = options.control;
+    let mut noop = |_event| {};
+    let on_event = options.on_event.as_deref_mut();
+    let on_event = on_event.unwrap_or(&mut noop);
+
     emit_training_event(
-        &mut on_event,
+        on_event,
         TrainingEvent::RunStarted(TrainingRunStarted {
             iterations: config.iterations,
             frame_count: dataset.poses.len(),
@@ -42,17 +44,17 @@ where
         }),
     );
     emit_training_event(
-        &mut on_event,
+        on_event,
         TrainingEvent::PlanSelected(TrainingPlanSelected {
             route: TrainingEventRoute::Standard,
         }),
     );
 
-    let run = run_training(dataset, config, &control, &mut on_event)?;
+    let run = run_training(dataset, config, &control, on_event)?;
 
     if run.report.cancelled {
         emit_training_event(
-            &mut on_event,
+            on_event,
             TrainingEvent::RunCancelled(TrainingRunCancelled {
                 completed_iterations: run.report.completed_iterations,
                 elapsed: run.report.elapsed,
@@ -61,7 +63,7 @@ where
     }
 
     emit_training_event(
-        &mut on_event,
+        on_event,
         TrainingEvent::RunCompleted(TrainingRunCompleted {
             report: run.report.clone(),
         }),
