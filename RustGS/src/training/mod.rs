@@ -1,37 +1,32 @@
 //! Training module for 3D Gaussian Splatting.
 
 mod config;
-#[cfg(feature = "gpu")]
-mod engine;
 mod evaluation;
 mod metrics;
 
 #[cfg(test)]
 mod tests;
 
-#[cfg(feature = "gpu")]
-mod backward;
+macro_rules! gpu_modules {
+    ($($module:ident),+ $(,)?) => {
+        $(
+            #[cfg(feature = "gpu")]
+            mod $module;
+        )+
+    };
+}
 
-#[cfg(feature = "gpu")]
-mod data;
+gpu_modules!(
+    backward,
+    data,
+    engine,
+    events,
+    forward,
+    gpu_primitives,
+    telemetry,
+    topology,
+);
 
-#[cfg(feature = "gpu")]
-mod events;
-
-#[cfg(feature = "gpu")]
-mod forward;
-
-#[cfg(feature = "gpu")]
-mod gpu_primitives;
-
-#[cfg(feature = "gpu")]
-mod telemetry;
-
-#[cfg(feature = "gpu")]
-mod topology;
-
-#[cfg(feature = "gpu")]
-use crate::core::HostSplats;
 #[cfg(feature = "gpu")]
 use crate::{TrainingDataset, TrainingError};
 
@@ -59,8 +54,9 @@ pub use evaluation::{
 #[cfg(feature = "gpu")]
 pub use events::{
     TrainingControl, TrainingEvent, TrainingEventCadence, TrainingEventRoute,
-    TrainingIterationProgress, TrainingPlanSelected, TrainingRun, TrainingRunCancelled,
-    TrainingRunCompleted, TrainingRunReport, TrainingRunStarted, TrainingSnapshotReady,
+    TrainingIterationProgress, TrainingOptions, TrainingPlanSelected, TrainingRun,
+    TrainingRunCancelled, TrainingRunCompleted, TrainingRunReport, TrainingRunStarted,
+    TrainingSnapshotReady,
 };
 pub use metrics::{
     ParityFloatDistribution, ParityLossCurveSample, ParityLossTerms, ParityTopologyMetrics,
@@ -79,45 +75,12 @@ pub use telemetry::{last_training_telemetry, LiteGsOptimizerLrs, LiteGsTrainingT
 pub fn train_splats(
     dataset: &TrainingDataset,
     config: &TrainingConfig,
-) -> Result<HostSplats, TrainingError> {
-    train_splats_with_report(dataset, config).map(TrainingRun::into_splats)
-}
-
-#[cfg(feature = "gpu")]
-pub fn train_splats_with_report(
-    dataset: &TrainingDataset,
-    config: &TrainingConfig,
+    options: TrainingOptions<'_>,
 ) -> Result<TrainingRun, TrainingError> {
-    let mut sink = |_event| {};
-    train_splats_with_events(dataset, config, &mut sink)
-}
-
-#[cfg(feature = "gpu")]
-pub fn train_splats_with_events<F>(
-    dataset: &TrainingDataset,
-    config: &TrainingConfig,
-    on_event: F,
-) -> Result<TrainingRun, TrainingError>
-where
-    F: FnMut(TrainingEvent),
-{
-    train_splats_with_controlled_events(dataset, config, TrainingControl::default(), on_event)
-}
-
-#[cfg(feature = "gpu")]
-pub fn train_splats_with_controlled_events<F>(
-    dataset: &TrainingDataset,
-    config: &TrainingConfig,
-    control: TrainingControl,
-    on_event: F,
-) -> Result<TrainingRun, TrainingError>
-where
-    F: FnMut(TrainingEvent),
-{
     telemetry::store_last_training_telemetry(None);
     config.validate()?;
     validate_litegs_mac_v1_config(config)?;
-    engine::train_splats_with_controlled_events(dataset, config, control, on_event)
+    engine::train_splats(dataset, config, options)
 }
 
 #[cfg(feature = "gpu")]

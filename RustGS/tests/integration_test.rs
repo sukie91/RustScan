@@ -1,7 +1,7 @@
 #![cfg(feature = "gpu")]
 
 use rustgs::{
-    train_splats_with_report, Intrinsics, ScenePose, TrainingConfig, TrainingDataset, SE3,
+    train_splats, Intrinsics, ScenePose, TrainingConfig, TrainingDataset, TrainingOptions, SE3,
 };
 use std::fs;
 use std::path::Path;
@@ -52,7 +52,8 @@ fn tiny_config() -> TrainingConfig {
 
 fn run_tiny_training(root: &Path) -> rustgs::TrainingRun {
     let dataset = tiny_dataset(root);
-    train_splats_with_report(&dataset, &tiny_config()).expect("tiny wgpu training run")
+    train_splats(&dataset, &tiny_config(), TrainingOptions::default())
+        .expect("tiny wgpu training run")
 }
 
 #[test]

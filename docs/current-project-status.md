@@ -19,7 +19,7 @@
 
 ## Current Progress
 
-- RustGS 的公开训练路径已经收口到 splat-first 入口：`train_splats`、`train_splats_from_path`、`evaluate_splats`、`save_splats_ply`、`load_splats_ply`。
+- RustGS 的公开训练路径已经收口到单一 splat-first 入口：`train_splats(dataset, config, options)`；数据加载、评估和 I/O 由 `load_training_dataset`、`evaluate_splats`、`save_splats_ply`、`load_splats_ply` 承担。
 - 旧兼容层已从源码主路径删除：`legacy/`、`training_pipeline.rs`、`io/dataset_loader.rs`、`io/scene_io/scene_import.rs`、`io/scene_io/scene_export.rs`。
 - Canonical 表示已经明确：
   - `training::HostSplats` 负责 host 侧边界、checkpoint 与 PLY。

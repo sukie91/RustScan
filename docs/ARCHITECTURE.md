@@ -32,7 +32,6 @@ RustScan 是一个多 crate 的 3D 重建工作区，但当前主线已经明确
 - `rustgs::load_training_dataset_with_source`
 - `rustgs::load_training_dataset`
 - `rustgs::train_splats`
-- `rustgs::train_splats_from_path`
 - `rustgs::evaluate_splats`
 - `rustgs::runtime_from_splats`
 - `rustgs::save_splats_ply`

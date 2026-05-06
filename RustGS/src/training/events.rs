@@ -148,6 +148,39 @@ pub enum TrainingEvent {
 
 pub type TrainingEventSink<'a> = dyn FnMut(TrainingEvent) + 'a;
 
+pub struct TrainingOptions<'a> {
+    pub control: TrainingControl,
+    pub on_event: Option<Box<TrainingEventSink<'a>>>,
+}
+
+impl<'a> Default for TrainingOptions<'a> {
+    fn default() -> Self {
+        Self {
+            control: TrainingControl::default(),
+            on_event: None,
+        }
+    }
+}
+
+impl<'a> TrainingOptions<'a> {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_control(mut self, control: TrainingControl) -> Self {
+        self.control = control;
+        self
+    }
+
+    pub fn with_event_sink<F>(mut self, on_event: F) -> Self
+    where
+        F: FnMut(TrainingEvent) + 'a,
+    {
+        self.on_event = Some(Box::new(on_event));
+        self
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct TrainingRunReport {
     pub elapsed: Duration,

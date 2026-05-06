@@ -2,7 +2,8 @@ use std::path::PathBuf;
 
 use rustgs::{
     evaluate_splats, evaluation_device, load_training_dataset, select_evaluation_frames,
-    EvaluationDevice, SplatEvaluationConfig, SplatMetadata, TrainingConfig, TumRgbdConfig,
+    EvaluationDevice, SplatEvaluationConfig, SplatMetadata, TrainingConfig, TrainingOptions,
+    TumRgbdConfig,
 };
 
 fn tum_root() -> PathBuf {
@@ -95,18 +96,9 @@ fn trains_directly_from_workspace_tum_directory() {
         return;
     }
 
-    let splats = rustgs::train_splats_from_path(
-        &root,
-        &TumRgbdConfig {
-            max_frames: 90,
-            frame_stride: 30,
-            ..Default::default()
-        },
-        &config,
-    )
-    .unwrap();
+    let run = rustgs::train_splats(&dataset, &config, TrainingOptions::default()).unwrap();
 
-    assert!(!splats.is_empty());
+    assert!(!run.splats.is_empty());
 }
 
 #[cfg(feature = "gpu")]
@@ -141,17 +133,17 @@ fn tum_training_smoke_produces_post_train_evaluation_summary() {
         return;
     }
 
-    let splats = rustgs::train_splats_from_path(&root, &tum_config, &config).unwrap();
+    let run = rustgs::train_splats(&dataset, &config, TrainingOptions::default()).unwrap();
     let metadata = SplatMetadata {
         iterations: config.iterations,
         final_loss: 0.0,
-        gaussian_count: splats.len(),
-        sh_degree: splats.sh_degree(),
+        gaussian_count: run.splats.len(),
+        sh_degree: run.splats.sh_degree(),
     };
     let device = evaluation_device(EvaluationDevice::Cpu).unwrap();
     let evaluation = evaluate_splats(
         &dataset,
-        &splats,
+        &run.splats,
         &metadata,
         &SplatEvaluationConfig {
             render_scale: 0.25,
@@ -167,7 +159,7 @@ fn tum_training_smoke_produces_post_train_evaluation_summary() {
 
     assert_eq!(evaluation.summary.device, EvaluationDevice::Cpu);
     assert!(evaluation.summary.frame_count > 0);
-    assert_eq!(evaluation.summary.splat_count, splats.len());
+    assert_eq!(evaluation.summary.splat_count, run.splats.len());
     assert!(evaluation.summary.psnr_mean_db.is_finite());
     assert!(evaluation.summary.elapsed_seconds >= 0.0);
 }
