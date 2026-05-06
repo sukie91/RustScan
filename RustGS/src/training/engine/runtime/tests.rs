@@ -1,6 +1,6 @@
 use super::super::trainer::TrainingLoopObserver;
 use super::*;
-use crate::training::telemetry::{last_training_telemetry, LiteGsTrainingTelemetry};
+use crate::training::reporting::telemetry::{last_training_telemetry, LiteGsTrainingTelemetry};
 
 #[test]
 fn observer_emits_progress_and_snapshot_on_cadence() {

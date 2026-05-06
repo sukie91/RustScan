@@ -15,7 +15,7 @@ use crate::training::events::{
     TrainingRunCancelled, TrainingRunCompleted, TrainingRunReport, TrainingRunStarted,
     TrainingSnapshotReady,
 };
-use crate::training::telemetry::store_last_training_telemetry;
+use crate::training::reporting::telemetry::store_last_training_telemetry;
 use crate::training::TrainingConfig;
 use crate::{Intrinsics, TrainingDataset, TrainingError};
 
@@ -90,20 +90,20 @@ where
     let input_width = dataset.intrinsics.width as usize;
     let input_height = dataset.intrinsics.height as usize;
     let (target_width, target_height) =
-        scaled_dimensions(input_width, input_height, config.render_scale);
+        scaled_dimensions(input_width, input_height, config.raster.render_scale);
     let initial_splats = build_initial_splats(dataset, config)?;
 
     let mut loader = PrefetchFrameLoader::new(
         dataset,
         config,
         FrameLoaderOptions {
-            cache_capacity: config.frame_cache_capacity,
-            prefetch_ahead: config.frame_prefetch_ahead,
+            cache_capacity: config.data.frame_cache_capacity,
+            prefetch_ahead: config.data.frame_prefetch_ahead,
             rgb_target_size: Some((target_width, target_height)),
         },
     )?;
 
-    let frame_order = ordered_frame_indices(dataset.poses.len(), 1, config.frame_shuffle_seed);
+    let frame_order = ordered_frame_indices(dataset.poses.len(), 1, config.data.frame_shuffle_seed);
     let mut cameras = Vec::with_capacity(frame_order.len());
 
     for &pose_idx in &frame_order {

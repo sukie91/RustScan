@@ -42,10 +42,19 @@ fn tiny_dataset(root: &Path) -> TrainingDataset {
 fn tiny_config() -> TrainingConfig {
     TrainingConfig {
         iterations: 100,
-        max_initial_gaussians: 10,
-        use_synthetic_depth: true,
-        render_scale: 1.0,
-        frame_shuffle_seed: 0,
+        initialization: rustgs::TrainingInitializationConfig {
+            max_initial_gaussians: 10,
+            use_synthetic_depth: true,
+            ..rustgs::TrainingInitializationConfig::default()
+        },
+        raster: rustgs::TrainingRasterConfig {
+            render_scale: 1.0,
+            ..rustgs::TrainingRasterConfig::default()
+        },
+        data: rustgs::TrainingDataConfig {
+            frame_shuffle_seed: 0,
+            ..rustgs::TrainingDataConfig::default()
+        },
         ..TrainingConfig::default()
     }
 }

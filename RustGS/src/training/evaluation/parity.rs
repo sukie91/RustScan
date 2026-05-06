@@ -1,6 +1,8 @@
 #![allow(clippy::too_many_arguments)]
 
-use super::super::metrics::{ParityLossCurveSample, ParityLossTerms, ParityTopologyMetrics};
+use super::super::reporting::metrics::{
+    ParityLossCurveSample, ParityLossTerms, ParityTopologyMetrics,
+};
 use super::super::LiteGsConfig;
 
 use serde::{Deserialize, Serialize};
@@ -601,7 +603,7 @@ mod tests {
         ParityReferenceComparison, ParityThresholds, DEFAULT_CONVERGENCE_FIXTURE_ID,
         DEFAULT_TINY_FIXTURE_ID,
     };
-    use crate::training::metrics::ParityLossCurveSample;
+    use crate::training::reporting::metrics::ParityLossCurveSample;
     use crate::LiteGsConfig;
     use std::path::{Path, PathBuf};
     use tempfile::tempdir;

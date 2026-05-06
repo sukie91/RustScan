@@ -15,7 +15,7 @@ pub(crate) use bridge::{plan_mutations, snapshot_for_topology};
 use self::density_controller::{DensityControllerConfig, PruneMode};
 use self::schedule::{plan_topology_execution, schedule_topology, TopologyStepContext};
 use self::splat_metrics::TopologySplatMetrics;
-use super::metrics::{ParityFloatDistribution, ParityTopologyMetrics, ParityTopologyStepSample};
+use super::reporting::metrics::{ParityFloatDistribution, ParityTopologyMetrics, ParityTopologyStepSample};
 use super::{LiteGsConfig, LiteGsPruneMode, LiteGsSplitScoreMode, TrainingConfig};
 use crate::core::HostSplats;
 
@@ -132,7 +132,7 @@ impl TopologyPolicy {
     pub(crate) fn from_training_config(config: &TrainingConfig, scene_extent: f32) -> Self {
         Self {
             litegs: config.litegs.clone(),
-            max_gaussian_budget: config.max_initial_gaussians.max(1),
+            max_gaussian_budget: config.initialization.max_initial_gaussians.max(1),
             scene_extent,
             max_iterations: config.iterations,
         }
@@ -150,10 +150,10 @@ impl TopologyPolicy {
     #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn litegs_effective_densify_from_epoch(&self, frame_count: usize) -> usize {
         let total_epochs = self.litegs_total_epochs(frame_count);
-        if total_epochs == 0 || self.litegs.densify_from >= total_epochs {
+        if total_epochs == 0 || self.litegs.topology.densify_from >= total_epochs {
             total_epochs
         } else {
-            self.litegs.densify_from
+            self.litegs.topology.densify_from
         }
     }
 
@@ -164,11 +164,11 @@ impl TopologyPolicy {
         if densify_from >= total_epochs {
             return total_epochs;
         }
-        if let Some(until) = self.litegs.densify_until {
+        if let Some(until) = self.litegs.topology.densify_until {
             return until.max(densify_from.saturating_add(1)).min(total_epochs);
         }
 
-        let reset_interval = self.litegs.opacity_reset_interval.max(1);
+        let reset_interval = self.litegs.topology.opacity_reset_interval.max(1);
         let scaled = ((total_epochs as f32) * 0.8).floor() as usize;
         let computed = (scaled / reset_interval) * reset_interval + 1;
         computed
@@ -186,16 +186,16 @@ impl TopologyPolicy {
         current_gaussians: usize,
     ) -> DensityControllerConfig {
         DensityControllerConfig {
-            densify_grad_threshold: self.litegs.growth_grad_threshold,
+            densify_grad_threshold: self.litegs.growth.growth_grad_threshold,
             opacity_threshold: LITEGS_OPACITY_THRESHOLD,
             percent_dense: LITEGS_PERCENT_DENSE,
             screen_extent: self.scene_extent.max(1e-6),
             init_points_num: current_gaussians.max(1),
-            target_primitives: self.litegs.target_primitives.max(current_gaussians.max(1)),
-            densify_from: self.litegs.densify_from,
-            densify_until: self.litegs.densify_until.unwrap_or(self.max_iterations),
-            densification_interval: self.litegs.densification_interval.max(1),
-            prune_mode: density_controller_prune_mode(self.litegs.prune_mode),
+            target_primitives: self.litegs.topology.target_primitives.max(current_gaussians.max(1)),
+            densify_from: self.litegs.topology.densify_from,
+            densify_until: self.litegs.topology.densify_until.unwrap_or(self.max_iterations),
+            densification_interval: self.litegs.topology.densification_interval.max(1),
+            prune_mode: density_controller_prune_mode(self.litegs.pruning.prune_mode),
         }
     }
 }
@@ -247,16 +247,16 @@ pub(crate) fn plan_topology_from_host_snapshot(
 
     let requested_additions = litegs_requested_additions(
         &analysis.infos,
-        policy.litegs.growth_select_fraction,
+        policy.litegs.growth.growth_select_fraction,
         schedule.allow_extra_growth,
     );
     let max_gaussians = requested_gaussian_cap(&policy, metrics.len(), requested_additions);
     let max_new = max_gaussians.saturating_sub(metrics.len());
-    let topology_seed = topology_rng_seed(config.frame_shuffle_seed, iteration);
+    let topology_seed = topology_rng_seed(config.data.frame_shuffle_seed, iteration);
     let litegs_selection = litegs_select_densify_candidates_seeded(
         &analysis.infos,
         max_new,
-        policy.litegs.growth_select_fraction,
+        policy.litegs.growth.growth_select_fraction,
         schedule.allow_extra_growth,
         topology_seed,
     );
@@ -318,21 +318,21 @@ pub(super) fn analyze_topology_candidates(
         let actual_visibility_ratio = gaussian_stats.actual_visibility_ratio;
         let depth_scale = depth_scale_factor(
             camera_depth,
-            policy.litegs.depth_scale_gamma,
+            policy.litegs.growth.depth_scale_gamma,
             policy.scene_extent,
         );
-        let split_score = match policy.litegs.split_score_mode {
+        let split_score = match policy.litegs.growth.split_score_mode {
             LiteGsSplitScoreMode::Baseline => mean2d_grad,
             LiteGsSplitScoreMode::Abs => abs_mean2d_grad,
             LiteGsSplitScoreMode::AbsPixel => abs_pixel_mean2d_grad,
             LiteGsSplitScoreMode::AbsPixelDepth => abs_pixel_mean2d_grad * depth_scale,
         };
-        let growth_threshold = policy.litegs.growth_grad_threshold;
-        let split_threshold = match policy.litegs.split_score_mode {
+        let growth_threshold = policy.litegs.growth.growth_grad_threshold;
+        let split_threshold = match policy.litegs.growth.split_score_mode {
             LiteGsSplitScoreMode::Baseline => growth_threshold,
             LiteGsSplitScoreMode::Abs
             | LiteGsSplitScoreMode::AbsPixel
-            | LiteGsSplitScoreMode::AbsPixelDepth => policy.litegs.split_grad_threshold,
+            | LiteGsSplitScoreMode::AbsPixelDepth => policy.litegs.growth.split_grad_threshold,
         };
         let clone_candidate = max_scale <= clone_scale_threshold
             && mean2d_grad.is_finite()
@@ -342,12 +342,12 @@ pub(super) fn analyze_topology_candidates(
             && mean2d_grad.is_finite()
             && mean2d_grad >= growth_threshold;
         let mode_uses_augmented_baseline = matches!(
-            policy.litegs.split_score_mode,
+            policy.litegs.growth.split_score_mode,
             LiteGsSplitScoreMode::Abs | LiteGsSplitScoreMode::AbsPixel
         );
         let mode_uses_depth_scaled_score =
-            policy.litegs.split_score_mode == LiteGsSplitScoreMode::AbsPixelDepth;
-        let score_split_candidate = policy.litegs.split_score_mode
+            policy.litegs.growth.split_score_mode == LiteGsSplitScoreMode::AbsPixelDepth;
+        let score_split_candidate = policy.litegs.growth.split_score_mode
             != LiteGsSplitScoreMode::Baseline
             && split_score.is_finite()
             && split_score >= split_threshold
@@ -363,7 +363,7 @@ pub(super) fn analyze_topology_candidates(
         let growth_weight = if clone_candidate {
             mean2d_grad.max(0.0)
         } else if split_candidate {
-            match policy.litegs.split_score_mode {
+            match policy.litegs.growth.split_score_mode {
                 LiteGsSplitScoreMode::Baseline => mean2d_grad.max(0.0),
                 LiteGsSplitScoreMode::Abs | LiteGsSplitScoreMode::AbsPixel => {
                     split_score.max(mean2d_grad).max(0.0)
@@ -424,11 +424,11 @@ pub(super) fn analyze_topology_candidates(
             if is_near_camera_low_visibility(policy, &candidate_info) {
                 analysis.near_low_visibility_splats += 1;
             }
-            if candidate_info.opacity >= policy.litegs.prune_high_opacity_threshold {
+            if candidate_info.opacity >= policy.litegs.pruning.prune_high_opacity_threshold {
                 analysis.high_opacity_low_visibility_splats += 1;
             }
-            if policy.litegs.prune_visibility_dry_run
-                && candidate_info.opacity < policy.litegs.prune_high_opacity_threshold
+            if policy.litegs.pruning.prune_visibility_dry_run
+                && candidate_info.opacity < policy.litegs.pruning.prune_high_opacity_threshold
             {
                 analysis.visibility_prune_dry_run_candidates += 1;
             }
@@ -460,21 +460,21 @@ pub(super) fn analyze_topology_candidates(
 
 fn is_low_visibility(policy: &TopologyPolicy, info: &TopologyCandidateInfo) -> bool {
     collects_actual_visibility_diagnostics(policy)
-        && info.age >= policy.litegs.prune_min_age
+        && info.age >= policy.litegs.pruning.prune_min_age
         && info.actual_visibility_ratio.is_finite()
-        && info.actual_visibility_ratio < policy.litegs.prune_visibility_threshold
+        && info.actual_visibility_ratio < policy.litegs.pruning.prune_visibility_threshold
 }
 
 fn collects_actual_visibility_diagnostics(policy: &TopologyPolicy) -> bool {
-    policy.litegs.prune_visibility_dry_run
+    policy.litegs.pruning.prune_visibility_dry_run
         || matches!(
-            policy.litegs.prune_mode,
+            policy.litegs.pruning.prune_mode,
             LiteGsPruneMode::Threshold | LiteGsPruneMode::VisibilityWeight
         )
 }
 
 fn is_near_camera_low_visibility(policy: &TopologyPolicy, info: &TopologyCandidateInfo) -> bool {
-    let near_depth = policy.scene_extent.max(1e-6) * policy.litegs.depth_scale_gamma;
+    let near_depth = policy.scene_extent.max(1e-6) * policy.litegs.growth.depth_scale_gamma;
     is_low_visibility(policy, info)
         && info.camera_depth.is_finite()
         && info.camera_depth > 0.0
@@ -489,7 +489,7 @@ fn topology_step_sample(
     completed_epoch: Option<usize>,
 ) -> ParityTopologyStepSample {
     let clone_scale_threshold = policy.litegs_clone_scale_threshold();
-    let growth_threshold = policy.litegs.growth_grad_threshold;
+    let growth_threshold = policy.litegs.growth.growth_grad_threshold;
     let mut max_scales = Vec::with_capacity(splats.len());
     let mut opacities = Vec::with_capacity(splats.len());
     let mut large_splat_count = 0usize;
@@ -747,7 +747,7 @@ fn refine_decay_for_schedule(
     should_refine: bool,
     iteration: usize,
 ) -> Option<TopologyRefineDecay> {
-    if !should_refine || (config.litegs.opacity_decay == 0.0 && config.litegs.scale_decay == 0.0) {
+    if !should_refine || (config.litegs.refine.opacity_decay == 0.0 && config.litegs.refine.scale_decay == 0.0) {
         return None;
     }
 
@@ -757,8 +757,8 @@ fn refine_decay_for_schedule(
         iteration as f32 / config.iterations as f32
     };
     Some(TopologyRefineDecay {
-        opacity_decay: config.litegs.opacity_decay,
-        scale_decay: config.litegs.scale_decay,
+        opacity_decay: config.litegs.refine.opacity_decay,
+        scale_decay: config.litegs.refine.scale_decay,
         train_t: train_t.clamp(0.0, 1.0),
     })
 }
@@ -1101,14 +1101,14 @@ fn litegs_should_prune_candidate(
     retainable: bool,
     opacity_prune_enabled: bool,
 ) -> bool {
-    let opacity_threshold = policy.litegs.prune_opacity_threshold.max(BRUSH_MIN_OPACITY);
-    let old_enough = info.age >= policy.litegs.prune_min_age;
+    let opacity_threshold = policy.litegs.pruning.prune_opacity_threshold.max(BRUSH_MIN_OPACITY);
+    let old_enough = info.age >= policy.litegs.pruning.prune_min_age;
     let opacity_prune =
         old_enough && (!info.opacity.is_finite() || info.opacity < opacity_threshold);
     let history_invisible_prune = old_enough
         && info.visible_count == 0
-        && info.consecutive_invisible_epochs >= policy.litegs.prune_invisible_epochs;
-    let contribution_prune = match policy.litegs.prune_mode {
+        && info.consecutive_invisible_epochs >= policy.litegs.pruning.prune_invisible_epochs;
+    let contribution_prune = match policy.litegs.pruning.prune_mode {
         LiteGsPruneMode::Threshold => opacity_prune || history_invisible_prune,
         LiteGsPruneMode::Weight => {
             (opacity_prune_enabled && opacity_prune)
@@ -1117,8 +1117,8 @@ fn litegs_should_prune_candidate(
         LiteGsPruneMode::VisibilityWeight => {
             let visibility_prune = old_enough
                 && info.actual_visibility_ratio.is_finite()
-                && info.actual_visibility_ratio < policy.litegs.prune_visibility_threshold
-                && info.opacity < policy.litegs.prune_high_opacity_threshold;
+                && info.actual_visibility_ratio < policy.litegs.pruning.prune_visibility_threshold
+                && info.opacity < policy.litegs.pruning.prune_high_opacity_threshold;
             (opacity_prune_enabled && opacity_prune)
                 || (!opacity_prune_enabled && history_invisible_prune)
                 || visibility_prune

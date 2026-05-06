@@ -131,9 +131,9 @@ impl PrefetchFrameLoader {
         let width = dataset.intrinsics.width as usize;
         let height = dataset.intrinsics.height as usize;
         let depth_scale = dataset.depth_scale;
-        let use_synthetic_depth = config.use_synthetic_depth;
-        let min_depth = config.min_depth;
-        let max_depth = config.max_depth;
+        let use_synthetic_depth = config.initialization.use_synthetic_depth;
+        let min_depth = config.initialization.min_depth;
+        let max_depth = config.initialization.max_depth;
         let rgb_target_size = options.rgb_target_size;
         let (request_tx, request_rx) = mpsc::channel();
         let (result_tx, result_rx) = mpsc::channel();
@@ -717,7 +717,10 @@ mod tests {
         let dir = tempdir().unwrap();
         let dataset = make_dataset(dir.path(), 4);
         let config = TrainingConfig {
-            use_synthetic_depth: false,
+            initialization: crate::training::TrainingInitializationConfig {
+                use_synthetic_depth: false,
+                ..crate::training::TrainingInitializationConfig::default()
+            },
             ..TrainingConfig::default()
         };
         let mut loader = PrefetchFrameLoader::new(

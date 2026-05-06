@@ -1,5 +1,5 @@
 use crate::core::HostSplats;
-use crate::training::telemetry::LiteGsTrainingTelemetry;
+use crate::training::reporting::telemetry::LiteGsTrainingTelemetry;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,

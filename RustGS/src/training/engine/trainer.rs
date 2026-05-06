@@ -11,8 +11,8 @@ use crate::core::GaussianCamera;
 use crate::core::HostSplats;
 use crate::training::backward;
 use crate::training::data::frame_loader::PrefetchFrameLoader;
-use crate::training::metrics::{ParityLossCurveSample, ParityTopologyMetrics};
-use crate::training::telemetry::{LiteGsOptimizerLrs, LiteGsTrainingTelemetry};
+use crate::training::reporting::metrics::{ParityLossCurveSample, ParityTopologyMetrics};
+use crate::training::reporting::telemetry::{LiteGsOptimizerLrs, LiteGsTrainingTelemetry};
 use crate::training::topology::TopologyMutationPlan;
 use crate::training::topology::{apply_mutations, plan_mutations, snapshot_for_topology};
 use crate::training::topology::{apply_topology_metrics_delta, should_apply_topology_step};
@@ -126,25 +126,25 @@ impl WgpuTrainer {
 
         let transform_scales = Tensor::<GsBackendBase, 2>::from_data(
             TensorData::from([[
-                config.lr_position,
-                config.lr_position,
-                config.lr_position,
-                config.lr_rotation,
-                config.lr_rotation,
-                config.lr_rotation,
-                config.lr_rotation,
-                config.lr_scale,
-                config.lr_scale,
-                config.lr_scale,
+                config.optimizer.lr_position,
+                config.optimizer.lr_position,
+                config.optimizer.lr_position,
+                config.optimizer.lr_rotation,
+                config.optimizer.lr_rotation,
+                config.optimizer.lr_rotation,
+                config.optimizer.lr_rotation,
+                config.optimizer.lr_scale,
+                config.optimizer.lr_scale,
+                config.optimizer.lr_scale,
             ]]),
             &device,
         );
-        let sh_scale_values = vec![config.lr_color; sh_coeffs.max(1)];
+        let sh_scale_values = vec![config.optimizer.lr_color; sh_coeffs.max(1)];
         let sh_scales = Tensor::<GsBackendBase, 3>::from_data(
             TensorData::new(sh_scale_values, [1, sh_coeffs.max(1), 1]),
             &device,
         );
-        let opacity_scales = Tensor::<GsBackendBase, 1>::from_floats([config.lr_opacity], &device);
+        let opacity_scales = Tensor::<GsBackendBase, 1>::from_floats([config.optimizer.lr_opacity], &device);
 
         optimizer.set_transform_scaling(transform_scales);
         optimizer.set_sh_scaling(sh_scales);
@@ -183,7 +183,7 @@ impl WgpuTrainer {
 
         let decay_iterations = self
             .config
-            .lr_decay_iterations
+            .optimizer.lr_decay_iterations
             .unwrap_or(self.config.iterations)
             .max(1);
         let t = (iteration.min(decay_iterations) as f32) / (decay_iterations as f32);
@@ -191,31 +191,31 @@ impl WgpuTrainer {
     }
 
     fn position_lr_at(&self, iteration: usize) -> f32 {
-        self.lr_at(self.config.lr_position, self.config.lr_pos_final, iteration)
+        self.lr_at(self.config.optimizer.lr_position, self.config.optimizer.lr_pos_final, iteration)
     }
 
     fn scale_lr_at(&self, iteration: usize) -> f32 {
-        self.lr_at(self.config.lr_scale, self.config.lr_scale_final, iteration)
+        self.lr_at(self.config.optimizer.lr_scale, self.config.optimizer.lr_scale_final, iteration)
     }
 
     fn rotation_lr_at(&self, iteration: usize) -> f32 {
         self.lr_at(
-            self.config.lr_rotation,
-            self.config.lr_rotation_final,
+            self.config.optimizer.lr_rotation,
+            self.config.optimizer.lr_rotation_final,
             iteration,
         )
     }
 
     fn opacity_lr_at(&self, iteration: usize) -> f32 {
         self.lr_at(
-            self.config.lr_opacity,
-            self.config.lr_opacity_final,
+            self.config.optimizer.lr_opacity,
+            self.config.optimizer.lr_opacity_final,
             iteration,
         )
     }
 
     fn color_lr_at(&self, iteration: usize) -> f32 {
-        self.lr_at(self.config.lr_color, self.config.lr_color_final, iteration)
+        self.lr_at(self.config.optimizer.lr_color, self.config.optimizer.lr_color_final, iteration)
     }
 
     fn update_optimizer_lrs(&mut self, iteration: usize, sh_coeffs: usize) {
@@ -280,12 +280,12 @@ impl WgpuTrainer {
         let loss = combined_loss_with_kernel(
             pred_rgb,
             target_img,
-            self.config.loss_l1_weight as f64,
-            self.config.loss_ssim_weight as f64,
-            self.config.loss_gradient_weight as f64,
-            self.config.loss_robust_delta as f64,
-            self.config.loss_outlier_threshold as f64,
-            self.config.loss_outlier_weight as f64,
+            self.config.loss.loss_l1_weight as f64,
+            self.config.loss.loss_ssim_weight as f64,
+            self.config.loss.loss_gradient_weight as f64,
+            self.config.loss.loss_robust_delta as f64,
+            self.config.loss.loss_outlier_threshold as f64,
+            self.config.loss.loss_outlier_weight as f64,
             dynamic_mask.map(|mask| mask.0).unwrap_or(0.0) as f64,
             dynamic_mask.map(|mask| mask.1).unwrap_or(0.0) as f64,
             dynamic_mask.map(|mask| mask.2).unwrap_or(1.0) as f64,
@@ -450,7 +450,7 @@ impl WgpuTrainer {
         observer: &mut dyn TrainingLoopObserver,
     ) -> WgpuTrainingReport {
         let mut report = WgpuTrainingReport::default();
-        let mut rng = StdRng::seed_from_u64(self.config.frame_shuffle_seed);
+        let mut rng = StdRng::seed_from_u64(self.config.data.frame_shuffle_seed);
 
         for iteration in 0..num_iterations {
             if observer.should_cancel() {
@@ -551,7 +551,7 @@ impl WgpuTrainer {
         }
 
         let mut report = WgpuTrainingReport::default();
-        let mut rng = StdRng::seed_from_u64(self.config.frame_shuffle_seed);
+        let mut rng = StdRng::seed_from_u64(self.config.data.frame_shuffle_seed);
         self.telemetry.topology.total_epochs =
             Some(training_epoch_count(num_iterations, cameras.len()));
 
@@ -728,37 +728,37 @@ impl WgpuTrainer {
     }
 
     fn uses_visibility_pruning(&self) -> bool {
-        matches!(self.config.litegs.prune_mode, LiteGsPruneMode::Threshold)
+        matches!(self.config.litegs.pruning.prune_mode, LiteGsPruneMode::Threshold)
     }
 
     fn collects_actual_visibility_diagnostics(&self) -> bool {
-        self.config.litegs.prune_visibility_dry_run
+        self.config.litegs.pruning.prune_visibility_dry_run
             || self.uses_visibility_pruning()
             || matches!(
-                self.config.litegs.prune_mode,
+                self.config.litegs.pruning.prune_mode,
                 LiteGsPruneMode::VisibilityWeight
             )
     }
 
     fn raster_cov_blur_at(&self, iteration: usize, frame_count: usize) -> f32 {
-        let Some(final_blur) = self.config.raster_cov_blur_final else {
-            return self.config.raster_cov_blur;
+        let Some(final_blur) = self.config.raster.raster_cov_blur_final else {
+            return self.config.raster.raster_cov_blur;
         };
         let Some(start_epoch) = self
             .config
-            .raster_cov_blur_final_after_epoch
-            .or(self.config.litegs.topology_freeze_after_epoch)
+            .raster.raster_cov_blur_final_after_epoch
+            .or(self.config.litegs.topology.topology_freeze_after_epoch)
         else {
-            return self.config.raster_cov_blur;
+            return self.config.raster.raster_cov_blur;
         };
         if frame_count == 0 {
-            return self.config.raster_cov_blur;
+            return self.config.raster.raster_cov_blur;
         }
         let completed_epoch = iteration.saturating_sub(1) / frame_count;
         if completed_epoch >= start_epoch {
             final_blur
         } else {
-            self.config.raster_cov_blur
+            self.config.raster.raster_cov_blur
         }
     }
 
@@ -767,25 +767,25 @@ impl WgpuTrainer {
         iteration: usize,
         frame_count: usize,
     ) -> Option<(f32, f32, f32)> {
-        if self.config.loss_dynamic_mask_threshold_high
-            <= self.config.loss_dynamic_mask_threshold_low
-            || self.config.loss_dynamic_mask_min_weight >= 1.0
+        if self.config.loss.loss_dynamic_mask_threshold_high
+            <= self.config.loss.loss_dynamic_mask_threshold_low
+            || self.config.loss.loss_dynamic_mask_min_weight >= 1.0
             || frame_count == 0
         {
             return None;
         }
         let start_epoch = self
             .config
-            .loss_dynamic_mask_start_epoch
-            .or(self.config.litegs.topology_freeze_after_epoch)?;
+            .loss.loss_dynamic_mask_start_epoch
+            .or(self.config.litegs.topology.topology_freeze_after_epoch)?;
         let completed_epoch = iteration.saturating_sub(1) / frame_count;
         if completed_epoch < start_epoch {
             return None;
         }
         Some((
-            self.config.loss_dynamic_mask_threshold_low,
-            self.config.loss_dynamic_mask_threshold_high,
-            self.config.loss_dynamic_mask_min_weight,
+            self.config.loss.loss_dynamic_mask_threshold_low,
+            self.config.loss.loss_dynamic_mask_threshold_high,
+            self.config.loss.loss_dynamic_mask_min_weight,
         ))
     }
 
@@ -979,19 +979,19 @@ fn initial_training_telemetry(
     initial_splats: usize,
 ) -> LiteGsTrainingTelemetry {
     LiteGsTrainingTelemetry {
-        active_sh_degree: Some(config.litegs.sh_degree),
-        rotation_frozen: config.lr_rotation == 0.0,
+        active_sh_degree: Some(config.litegs.rendering.sh_degree),
+        rotation_frozen: config.optimizer.lr_rotation == 0.0,
         learning_rates: LiteGsOptimizerLrs {
-            xyz: Some(config.lr_position),
-            sh_0: Some(config.lr_color),
-            sh_rest: Some(config.lr_color),
-            opacity: Some(config.lr_opacity),
-            scale: Some(config.lr_scale),
-            rot: Some(config.lr_rotation),
+            xyz: Some(config.optimizer.lr_position),
+            sh_0: Some(config.optimizer.lr_color),
+            sh_rest: Some(config.optimizer.lr_color),
+            opacity: Some(config.optimizer.lr_opacity),
+            scale: Some(config.optimizer.lr_scale),
+            rot: Some(config.optimizer.lr_rotation),
         },
         topology: ParityTopologyMetrics {
             initialization_gaussians: Some(initial_splats),
-            topology_freeze_epoch: config.litegs.topology_freeze_after_epoch,
+            topology_freeze_epoch: config.litegs.topology.topology_freeze_after_epoch,
             ..ParityTopologyMetrics::default()
         },
         ..LiteGsTrainingTelemetry::default()
@@ -1024,8 +1024,11 @@ mod tests {
     fn test_position_lr_decay() {
         let config = TrainingConfig {
             iterations: 1000,
-            lr_position: 1.6e-4_f32,
-            lr_pos_final: 1.6e-6_f32,
+            optimizer: crate::training::TrainingOptimizerConfig {
+                lr_position: 1.6e-4_f32,
+                lr_pos_final: 1.6e-6_f32,
+                ..crate::training::TrainingOptimizerConfig::default()
+            },
             ..TrainingConfig::default()
         };
 
@@ -1035,15 +1038,15 @@ mod tests {
         let at_end = trainer.position_lr_at(config.iterations);
 
         assert!(
-            (at_0 - config.lr_position).abs() < 1e-8,
+            (at_0 - config.optimizer.lr_position).abs() < 1e-8,
             "initial LR should equal lr_position"
         );
         assert!(
-            (at_end - config.lr_pos_final).abs() < config.lr_pos_final * 0.01,
+            (at_end - config.optimizer.lr_pos_final).abs() < config.optimizer.lr_pos_final * 0.01,
             "final LR should ≈ lr_pos_final"
         );
         assert!(
-            at_mid < config.lr_position && at_mid > config.lr_pos_final,
+            at_mid < config.optimizer.lr_position && at_mid > config.optimizer.lr_pos_final,
             "mid LR should be between bounds"
         );
     }
@@ -1052,15 +1055,18 @@ mod tests {
     fn test_group_lr_decay_uses_configured_horizon() {
         let config = TrainingConfig {
             iterations: 30_000,
-            lr_decay_iterations: Some(10_000),
-            lr_scale: 5e-3,
-            lr_scale_final: 5e-4,
-            lr_rotation: 1e-3,
-            lr_rotation_final: 1e-4,
-            lr_opacity: 5e-2,
-            lr_opacity_final: 5e-3,
-            lr_color: 2.5e-3,
-            lr_color_final: 2.5e-4,
+            optimizer: crate::training::TrainingOptimizerConfig {
+                lr_decay_iterations: Some(10_000),
+                lr_scale: 5e-3,
+                lr_scale_final: 5e-4,
+                lr_rotation: 1e-3,
+                lr_rotation_final: 1e-4,
+                lr_opacity: 5e-2,
+                lr_opacity_final: 5e-3,
+                lr_color: 2.5e-3,
+                lr_color_final: 2.5e-4,
+                ..crate::training::TrainingOptimizerConfig::default()
+            },
             ..TrainingConfig::default()
         };
 

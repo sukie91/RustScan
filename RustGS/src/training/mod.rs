@@ -2,7 +2,7 @@
 
 mod config;
 mod evaluation;
-mod metrics;
+mod reporting;
 
 #[cfg(test)]
 mod tests;
@@ -23,7 +23,6 @@ gpu_modules!(
     events,
     forward,
     gpu_primitives,
-    telemetry,
     topology,
 );
 
@@ -58,18 +57,23 @@ pub use events::{
     TrainingRunCancelled, TrainingRunCompleted, TrainingRunReport, TrainingRunStarted,
     TrainingSnapshotReady,
 };
-pub use metrics::{
+pub use reporting::metrics::{
     ParityFloatDistribution, ParityLossCurveSample, ParityLossTerms, ParityTopologyMetrics,
     ParityTopologyStepSample,
 };
 
 pub use config::{
-    LiteGsConfig, LiteGsOpacityResetMode, LiteGsPruneMode, LiteGsSplitScoreMode, LiteGsTileSize,
-    LiteGsTrainingProfile, TrainingBackend, TrainingConfig, TrainingResult,
-    DEFAULT_RASTER_COV_BLUR,
+    LiteGsCameraConfig, LiteGsConfig, LiteGsFeatureConfig, LiteGsGrowthConfig,
+    LiteGsOpacityResetMode, LiteGsPruneMode, LiteGsPruningConfig, LiteGsRefineConfig,
+    LiteGsRenderingConfig, LiteGsSplitScoreMode, LiteGsTileSize, LiteGsTopologyConfig,
+    LiteGsTrainingProfile, TrainingBackend, TrainingConfig, TrainingDataConfig,
+    TrainingInitializationConfig, TrainingLossConfig, TrainingOptimizerConfig,
+    TrainingRasterConfig, TrainingResult, DEFAULT_RASTER_COV_BLUR,
 };
 #[cfg(feature = "gpu")]
-pub use telemetry::{last_training_telemetry, LiteGsOptimizerLrs, LiteGsTrainingTelemetry};
+pub use reporting::telemetry::{
+    last_training_telemetry, LiteGsOptimizerLrs, LiteGsTrainingTelemetry,
+};
 
 #[cfg(feature = "gpu")]
 pub fn train_splats(
@@ -77,93 +81,7 @@ pub fn train_splats(
     config: &TrainingConfig,
     options: TrainingOptions<'_>,
 ) -> Result<TrainingRun, TrainingError> {
-    telemetry::store_last_training_telemetry(None);
+    reporting::telemetry::store_last_training_telemetry(None);
     config.validate()?;
-    validate_litegs_mac_v1_config(config)?;
     engine::train_splats(dataset, config, options)
-}
-
-#[cfg(feature = "gpu")]
-fn validate_litegs_mac_v1_config(config: &TrainingConfig) -> Result<(), TrainingError> {
-    let defaults = LiteGsConfig::default();
-    let mut unsupported = Vec::new();
-
-    if config.litegs.tile_size != defaults.tile_size {
-        unsupported.push(format!(
-            "tile_size={} overrides are reserved for later LiteGS parity work; bootstrap profile currently expects {}",
-            config.litegs.tile_size, defaults.tile_size
-        ));
-    }
-    if config.litegs.sh_degree == 0 {
-        unsupported
-            .push("sh_degree=0 is not supported for LiteGsMacV1; use degree >= 1".to_string());
-    }
-    if config.litegs.densification_interval == 0 {
-        unsupported.push("densification_interval must be >= 1".to_string());
-    }
-    if config.litegs.refine_every == 0 {
-        unsupported.push("refine_every must be >= 1".to_string());
-    }
-    if !config.litegs.growth_grad_threshold.is_finite() || config.litegs.growth_grad_threshold < 0.0
-    {
-        unsupported.push("growth_grad_threshold must be finite and >= 0".to_string());
-    }
-    if !config.litegs.split_grad_threshold.is_finite() || config.litegs.split_grad_threshold < 0.0 {
-        unsupported.push("split_grad_threshold must be finite and >= 0".to_string());
-    }
-    if !config.litegs.depth_scale_gamma.is_finite() || config.litegs.depth_scale_gamma <= 0.0 {
-        unsupported.push("depth_scale_gamma must be finite and > 0".to_string());
-    }
-    if !config.litegs.growth_select_fraction.is_finite()
-        || !(0.0..=1.0).contains(&config.litegs.growth_select_fraction)
-    {
-        unsupported.push("growth_select_fraction must be in [0, 1]".to_string());
-    }
-    if config.litegs.growth_stop_iter == 0 {
-        unsupported.push("growth_stop_iter must be >= 1".to_string());
-    }
-    if !config.litegs.opacity_decay.is_finite()
-        || !(0.0..=1.0).contains(&config.litegs.opacity_decay)
-    {
-        unsupported.push("opacity_decay must be finite and in [0, 1]".to_string());
-    }
-    if !config.litegs.scale_decay.is_finite() || !(0.0..=1.0).contains(&config.litegs.scale_decay) {
-        unsupported.push("scale_decay must be finite and in [0, 1]".to_string());
-    }
-    if !config.litegs.prune_opacity_threshold.is_finite()
-        || !(0.0..=1.0).contains(&config.litegs.prune_opacity_threshold)
-    {
-        unsupported.push("prune_opacity_threshold must be finite and in [0, 1]".to_string());
-    }
-    if !config.litegs.prune_visibility_threshold.is_finite()
-        || !(0.0..=1.0).contains(&config.litegs.prune_visibility_threshold)
-    {
-        unsupported.push("prune_visibility_threshold must be finite and in [0, 1]".to_string());
-    }
-    if !config.litegs.prune_high_opacity_threshold.is_finite()
-        || !(0.0..=1.0).contains(&config.litegs.prune_high_opacity_threshold)
-    {
-        unsupported.push("prune_high_opacity_threshold must be finite and in [0, 1]".to_string());
-    }
-    if config.litegs.opacity_reset_interval == 0 {
-        unsupported.push("opacity_reset_interval must be >= 1".to_string());
-    }
-    if config.litegs.target_primitives == 0 {
-        unsupported.push("target_primitives must be >= 1".to_string());
-    }
-    if config.litegs.prune_min_age == 0 {
-        unsupported.push("prune_min_age must be >= 1 to protect newly-added Gaussians".to_string());
-    }
-    if config.litegs.prune_invisible_epochs == 0 {
-        unsupported.push("prune_invisible_epochs must be >= 1".to_string());
-    }
-
-    if unsupported.is_empty() {
-        return Ok(());
-    }
-
-    Err(TrainingError::TrainingFailed(format!(
-        "LiteGsMacV1 bootstrap profile rejected unsupported overrides: {}",
-        unsupported.join("; ")
-    )))
 }

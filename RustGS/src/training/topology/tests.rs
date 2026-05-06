@@ -14,7 +14,7 @@ use super::{
 };
 use crate::core::HostSplats as Splats;
 use crate::sh::{rgb_to_sh0_value, sh_coeff_count_for_degree, SplatColorRepresentation};
-use crate::training::metrics::ParityTopologyMetrics;
+use crate::training::reporting::metrics::ParityTopologyMetrics;
 use crate::training::{LiteGsConfig, TrainingConfig};
 
 pub(super) fn densify_snapshot_litegs(
@@ -303,18 +303,23 @@ fn test_snapshot(
     }
 }
 
+fn litegs_with(mut configure: impl FnMut(&mut LiteGsConfig)) -> LiteGsConfig {
+    let mut litegs = LiteGsConfig::default();
+    configure(&mut litegs);
+    litegs
+}
+
 #[test]
 fn litegs_schedule_respects_refine_cadence_and_freeze() {
     let config = TrainingConfig {
         iterations: 30,
-        litegs: LiteGsConfig {
-            densify_from: 1,
-            densify_until: Some(6),
-            refine_every: 2,
-            opacity_reset_interval: 2,
-            topology_freeze_after_epoch: Some(4),
-            ..LiteGsConfig::default()
-        },
+        litegs: litegs_with(|litegs| {
+            litegs.topology.densify_from = 1;
+            litegs.topology.densify_until = Some(6);
+            litegs.topology.refine_every = 2;
+            litegs.topology.opacity_reset_interval = 2;
+            litegs.topology.topology_freeze_after_epoch = Some(4);
+        }),
         ..TrainingConfig::default()
     };
     let policy = TopologyPolicy::from_training_config(&config, 1.0);
@@ -350,12 +355,11 @@ fn litegs_schedule_respects_refine_cadence_and_freeze() {
 fn litegs_growth_freeze_still_allows_pruning() {
     let config = TrainingConfig {
         iterations: 30_000,
-        litegs: LiteGsConfig {
-            growth_freeze_after_epoch: Some(4),
-            prune_until_epoch: Some(30),
-            refine_every: 160,
-            ..LiteGsConfig::default()
-        },
+        litegs: litegs_with(|litegs| {
+            litegs.topology.growth_freeze_after_epoch = Some(4);
+            litegs.pruning.prune_until_epoch = Some(30);
+            litegs.topology.refine_every = 160;
+        }),
         ..TrainingConfig::default()
     };
     let policy = TopologyPolicy::from_training_config(&config, 1.0);
@@ -378,11 +382,10 @@ fn litegs_growth_freeze_still_allows_pruning() {
 fn litegs_short_run_schedule_disables_densify_window() {
     let config = TrainingConfig {
         iterations: 500,
-        litegs: LiteGsConfig {
-            densify_from: 3,
-            refine_every: 200,
-            ..LiteGsConfig::default()
-        },
+        litegs: litegs_with(|litegs| {
+            litegs.topology.densify_from = 3;
+            litegs.topology.refine_every = 200;
+        }),
         ..TrainingConfig::default()
     };
     let policy = TopologyPolicy::from_training_config(&config, 1.0);
@@ -434,10 +437,9 @@ fn litegs_short_run_schedule_disables_densify_window() {
 fn should_apply_topology_step_uses_litegs_refine_cadence() {
     let config = TrainingConfig {
         iterations: 500,
-        litegs: LiteGsConfig {
-            refine_every: 160,
-            ..LiteGsConfig::default()
-        },
+        litegs: litegs_with(|litegs| {
+            litegs.topology.refine_every = 160;
+        }),
         ..TrainingConfig::default()
     };
 
@@ -507,10 +509,9 @@ fn litegs_selection_is_repeatable_for_same_seed() {
 #[test]
 fn litegs_densify_preserves_sh_layout() {
     let config = TrainingConfig {
-        litegs: LiteGsConfig {
-            sh_degree: 3,
-            ..LiteGsConfig::default()
-        },
+        litegs: litegs_with(|litegs| {
+            litegs.rendering.sh_degree = 3;
+        }),
         ..TrainingConfig::default()
     };
     let policy = TopologyPolicy::from_training_config(&config, 1.0);
@@ -537,11 +538,10 @@ fn litegs_densify_preserves_sh_layout() {
 #[test]
 fn analyze_topology_candidates_marks_litegs_growth_and_prune() {
     let config = TrainingConfig {
-        litegs: LiteGsConfig {
-            prune_min_age: 1,
-            prune_invisible_epochs: 1,
-            ..LiteGsConfig::default()
-        },
+        litegs: litegs_with(|litegs| {
+            litegs.pruning.prune_min_age = 1;
+            litegs.pruning.prune_invisible_epochs = 1;
+        }),
         ..TrainingConfig::default()
     };
     let policy = TopologyPolicy::from_training_config(&config, 1.0);
@@ -593,13 +593,12 @@ fn analyze_topology_candidates_marks_litegs_growth_and_prune() {
 #[test]
 fn analyze_topology_candidates_uses_configured_prune_opacity_threshold() {
     let config = TrainingConfig {
-        litegs: LiteGsConfig {
-            prune_opacity_threshold: 0.02,
-            prune_mode: crate::training::LiteGsPruneMode::Threshold,
-            prune_min_age: 1,
-            prune_invisible_epochs: 100,
-            ..LiteGsConfig::default()
-        },
+        litegs: litegs_with(|litegs| {
+            litegs.pruning.prune_opacity_threshold = 0.02;
+            litegs.pruning.prune_mode = crate::training::LiteGsPruneMode::Threshold;
+            litegs.pruning.prune_min_age = 1;
+            litegs.pruning.prune_invisible_epochs = 100;
+        }),
         ..TrainingConfig::default()
     };
     let policy = TopologyPolicy::from_training_config(&config, 1.0);
@@ -628,11 +627,10 @@ fn analyze_topology_candidates_uses_configured_prune_opacity_threshold() {
 #[test]
 fn weight_pruning_keeps_visible_low_opacity_splats_after_growth_freeze() {
     let config = TrainingConfig {
-        litegs: LiteGsConfig {
-            prune_opacity_threshold: 0.02,
-            prune_mode: crate::training::LiteGsPruneMode::Weight,
-            ..LiteGsConfig::default()
-        },
+        litegs: litegs_with(|litegs| {
+            litegs.pruning.prune_opacity_threshold = 0.02;
+            litegs.pruning.prune_mode = crate::training::LiteGsPruneMode::Weight;
+        }),
         ..TrainingConfig::default()
     };
     let policy = TopologyPolicy::from_training_config(&config, 1.0);
@@ -661,11 +659,10 @@ fn weight_pruning_keeps_visible_low_opacity_splats_after_growth_freeze() {
 #[test]
 fn weight_pruning_uses_opacity_during_growth() {
     let config = TrainingConfig {
-        litegs: LiteGsConfig {
-            prune_opacity_threshold: 0.02,
-            prune_mode: crate::training::LiteGsPruneMode::Weight,
-            ..LiteGsConfig::default()
-        },
+        litegs: litegs_with(|litegs| {
+            litegs.pruning.prune_opacity_threshold = 0.02;
+            litegs.pruning.prune_mode = crate::training::LiteGsPruneMode::Weight;
+        }),
         ..TrainingConfig::default()
     };
     let policy = TopologyPolicy::from_training_config(&config, 1.0);
@@ -694,11 +691,10 @@ fn weight_pruning_uses_opacity_during_growth() {
 #[test]
 fn invisible_pruning_requires_configured_consecutive_windows() {
     let config = TrainingConfig {
-        litegs: LiteGsConfig {
-            prune_min_age: 1,
-            prune_invisible_epochs: 3,
-            ..LiteGsConfig::default()
-        },
+        litegs: litegs_with(|litegs| {
+            litegs.pruning.prune_min_age = 1;
+            litegs.pruning.prune_invisible_epochs = 3;
+        }),
         ..TrainingConfig::default()
     };
     let policy = TopologyPolicy::from_training_config(&config, 1.0);
@@ -746,11 +742,10 @@ fn invisible_pruning_requires_configured_consecutive_windows() {
 #[test]
 fn opacity_pruning_respects_min_age() {
     let config = TrainingConfig {
-        litegs: LiteGsConfig {
-            prune_min_age: 5,
-            prune_opacity_threshold: 0.02,
-            ..LiteGsConfig::default()
-        },
+        litegs: litegs_with(|litegs| {
+            litegs.pruning.prune_min_age = 5;
+            litegs.pruning.prune_opacity_threshold = 0.02;
+        }),
         ..TrainingConfig::default()
     };
     let policy = TopologyPolicy::from_training_config(&config, 1.0);
@@ -795,14 +790,13 @@ fn opacity_pruning_respects_min_age() {
 fn density_controller_reference_summary_tracks_threshold_masks() {
     let config = TrainingConfig {
         iterations: 12,
-        litegs: LiteGsConfig {
-            densify_from: 1,
-            densify_until: Some(8),
-            densification_interval: 1,
-            growth_grad_threshold: 0.001,
-            prune_mode: crate::training::LiteGsPruneMode::Threshold,
-            ..LiteGsConfig::default()
-        },
+        litegs: litegs_with(|litegs| {
+            litegs.topology.densify_from = 1;
+            litegs.topology.densify_until = Some(8);
+            litegs.topology.densification_interval = 1;
+            litegs.growth.growth_grad_threshold = 0.001;
+            litegs.pruning.prune_mode = crate::training::LiteGsPruneMode::Threshold;
+        }),
         ..TrainingConfig::default()
     };
     let policy = TopologyPolicy::from_training_config(&config, 2.0);
@@ -860,15 +854,14 @@ fn density_controller_reference_summary_tracks_threshold_masks() {
 fn density_controller_reference_summary_tracks_weight_budget() {
     let config = TrainingConfig {
         iterations: 12,
-        litegs: LiteGsConfig {
-            densify_from: 1,
-            densify_until: Some(5),
-            densification_interval: 1,
-            growth_grad_threshold: 0.001,
-            prune_mode: crate::training::LiteGsPruneMode::Weight,
-            target_primitives: 6,
-            ..LiteGsConfig::default()
-        },
+        litegs: litegs_with(|litegs| {
+            litegs.topology.densify_from = 1;
+            litegs.topology.densify_until = Some(5);
+            litegs.topology.densification_interval = 1;
+            litegs.growth.growth_grad_threshold = 0.001;
+            litegs.pruning.prune_mode = crate::training::LiteGsPruneMode::Weight;
+            litegs.topology.target_primitives = 6;
+        }),
         ..TrainingConfig::default()
     };
     let policy = TopologyPolicy::from_training_config(&config, 1.0);

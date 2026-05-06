@@ -42,16 +42,18 @@ pub(super) fn schedule_topology(
     let phase_iter = step.iteration.saturating_sub(1);
     let topology_frozen = policy
         .litegs
+        .topology
         .topology_freeze_after_epoch
         .map(|freeze_epoch| epoch >= freeze_epoch)
         .unwrap_or(false);
     let growth_frozen = topology_frozen
         || policy
             .litegs
+            .topology
             .growth_freeze_after_epoch
             .map(|freeze_epoch| epoch >= freeze_epoch)
             .unwrap_or(false);
-    let refine_every = policy.litegs.refine_every.max(1);
+    let refine_every = policy.litegs.topology.refine_every.max(1);
     let progress = if policy.max_iterations == 0 {
         1.0
     } else {
@@ -61,6 +63,7 @@ pub(super) fn schedule_topology(
     let growth_window = progress <= BRUSH_REFINE_PROGRESS_LIMIT;
     let prune_window = policy
         .litegs
+        .pruning
         .prune_until_epoch
         .map(|until_epoch| epoch < until_epoch)
         .unwrap_or(growth_window);
@@ -71,7 +74,7 @@ pub(super) fn schedule_topology(
         densify,
         prune,
         reset_opacity: false,
-        allow_extra_growth: densify && phase_iter < policy.litegs.growth_stop_iter,
+        allow_extra_growth: densify && phase_iter < policy.litegs.growth.growth_stop_iter,
     }
 }
 

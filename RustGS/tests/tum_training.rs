@@ -79,7 +79,10 @@ fn trains_directly_from_workspace_tum_directory() {
     }
     let config = TrainingConfig {
         iterations: 1,
-        max_initial_gaussians: 10_000,
+        initialization: rustgs::TrainingInitializationConfig {
+            max_initial_gaussians: 10_000,
+            ..rustgs::TrainingInitializationConfig::default()
+        },
         ..TrainingConfig::default()
     };
     let dataset = load_training_dataset(
@@ -125,7 +128,10 @@ fn tum_training_smoke_produces_post_train_evaluation_summary() {
 
     let config = TrainingConfig {
         iterations: 1,
-        max_initial_gaussians: 2_000,
+        initialization: rustgs::TrainingInitializationConfig {
+            max_initial_gaussians: 2_000,
+            ..rustgs::TrainingInitializationConfig::default()
+        },
         ..TrainingConfig::default()
     };
     if dataset.initial_points.is_empty() {

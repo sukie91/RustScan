@@ -1041,7 +1041,7 @@ mod tests {
         let config = build_training_config(&args).unwrap();
 
         assert_eq!(
-            config.litegs.prune_mode,
+            config.litegs.pruning.prune_mode,
             rustgs::LiteGsPruneMode::VisibilityWeight
         );
     }
@@ -1072,11 +1072,11 @@ mod tests {
         assert_eq!(args.frame_stride, 1);
         assert!(args.eval_after_train);
         assert_eq!(args.eval_raster_cov_blur, Some(0.2));
-        assert_eq!(config.raster_cov_blur, 0.3);
-        assert_eq!(config.litegs.topology_freeze_after_epoch, Some(18));
-        assert_eq!(config.litegs.growth_select_fraction, 0.14);
-        assert_eq!(config.loss_l1_weight, 0.8);
-        assert_eq!(config.loss_ssim_weight, 0.2);
+        assert_eq!(config.raster.raster_cov_blur, 0.3);
+        assert_eq!(config.litegs.topology.topology_freeze_after_epoch, Some(18));
+        assert_eq!(config.litegs.growth.growth_select_fraction, 0.14);
+        assert_eq!(config.loss.loss_l1_weight, 0.8);
+        assert_eq!(config.loss.loss_ssim_weight, 0.2);
     }
 
     #[test]
@@ -1094,9 +1094,9 @@ mod tests {
         let args = effective_train_args(args);
         let config = build_training_config(&args).unwrap();
 
-        assert_eq!(config.litegs.growth_select_fraction, 0.14);
-        assert_eq!(config.loss_l1_weight, 0.9);
-        assert_eq!(config.loss_ssim_weight, 0.1);
+        assert_eq!(config.litegs.growth.growth_select_fraction, 0.14);
+        assert_eq!(config.loss.loss_l1_weight, 0.9);
+        assert_eq!(config.loss.loss_ssim_weight, 0.1);
     }
 
     #[test]
@@ -1116,10 +1116,10 @@ mod tests {
 
         assert_eq!(args.max_frames, 0);
         assert_eq!(args.frame_stride, 1);
-        assert_eq!(config.litegs.topology_freeze_after_epoch, Some(4));
-        assert_eq!(config.litegs.growth_select_fraction, 0.25);
-        assert_eq!(config.loss_l1_weight, 0.8);
-        assert_eq!(config.loss_ssim_weight, 0.2);
+        assert_eq!(config.litegs.topology.topology_freeze_after_epoch, Some(4));
+        assert_eq!(config.litegs.growth.growth_select_fraction, 0.25);
+        assert_eq!(config.loss.loss_l1_weight, 0.8);
+        assert_eq!(config.loss.loss_ssim_weight, 0.2);
     }
 
     #[test]
@@ -1137,14 +1137,14 @@ mod tests {
         let config = build_training_config(&args).unwrap();
 
         assert_eq!(
-            config.litegs.training_profile,
+            config.litegs.features.training_profile,
             rustgs::LiteGsTrainingProfile::AbsPixel
         );
         assert_eq!(
-            config.litegs.split_score_mode,
+            config.litegs.growth.split_score_mode,
             rustgs::LiteGsSplitScoreMode::AbsPixel
         );
-        assert_eq!(config.litegs.split_grad_threshold, 0.00001);
+        assert_eq!(config.litegs.growth.split_grad_threshold, 0.00001);
     }
 
     #[test]
@@ -1498,46 +1498,52 @@ mod tests {
         ]);
         let config = build_training_config(&args).unwrap();
 
-        assert_eq!(config.litegs.sh_degree, 4);
-        assert_eq!(config.litegs.tile_size, rustgs::LiteGsTileSize::new(16, 16));
-        assert!(config.litegs.sparse_grad);
-        assert_eq!(config.litegs.reg_weight, 0.01);
-        assert!(config.litegs.enable_transmittance);
-        assert!(config.litegs.enable_depth);
-        assert_eq!(config.litegs.densify_from, 6);
-        assert_eq!(config.litegs.densify_until, Some(24));
-        assert_eq!(config.litegs.topology_freeze_after_epoch, Some(18));
-        assert_eq!(config.litegs.growth_freeze_after_epoch, Some(9));
-        assert_eq!(config.litegs.refine_every, 120);
-        assert_eq!(config.litegs.densification_interval, 8);
-        assert_eq!(config.litegs.growth_grad_threshold, 0.0003);
-        assert_eq!(config.litegs.growth_select_fraction, 0.35);
-        assert_eq!(config.litegs.growth_stop_iter, 2_400);
-        assert_eq!(config.litegs.opacity_decay, 0.003);
-        assert_eq!(config.litegs.scale_decay, 0.0015);
-        assert_eq!(config.litegs.opacity_reset_interval, 12);
+        assert_eq!(config.litegs.rendering.sh_degree, 4);
         assert_eq!(
-            config.litegs.opacity_reset_mode,
+            config.litegs.rendering.tile_size,
+            rustgs::LiteGsTileSize::new(16, 16)
+        );
+        assert!(config.litegs.features.sparse_grad);
+        assert_eq!(config.litegs.features.reg_weight, 0.01);
+        assert!(config.litegs.features.enable_transmittance);
+        assert!(config.litegs.features.enable_depth);
+        assert_eq!(config.litegs.topology.densify_from, 6);
+        assert_eq!(config.litegs.topology.densify_until, Some(24));
+        assert_eq!(config.litegs.topology.topology_freeze_after_epoch, Some(18));
+        assert_eq!(config.litegs.topology.growth_freeze_after_epoch, Some(9));
+        assert_eq!(config.litegs.topology.refine_every, 120);
+        assert_eq!(config.litegs.topology.densification_interval, 8);
+        assert_eq!(config.litegs.growth.growth_grad_threshold, 0.0003);
+        assert_eq!(config.litegs.growth.growth_select_fraction, 0.35);
+        assert_eq!(config.litegs.growth.growth_stop_iter, 2_400);
+        assert_eq!(config.litegs.refine.opacity_decay, 0.003);
+        assert_eq!(config.litegs.refine.scale_decay, 0.0015);
+        assert_eq!(config.litegs.topology.opacity_reset_interval, 12);
+        assert_eq!(
+            config.litegs.topology.opacity_reset_mode,
             rustgs::LiteGsOpacityResetMode::Reset
         );
-        assert_eq!(config.litegs.prune_mode, rustgs::LiteGsPruneMode::Threshold);
-        assert_eq!(config.litegs.prune_offset_epochs, 0); // default value
-        assert_eq!(config.litegs.prune_min_age, 5); // default value
-        assert_eq!(config.litegs.prune_invisible_epochs, 10); // default value
-        assert_eq!(config.litegs.prune_opacity_threshold, 0.01);
-        assert!(config.litegs.prune_visibility_dry_run);
-        assert_eq!(config.litegs.prune_visibility_threshold, 0.07);
-        assert_eq!(config.litegs.prune_high_opacity_threshold, 0.2);
-        assert_eq!(config.litegs.prune_until_epoch, Some(60));
-        assert_eq!(config.litegs.target_primitives, 200_000);
-        assert!(config.litegs.learnable_viewproj);
-        assert_eq!(config.litegs.lr_pose, 0.0002);
-        assert_eq!(config.frame_shuffle_seed, 42);
-        assert_eq!(config.lr_decay_iterations, Some(10_000));
-        assert_eq!(config.lr_scale_final, 0.0005);
-        assert_eq!(config.lr_rotation_final, 0.0001);
-        assert_eq!(config.lr_opacity_final, 0.005);
-        assert_eq!(config.lr_color_final, 0.00025);
+        assert_eq!(
+            config.litegs.pruning.prune_mode,
+            rustgs::LiteGsPruneMode::Threshold
+        );
+        assert_eq!(config.litegs.pruning.prune_offset_epochs, 0); // default value
+        assert_eq!(config.litegs.pruning.prune_min_age, 5); // default value
+        assert_eq!(config.litegs.pruning.prune_invisible_epochs, 10); // default value
+        assert_eq!(config.litegs.pruning.prune_opacity_threshold, 0.01);
+        assert!(config.litegs.pruning.prune_visibility_dry_run);
+        assert_eq!(config.litegs.pruning.prune_visibility_threshold, 0.07);
+        assert_eq!(config.litegs.pruning.prune_high_opacity_threshold, 0.2);
+        assert_eq!(config.litegs.pruning.prune_until_epoch, Some(60));
+        assert_eq!(config.litegs.topology.target_primitives, 200_000);
+        assert!(config.litegs.camera.learnable_viewproj);
+        assert_eq!(config.litegs.camera.lr_pose, 0.0002);
+        assert_eq!(config.data.frame_shuffle_seed, 42);
+        assert_eq!(config.optimizer.lr_decay_iterations, Some(10_000));
+        assert_eq!(config.optimizer.lr_scale_final, 0.0005);
+        assert_eq!(config.optimizer.lr_rotation_final, 0.0001);
+        assert_eq!(config.optimizer.lr_opacity_final, 0.005);
+        assert_eq!(config.optimizer.lr_color_final, 0.00025);
     }
 
     #[test]
@@ -1558,10 +1564,10 @@ mod tests {
         ]);
         let config = build_training_config(&args).unwrap();
 
-        assert_eq!(config.loss_dynamic_mask_threshold_low, 0.12);
-        assert_eq!(config.loss_dynamic_mask_threshold_high, 0.32);
-        assert_eq!(config.loss_dynamic_mask_min_weight, 0.35);
-        assert_eq!(config.loss_dynamic_mask_start_epoch, None);
+        assert_eq!(config.loss.loss_dynamic_mask_threshold_low, 0.12);
+        assert_eq!(config.loss.loss_dynamic_mask_threshold_high, 0.32);
+        assert_eq!(config.loss.loss_dynamic_mask_min_weight, 0.35);
+        assert_eq!(config.loss.loss_dynamic_mask_start_epoch, None);
     }
 
     #[test]
@@ -1586,10 +1592,10 @@ mod tests {
         let config = build_training_config(&args).unwrap();
 
         assert_eq!(args.max_frames, 180);
-        assert_eq!(config.litegs.growth_select_fraction, 0.14);
-        assert_eq!(config.loss_dynamic_mask_threshold_low, 0.12);
-        assert_eq!(config.loss_dynamic_mask_threshold_high, 0.32);
-        assert_eq!(config.loss_dynamic_mask_min_weight, 0.35);
+        assert_eq!(config.litegs.growth.growth_select_fraction, 0.14);
+        assert_eq!(config.loss.loss_dynamic_mask_threshold_low, 0.12);
+        assert_eq!(config.loss.loss_dynamic_mask_threshold_high, 0.32);
+        assert_eq!(config.loss.loss_dynamic_mask_min_weight, 0.35);
     }
 
     #[test]
@@ -1790,8 +1796,11 @@ mod tests {
         dataset.add_point([0.0, 0.0, 0.0], None);
         let config = rustgs::TrainingConfig {
             litegs: rustgs::LiteGsConfig {
-                sparse_grad: true,
-                enable_depth: true,
+                features: rustgs::LiteGsFeatureConfig {
+                    sparse_grad: true,
+                    enable_depth: true,
+                    ..rustgs::LiteGsFeatureConfig::default()
+                },
                 ..rustgs::LiteGsConfig::default()
             },
             ..rustgs::TrainingConfig::default()
@@ -1841,8 +1850,8 @@ mod tests {
 
         let report_path = rustgs::default_parity_report_path(&output);
         let report = rustgs::ParityHarnessReport::load_json(&report_path).unwrap();
-        assert!(report.litegs.sparse_grad);
-        assert!(report.litegs.enable_depth);
+        assert!(report.litegs.features.sparse_grad);
+        assert!(report.litegs.features.enable_depth);
         assert_eq!(report.loss_terms.depth, Some(0.6));
         assert_eq!(report.loss_terms.total, Some(0.7));
         assert_eq!(report.metrics.depth_valid_pixels, Some(256));
@@ -1990,11 +1999,20 @@ mod tests {
         };
         let config = rustgs::TrainingConfig {
             iterations: 1,
-            max_initial_gaussians: 2048,
-            render_scale: 0.5,
+            initialization: rustgs::TrainingInitializationConfig {
+                max_initial_gaussians: 2048,
+                ..rustgs::TrainingInitializationConfig::default()
+            },
+            raster: rustgs::TrainingRasterConfig {
+                render_scale: 0.5,
+                ..rustgs::TrainingRasterConfig::default()
+            },
             litegs: rustgs::LiteGsConfig {
-                sparse_grad: true,
-                enable_depth: true,
+                features: rustgs::LiteGsFeatureConfig {
+                    sparse_grad: true,
+                    enable_depth: true,
+                    ..rustgs::LiteGsFeatureConfig::default()
+                },
                 ..rustgs::LiteGsConfig::default()
             },
             ..rustgs::TrainingConfig::default()
@@ -2055,8 +2073,8 @@ mod tests {
         let report = rustgs::ParityHarnessReport::load_json(&report_path).unwrap();
 
         assert_eq!(report.fixture_id, rustgs::DEFAULT_CONVERGENCE_FIXTURE_ID);
-        assert!(report.litegs.sparse_grad);
-        assert!(report.litegs.enable_depth);
+        assert!(report.litegs.features.sparse_grad);
+        assert!(report.litegs.features.enable_depth);
         assert_eq!(report.topology.export_outputs, 1);
         assert_eq!(report.topology.final_gaussians, Some(splats.len()));
         assert!(report.loss_terms.total.unwrap_or(0.0) > 0.0);

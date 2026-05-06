@@ -27,7 +27,7 @@ pub struct LiteGsTrainingTelemetry {
 
 static LAST_TRAINING_TELEMETRY: OnceLock<Mutex<Option<LiteGsTrainingTelemetry>>> = OnceLock::new();
 
-pub(super) fn store_last_training_telemetry(telemetry: Option<LiteGsTrainingTelemetry>) {
+pub(crate) fn store_last_training_telemetry(telemetry: Option<LiteGsTrainingTelemetry>) {
     let slot = LAST_TRAINING_TELEMETRY.get_or_init(|| Mutex::new(None));
     let mut guard = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     *guard = telemetry;
@@ -46,7 +46,7 @@ mod tests {
         last_training_telemetry, store_last_training_telemetry, LiteGsOptimizerLrs,
         LiteGsTrainingTelemetry,
     };
-    use crate::training::metrics::{ParityLossTerms, ParityTopologyMetrics};
+    use crate::training::reporting::metrics::{ParityLossTerms, ParityTopologyMetrics};
 
     #[test]
     fn telemetry_store_round_trips_latest_snapshot() {
