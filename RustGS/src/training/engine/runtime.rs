@@ -252,5 +252,5 @@ fn build_training_run(
 }
 
 #[cfg(test)]
+#[path = "runtime_tests.rs"]
 mod tests;
-

@@ -237,25 +237,6 @@ where
     }
 }
 
-#[cfg(test)]
-#[allow(dead_code)]
-pub async fn render_splats(
-    splats: &DeviceSplats<GsDiffBackend>,
-    camera: &GaussianCamera,
-    img_size: (u32, u32),
-    background: [f32; 3],
-) -> Tensor<GsDiffBackend, 3> {
-    render_splats_with_visibility(
-        splats,
-        camera,
-        img_size,
-        background,
-        crate::training::DEFAULT_RASTER_COV_BLUR,
-    )
-    .await
-    .image
-}
-
 pub(crate) async fn render_splats_with_visibility(
     splats: &DeviceSplats<GsDiffBackend>,
     camera: &GaussianCamera,
