@@ -95,4 +95,5 @@ pub fn viewmat_from_pose(rotation: Quat, translation: Vec3) -> Mat4 {
 }
 
 #[cfg(test)]
+#[path = "camera_tests.rs"]
 mod tests;

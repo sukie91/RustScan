@@ -324,4 +324,5 @@ pub(crate) fn sigmoid_scalar(value: f32) -> f32 {
 }
 
 #[cfg(test)]
+#[path = "splats_tests.rs"]
 mod tests;
