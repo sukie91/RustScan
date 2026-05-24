@@ -8,7 +8,7 @@
 //! - `core`: shared training-neutral types such as cameras
 //! - `render`: Rendering
 //! - `training`: Training loops and optimizers
-//! - `io`: Scene file I/O (PLY, checkpoints)
+//! - `io`: Scene file I/O (.splat, PLY, checkpoints)
 //! - `init`: Splat initialization from point clouds
 //!
 //! # Example
@@ -28,8 +28,8 @@
 //! let run = train_splats(&dataset, &config, TrainingOptions::default())?;
 //!
 //! // Save the trained splats.
-//! rustgs::save_splats_ply(
-//!     "scene.ply".as_ref(),
+//! rustgs::save_splats(
+//!     "scene.splat".as_ref(),
 //!     &run.splats,
 //!     &rustgs::SplatMetadata::default(),
 //! )?;
@@ -94,7 +94,10 @@ pub use crate::training::{TrainingBackend, TrainingConfig, TrainingResult};
 pub use crate::io::colmap_dataset::{load_colmap_dataset, ColmapConfig};
 pub use crate::io::nerfstudio_dataset::{load_nerfstudio_dataset, NerfstudioConfig};
 #[cfg(feature = "gpu")]
-pub use crate::io::scene_io::{load_splats_ply, save_splats_ply};
+pub use crate::io::scene_io::{
+    load_splats, load_splats_ply, load_splats_splat, save_splats, save_splats_ply,
+    save_splats_splat,
+};
 pub use crate::io::scene_io::{SceneIoError, SplatMetadata};
 pub use crate::io::tum_dataset::{load_tum_rgbd_dataset, TumRgbdConfig};
 #[cfg(feature = "gpu")]

@@ -15,7 +15,7 @@ use super::{
 use crate::core::HostSplats as Splats;
 use crate::sh::{rgb_to_sh0_value, sh_coeff_count_for_degree, SplatColorRepresentation};
 use crate::training::reporting::metrics::ParityTopologyMetrics;
-use crate::training::{LiteGsConfig, TrainingConfig};
+use crate::training::{LiteGsConfig, LiteGsOpacityResetMode, TrainingConfig};
 
 pub(super) fn densify_snapshot_litegs(
     policy: &TopologyPolicy,
@@ -170,6 +170,7 @@ pub(super) fn apply_snapshot_mutations(
         || plan.pruned > 0
         || plan.rows.len() != snapshot.len()
         || plan.refine_decay.is_some()
+        || plan.aftermath.apply_opacity_reset
     {
         *snapshot = rebuild_snapshot_from_plan(snapshot, &metrics, &plan);
         *stats = plan.remap_stats(stats);
@@ -229,6 +230,9 @@ fn rebuild_snapshot_from_plan(
         let mut opacity = row.opacity(metrics).clamp(1e-6, 1.0 - 1e-6);
         if let Some(decay) = plan.refine_decay {
             apply_refine_decay_for_test(&mut scale, &mut opacity, decay);
+        }
+        if plan.aftermath.apply_opacity_reset {
+            opacity = opacity.min(super::LITEGS_OPACITY_RESET_CAP);
         }
         let log_scale = scale.map(|value| value.max(1e-6).ln());
         let rotation = snapshot.rotation(source_idx);
@@ -349,6 +353,42 @@ fn litegs_schedule_respects_refine_cadence_and_freeze() {
     assert!(!epoch4.densify);
     assert!(!epoch4.prune);
     assert!(!epoch4.reset_opacity);
+}
+
+#[test]
+fn litegs_reset_mode_schedules_opacity_reset_on_epoch_cadence() {
+    let config = TrainingConfig {
+        iterations: 30,
+        litegs: litegs_with(|litegs| {
+            litegs.topology.refine_every = 2;
+            litegs.topology.opacity_reset_interval = 2;
+            litegs.topology.opacity_reset_mode = LiteGsOpacityResetMode::Reset;
+        }),
+        ..TrainingConfig::default()
+    };
+    let policy = TopologyPolicy::from_training_config(&config, 1.0);
+
+    let epoch2 = schedule_topology(
+        &policy,
+        TopologyStepContext {
+            iteration: 5,
+            frame_count: 2,
+        },
+    );
+    let epoch3 = schedule_topology(
+        &policy,
+        TopologyStepContext {
+            iteration: 7,
+            frame_count: 2,
+        },
+    );
+
+    assert_eq!(epoch2.completed_epoch, Some(2));
+    assert!(epoch2.reset_opacity);
+    assert!(should_apply_topology_step(&config, 5, 2));
+
+    assert_eq!(epoch3.completed_epoch, Some(3));
+    assert!(!epoch3.reset_opacity);
 }
 
 #[test]
@@ -1063,6 +1103,70 @@ fn mutation_aftermath_marks_litegs_opacity_reset_without_structural_change() {
     assert_eq!(metrics.opacity_reset_events, 1);
     assert_eq!(metrics.first_opacity_reset_epoch, Some(3));
     assert_eq!(metrics.late_stage_opacity_reset_events, 1);
+}
+
+#[test]
+fn opacity_reset_caps_high_opacity_without_raising_low_opacity() {
+    let mut snapshot = test_snapshot(
+        vec![0.0, 0.0, 1.0, 0.1, 0.0, 1.0],
+        vec![
+            0.05f32.ln(),
+            0.05f32.ln(),
+            0.05f32.ln(),
+            0.05f32.ln(),
+            0.05f32.ln(),
+            0.05f32.ln(),
+        ],
+        vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+        vec![
+            (0.8f32 / (1.0 - 0.8f32)).ln(),
+            (0.005f32 / (1.0 - 0.005f32)).ln(),
+        ],
+        vec![1.0, 0.0, 0.0, 0.5, 0.5, 0.5],
+        Vec::new(),
+        SplatColorRepresentation::Rgb,
+    );
+    let mut stats = vec![MetalGaussianStats::default(); 2];
+    let mut origins = vec![Some(0), Some(1)];
+    let infos = vec![
+        candidate(false, false, 1, 0.8, 0.0),
+        candidate(false, false, 1, 0.005, 0.0),
+    ];
+
+    let mutation = apply_snapshot_mutations(
+        &mut snapshot,
+        &mut stats,
+        &mut origins,
+        TopologyMutationRequest {
+            should_densify: false,
+            should_reset_opacity: true,
+            refine_decay: None,
+            completed_epoch: Some(2),
+            late_stage: false,
+            infos: &infos,
+            litegs_selection: &LiteGsDensifySelection::default(),
+            random_seed: 0,
+        },
+    );
+
+    assert!(mutation.aftermath.apply_opacity_reset);
+    assert!(mutation.aftermath.requires_adam_rebuild);
+    assert!(plan_topology_mutation(
+        &TopologySplatMetrics::from_snapshot(&snapshot),
+        TopologyMutationRequest {
+            should_densify: false,
+            should_reset_opacity: true,
+            refine_decay: None,
+            completed_epoch: Some(2),
+            late_stage: false,
+            infos: &infos,
+            litegs_selection: &LiteGsDensifySelection::default(),
+            random_seed: 0,
+        }
+    )
+    .mutates_splats());
+    assert!((snapshot.opacity(0) - super::LITEGS_OPACITY_RESET_CAP).abs() < 1e-6);
+    assert!((snapshot.opacity(1) - 0.005).abs() < 1e-6);
 }
 
 #[test]

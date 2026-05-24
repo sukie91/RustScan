@@ -2,14 +2,15 @@
 
 use crate::TrainArgs;
 use anyhow::{bail, Context};
+use clap::parser::ValueSource;
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 #[cfg(feature = "gpu")]
-pub(super) fn run_train_command(args: TrainArgs) -> anyhow::Result<()> {
-    let args = effective_train_args(args);
+pub(super) fn run_train_command(args: TrainArgs, sources: TrainArgSources) -> anyhow::Result<()> {
+    let args = effective_train_args_with_sources(args, &sources);
     env_logger::Builder::new()
         .parse_filters(&args.log_level)
         .init();
@@ -79,7 +80,7 @@ pub(super) fn run_train_command(args: TrainArgs) -> anyhow::Result<()> {
             })?;
         }
     }
-    rustgs::save_splats_ply(&args.output, &splats, &metadata)?;
+    rustgs::save_splats(&args.output, &splats, &metadata)?;
     log::info!("Saved scene to {:?}", args.output);
 
     let evaluation_summary =
@@ -102,8 +103,8 @@ pub(super) fn run_train_command(args: TrainArgs) -> anyhow::Result<()> {
 }
 
 #[cfg(not(feature = "gpu"))]
-pub(super) fn run_train_command(args: TrainArgs) -> anyhow::Result<()> {
-    let args = effective_train_args(args);
+pub(super) fn run_train_command(args: TrainArgs, sources: TrainArgSources) -> anyhow::Result<()> {
+    let args = effective_train_args_with_sources(args, &sources);
     env_logger::Builder::new()
         .parse_filters(&args.log_level)
         .init();
@@ -111,32 +112,46 @@ pub(super) fn run_train_command(args: TrainArgs) -> anyhow::Result<()> {
     std::process::exit(1);
 }
 
-pub(super) fn effective_train_args(mut args: TrainArgs) -> TrainArgs {
-    let dynamic_mask_override = (dynamic_mask_configured(&args)).then(|| {
-        (
-            args.loss_dynamic_mask_threshold_low,
-            args.loss_dynamic_mask_threshold_high,
-            args.loss_dynamic_mask_min_weight,
-            args.loss_dynamic_mask_start_epoch,
-        )
-    });
+#[cfg(test)]
+pub(super) fn effective_train_args(args: TrainArgs) -> TrainArgs {
+    effective_train_args_with_sources(args, &TrainArgSources::default())
+}
+
+pub(super) fn effective_train_args_with_sources(
+    mut args: TrainArgs,
+    sources: &TrainArgSources,
+) -> TrainArgs {
     if let Some(preset) = args.train_preset {
-        preset.apply_to(&mut args);
-    }
-    if let Some((low, high, min_weight, start_epoch)) = dynamic_mask_override {
-        args.loss_dynamic_mask_threshold_low = low;
-        args.loss_dynamic_mask_threshold_high = high;
-        args.loss_dynamic_mask_min_weight = min_weight;
-        args.loss_dynamic_mask_start_epoch = start_epoch;
+        preset.apply_to_with_sources(&mut args, sources);
     }
     args
 }
 
-fn dynamic_mask_configured(args: &TrainArgs) -> bool {
-    args.loss_dynamic_mask_threshold_low > 0.0
-        || args.loss_dynamic_mask_threshold_high > 0.0
-        || args.loss_dynamic_mask_min_weight < 1.0
-        || args.loss_dynamic_mask_start_epoch.is_some()
+#[derive(Debug, Clone, Default)]
+pub(super) struct TrainArgSources {
+    command_line: BTreeSet<String>,
+}
+
+impl TrainArgSources {
+    pub(super) fn from_cli_matches(matches: &clap::ArgMatches) -> Self {
+        let Some(("train", train_matches)) = matches.subcommand() else {
+            return Self::default();
+        };
+        Self::from_train_matches(train_matches)
+    }
+
+    fn from_train_matches(matches: &clap::ArgMatches) -> Self {
+        let command_line = matches
+            .ids()
+            .filter(|id| matches.value_source(id.as_str()) == Some(ValueSource::CommandLine))
+            .map(|id| id.as_str().to_string())
+            .collect();
+        Self { command_line }
+    }
+
+    pub(super) fn is_command_line(&self, id: &str) -> bool {
+        self.command_line.contains(id)
+    }
 }
 
 pub(super) fn load_training_dataset_for_training(
@@ -751,6 +766,11 @@ pub(super) fn build_training_config(args: &TrainArgs) -> anyhow::Result<rustgs::
     if args.litegs_target_primitives == 0 {
         bail!("--litegs-target-primitives must be >= 1");
     }
+    if args.litegs_learnable_viewproj {
+        bail!(
+            "--litegs-learnable-viewproj is not implemented in the RustGS wgpu trainer yet; camera poses are fixed during training"
+        );
+    }
 
     let (split_score_mode, split_grad_threshold, depth_scale_gamma) =
         litegs_profile_overrides(args);
@@ -922,10 +942,12 @@ fn log_litegs_training_config(config: &rustgs::TrainingConfig) {
         config.optimizer.lr_color_final,
         config.raster.raster_cov_blur,
         config.raster.raster_cov_blur_final,
-        config
-            .raster
-            .raster_cov_blur_final_after_epoch
-            .or(config.litegs.topology.topology_freeze_after_epoch),
+        config.raster.raster_cov_blur_final.and_then(|_| {
+            config
+                .raster
+                .raster_cov_blur_final_after_epoch
+                .or(config.litegs.topology.topology_freeze_after_epoch)
+        }),
         config.loss.loss_l1_weight,
         config.loss.loss_ssim_weight,
         config.loss.loss_gradient_weight,
@@ -1063,7 +1085,7 @@ pub(super) fn maybe_write_litegs_parity_report_with_manifest_dir(
         );
     }
 
-    let (roundtrip_splats, roundtrip_metadata) = rustgs::load_splats_ply(output)?;
+    let (roundtrip_splats, roundtrip_metadata) = rustgs::load_splats(output)?;
     report.metrics.export_roundtrip_ok = roundtrip_splats.len() == splats.len()
         && roundtrip_metadata.gaussian_count == splats.len()
         && !splats_have_non_finite(&roundtrip_splats);

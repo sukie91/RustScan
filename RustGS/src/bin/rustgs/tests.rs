@@ -1,8 +1,9 @@
 use crate::{
     train_command::{
-        build_training_config, effective_train_args, evaluation_dataset_load_params,
-        load_training_dataset_for_training, maybe_write_litegs_parity_report,
-        maybe_write_litegs_parity_report_with_manifest_dir,
+        build_training_config, effective_train_args, effective_train_args_with_sources,
+        evaluation_dataset_load_params, load_training_dataset_for_training,
+        maybe_write_litegs_parity_report, maybe_write_litegs_parity_report_with_manifest_dir,
+        TrainArgSources,
     },
     Cli, Commands, PruneSceneArgs, TrainArgs, TrainPreset,
 };
@@ -21,6 +22,19 @@ fn parse_train_args(args: &[&str]) -> TrainArgs {
         panic!("expected train command");
     };
     args
+}
+
+fn parse_train_args_with_sources(args: &[&str]) -> (TrainArgs, TrainArgSources) {
+    let matches = <Cli as clap::CommandFactory>::command()
+        .try_get_matches_from(args)
+        .expect("cli args should parse");
+    let sources = TrainArgSources::from_cli_matches(&matches);
+    let cli =
+        <Cli as clap::FromArgMatches>::from_arg_matches(&matches).expect("cli args should convert");
+    let Commands::Train(args) = cli.command else {
+        panic!("expected train command");
+    };
+    (args, sources)
 }
 
 fn parse_prune_scene_args(args: &[&str]) -> PruneSceneArgs {
@@ -228,6 +242,34 @@ fn train_command_applies_tum_prefix_efficient_loss_preset() {
 }
 
 #[test]
+fn train_command_applies_tum_prefix_quality_abs_pixel_preset() {
+    let args = parse_train_args(&[
+        "rustgs",
+        "train",
+        "--input",
+        "scene.json",
+        "--output",
+        "scene.ply",
+        "--train-preset",
+        "tum-prefix-quality",
+    ]);
+    let args = effective_train_args(args);
+    let config = build_training_config(&args).unwrap();
+
+    assert_eq!(args.max_frames, 180);
+    assert_eq!(
+        config.litegs.features.training_profile,
+        rustgs::LiteGsTrainingProfile::AbsPixel
+    );
+    assert_eq!(
+        config.litegs.growth.split_score_mode,
+        rustgs::LiteGsSplitScoreMode::AbsPixel
+    );
+    assert_eq!(config.litegs.growth.split_grad_threshold, 0.00001);
+    assert_eq!(config.litegs.growth.growth_select_fraction, 0.25);
+}
+
+#[test]
 fn train_command_applies_tum_full_798_baseline_preset() {
     let args = parse_train_args(&[
         "rustgs",
@@ -248,6 +290,71 @@ fn train_command_applies_tum_full_798_baseline_preset() {
     assert_eq!(config.litegs.growth.growth_select_fraction, 0.25);
     assert_eq!(config.loss.loss_l1_weight, 0.8);
     assert_eq!(config.loss.loss_ssim_weight, 0.2);
+}
+
+#[test]
+fn train_command_applies_tum_full_798_quality_preset() {
+    let args = parse_train_args(&[
+        "rustgs",
+        "train",
+        "--input",
+        "scene.json",
+        "--output",
+        "scene.ply",
+        "--train-preset",
+        "tum-full-798-quality",
+    ]);
+    let args = effective_train_args(args);
+    let config = build_training_config(&args).unwrap();
+
+    assert_eq!(args.max_frames, 0);
+    assert_eq!(args.frame_stride, 1);
+    assert_eq!(config.litegs.topology.topology_freeze_after_epoch, Some(4));
+    assert_eq!(
+        config.litegs.features.training_profile,
+        rustgs::LiteGsTrainingProfile::AbsPixel
+    );
+    assert_eq!(
+        config.litegs.growth.split_score_mode,
+        rustgs::LiteGsSplitScoreMode::AbsPixel
+    );
+    assert_eq!(config.litegs.growth.split_grad_threshold, 0.00001);
+    assert_eq!(config.loss.loss_l1_weight, 0.8);
+    assert_eq!(config.loss.loss_ssim_weight, 0.2);
+}
+
+#[test]
+fn train_preset_keeps_explicit_cli_overrides() {
+    let (args, sources) = parse_train_args_with_sources(&[
+        "rustgs",
+        "train",
+        "--input",
+        "scene.json",
+        "--output",
+        "scene.ply",
+        "--train-preset",
+        "tum-full-798-quality",
+        "--iterations",
+        "1000",
+        "--litegs-profile",
+        "baseline",
+        "--eval-raster-cov-blur",
+        "0.3",
+    ]);
+    let args = effective_train_args_with_sources(args, &sources);
+    let config = build_training_config(&args).unwrap();
+
+    assert_eq!(args.iterations, 1000);
+    assert_eq!(args.eval_raster_cov_blur, Some(0.3));
+    assert_eq!(
+        config.litegs.features.training_profile,
+        rustgs::LiteGsTrainingProfile::Baseline
+    );
+    assert_eq!(
+        config.litegs.growth.split_score_mode,
+        rustgs::LiteGsSplitScoreMode::Baseline
+    );
+    assert_eq!(config.litegs.topology.topology_freeze_after_epoch, Some(4));
 }
 
 #[test]
@@ -608,7 +715,6 @@ fn train_command_parses_litegs_flags_and_builds_nested_config() {
         "60",
         "--litegs-target-primitives",
         "200000",
-        "--litegs-learnable-viewproj",
         "--litegs-lr-pose",
         "0.0002",
         "--lr-decay-iterations",
@@ -662,7 +768,7 @@ fn train_command_parses_litegs_flags_and_builds_nested_config() {
     assert_eq!(config.litegs.pruning.prune_high_opacity_threshold, 0.2);
     assert_eq!(config.litegs.pruning.prune_until_epoch, Some(60));
     assert_eq!(config.litegs.topology.target_primitives, 200_000);
-    assert!(config.litegs.camera.learnable_viewproj);
+    assert!(!config.litegs.camera.learnable_viewproj);
     assert_eq!(config.litegs.camera.lr_pose, 0.0002);
     assert_eq!(config.data.frame_shuffle_seed, 42);
     assert_eq!(config.optimizer.lr_decay_iterations, Some(10_000));
@@ -670,6 +776,26 @@ fn train_command_parses_litegs_flags_and_builds_nested_config() {
     assert_eq!(config.optimizer.lr_rotation_final, 0.0001);
     assert_eq!(config.optimizer.lr_opacity_final, 0.005);
     assert_eq!(config.optimizer.lr_color_final, 0.00025);
+}
+
+#[test]
+fn train_command_rejects_unimplemented_learnable_viewproj() {
+    let args = parse_train_args(&[
+        "rustgs",
+        "train",
+        "--input",
+        "scene.json",
+        "--output",
+        "scene.ply",
+        "--litegs-learnable-viewproj",
+    ]);
+
+    let err = build_training_config(&args)
+        .expect_err("learnable viewproj should be rejected until trainer support exists");
+    assert!(
+        err.to_string().contains("not implemented"),
+        "unexpected error: {err}"
+    );
 }
 
 #[test]
@@ -698,7 +824,7 @@ fn train_command_builds_dynamic_mask_config() {
 
 #[test]
 fn train_preset_preserves_dynamic_mask_override() {
-    let args = parse_train_args(&[
+    let (args, sources) = parse_train_args_with_sources(&[
         "rustgs",
         "train",
         "--input",
@@ -714,7 +840,7 @@ fn train_preset_preserves_dynamic_mask_override() {
         "--loss-dynamic-mask-min-weight",
         "0.35",
     ]);
-    let args = effective_train_args(args);
+    let args = effective_train_args_with_sources(args, &sources);
     let config = build_training_config(&args).unwrap();
 
     assert_eq!(args.max_frames, 180);

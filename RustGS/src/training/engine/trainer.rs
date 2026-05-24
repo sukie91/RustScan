@@ -848,7 +848,9 @@ impl WgpuTrainer {
             apply_mutations(splats, &snapshot.splats, &plan, &self.device);
             self.remap_topology_visibility_state(&plan, iteration);
         }
-        self.optimizer.reset();
+        if plan.aftermath.requires_adam_rebuild || plan.aftermath.apply_opacity_reset {
+            self.optimizer.reset();
+        }
         self.reset_accumulators(
             splats.num_splats(),
             splats.sh_coeffs.val().dims()[1],
@@ -968,7 +970,7 @@ impl WgpuTrainer {
 
     fn finish_report(&mut self, report: &mut WgpuTrainingReport) {
         self.telemetry.final_loss = report.final_loss;
-        self.telemetry.final_step_loss = report.final_loss;
+        self.telemetry.final_step_loss = report.final_step_loss;
         self.telemetry.topology.final_gaussians = Some(report.final_gaussian_count);
         report.telemetry = self.telemetry.clone();
     }

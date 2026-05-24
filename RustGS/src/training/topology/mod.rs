@@ -22,6 +22,7 @@ use crate::core::HostSplats;
 const LITEGS_OPACITY_THRESHOLD: f32 = 0.005;
 const LITEGS_PERCENT_DENSE: f32 = 0.01;
 const BRUSH_MIN_OPACITY: f32 = 1.0 / 255.0;
+const LITEGS_OPACITY_RESET_CAP: f32 = 0.01;
 const BRUSH_MIN_SCALE: f32 = 1e-10;
 const BRUSH_REFINE_PROGRESS_LIMIT: f32 = 0.95;
 const TOPOLOGY_SELECTION_SALT: u64 = 0x6c69_7465_6773_7365;
@@ -870,7 +871,10 @@ pub(crate) struct TopologyMutationPlan {
 
 impl TopologyMutationPlan {
     pub(crate) fn mutates_splats(&self) -> bool {
-        self.added > 0 || self.pruned > 0 || self.refine_decay.is_some()
+        self.added > 0
+            || self.pruned > 0
+            || self.refine_decay.is_some()
+            || self.aftermath.apply_opacity_reset
     }
 
     pub(crate) fn origins(&self) -> Vec<Option<usize>> {
@@ -951,6 +955,8 @@ fn topology_mutation_aftermath(
     pruned: usize,
 ) -> TopologyMutationAftermath {
     let topology_changed = added > 0 || pruned > 0;
+    let splat_values_changed =
+        topology_changed || request.refine_decay.is_some() || request.should_reset_opacity;
     let gaussian_stats_action = if topology_changed {
         TopologyStatsAction::UseMutated
     } else {
@@ -959,7 +965,7 @@ fn topology_mutation_aftermath(
 
     TopologyMutationAftermath {
         requires_runtime_rebuild: topology_changed,
-        requires_adam_rebuild: topology_changed,
+        requires_adam_rebuild: splat_values_changed,
         requires_cluster_resync: topology_changed,
         requires_runtime_reserve: topology_changed,
         apply_opacity_reset: request.should_reset_opacity,

@@ -72,6 +72,9 @@ fn rebuild_host_snapshot(snapshot: &HostSplats, plan: &TopologyMutationPlan) -> 
         if let Some(decay) = plan.refine_decay {
             apply_refine_decay(&mut log_scale, &mut opacity_logit, decay);
         }
+        if plan.aftermath.apply_opacity_reset {
+            opacity_logit = opacity_reset_logit(opacity_logit);
+        }
 
         positions.extend_from_slice(&position);
         log_scales.extend_from_slice(&log_scale);
@@ -93,6 +96,11 @@ fn rebuild_host_snapshot(snapshot: &HostSplats, plan: &TopologyMutationPlan) -> 
 
 fn brush_refine_offset(rotation: [f32; 4], scale: [f32; 3], sample_scalar: f32) -> [f32; 3] {
     let quat = Quat::from_xyzw(rotation[1], rotation[2], rotation[3], rotation[0]);
+    let quat = if quat.length_squared() > 0.0 {
+        quat.normalize()
+    } else {
+        Quat::IDENTITY
+    };
     let rotated = quat * (Vec3::from_array(scale) * sample_scalar);
     rotated.to_array()
 }
@@ -113,6 +121,12 @@ fn brush_refine_opacity_logit(opacity_logit: f32) -> f32 {
     let opacity = sigmoid_scalar(opacity_logit).clamp(1.0 / 255.0, 1.0 - 1.0 / 255.0);
     let refined = (1.0 - (1.0 - opacity).sqrt()).clamp(1.0 / 255.0, 1.0 - 1.0 / 255.0);
     (refined / (1.0 - refined)).ln()
+}
+
+fn opacity_reset_logit(opacity_logit: f32) -> f32 {
+    let opacity = sigmoid_scalar(opacity_logit).clamp(1e-12, 1.0 - 1e-12);
+    let reset = opacity.min(super::LITEGS_OPACITY_RESET_CAP);
+    (reset / (1.0 - reset)).ln()
 }
 
 fn apply_refine_decay(
@@ -142,5 +156,33 @@ fn sigmoid_scalar(value: f32) -> f32 {
     } else {
         let exp = value.exp();
         exp / (1.0 + exp)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn brush_refine_offset_normalizes_non_unit_rotation() {
+        let unit = Quat::from_rotation_z(std::f32::consts::FRAC_PI_2);
+        let rotation = [unit.w * 2.0, unit.x * 2.0, unit.y * 2.0, unit.z * 2.0];
+
+        let offset = brush_refine_offset(rotation, [2.0, 0.0, 0.0], 1.0);
+
+        assert!(offset[0].abs() < 1e-5, "x offset was {}", offset[0]);
+        assert!(
+            (offset[1] - 2.0).abs() < 1e-5,
+            "y offset was {}",
+            offset[1]
+        );
+        assert!(offset[2].abs() < 1e-5, "z offset was {}", offset[2]);
+    }
+
+    #[test]
+    fn brush_refine_offset_uses_identity_for_zero_rotation() {
+        let offset = brush_refine_offset([0.0; 4], [1.0, 2.0, 3.0], 0.5);
+
+        assert_eq!(offset, [0.5, 1.0, 1.5]);
     }
 }

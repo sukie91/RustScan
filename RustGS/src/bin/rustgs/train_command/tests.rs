@@ -99,7 +99,8 @@ fn run_train_command_surfaces_missing_input_cleanly() {
         eval_crop_rect: None,
     };
 
-    let err = run_train_command(args).expect_err("missing input should fail");
+    let err = run_train_command(args, super::TrainArgSources::default())
+        .expect_err("missing input should fail");
     assert!(err.to_string().contains("failed to load"));
 }
 

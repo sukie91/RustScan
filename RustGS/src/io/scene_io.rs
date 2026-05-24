@@ -1,4 +1,4 @@
-//! Host-side splat export and import utilities (PLY).
+//! Host-side splat export and import utilities (PLY and binary .splat).
 #![allow(clippy::too_many_arguments)]
 
 use std::fs::File;
@@ -6,7 +6,7 @@ use std::io::{BufWriter, Write};
 use std::path::Path;
 
 #[cfg(feature = "gpu")]
-use crate::sh::sh_coeff_count_for_degree;
+use crate::sh::{rgb_to_sh0_value, sh_coeff_count_for_degree};
 use thiserror::Error;
 
 #[derive(Debug, Clone)]
@@ -64,6 +64,13 @@ enum PlyShCoeffLayout {
 enum PlyFormat {
     Ascii,
     BinaryLittleEndian,
+}
+
+#[cfg(feature = "gpu")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SplatFileFormat {
+    Ply,
+    Splat,
 }
 
 #[cfg(feature = "gpu")]
@@ -174,6 +181,27 @@ fn write_ply_header<W: Write>(
 fn opacity_to_logit(opacity: f32) -> f32 {
     let clamped = opacity.clamp(1e-6, 1.0 - 1e-6);
     (clamped / (1.0 - clamped)).ln()
+}
+
+#[cfg(feature = "gpu")]
+fn splat_file_format(path: &Path) -> Result<SplatFileFormat, SceneIoError> {
+    match path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("ply") => Ok(SplatFileFormat::Ply),
+        Some("splat") => Ok(SplatFileFormat::Splat),
+        Some(extension) => Err(SceneIoError::InvalidFormat {
+            message: format!(
+                "unsupported splat output extension '.{extension}'; expected .splat or .ply"
+            ),
+        }),
+        None => Err(SceneIoError::InvalidFormat {
+            message: "missing splat output extension; expected .splat or .ply".to_string(),
+        }),
+    }
 }
 
 #[cfg(feature = "gpu")]
@@ -528,6 +556,86 @@ pub fn save_splats_ply(
 }
 
 #[cfg(feature = "gpu")]
+pub fn save_splats_splat(
+    path: &Path,
+    splats: &crate::core::HostSplats,
+    _metadata: &SplatMetadata,
+) -> Result<(), SceneIoError> {
+    splats
+        .validate()
+        .map_err(|err| SceneIoError::InvalidFormat {
+            message: err.to_string(),
+        })?;
+
+    let file = File::create(path).map_err(|source| SceneIoError::Write {
+        path: path.display().to_string(),
+        source,
+    })?;
+    let mut writer = BufWriter::new(file);
+
+    for idx in 0..splats.len() {
+        for value in splats.position(idx) {
+            writer
+                .write_all(&value.to_le_bytes())
+                .map_err(|source| SceneIoError::Write {
+                    path: path.display().to_string(),
+                    source,
+                })?;
+        }
+        for value in splats.scale(idx) {
+            writer
+                .write_all(&value.to_le_bytes())
+                .map_err(|source| SceneIoError::Write {
+                    path: path.display().to_string(),
+                    source,
+                })?;
+        }
+
+        let rgb = splats.rgb_color(idx);
+        let color = [
+            normalized_to_u8(rgb[0]),
+            normalized_to_u8(rgb[1]),
+            normalized_to_u8(rgb[2]),
+            normalized_to_u8(splats.opacity(idx)),
+        ];
+        writer
+            .write_all(&color)
+            .map_err(|source| SceneIoError::Write {
+                path: path.display().to_string(),
+                source,
+            })?;
+
+        let rotation = normalized_quaternion(splats.rotation(idx));
+        let rotation_bytes = [
+            quaternion_component_to_u8(rotation[0]),
+            quaternion_component_to_u8(rotation[1]),
+            quaternion_component_to_u8(rotation[2]),
+            quaternion_component_to_u8(rotation[3]),
+        ];
+        writer
+            .write_all(&rotation_bytes)
+            .map_err(|source| SceneIoError::Write {
+                path: path.display().to_string(),
+                source,
+            })?;
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "gpu")]
+pub fn save_splats(
+    path: &Path,
+    splats: &crate::core::HostSplats,
+    metadata: &SplatMetadata,
+) -> Result<(), SceneIoError> {
+    match splat_file_format(path)? {
+        SplatFileFormat::Ply => save_splats_ply(path, splats, metadata),
+        SplatFileFormat::Splat => save_splats_splat(path, splats, metadata),
+    }
+}
+
+#[cfg(feature = "gpu")]
 pub fn load_splats_ply(
     path: &Path,
 ) -> Result<(crate::core::HostSplats, SplatMetadata), SceneIoError> {
@@ -685,6 +793,130 @@ pub fn load_splats_ply(
     })?;
 
     Ok((splats, metadata))
+}
+
+#[cfg(feature = "gpu")]
+pub fn load_splats_splat(
+    path: &Path,
+) -> Result<(crate::core::HostSplats, SplatMetadata), SceneIoError> {
+    const ROW_BYTES: usize = 32;
+
+    let bytes = std::fs::read(path).map_err(|source| SceneIoError::Read {
+        path: path.display().to_string(),
+        source,
+    })?;
+    if bytes.len() % ROW_BYTES != 0 {
+        return Err(SceneIoError::InvalidFormat {
+            message: format!(
+                "invalid .splat byte length {}; expected a multiple of {ROW_BYTES}",
+                bytes.len()
+            ),
+        });
+    }
+
+    let row_count = bytes.len() / ROW_BYTES;
+    let mut positions = Vec::with_capacity(row_count * 3);
+    let mut log_scales = Vec::with_capacity(row_count * 3);
+    let mut rotations = Vec::with_capacity(row_count * 4);
+    let mut opacity_logits = Vec::with_capacity(row_count);
+    let mut sh_coeffs = Vec::with_capacity(row_count * 3);
+
+    for row in bytes.chunks_exact(ROW_BYTES) {
+        for idx in 0..3 {
+            positions.push(read_le_f32(row, idx * 4)?);
+        }
+        for idx in 0..3 {
+            let scale = read_le_f32(row, 12 + idx * 4)?;
+            log_scales.push(scale.max(1e-8).ln());
+        }
+
+        let rgb = [
+            row[24] as f32 / 255.0,
+            row[25] as f32 / 255.0,
+            row[26] as f32 / 255.0,
+        ];
+        sh_coeffs.extend(rgb.map(rgb_to_sh0_value));
+        opacity_logits.push(opacity_to_logit(row[27] as f32 / 255.0));
+
+        let rotation = normalized_quaternion([
+            u8_to_quaternion_component(row[28]),
+            u8_to_quaternion_component(row[29]),
+            u8_to_quaternion_component(row[30]),
+            u8_to_quaternion_component(row[31]),
+        ]);
+        rotations.extend_from_slice(&rotation);
+    }
+
+    let metadata = SplatMetadata {
+        iterations: 0,
+        final_loss: 0.0,
+        gaussian_count: row_count,
+        sh_degree: 0,
+    };
+    let splats = crate::core::HostSplats::from_raw_parts(
+        positions,
+        log_scales,
+        rotations,
+        opacity_logits,
+        sh_coeffs,
+        0,
+    )
+    .map_err(|err| SceneIoError::InvalidFormat {
+        message: err.to_string(),
+    })?;
+
+    Ok((splats, metadata))
+}
+
+#[cfg(feature = "gpu")]
+pub fn load_splats(path: &Path) -> Result<(crate::core::HostSplats, SplatMetadata), SceneIoError> {
+    match splat_file_format(path)? {
+        SplatFileFormat::Ply => load_splats_ply(path),
+        SplatFileFormat::Splat => load_splats_splat(path),
+    }
+}
+
+#[cfg(feature = "gpu")]
+fn read_le_f32(bytes: &[u8], offset: usize) -> Result<f32, SceneIoError> {
+    let chunk: [u8; 4] = bytes
+        .get(offset..offset + 4)
+        .and_then(|chunk| chunk.try_into().ok())
+        .ok_or_else(|| SceneIoError::InvalidFormat {
+            message: "truncated .splat float field".to_string(),
+        })?;
+    Ok(f32::from_le_bytes(chunk))
+}
+
+#[cfg(feature = "gpu")]
+fn normalized_to_u8(value: f32) -> u8 {
+    (value.clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
+#[cfg(feature = "gpu")]
+fn quaternion_component_to_u8(value: f32) -> u8 {
+    ((value.clamp(-1.0, 1.0) * 128.0) + 128.0)
+        .round()
+        .clamp(0.0, 255.0) as u8
+}
+
+#[cfg(feature = "gpu")]
+fn u8_to_quaternion_component(value: u8) -> f32 {
+    (value as f32 - 128.0) / 128.0
+}
+
+#[cfg(feature = "gpu")]
+fn normalized_quaternion(rotation: [f32; 4]) -> [f32; 4] {
+    let length_sq = rotation.iter().map(|value| value * value).sum::<f32>();
+    if !length_sq.is_finite() || length_sq <= 1e-12 {
+        return [1.0, 0.0, 0.0, 0.0];
+    }
+    let inv_length = length_sq.sqrt().recip();
+    [
+        rotation[0] * inv_length,
+        rotation[1] * inv_length,
+        rotation[2] * inv_length,
+        rotation[3] * inv_length,
+    ]
 }
 
 #[cfg(test)]

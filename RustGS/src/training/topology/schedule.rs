@@ -1,7 +1,7 @@
 use super::{
     LiteGsDensifySelection, TopologyAnalysis, TopologyPolicy, BRUSH_REFINE_PROGRESS_LIMIT,
 };
-use crate::training::TrainingConfig;
+use crate::training::{LiteGsOpacityResetMode, TrainingConfig};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum TopologyExecutionDisposition {
@@ -69,11 +69,20 @@ pub(super) fn schedule_topology(
         .unwrap_or(growth_window);
     let densify = on_refine_cadence && !growth_frozen && growth_window;
     let prune = on_refine_cadence && !topology_frozen && prune_window;
+    let reset_opacity = on_refine_cadence
+        && !topology_frozen
+        && matches!(
+            policy.litegs.topology.opacity_reset_mode,
+            LiteGsOpacityResetMode::Reset
+        )
+        && policy.litegs.topology.opacity_reset_interval > 0
+        && epoch > 0
+        && epoch.is_multiple_of(policy.litegs.topology.opacity_reset_interval);
     TopologySchedule {
         completed_epoch: Some(epoch),
         densify,
         prune,
-        reset_opacity: false,
+        reset_opacity,
         allow_extra_growth: densify && phase_iter < policy.litegs.growth.growth_stop_iter,
     }
 }

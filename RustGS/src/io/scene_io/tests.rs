@@ -68,6 +68,84 @@ fn test_save_splats_ply_roundtrip_with_sh_coeffs() {
 
 #[cfg(feature = "gpu")]
 #[test]
+fn test_save_splats_splat_roundtrip() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("splats.splat");
+    let metadata = SplatMetadata {
+        iterations: 12,
+        final_loss: 0.25,
+        gaussian_count: 2,
+        sh_degree: 0,
+    };
+    let splats = crate::core::HostSplats::from_raw_parts(
+        vec![0.0, 0.0, 1.0, 1.0, 2.0, 3.0],
+        vec![
+            0.1f32.ln(),
+            0.2f32.ln(),
+            0.3f32.ln(),
+            0.4f32.ln(),
+            0.5f32.ln(),
+            0.6f32.ln(),
+        ],
+        vec![1.0, 0.0, 0.0, 0.0, 0.707, 0.0, 0.707, 0.0],
+        vec![0.0, 0.42],
+        vec![
+            rgb_to_sh_dc(0.2),
+            rgb_to_sh_dc(0.3),
+            rgb_to_sh_dc(0.4),
+            rgb_to_sh_dc(0.8),
+            rgb_to_sh_dc(0.7),
+            rgb_to_sh_dc(0.6),
+        ],
+        0,
+    )
+    .unwrap();
+
+    save_splats(&path, &splats, &metadata).unwrap();
+
+    let bytes = std::fs::read(&path).unwrap();
+    assert_eq!(bytes.len(), 64);
+
+    let (loaded, loaded_meta) = load_splats(&path).unwrap();
+    assert_eq!(loaded.len(), 2);
+    assert_eq!(loaded_meta.gaussian_count, 2);
+    assert_eq!(loaded_meta.sh_degree, 0);
+    assert_eq!(loaded.position(1), [1.0, 2.0, 3.0]);
+    for (actual, expected) in loaded.scale(0).into_iter().zip([0.1, 0.2, 0.3]) {
+        assert!((actual - expected).abs() < 1e-6);
+    }
+    assert!((loaded.opacity(0) - 0.5019608).abs() < 1e-6);
+    assert!((loaded.rgb_color(1)[0] - 0.8).abs() <= 1.0 / 255.0 + 1e-6);
+}
+
+#[cfg(feature = "gpu")]
+#[test]
+fn test_save_splats_dispatches_ply_by_extension() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("splats.ply");
+    let metadata = SplatMetadata {
+        iterations: 1,
+        final_loss: 0.0,
+        gaussian_count: 1,
+        sh_degree: 0,
+    };
+    let splats = crate::core::HostSplats::from_raw_parts(
+        vec![0.0, 0.0, 1.0],
+        vec![0.1f32.ln(), 0.1f32.ln(), 0.1f32.ln()],
+        vec![1.0, 0.0, 0.0, 0.0],
+        vec![0.0],
+        vec![rgb_to_sh_dc(0.2), rgb_to_sh_dc(0.3), rgb_to_sh_dc(0.4)],
+        0,
+    )
+    .unwrap();
+
+    save_splats(&path, &splats, &metadata).unwrap();
+    let contents = std::fs::read_to_string(&path).unwrap();
+    assert!(contents.starts_with("ply\n"));
+}
+
+#[cfg(feature = "gpu")]
+#[test]
 fn test_load_external_raw_logit_opacity() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("external_raw_logit.ply");
