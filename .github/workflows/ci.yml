@@ -24,6 +24,20 @@ jobs:
             libavfilter-dev \
             libavdevice-dev \
             libswresample-dev
+      - name: Format
+        run: cargo fmt --check
+      - name: Workspace check
+        run: cargo check --workspace --all-targets
+      - name: rustscan-types tests
+        run: cargo test -p rustscan-types --lib
+      - name: RustFF tests
+        run: cargo test -p rustff --lib
+      - name: RustGS tests
+        run: cargo test -p rustgs --all-targets
+      - name: RustViewer tests
+        run: cargo test -p rust-viewer --all-targets
+      - name: RustScan CLI tests
+        run: cargo test -p rustscan --all-targets
       - name: RustMesh tests
         working-directory: RustMesh
         run: cargo test

@@ -30,6 +30,7 @@ pub struct Spann3RInference {
     encoder_session: Session,
 
     #[cfg(feature = "onnx-ort")]
+    #[allow(dead_code)]
     decoder_session: Session,
 }
 
@@ -188,13 +189,11 @@ impl Spann3RInference {
     #[cfg(feature = "onnx-ort")]
     fn decode_pointmap(
         &self,
-        current_features: &[f32],
+        _current_features: &[f32],
     ) -> Result<(Vec<[f32; 3]>, Vec<f32>), InferenceError> {
-        // TODO: implement actual ONNX decoder call
-        // For now, return placeholder
-        let img_size = self.config.image_size as usize;
-        let n_pixels = img_size * img_size;
-        Ok((vec![[0.0; 3]; n_pixels], vec![1.0; n_pixels]))
+        Err(InferenceError::Inference(
+            "Spann3R decoder ONNX execution is not implemented yet".to_string(),
+        ))
     }
 
     #[cfg(not(feature = "onnx-ort"))]
@@ -202,9 +201,9 @@ impl Spann3RInference {
         &self,
         _current_features: &[f32],
     ) -> Result<(Vec<[f32; 3]>, Vec<f32>), InferenceError> {
-        let img_size = self.config.image_size as usize;
-        let n_pixels = img_size * img_size;
-        Ok((vec![[0.0; 3]; n_pixels], vec![1.0; n_pixels]))
+        Err(InferenceError::Inference(
+            "No ONNX backend enabled. Enable 'onnx-ort' feature.".to_string(),
+        ))
     }
 
     /// Extract camera pose from pointmap via weighted Procrustes alignment

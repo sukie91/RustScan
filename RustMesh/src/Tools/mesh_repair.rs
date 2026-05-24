@@ -575,7 +575,7 @@ mod tests {
         let v0 = mesh.add_vertex(Vec3::new(2.0, 0.0, 0.0));
         let v1 = mesh.add_vertex(Vec3::new(3.0, 0.0, 0.0));
         let v2 = mesh.add_vertex(Vec3::new(2.5, 1.0, 0.0));
-        mesh.add_face(&[v0, v1, v2]); // This should have opposite normal
+        mesh.add_face(&[v0, v2, v1]); // Opposite normal from the reference face
 
         let flipped = fix_winding_order(&mut mesh).unwrap();
         // At least one face should be flipped

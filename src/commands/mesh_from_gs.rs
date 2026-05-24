@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Args)]
 pub struct MeshFromGsArgs {
-    /// Trained RustGS scene PLY.
+    /// Trained RustGS scene .splat or PLY.
     #[arg(long)]
     scene: PathBuf,
 
@@ -80,7 +80,7 @@ pub fn run_mesh_from_gs(args: MeshFromGsArgs) -> anyhow::Result<()> {
         .try_init();
     validate_args(&args)?;
 
-    let (splats, metadata) = rustgs::load_splats_ply(&args.scene)
+    let (splats, metadata) = rustgs::load_splats(&args.scene)
         .with_context(|| format!("failed to load RustGS scene {}", args.scene.display()))?;
     if splats.is_empty() {
         bail!("scene {} contains no Gaussians", args.scene.display());
