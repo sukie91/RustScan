@@ -54,13 +54,20 @@ pub struct ViewerApp {
 
 impl ViewerApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        Self::new_with_startup_asset(cc, None)
+    }
+
+    pub fn new_with_startup_asset(
+        cc: &eframe::CreationContext<'_>,
+        startup_asset: Option<PathBuf>,
+    ) -> Self {
         let (command_tx, command_rx) = mpsc::channel();
         let surface_format = cc
             .wgpu_render_state
             .as_ref()
             .map(|rs| rs.target_format)
             .unwrap_or(wgpu::TextureFormat::Bgra8Unorm);
-        Self {
+        let app = Self {
             scene: Arc::new(Mutex::new(Scene::default())),
             camera: ArcballCamera::default(),
             preview_camera: ArcballCamera::default(),
@@ -74,7 +81,16 @@ impl ViewerApp {
             preview_texture_size: None,
             preview_dirty: true,
             surface_format,
+        };
+
+        if let Some(path) = startup_asset {
+            let _ = app.command_tx.send(AppCommand::LoadAsset {
+                kind: startup_asset_kind(&path),
+                path,
+            });
         }
+
+        app
     }
 
     fn poll_commands(&mut self) {
@@ -88,6 +104,8 @@ impl ViewerApp {
 
     fn handle_asset_load(&mut self, kind: AssetLoadKind, path: PathBuf) {
         if let Ok(mut scene) = self.scene.lock() {
+            clear_scene_preserving_layers(&mut scene);
+
             let result: Result<(), LoadError> = match kind {
                 AssetLoadKind::Checkpoint => {
                     crate::loader::checkpoint::load_checkpoint(&path, &mut scene)
@@ -103,9 +121,12 @@ impl ViewerApp {
                     self.ui_state.load_error = None;
                     if scene.has_data() {
                         self.camera.fit_scene(&scene.bounds);
+                    } else {
+                        scene.recompute_bounds();
                     }
                 }
                 Err(err) => {
+                    clear_scene_preserving_layers(&mut scene);
                     self.ui_state.load_error = Some(err.to_string());
                 }
             }
@@ -119,9 +140,7 @@ impl ViewerApp {
         match result {
             Ok(loaded) => {
                 if let Ok(mut scene) = self.scene.lock() {
-                    let layers = scene.layers.clone();
-                    *scene = Scene::default();
-                    scene.layers = layers;
+                    clear_scene_preserving_layers(&mut scene);
                     map_training_dataset_to_scene(&loaded.dataset, &mut scene);
                     if scene.has_data() {
                         self.camera.fit_scene(&scene.bounds);
@@ -167,7 +186,9 @@ impl ViewerApp {
         std::thread::spawn(move || {
             let dialog = match kind {
                 AssetLoadKind::Checkpoint => rfd::FileDialog::new().add_filter("JSON", &["json"]),
-                AssetLoadKind::Gaussian => rfd::FileDialog::new().add_filter("PLY", &["ply"]),
+                AssetLoadKind::Gaussian => {
+                    rfd::FileDialog::new().add_filter("Splats", &["splat", "ply"])
+                }
                 AssetLoadKind::Mesh => rfd::FileDialog::new().add_filter("Mesh", &["obj", "ply"]),
             };
 
@@ -203,7 +224,7 @@ impl ViewerApp {
 
         let mut config = TrainingConfig::default();
         config.iterations = self.ui_state.training_controls.iterations;
-        config.render_scale = self.ui_state.training_controls.render_scale;
+        config.raster.render_scale = self.ui_state.training_controls.render_scale;
 
         let options = TrainingControlOptions {
             progress_every: self.ui_state.training_controls.progress_every,
@@ -375,12 +396,21 @@ impl ViewerApp {
 
                     let mut preview_moved = false;
                     if response.dragged_by(egui::PointerButton::Primary) {
-                        let delta = response.drag_delta();
-                        self.preview_camera.orbit(delta.x, delta.y);
+                        let delta = response.drag_motion();
+                        if ui.input(|input| input.modifiers.shift) {
+                            self.preview_camera.roll(delta.x);
+                        } else {
+                            self.preview_camera.orbit(delta.x, delta.y);
+                        }
+                        preview_moved = true;
+                    }
+                    if response.dragged_by(egui::PointerButton::Middle) {
+                        let delta = response.drag_motion();
+                        self.preview_camera.roll(delta.x);
                         preview_moved = true;
                     }
                     if response.dragged_by(egui::PointerButton::Secondary) {
-                        let delta = response.drag_delta();
+                        let delta = response.drag_motion();
                         self.preview_camera.pan(delta.x, delta.y);
                         preview_moved = true;
                     }
@@ -423,6 +453,26 @@ impl ViewerApp {
                 });
             });
     }
+}
+
+fn startup_asset_kind(path: &std::path::Path) -> AssetLoadKind {
+    match path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("json") => AssetLoadKind::Checkpoint,
+        Some("obj") => AssetLoadKind::Mesh,
+        Some("ply") | Some("splat") => AssetLoadKind::Gaussian,
+        _ => AssetLoadKind::Gaussian,
+    }
+}
+
+fn clear_scene_preserving_layers(scene: &mut Scene) {
+    let layers = scene.layers.clone();
+    *scene = Scene::default();
+    scene.layers = layers;
 }
 
 impl eframe::App for ViewerApp {
@@ -497,12 +547,21 @@ impl eframe::App for ViewerApp {
 
                 let mut camera_moved = false;
                 if response.dragged_by(egui::PointerButton::Primary) {
-                    let delta = response.drag_delta();
-                    self.camera.orbit(delta.x, delta.y);
+                    let delta = response.drag_motion();
+                    if ui.input(|input| input.modifiers.shift) {
+                        self.camera.roll(delta.x);
+                    } else {
+                        self.camera.orbit(delta.x, delta.y);
+                    }
+                    camera_moved = true;
+                }
+                if response.dragged_by(egui::PointerButton::Middle) {
+                    let delta = response.drag_motion();
+                    self.camera.roll(delta.x);
                     camera_moved = true;
                 }
                 if response.dragged_by(egui::PointerButton::Secondary) {
-                    let delta = response.drag_delta();
+                    let delta = response.drag_motion();
                     self.camera.pan(delta.x, delta.y);
                     camera_moved = true;
                 }
@@ -547,4 +606,51 @@ fn draw_preview_placeholder(ui: &egui::Ui, rect: Rect, message: &str) {
         egui::FontId::proportional(13.0),
         TEXT_SECONDARY,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::renderer::scene::MeshGpuVertex;
+
+    #[test]
+    fn clear_scene_preserving_layers_removes_data_without_resetting_visibility() {
+        let mut scene = Scene::default();
+        scene.layers.trajectory = false;
+        scene.layers.map_points = false;
+        scene.layers.gaussians = true;
+        scene.layers.mesh_wireframe = true;
+        scene.layers.mesh_solid = false;
+        scene.trajectory.push([1.0, 2.0, 3.0]);
+        scene.map_points.push([4.0, 5.0, 6.0]);
+        scene.map_point_colors.push([0.1, 0.2, 0.3]);
+        scene.gaussians.push(GaussianSplat {
+            position: [7.0, 8.0, 9.0],
+            scale: [1.0, 1.0, 1.0],
+            rotation: [1.0, 0.0, 0.0, 0.0],
+            opacity: 0.5,
+            color: [0.3, 0.4, 0.5],
+        });
+        scene.mesh_vertices.push(MeshGpuVertex {
+            position: [0.0, 1.0, 2.0],
+            normal: [0.0, 0.0, 1.0],
+            color: [1.0, 1.0, 1.0],
+        });
+        scene.mesh_indices.push(0);
+        scene.mesh_edge_indices.push(0);
+        scene.bounds.extend([7.0, 8.0, 9.0]);
+
+        clear_scene_preserving_layers(&mut scene);
+
+        assert!(!scene.has_data());
+        assert!(scene.map_point_colors.is_empty());
+        assert!(scene.mesh_indices.is_empty());
+        assert!(scene.mesh_edge_indices.is_empty());
+        assert!(!scene.bounds.is_valid());
+        assert!(!scene.layers.trajectory);
+        assert!(!scene.layers.map_points);
+        assert!(scene.layers.gaussians);
+        assert!(scene.layers.mesh_wireframe);
+        assert!(!scene.layers.mesh_solid);
+    }
 }

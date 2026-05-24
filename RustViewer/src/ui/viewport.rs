@@ -114,13 +114,15 @@ pub fn draw_viewport_overlay(ui: &mut egui::Ui, camera: &ArcballCamera, has_data
     // Camera info (only when data is loaded)
     if has_data {
         let info_pos = indicator_rect.min + Vec2::new(6.0, 50.0);
+        let (yaw, pitch, roll) = camera.display_angles();
         ui.painter().text(
             info_pos,
             egui::Align2::LEFT_TOP,
             format!(
-                "yaw: {:.1}°\npitch: {:.1}°\ndist: {:.2}",
-                camera.yaw.to_degrees(),
-                camera.pitch.to_degrees(),
+                "yaw: {:.1}°\npitch: {:.1}°\nroll: {:.1}°\ndist: {:.2}",
+                yaw.to_degrees(),
+                pitch.to_degrees(),
+                roll.to_degrees(),
                 camera.distance
             ),
             egui::FontId::proportional(10.0),

@@ -2,7 +2,7 @@
 
 use crate::renderer::camera::ArcballCamera;
 use eframe::egui::{Color32, ColorImage, Vec2};
-use glam::{Mat3, Quat, Vec3};
+use glam::{Mat3, Quat};
 use rustgs::{
     EvaluationDevice, GaussianCamera, HostSplats, Intrinsics, SplatEvaluationRenderer, SE3,
 };
@@ -127,8 +127,13 @@ impl LivePreviewBridge {
         let needs_rebuild = self.renderer_resolution != Some(resolution) || self.renderer.is_none();
         if needs_rebuild {
             self.renderer = Some(
-                SplatEvaluationRenderer::new(resolution.width, resolution.height, self.device)
-                    .map_err(|err| PreviewRenderError::RendererInit(err.to_string()))?,
+                SplatEvaluationRenderer::new(
+                    resolution.width,
+                    resolution.height,
+                    self.device,
+                    rustgs::DEFAULT_RASTER_COV_BLUR,
+                )
+                .map_err(|err| PreviewRenderError::RendererInit(err.to_string()))?,
             );
             self.renderer_resolution = Some(resolution);
         }
@@ -163,28 +168,13 @@ pub fn gaussian_camera_from_arcball(
 
 fn arcball_pose_c2w(arcball: &ArcballCamera) -> SE3 {
     let eye = arcball.eye();
-    let mut forward = arcball.target - eye;
-    if forward.length_squared() <= 1e-12 {
-        forward = -Vec3::Z;
-    }
-    let forward = forward.normalize();
-
-    let world_up = stable_up(forward);
-    let right = world_up.cross(forward).normalize();
-    let up = forward.cross(right).normalize();
-    let rotation = Mat3::from_cols(right, up, forward);
+    let forward = -arcball.backward();
+    let right = arcball.right();
+    let down = -arcball.up();
+    let rotation = Mat3::from_cols(right, down, forward);
     let rotation = Quat::from_mat3(&rotation);
 
     SE3::from_quat_translation(rotation, eye)
-}
-
-fn stable_up(forward: Vec3) -> Vec3 {
-    let dot = forward.dot(Vec3::Y).abs();
-    if dot > 0.999 {
-        Vec3::Z
-    } else {
-        Vec3::Y
-    }
 }
 
 fn rgb_f32_to_color_image(
@@ -225,13 +215,8 @@ mod tests {
 
     #[test]
     fn gaussian_camera_from_arcball_scales_intrinsics_and_projects_target_to_center() {
-        let arcball = ArcballCamera {
-            target: Vec3::ZERO,
-            distance: 5.0,
-            yaw: 0.0,
-            pitch: 0.0,
-            fov_y: std::f32::consts::FRAC_PI_4,
-        };
+        let arcball =
+            ArcballCamera::from_angles(Vec3::ZERO, 5.0, 0.0, 0.0, 0.0, std::f32::consts::FRAC_PI_4);
         let dataset_intrinsics = Intrinsics::new(400.0, 300.0, 320.0, 240.0, 640, 480);
         let resolution = PreviewResolution::new(320, 240).unwrap();
 
@@ -246,6 +231,21 @@ mod tests {
             .expect("target should be visible");
         assert!((projected[0] - camera.intrinsics.cx).abs() < 1e-3);
         assert!((projected[1] - camera.intrinsics.cy).abs() < 1e-3);
+    }
+
+    #[test]
+    fn gaussian_camera_from_arcball_matches_viewer_screen_axes() {
+        let arcball =
+            ArcballCamera::from_angles(Vec3::ZERO, 5.0, 0.0, 0.0, 0.0, std::f32::consts::FRAC_PI_4);
+        let dataset_intrinsics = Intrinsics::new(400.0, 400.0, 320.0, 240.0, 640, 480);
+        let resolution = PreviewResolution::new(640, 480).unwrap();
+
+        let camera = gaussian_camera_from_arcball(&arcball, dataset_intrinsics, resolution);
+        let right = camera.project([1.0, 0.0, 0.0]).unwrap();
+        let up = camera.project([0.0, 1.0, 0.0]).unwrap();
+
+        assert!(right[0] > camera.intrinsics.cx);
+        assert!(up[1] < camera.intrinsics.cy);
     }
 
     #[test]
@@ -273,13 +273,8 @@ mod tests {
     #[test]
     fn render_from_arcball_returns_frame_for_valid_snapshot() {
         let mut bridge = LivePreviewBridge::default();
-        let arcball = ArcballCamera {
-            target: Vec3::ZERO,
-            distance: 5.0,
-            yaw: 0.0,
-            pitch: 0.0,
-            fov_y: std::f32::consts::FRAC_PI_4,
-        };
+        let arcball =
+            ArcballCamera::from_angles(Vec3::ZERO, 5.0, 0.0, 0.0, 0.0, std::f32::consts::FRAC_PI_4);
         let intrinsics = Intrinsics::from_focal(300.0, 128, 128);
         let splats = HostSplats::from_raw_parts(
             vec![0.0, 0.0, 0.0],
